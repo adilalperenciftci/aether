@@ -8,7 +8,11 @@
 #   3. a "localhost" listener still binds IPv4 only, as before
 #   4. the same dual-stack listener over pure TLS 1.3, both ends pure Aether,
 #      the certificate naming 127.0.0.1 and ::1 as iPAddress SANs
-#   5. under libaether_sandbox.so (Linux), a tcp grant for 127.0.0.1 admits
+#   5. TinyWeb on "::": a WebSocket echo, SSE and a long poll through [::1]
+#      and 127.0.0.1, over plain HTTP, over TLS (wss://, OpenSSL server)
+#      and over pure-Aether TLS 1.3 (SSE and the long poll; see streams.ae
+#      for why wss is not run against the pure server)
+#   6. under libaether_sandbox.so (Linux), a tcp grant for 127.0.0.1 admits
 #      127.0.0.1 and ::ffff:127.0.0.1 but not ::1, and one for [::1] admits
 #      ::1 alone: a grant for one family never opens the other
 #
@@ -40,6 +44,16 @@ fail() { echo "  [FAIL] http_ipv6: $1"; exit 1; }
     || { sed -n '1,12p' "$TMP/b2.log"; fail "client did not build"; }
 "$AE" build "$SCRIPT_DIR/dial.ae" -o "$TMP/dial" >"$TMP/b3.log" 2>&1 \
     || { sed -n '1,12p' "$TMP/b3.log"; fail "dial did not build"; }
+AETHER_HOME="$ROOT" "$AE" build "$SCRIPT_DIR/streams.ae" --lib "$ROOT/contrib" -o "$TMP/streams" >"$TMP/b4.log" 2>&1 \
+    || { sed -n '1,12p' "$TMP/b4.log"; fail "streams did not build"; }
+
+# streams LABEL [env...]: run the TinyWeb streams client/server once.
+streams() {
+    _label="$1"; shift
+    env "$@" "$TMP/streams" >"$TMP/streams.log" 2>&1 \
+        && grep -q '^PASS$' "$TMP/streams.log" \
+        || { sed 's/^/    streams: /' "$TMP/streams.log"; fail "TinyWeb streams over $_label"; }
+}
 
 # start HOST LOG [env...]: start the server on HOST, set PORT, or return 3
 # when the host can't bind it.
@@ -144,7 +158,18 @@ else
     TLS_NOTE="TLS part skipped: no openssl to make a cert"
 fi
 
-# --- 5. tcp grants don't cross families ---
+# --- 5. TinyWeb WebSocket, SSE and long poll ---
+streams "plain HTTP"
+STREAMS_NOTE="ws/SSE/long poll over HTTP"
+if [ -f "$TMP/cert.pem" ]; then
+    streams "TLS (OpenSSL server)" CERT_PATH="$TMP/cert.pem" KEY_PATH="$TMP/key.pem" \
+        CAFILE="$TMP/cert.pem" SSL_CERT_FILE="$TMP/cert.pem"
+    streams "pure TLS 1.3" SKIP_WS=1 AETHER_PURE_TLS=1 CERT_PATH="$TMP/cert.pem" \
+        KEY_PATH="$TMP/key.pem" CAFILE="$TMP/cert.pem"
+    STREAMS_NOTE="ws/wss/SSE/long poll over HTTP and TLS"
+fi
+
+# --- 6. tcp grants don't cross families ---
 PRELOAD="$ROOT/build/libaether_sandbox.so"
 if [ "$(uname -s)" = Linux ] && [ -f "$PRELOAD" ]; then
     # dial GRANT TARGET EXPECTED
@@ -165,4 +190,4 @@ else
     SANDBOX_NOTE="grant part skipped: no LD_PRELOAD sandbox here"
 fi
 
-echo "  [PASS] http_ipv6: ::1, dual-stack ::, localhost-stays-IPv4, $TLS_NOTE, $SANDBOX_NOTE"
+echo "  [PASS] http_ipv6: ::1, dual-stack ::, localhost-stays-IPv4, $TLS_NOTE, $STREAMS_NOTE, $SANDBOX_NOTE"

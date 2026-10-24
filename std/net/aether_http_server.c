@@ -5842,8 +5842,10 @@ static int http_server_run(HttpServer* server) {
         server->accept_thread_count = n_threads;
 
         if (!server->background) {
-            printf("Server running at http://%s:%d (%d accept threads, SO_REUSEPORT)\n",
-                   server->host, server->port, n_threads);
+            char where[300];
+            printf("Server running at http://%s (%d accept threads, SO_REUSEPORT)\n",
+                   aether_addr_authority(where, sizeof where, server->host, server->port),
+                   n_threads);
             printf("Press Ctrl+C to stop\n\n");
             fflush(stdout);
         }
@@ -5906,7 +5908,11 @@ static int http_server_run(HttpServer* server) {
         if (flags >= 0) fcntl(server->socket_fd, F_SETFL, flags | O_NONBLOCK);
 
         if (!server->background) {
-            printf("Server running at http://%s:%d\n", server->host, server->port);
+            {
+                char where[300];
+                printf("Server running at http://%s\n",
+                       aether_addr_authority(where, sizeof where, server->host, server->port));
+            }
             printf("Press Ctrl+C to stop\n\n");
             fflush(stdout);
         }
@@ -5926,7 +5932,11 @@ static int http_server_run(HttpServer* server) {
         }
 
         if (!server->background) {
-            printf("Server running at http://%s:%d\n", server->host, server->port);
+            {
+                char where[300];
+                printf("Server running at http://%s\n",
+                       aether_addr_authority(where, sizeof where, server->host, server->port));
+            }
             printf("Press Ctrl+C to stop\n\n");
             fflush(stdout);
         }

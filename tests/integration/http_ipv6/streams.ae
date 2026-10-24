@@ -1,0 +1,149 @@
+// TinyWeb's long-lived traffic over IPv6: a WebSocket echo, an SSE stream and
+// a long poll, served by one TinyWeb server on "::" and reached through
+// [::1] and through 127.0.0.1. With CERT_PATH and KEY_PATH set the server
+// is HTTPS (pure-Aether TLS 1.3 under AETHER_PURE_TLS=1) and the clients use
+// wss:// and https://, pinned to CAFILE.
+//
+// SKIP_WS=1 leaves the WebSocket out: a wss:// client against the
+// pure-Aether TLS server hangs in the upgrade, on IPv4 as on IPv6 and on main
+// before this change, so the runner checks wss against the OpenSSL server
+// and SSE and the long poll against the pure one.
+//
+// Prints one "ok <what>" per check and "PASS" at the end; a failure prints
+// "FAIL: <what>" and exits 1.
+
+import contrib.tinyweb
+import std.http
+import std.http.client
+import std.cryptography.tls13_server
+import std.cryptography.tls13_client
+import std.net
+import std.string
+import std.os
+
+extern exit(code: int)
+
+message Serve { srv: ptr }
+actor Server {
+    state s = 0
+    receive {
+        Serve(srv) -> {
+            s = srv
+            err = tinyweb.tw_start(srv)
+            if err != "" { println("tinyweb: ${err}") }
+        }
+    }
+}
+
+fail(what: string) {
+    println("FAIL: ${what}")
+    exit(1)
+}
+
+// A port nothing is listening on, for the server to take.
+free_port() -> int {
+    probe = net.tcp_listen_on_raw("::", 0)
+    if probe == null { return 0 }
+    port = net.tcp_server_port_raw(probe)
+    _ = net.tcp_server_close(probe)
+    return port
+}
+
+// A GET of `url`, pinned to CAFILE for https: (status, body, error).
+fetch(url: string, stream: int) -> (ptr, string) {
+    req = client.request("GET", url)
+    client.set_timeout(req, 10s)
+    ca = os.getenv("CAFILE")
+    if ca != null {
+        if ca != "" { client.set_cafile(req, ca) }
+    }
+    if stream == 1 {
+        resp, err = client.send_stream(req)
+        client.request_free(req)
+        return resp, err
+    }
+    resp, err = client.send_request(req)
+    client.request_free(req)
+    return resp, err
+}
+
+check_host(scheme: string, ws_scheme: string, host: string, port: int) {
+    base = "${scheme}://${host}:${port}"
+
+    if os.getenv("SKIP_WS") == null {
+        // WebSocket: two round trips on one connection.
+        w = http.ws_connect("${ws_scheme}://${host}:${port}/ws/echo")
+        if w == null { fail("${ws_scheme} upgrade via ${host}") }
+        if http.ws_send_text(w, "hello") < 0 || http.ws_recv(w) != 1 { fail("ws echo via ${host}") }
+        if http.ws_message(w) != "hello" { fail("ws echo text via ${host}: ${http.ws_message(w)}") }
+        if http.ws_send_text(w, "again") < 0 || http.ws_recv(w) != 1 { fail("ws second echo via ${host}") }
+        http.ws_close(w, 1000, "done")
+        http.ws_client_free(w)
+        println("ok ${ws_scheme} echo via ${host}")
+    }
+
+    // SSE: the first two events, read as they stream.
+    sresp, serr = fetch("${base}/sse/ticks", 1)
+    if serr != "" { fail("sse via ${host}: ${serr}") }
+    seen = ""
+    reads = 0
+    while reads < 50 && string.contains(seen, "data: 1") == 0 {
+        chunk = client.response_read(sresp, 4096)
+        if string.length(chunk) == 0 { reads = 50 }
+        seen = string.concat(seen, chunk)
+        reads = reads + 1
+    }
+    client.response_free(sresp)
+    if string.contains(seen, "event: tick\ndata: 0") == 0 { fail("sse events via ${host}: '${seen}'") }
+    println("ok sse via ${host}")
+
+    // Long poll: the answer comes after the server has held the request.
+    started = os.now_monotonic_ms()
+    presp, perr = fetch("${base}/poll", 0)
+    waited = os.now_monotonic_ms() - started
+    if perr != "" { fail("long poll via ${host}: ${perr}") }
+    body = client.response_body(presp)
+    client.response_free(presp)
+    if body != "polled" { fail("long poll body via ${host}: '${body}'") }
+    if waited < 900 { fail("long poll via ${host} answered after ${waited} ms, not held") }
+    println("ok long poll via ${host}")
+}
+
+main() {
+    port = free_port()
+    if port <= 0 { fail("no free port on ::") }
+
+    server = tinyweb.web_server_host("::", port) {
+        tinyweb.web_socket("/ws/echo") | msg: string, sender: ptr, ctx: ptr | {
+            http.ws_send_text(sender, msg)
+        }
+        tinyweb.sse_endpoint("/sse/ticks") | stream: ptr | {
+            n = 0
+            while n < 50 && tinyweb.sse_send_event(stream, "tick", "${n}") == 0 {
+                n = n + 1
+                sleep(20)
+            }
+        }
+        tinyweb.end_point(tinyweb.GET, "/poll") | req: ptr, res: ptr, ctx: ptr | {
+            sleep(1000)
+            tinyweb.response_write(res, "polled")
+        }
+    }
+    scheme = "http"
+    ws_scheme = "ws"
+    cert = os.getenv("CERT_PATH")
+    if cert != null {
+        _ = tinyweb.with_tls(server, cert, os.getenv("KEY_PATH"))
+        scheme = "https"
+        ws_scheme = "wss"
+    }
+
+    a = spawn(Server())
+    a ! Serve { srv: server }
+    sleep(500)
+
+    check_host(scheme, ws_scheme, "[::1]", port)
+    check_host(scheme, ws_scheme, "127.0.0.1", port)
+    println("PASS")
+    exit(0)
+}
