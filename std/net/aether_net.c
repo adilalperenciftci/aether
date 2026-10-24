@@ -167,9 +167,9 @@ void aether_net_note_family(const char* host, int port, int family) {
     pthread_mutex_unlock(net_family_memo_lock());
 }
 
-void aether_net_order(const char* host, int port, AetherAddrList* addrs) {
+int aether_net_order(const char* host, int port, AetherAddrList* addrs) {
     int family = net_family_lookup(host, port);
-    if (!family || addrs->n < 2) return;
+    if (!family || addrs->n < 2) return family;
     /* A stable partition: the remembered family first, each side in
      * getaddrinfo's order. */
     AetherAddrList sorted;
@@ -185,6 +185,7 @@ void aether_net_order(const char* host, int port, AetherAddrList* addrs) {
         }
     }
     *addrs = sorted;
+    return family;
 }
 
 int aether_net_connect_addr(const struct sockaddr_storage* addr, socklen_t len,
@@ -290,7 +291,12 @@ int aether_net_dial_addrs(const char* host, int port, AetherAddrList* addrs,
                           long long timeout_ns, const char** why) {
     *why = "could not resolve host";
     if (!addrs || addrs->n <= 0) return -1;
-    aether_net_order(host, port, addrs);
+    /* A family that has connected to this host and port before is a proven
+     * route: its addresses get the whole budget, as a single address would.
+     * Only an unproven address is held to the short first try -- cutting a
+     * proven one short turns a busy server's dropped SYN (retried after a
+     * second) into a failed dial. */
+    int proven = aether_net_order(host, port, addrs);
 
     const long long first_try = (long long)AETHER_DIAL_FIRST_TRY_MS * 1000000LL;
     unsigned long long deadline = timeout_ns > 0
@@ -310,14 +316,16 @@ int aether_net_dial_addrs(const char* host, int port, AetherAddrList* addrs,
                 left = (long long)(deadline - now);
             }
             long long t = left;
-            if (!last) t = (left > 0 && left < first_try) ? left : first_try;
+            if (!last && addrs->ss[i].ss_family != proven)
+                t = (left > 0 && left < first_try) ? left : first_try;
             int timed_out = 0;
             int fd = aether_net_connect_addr(&addrs->ss[i], addrs->len[i], t, why, &timed_out);
             if (fd >= 0) {
                 if (addrs->n > 1) aether_net_note_family(host, port, addrs->ss[i].ss_family);
                 return fd;
             }
-            if (pass == 0 && !last && timed_out) again[n_again++] = i;
+            if (pass == 0 && !last && timed_out && addrs->ss[i].ss_family != proven)
+                again[n_again++] = i;
         }
     }
     return -1;

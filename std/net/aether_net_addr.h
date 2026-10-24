@@ -221,7 +221,8 @@ static inline int aether_addr_port(const struct sockaddr_storage* addr) {
  * connection to a server listening on 127.0.0.1 -- no longer sets the pace.
  *
  * The family that connected is remembered per host and port, and tried first
- * next time, so the cost is paid once rather than per connection. */
+ * next time with the whole budget, so the cost is paid once rather than per
+ * connection, and a proven route is never cut short. */
 #define AETHER_DIAL_FIRST_TRY_MS 250
 
 /* Connect a fresh socket to `addr`: within `timeout_ns` when positive, else
@@ -235,8 +236,9 @@ int aether_net_dial_addrs(const char* host, int port, AetherAddrList* addrs,
                           long long timeout_ns, const char** why);
 /* Resolve, then aether_net_dial_addrs. */
 int aether_net_dial(const char* host, int port, long long timeout_ns, const char** why);
-/* The remembered family: put its addresses first. */
-void aether_net_order(const char* host, int port, AetherAddrList* addrs);
+/* The remembered family: put its addresses first. Returns that family, or 0
+ * when none is remembered. */
+int  aether_net_order(const char* host, int port, AetherAddrList* addrs);
 /* Remember that `family` connected to `host`:`port`. */
 void aether_net_note_family(const char* host, int port, int family);
 

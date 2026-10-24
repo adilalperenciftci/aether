@@ -1,8 +1,9 @@
 # Holds [::1]:PORT so that a connect to it hangs rather than completing or
 # being refused: a listener with a backlog of 0, its queue filled and never
-# accepted, drops further SYNs. It stands in for an address that answers
-# slowly, which is what ::1 is on Windows for a server on 127.0.0.1 alone
-# (a refused SYN is retried for about two seconds there).
+# accepted, drops further SYNs. That is Linux; macOS completes the handshake
+# anyway, so the runner uses this on Linux only. It stands in for an address
+# that answers slowly, which is what ::1 is on Windows for a server on
+# 127.0.0.1 alone (a refused SYN is retried for about two seconds there).
 #
 #   blackhole.py PORT READYFILE   writes READYFILE once the queue is full,
 #                                 then holds until killed

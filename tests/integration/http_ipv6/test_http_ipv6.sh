@@ -197,7 +197,11 @@ fi
 # --- 6. a slow first address costs one short try, once ---
 PY="$(sh "$ROOT/tests/scripts/find_python.sh" 2>/dev/null)" || PY=""
 SLOW_NOTE="slow-first-address part skipped"
-if [ -n "$PY" ] && [ "$WILDCARD" = yes ] && \
+# Linux only: a full accept queue makes Linux drop the SYN, so the connect
+# hangs; macOS completes the handshake anyway and the connection then just
+# goes unanswered, which is a different case (a silent server, which no
+# dial should fall back from).
+if [ "$(uname -s)" = Linux ] && [ -n "$PY" ] && \
    [ "$($PY -I -c 'import socket; print(socket.getaddrinfo("localhost", 80, 0, socket.SOCK_STREAM)[0][0] == socket.AF_INET6)' 2>/dev/null)" = True ]; then
     start "127.0.0.1" "$TMP/s6.log" || fail "could not bind 127.0.0.1"
     $PY -I "$SCRIPT_DIR/blackhole.py" "$PORT" "$TMP/bh.ready" >"$TMP/bh.log" 2>&1 &
@@ -221,6 +225,8 @@ if [ -n "$PY" ] && [ "$WILDCARD" = yes ] && \
         SLOW_NOTE="slow-first-address part skipped: could not hold ::1:$PORT"
     fi
     stop_server "$SRV_PID"; SRV_PID=""
+elif [ "$(uname -s)" != Linux ]; then
+    SLOW_NOTE="slow-first-address part skipped: hanging ::1 is simulated on Linux only"
 elif [ -z "$PY" ]; then
     SLOW_NOTE="slow-first-address part skipped: no Python"
 else

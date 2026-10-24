@@ -2718,18 +2718,40 @@ static void upstream_reset(HttpUpstreamConn* out) {
 #endif
     out->reused = 0;
     out->connecting = 0;
-    out->addr_next = 0;
+    out->addr_n_tried = 0;
+    out->addr_total = 0;
     out->dial_host[0] = '\0';
     out->dial_port = 0;
 }
 
-/* Dial `host` from its `first` resolved address on. Non-blocking, so only an
- * address that fails at once (no route to that family, a refusal the kernel
- * already knows) moves on here; one still connecting is the answer, and
- * addr_next says where http_upstream_redial goes if it then fails -- the
- * usual case being a name whose IPv6 address comes first and whose server
- * listens on IPv4 alone. */
-static int upstream_dial(const char* host, int port, int first, HttpUpstreamConn* out) {
+/* FNV-1a over an address's family, port and bytes: what tells one resolved
+ * address from another. */
+static unsigned upstream_addr_hash(const struct sockaddr_storage* a) {
+    const unsigned char* p;
+    size_t n;
+    unsigned h = 2166136261u;
+    if (a->ss_family == AF_INET6) {
+        const struct sockaddr_in6* a6 = (const struct sockaddr_in6*)a;
+        p = (const unsigned char*)&a6->sin6_addr; n = 16;
+        h = (h ^ 6u) * 16777619u;
+        h = (h ^ (unsigned)a6->sin6_port) * 16777619u;
+    } else {
+        const struct sockaddr_in* a4 = (const struct sockaddr_in*)a;
+        p = (const unsigned char*)&a4->sin_addr; n = 4;
+        h = (h ^ 4u) * 16777619u;
+        h = (h ^ (unsigned)a4->sin_port) * 16777619u;
+    }
+    for (size_t i = 0; i < n; i++) h = (h ^ p[i]) * 16777619u;
+    return h;
+}
+
+/* Dial `host` over the resolved addresses this connection has not tried yet.
+ * Non-blocking, so only an address that fails at once (no route to that
+ * family, a refusal the kernel already knows) moves on here; one still
+ * connecting is the answer, and http_upstream_redial carries on from the
+ * rest if it then fails -- the usual case being a name whose IPv6 address
+ * comes first and whose server listens on IPv4 alone. */
+static int upstream_dial(const char* host, int port, HttpUpstreamConn* out) {
     AetherAddrList addrs;
     int resolved = 0;
     if (!resolve_dial_addr(host, port, &addrs, &resolved)) return -1;
@@ -2738,13 +2760,21 @@ static int upstream_dial(const char* host, int port, int first, HttpUpstreamConn
      * refusal (Windows takes about two seconds over ::1) to the first
      * connection rather than every one. */
     aether_net_order(host, port, &addrs);
+    out->addr_total = addrs.n;
     out->dial_host[0] = '\0';
     if (addrs.n > 1 && strlen(host) < sizeof(out->dial_host)) {
         strcpy(out->dial_host, host);
         out->dial_port = port;
     }
 
-    for (int i = first; i < addrs.n; i++) {
+    for (int i = 0; i < addrs.n; i++) {
+        unsigned h = upstream_addr_hash(&addrs.ss[i]);
+        int seen = 0;
+        for (int k = 0; k < out->addr_n_tried; k++) if (out->addr_tried[k] == h) seen = 1;
+        if (seen) continue;
+        if (out->addr_n_tried < (int)(sizeof(out->addr_tried) / sizeof(out->addr_tried[0])))
+            out->addr_tried[out->addr_n_tried++] = h;
+
         int fd = (int)socket(addrs.ss[i].ss_family, SOCK_STREAM, 0);
         if (fd < 0) continue;
 #ifdef _WIN32
@@ -2760,7 +2790,6 @@ static int upstream_dial(const char* host, int port, int first, HttpUpstreamConn
         out->t.sockfd = fd;
         out->t.nonblocking = 1;      /* dialled non-blocking just above */
         out->reused = 0;
-        out->addr_next = i + 1 < addrs.n ? i + 1 : 0;
         if (connect(fd, (struct sockaddr*)&addrs.ss[i], addrs.len[i]) == 0) {
             out->connecting = 0;
             if (out->dial_host[0])
@@ -2780,7 +2809,7 @@ static int upstream_dial(const char* host, int port, int first, HttpUpstreamConn
         close(fd);
         out->t.sockfd = -1;
     }
-    out->addr_next = 0;
+    out->addr_n_tried = out->addr_total;   /* nothing left to redial to */
     return -1;
 }
 
@@ -2811,18 +2840,23 @@ int http_upstream_acquire_ex(const char* host, int port, int allow_pool,
         }
         return out->t.sockfd;
     }
-    return upstream_dial(host, port, 0, out);
+    return upstream_dial(host, port, out);
 }
 
 int http_upstream_has_next(HttpUpstreamConn* c) {
-    return c && !c->reused && c->addr_next > 0;
+    return c && !c->reused && c->addr_n_tried < c->addr_total;
 }
 
 int http_upstream_redial(const char* host, int port, HttpUpstreamConn* c) {
-    if (!c || !host || c->reused || c->addr_next <= 0) return -1;
-    int first = c->addr_next;
+    if (!http_upstream_has_next(c) || !host) return -1;
+    /* A fresh transport; the tried set carries over. */
+    unsigned tried[8];
+    int n_tried = c->addr_n_tried;
+    memcpy(tried, c->addr_tried, sizeof tried);
     upstream_reset(c);
-    return upstream_dial(host, port, first, c);
+    memcpy(c->addr_tried, tried, sizeof tried);
+    c->addr_n_tried = n_tried;
+    return upstream_dial(host, port, c);
 }
 
 /* Did the connect this driver started actually succeed? A refused connection
