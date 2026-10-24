@@ -189,6 +189,20 @@ fn send_record_raw(sock: ptr, rec: ptr) -> string {
     return ""
 }
 
+// The alert for a ClientHello parse_client_hello refused: illegal_parameter
+// (47) for a malformed X25519MLKEM768 share (RFC 10024 §4.2),
+// handshake_failure (40) when nothing offered is something we do, and
+// decode_error (50) for the rest, which are all framing faults.
+fn ch_error_alert(perr: string) -> int {
+    if string.contains(perr, "X25519MLKEM768") == 1 { return 47 }
+    if string.contains(perr, "no key_share") == 1 { return 40 }
+    if string.contains(perr, "no mutually supported") == 1 { return 40 }
+    if string.contains(perr, "supported_versions") == 1 { return 70 } // protocol_version
+    return 50
+}
+
+// A fatal alert in the clear, before any keys exist. Best effort: the
+// handshake is failing either way.
 fn send_plaintext_alert(sock: ptr, level: int, desc: int) {
     b = bytes.new(7)
     bytes.set(b, 0, 0x15) // alert
@@ -314,8 +328,8 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
         has_sni: 0, saw_supported_versions: 0 }
     perr = tls13_hs.parse_client_hello(bytes.view(ch_msg)[0..ch_msg_len], &ch_parsed)
     if string.equals(perr, "") != 1 {
-        send_plaintext_alert(sock, 2, 47) // illegal_parameter
-        bytes.free(ch_msg); recio_free(rio)
+        send_plaintext_alert(sock, 2, ch_error_alert(perr))
+        tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); recio_free(rio)
         return null, perr
     }
 
@@ -376,7 +390,7 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
         x_ss, xerr = x25519.agree(x25519_priv, ch_parsed.key_share)
         if string.equals(xerr, "") != 1 || x_ss == null {
             if x_ss != null { bytes.free(x_ss) }
-            send_plaintext_alert(sock, 2, 40) // handshake_failure
+            send_plaintext_alert(sock, 2, 47) // illegal_parameter (RFC 8446 §7.4.2)
             tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
             return null, xerr
         }

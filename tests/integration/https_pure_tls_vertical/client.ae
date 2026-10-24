@@ -37,6 +37,9 @@ main() {
         exit(1)
     }
     println("PASS: pure-Aether TLS 1.3 handshake (no OpenSSL on this side)")
+    // The key exchange group the server chose: 4588 is X25519MLKEM768
+    // (0x11EC), 29 x25519, 23 secp256r1. The runner checks it per server.
+    println("GROUP: ${tls13_client.conn_group(conn)}")
 
     // Frame one HTTP/1.1 request over the TLS stream.
     req = "GET / HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n"
