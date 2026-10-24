@@ -3019,7 +3019,8 @@ static unsigned optional_link_requirement(const char* tok, size_t len) {
         { "-lssl", LINK_OPENSSL }, { "-lcrypto", LINK_OPENSSL },
         { "-lz", LINK_ZLIB }, { "-lnghttp2", LINK_NGHTTP2 },
         { "-lpcre2-8", LINK_PCRE2 },
-        { "-lbrotlienc", LINK_BROTLI }, { "-lbrotlicommon", LINK_BROTLI },
+        { "-lbrotlienc", LINK_BROTLI }, { "-lbrotlidec", LINK_BROTLI },
+        { "-lbrotlicommon", LINK_BROTLI },
         { "-lzstd", LINK_ZSTD }, { "-lfyaml", LINK_YAML },
     };
     for (size_t i = 0; i < sizeof(libs) / sizeof(libs[0]); i++) {
@@ -4615,9 +4616,9 @@ void build_gcc_cmd(char* cmd, size_t size,
     const char* pcre2_libs = "";
 #endif
 #ifdef AETHER_BROTLI_LIBS
-    /* libbrotlienc powers std.brotli. Empty when not detected, and that
-     * emptiness is load-bearing: a box without the library must not get a
-     * -lbrotlienc it cannot resolve. The std.brotli surface stays valid and
+    /* libbrotlienc and libbrotlidec power std.brotli. Empty when not
+     * detected, and that emptiness is load-bearing: a box without the
+     * libraries must not get a -lbrotlienc it cannot resolve. The std.brotli surface stays valid and
      * reports "brotli unavailable". */
     const char* brotli_libs = (required_libs & LINK_BROTLI) ? AETHER_BROTLI_LIBS : "";
 #else
@@ -4935,9 +4936,9 @@ void build_gcc_cmd(char* cmd, size_t size,
 #else
     const char* pcre2_libs = "";
 #endif
-    // libbrotlienc powers std.brotli. Empty when not detected, and that
-    // emptiness is load-bearing: a box without the library must not be handed
-    // a -lbrotlienc it cannot resolve.
+    // libbrotlienc and libbrotlidec power std.brotli. Empty when not detected,
+    // and that emptiness is load-bearing: a box without the libraries must not
+    // be handed a -lbrotlienc it cannot resolve.
 #ifdef AETHER_BROTLI_LIBS
     const char* brotli_libs = (required_libs & LINK_BROTLI) ? AETHER_BROTLI_LIBS : "";
 #else

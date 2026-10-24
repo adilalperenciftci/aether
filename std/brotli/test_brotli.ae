@@ -1,0 +1,396 @@
+// std.brotli unit & security regression tests — co-located with std/brotli/ module.
+//
+// Includes test vector patterns and edge cases adapted from Google Brotli
+// (https://github.com/google/brotli), subject to the MIT License:
+// Copyright 2016 The Brotli Authors. All rights reserved.
+
+import std.spec
+import std.brotli
+import std.string
+import std.bytes
+
+// "hello large window" encoded by the brotli 1.2.1 CLI with
+// --large_window=30: the non-RFC 7932 large-window format, whose header may ask
+// the decoder for a window of up to 1 GiB before a byte of output exists.
+const LARGE_WINDOW_BR: int[] = [0x11, 0x5e, 0x44, 0x00, 0xe0, 0x97, 0x2e, 0x43, 0x63, 0x7b,
+    0x53, 0x84, 0xac, 0x52, 0x66, 0x38, 0x47, 0xa9, 0xeb, 0x00]
+
+const SAMPLE = "the quick brown fox jumps over the lazy dog, and then does it again and again"
+
+// `n` bytes cycling through 0..250, NULs included, so a decoder that stops
+// at a NUL or mixes up chunk order is caught.
+binary_payload(n: int) -> string {
+    b = bytes.new(n)
+    i = 0
+    while i < n {
+        bytes.set(b, i, i % 251)
+        i = i + 1
+    }
+    return bytes.finish(b, n)
+}
+
+// `mb` megabytes of one byte, compressed through the streaming encoder so the
+// plaintext never sits in memory at once: a small input that expands a
+// thousandfold, the shape a decompression bomb takes.
+bomb(mb: int) -> (string, int) {
+    chunk = bytes.new(65536)
+    i = 0
+    while i < 65536 {
+        bytes.set(chunk, i, 0)
+        i = i + 1
+    }
+    block = bytes.finish(chunk, 65536)
+    s, _e = brotli.stream_new(brotli.FAST_QUALITY, 0)
+    out = bytes.new(64)
+    total = 0
+    k = 0
+    while k < mb * 16 {
+        c, n, _e2 = brotli.stream_write(s, string.bytes(block)[0..65536])
+        if n > 0 {
+            bytes.copy_from_string(out, total, c, n)
+            total = total + n
+        }
+        k = k + 1
+    }
+    c, n, _e3 = brotli.stream_finish(s)
+    brotli.stream_free(s)
+    if n > 0 { bytes.copy_from_string(out, total, c, n) }
+    total = total + n
+    return bytes.finish(out, total), total
+}
+
+main() {
+    fw = spec.init()
+
+    if brotli.available() == 1 && brotli.decoder_available() == 0 {
+        // An unpatched system decoder: every decode must refuse (CVE-2026-111497).
+        spec.describe(fw, "std.brotli on an unpatched libbrotlidec") {
+            spec.it("refuses to decode") callback {
+                packed, plen, _e = brotli.compress(string.bytes(SAMPLE)[0..string.length(SAMPLE)], 5)
+                _o, _n, derr = brotli.decompress(string.bytes(packed)[0..plen])
+                spec.assert_err_contains(derr, "CVE-2026-111497", "one-shot refuses")
+                _h, serr = brotli.decompress_stream_new(0)
+                spec.assert_err_contains(serr, "CVE-2026-111497", "streaming refuses")
+            }
+        }
+        return spec.run_summary(fw)
+    }
+
+    unavailable = spec.skip_all_if(fw, brotli.decoder_available() == 0,
+        "brotli backend not built in")
+
+    if unavailable == 0 {
+        spec.describe(fw, "std.brotli one-shot compress/decompress") {
+            spec.it("round-trips a string byte for byte") callback {
+                n = string.length(SAMPLE)
+                packed, plen, err = brotli.compress(string.bytes(SAMPLE)[0..n], brotli.FAST_QUALITY)
+                spec.assert_ok(err, "compress succeeds")
+                spec.assert_true(plen > 0, "compressed length is positive")
+
+                back, blen, derr = brotli.decompress(string.bytes(packed)[0..plen])
+                spec.assert_ok(derr, "decompress succeeds")
+                spec.assert_eq(blen, n, "length restored")
+                spec.assert_str_eq(back, SAMPLE, "content restored")
+            }
+
+            spec.it("shrinks repetitive input") callback {
+                original = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                n = string.length(original)
+                packed, plen, err = brotli.compress(string.bytes(original)[0..n], brotli.FAST_QUALITY)
+                spec.assert_ok(err, "compress succeeds")
+                spec.assert_true(plen < n, "compressed ${plen} < original ${n}")
+
+                back, blen, derr = brotli.decompress(string.bytes(packed)[0..plen])
+                spec.assert_ok(derr, "decompress succeeds")
+                spec.assert_eq(blen, n, "length restored")
+                spec.assert_str_eq(back, original, "content restored")
+            }
+
+            spec.it("round-trips at various quality levels") callback {
+                n = string.length(SAMPLE)
+                q = brotli.MIN_QUALITY
+                while q <= 9 {
+                    packed, plen, err = brotli.compress(string.bytes(SAMPLE)[0..n], q)
+                    spec.assert_ok(err, "compress at quality ${q}")
+                    back, blen, derr = brotli.decompress(string.bytes(packed)[0..plen])
+                    spec.assert_ok(derr, "decompress at quality ${q}")
+                    spec.assert_str_eq(back, SAMPLE, "content restored at quality ${q}")
+                    q = q + 3
+                }
+            }
+        }
+
+        spec.describe(fw, "std.brotli decompress_max security limits") {
+            spec.it("succeeds when output fits within max_bytes limit") callback {
+                n = string.length(SAMPLE)
+                packed, plen, err = brotli.compress(string.bytes(SAMPLE)[0..n], brotli.FAST_QUALITY)
+                spec.assert_ok(err, "compress succeeds")
+
+                back, blen, derr = brotli.decompress_max(string.bytes(packed)[0..plen], n)
+                spec.assert_ok(derr, "decompress_max succeeds with exact limit")
+                spec.assert_eq(blen, n, "length matches")
+                spec.assert_str_eq(back, SAMPLE, "content restored")
+            }
+
+            spec.it("refuses decompression bomb exceeding max_bytes limit") callback {
+                // Highly compressible payload (decompression bomb pattern)
+                b = bytes.new(2000)
+                i = 0
+                while i < 2000 {
+                    bytes.set(b, i, 120) // 'x'
+                    i = i + 1
+                }
+                bomb = bytes.finish(b, 2000)
+
+                packed, plen, err = brotli.compress(string.bytes(bomb)[0..2000], brotli.FAST_QUALITY)
+                spec.assert_ok(err, "compress bomb payload")
+
+                _out, _olen, derr = brotli.decompress_max(string.bytes(packed)[0..plen], 500)
+                spec.assert_err_contains(derr, "output limit exceeded", "strictly halts decompression bomb when limit exceeded")
+            }
+
+            spec.it("rejects negative max_bytes parameter") callback {
+                n = string.length(SAMPLE)
+                packed, plen, err = brotli.compress(string.bytes(SAMPLE)[0..n], brotli.FAST_QUALITY)
+                spec.assert_ok(err, "compress succeeds")
+
+                _out, _olen, derr = brotli.decompress_max(string.bytes(packed)[0..plen], 0 - 5)
+                spec.assert_err_contains(derr, "max_bytes must be >= 0", "rejects negative limit")
+            }
+        }
+
+        spec.describe(fw, "std.brotli large and hostile input") {
+            spec.it("round-trips a binary payload larger than its first buffer") callback {
+                n = 300000
+                plain = binary_payload(n)
+                packed, plen, err = brotli.compress(string.bytes(plain)[0..n], brotli.FAST_QUALITY)
+                spec.assert_ok(err, "compress succeeds")
+                back, blen, derr = brotli.decompress(string.bytes(packed)[0..plen])
+                spec.assert_ok(derr, "decompress succeeds")
+                spec.assert_eq(blen, n, "length restored, NULs and all")
+                spec.assert_true(string.string_equals(back, plain) == 1, "content restored byte for byte")
+                _exact, elen, eerr = brotli.decompress_max(string.bytes(packed)[0..plen], n)
+                spec.assert_ok(eerr, "a limit equal to the output size is enough")
+                spec.assert_eq(elen, n, "length at the exact limit")
+                _o, _l, oerr = brotli.decompress_max(string.bytes(packed)[0..plen], n - 1)
+                spec.assert_err_contains(oerr, "output limit exceeded", "one byte under the size is refused")
+            }
+
+            spec.it("stops a thousandfold bomb at the limit") callback {
+                packed, plen = bomb(8)
+                spec.assert_true(plen < 65536, "8 MiB packs into ${plen} bytes")
+                _o, _l, derr = brotli.decompress_max(string.bytes(packed)[0..plen], 1048576)
+                spec.assert_err_contains(derr, "output limit exceeded", "one-shot refuses past 1 MiB")
+                ds, _e = brotli.decompress_stream_new(1048576)
+                _d, _dn, serr = brotli.decompress_stream_write(ds, string.bytes(packed)[0..plen])
+                spec.assert_err_contains(serr, "output limit exceeded", "a stream refuses past 1 MiB")
+                brotli.decompress_stream_free(ds)
+            }
+        }
+
+        spec.describe(fw, "std.brotli edge cases & invalid input") {
+            spec.it("round-trips an empty body") callback {
+                packed, plen, err = brotli.compress(string.bytes("")[0..0], brotli.FAST_QUALITY)
+                spec.assert_ok(err, "compress of nothing")
+                spec.assert_true(plen > 0, "an empty stream still has a header")
+                back, blen, derr = brotli.decompress(string.bytes(packed)[0..plen])
+                spec.assert_ok(derr, "decompress of an empty stream")
+                spec.assert_eq(blen, 0, "nothing comes back")
+                spec.assert_str_eq(back, "", "as an empty string")
+            }
+
+            spec.it("refuses the large-window format") callback {
+                // Large windows are off in libbrotlidec unless a caller turns
+                // them on; this pins that nobody does, since the window is
+                // allocated from the header, outside max_bytes.
+                n = LARGE_WINDOW_BR.len
+                b = bytes.new(n)
+                i = 0
+                while i < n {
+                    bytes.set(b, i, LARGE_WINDOW_BR[i])
+                    i = i + 1
+                }
+                lw = bytes.finish(b, n)
+                _o, _l, derr = brotli.decompress(string.bytes(lw)[0..n])
+                spec.assert_err(derr, "one-shot refuses a large-window stream")
+                ds, _e = brotli.decompress_stream_new(0)
+                _d, _dn, serr = brotli.decompress_stream_write(ds, string.bytes(lw)[0..n])
+                spec.assert_err(serr, "a stream refuses it too")
+                brotli.decompress_stream_free(ds)
+            }
+
+            spec.it("rejects garbage input on decompress") callback {
+                _out, _olen, derr = brotli.decompress(string.bytes("this is not brotli data"))
+                spec.assert_err(derr, "garbage input is rejected")
+            }
+
+            spec.it("rejects empty buffer on decompress") callback {
+                _out, _olen, derr = brotli.decompress(string.bytes(""))
+                spec.assert_err(derr, "empty input buffer is rejected")
+            }
+
+            spec.it("rejects trailing garbage appended to valid stream") callback {
+                // Adapted from Google Brotli decompress_test.py (test_garbage_appended)
+                n = string.length(SAMPLE)
+                packed, plen, err = brotli.compress(string.bytes(SAMPLE)[0..n], brotli.FAST_QUALITY)
+                spec.assert_ok(err, "compress succeeds")
+
+                buf = bytes.new(plen + 5)
+                bytes.copy_from_string(buf, 0, packed, plen)
+                bytes.copy_from_string(buf, plen, "extra", 5)
+                corrupt = bytes.finish(buf, plen + 5)
+
+                _out, _olen, derr = brotli.decompress(string.bytes(corrupt)[0..plen + 5])
+                spec.assert_err(derr, "trailing garbage appended to stream is rejected")
+            }
+
+            spec.it("rejects truncated bitstream") callback {
+                n = string.length(SAMPLE)
+                packed, plen, err = brotli.compress(string.bytes(SAMPLE)[0..n], brotli.FAST_QUALITY)
+                spec.assert_ok(err, "compress succeeds")
+
+                // Truncate stream midway
+                trunc_len = plen / 2
+                _out, _olen, derr = brotli.decompress(string.bytes(packed)[0..trunc_len])
+                spec.assert_err(derr, "truncated bitstream is rejected")
+            }
+        }
+
+        spec.describe(fw, "std.brotli streaming decompression") {
+            spec.it("decompresses streamed chunks accurately") callback {
+                s, err = brotli.stream_new(brotli.FAST_QUALITY, 0)
+                spec.assert_ok(err, "stream_new encoder")
+
+                n = string.length(SAMPLE)
+                c1, n1, e1 = brotli.stream_write(s, string.bytes(SAMPLE)[0..n])
+                spec.assert_ok(e1, "stream_write")
+                c2, n2, e2 = brotli.stream_finish(s)
+                spec.assert_ok(e2, "stream_finish")
+
+                // Concatenate encoded output chunks
+                tot = n1 + n2
+                buf = bytes.new(tot)
+                if n1 > 0 { bytes.copy_from_string(buf, 0, c1, n1) }
+                if n2 > 0 { bytes.copy_from_string(buf, n1, c2, n2) }
+                compressed = bytes.finish(buf, tot)
+                brotli.stream_free(s)
+
+                // Decompress via streaming decoder
+                ds, derr = brotli.decompress_stream_new(0)
+                spec.assert_ok(derr, "decompress_stream_new")
+
+                d1, dn1, de1 = brotli.decompress_stream_write(ds, string.bytes(compressed)[0..tot])
+                spec.assert_ok(de1, "decompress_stream_write")
+
+                d2, dn2, de2 = brotli.decompress_stream_finish(ds)
+                spec.assert_ok(de2, "decompress_stream_finish")
+
+                full_decomp = "${d1}${d2}"
+                spec.assert_eq(dn1 + dn2, n, "decompressed total length matches original")
+                spec.assert_str_eq(full_decomp, SAMPLE, "decompressed stream content restored")
+
+                brotli.decompress_stream_free(ds)
+            }
+
+            spec.it("decodes a stream fed one byte at a time") callback {
+                n = 5000
+                plain = binary_payload(n)
+                packed, plen, err = brotli.compress(string.bytes(plain)[0..n], brotli.FAST_QUALITY)
+                spec.assert_ok(err, "compress succeeds")
+                ds, _e = brotli.decompress_stream_new(0)
+                out = bytes.new(n)
+                got = 0
+                i = 0
+                while i < plen {
+                    c, cn, werr = brotli.decompress_stream_write(ds, string.bytes(packed)[i..i + 1])
+                    spec.assert_ok(werr, "write of byte ${i}")
+                    if cn > 0 {
+                        bytes.copy_from_string(out, got, c, cn)
+                        got = got + cn
+                    }
+                    i = i + 1
+                }
+                _t, tn, ferr = brotli.decompress_stream_finish(ds)
+                spec.assert_ok(ferr, "finish after the last byte")
+                spec.assert_eq(got + tn, n, "every byte came out")
+                spec.assert_true(string.string_equals(bytes.finish(out, got), plain) == 1, "in order")
+                brotli.decompress_stream_free(ds)
+            }
+
+            spec.it("finish refuses a truncated stream") callback {
+                n = 5000
+                plain = binary_payload(n)
+                packed, plen, err = brotli.compress(string.bytes(plain)[0..n], brotli.FAST_QUALITY)
+                spec.assert_ok(err, "compress succeeds")
+                ds, _e = brotli.decompress_stream_new(0)
+                _d, _dn, werr = brotli.decompress_stream_write(ds, string.bytes(packed)[0..plen - 3])
+                spec.assert_ok(werr, "a prefix decodes so far")
+                _t, _tn, ferr = brotli.decompress_stream_finish(ds)
+                spec.assert_err_contains(ferr, "truncated", "the missing tail is reported")
+                brotli.decompress_stream_free(ds)
+            }
+
+            spec.it("refuses bytes after the end of the stream") callback {
+                n = string.length(SAMPLE)
+                packed, plen, err = brotli.compress(string.bytes(SAMPLE)[0..n], brotli.FAST_QUALITY)
+                spec.assert_ok(err, "compress succeeds")
+                buf = bytes.new(plen + 5)
+                bytes.copy_from_string(buf, 0, packed, plen)
+                bytes.copy_from_string(buf, plen, "extra", 5)
+                padded = bytes.finish(buf, plen + 5)
+                ds, _e = brotli.decompress_stream_new(0)
+                _d, _dn, werr = brotli.decompress_stream_write(ds, string.bytes(padded)[0..plen + 5])
+                spec.assert_err(werr, "trailing bytes in the same write are refused")
+                brotli.decompress_stream_free(ds)
+
+                ds2, _e2 = brotli.decompress_stream_new(0)
+                _d2, _dn2, w2 = brotli.decompress_stream_write(ds2, string.bytes(packed)[0..plen])
+                spec.assert_ok(w2, "the whole stream decodes")
+                _d3, _dn3, w3 = brotli.decompress_stream_write(ds2, string.bytes("extra")[0..5])
+                spec.assert_err(w3, "a later write past the end is refused")
+                brotli.decompress_stream_free(ds2)
+            }
+
+            spec.it("allows output exactly at a stream's limit") callback {
+                n = 5000
+                plain = binary_payload(n)
+                packed, plen, err = brotli.compress(string.bytes(plain)[0..n], brotli.FAST_QUALITY)
+                spec.assert_ok(err, "compress succeeds")
+                ds, _e = brotli.decompress_stream_new(n)
+                _d, dn, werr = brotli.decompress_stream_write(ds, string.bytes(packed)[0..plen])
+                spec.assert_ok(werr, "output equal to the limit")
+                _t, tn, ferr = brotli.decompress_stream_finish(ds)
+                spec.assert_ok(ferr, "finish")
+                spec.assert_eq(dn + tn, n, "all of it")
+                brotli.decompress_stream_free(ds)
+            }
+
+            spec.it("enforces max_bytes limit during streaming decompression") callback {
+                b = bytes.new(2000)
+                i = 0
+                while i < 2000 {
+                    bytes.set(b, i, 121) // 'y'
+                    i = i + 1
+                }
+                bomb = bytes.finish(b, 2000)
+
+                packed, plen, err = brotli.compress(string.bytes(bomb)[0..2000], brotli.FAST_QUALITY)
+                spec.assert_ok(err, "compress bomb")
+
+                ds, derr = brotli.decompress_stream_new(300)
+                spec.assert_ok(derr, "decompress_stream_new with max_bytes=300")
+
+                _d1, _dn1, de1 = brotli.decompress_stream_write(ds, string.bytes(packed)[0..plen])
+                spec.assert_err_contains(de1, "output limit exceeded", "streaming decompress halts bomb exceeding limit")
+
+                // Subsequent write on broken handle fails safely
+                _d2, _dn2, de2 = brotli.decompress_stream_write(ds, string.bytes("more")[0..4])
+                spec.assert_err(de2, "broken stream handle rejects further writes")
+
+                brotli.decompress_stream_free(ds)
+            }
+        }
+    }
+
+    return spec.run_summary(fw)
+}

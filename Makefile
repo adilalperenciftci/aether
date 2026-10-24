@@ -583,14 +583,19 @@ ifeq ($(BROTLI),0)
   BROTLI_CFLAGS :=
   BROTLI_LDFLAGS :=
 else
-  BROTLI_CFLAGS := $(shell pkg-config --cflags libbrotlienc 2>/dev/null)
+  BROTLI_CFLAGS := $(shell pkg-config --cflags libbrotlienc libbrotlidec 2>/dev/null)
   # --static so libbrotlicommon comes with it. It is a Requires.private of
-  # libbrotlienc, so a plain --libs omits it -- fine when the loader resolves
-  # a shared object, fatal on a static link: MinGW's ld then reports a wall of
-  # undefined BrotliGetDictionary / BrotliDefaultAllocFunc / _kBrotli*
-  # references from inside libbrotlienc.a itself. Found on a real MSYS2 box;
-  # a Linux shared link hides it entirely.
-  BROTLI_LDFLAGS := $(shell pkg-config --static --libs libbrotlienc 2>/dev/null)
+  # libbrotlienc and libbrotlidec, so a plain --libs omits it -- fine when the
+  # loader resolves a shared object, fatal on a static link: MinGW's ld then
+  # reports a wall of undefined BrotliGetDictionary / BrotliDefaultAllocFunc /
+  # _kBrotli* references from inside libbrotlienc.a itself. Found on a real
+  # MSYS2 box; a Linux shared link hides it entirely. Asking for both
+  # libraries names -lbrotlicommon twice, and the link line must name each
+  # library once (optional_library_linking checks), so keep the LAST of each:
+  # a static link resolves left to right, and -lbrotlicommon has to follow
+  # libbrotlidec as well as libbrotlienc.
+  BROTLI_LDFLAGS := $(shell pkg-config --static --libs libbrotlienc libbrotlidec 2>/dev/null \
+    | awk '{ o = ""; for (i = NF; i > 0; i--) if (!seen[$$i]++) o = $$i " " o; print o }')
 endif
 ifneq ($(BROTLI_LDFLAGS),)
   BROTLI_CFLAGS += -DAETHER_HAS_BROTLI
