@@ -14,6 +14,40 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.843.0]
+
+### Added
+
+- **std.http, std.net and TinyWeb speak IPv6.** A server binds an IPv6
+  address (`"::1"`), or `"::"` for every interface of both families, so
+  `web_server_host("::", 8443)` serves IPv4 and IPv6 clients from one socket
+  and reports an IPv4 client as `127.0.0.1`, not `::ffff:127.0.0.1`. Names
+  bind as before: `"localhost"` still listens on 127.0.0.1 only. The client
+  takes bracketed URLs (`https://[2001:db8::1]:8443/x`), resolves a name to
+  every address it has and dials them Happy-Eyeballs style: a 250 ms first
+  try on each but the last, a second try for any that only timed out, and
+  the family that connected remembered per host and port and tried first
+  next time (so `localhost` -> ::1 against a server on 127.0.0.1 costs one
+  short try, not Windows' two-second refused SYN on every connection). It
+  writes the brackets back into `Host:`, the
+  `CONNECT` line and a proxied request line. `net.tcp_connect_raw`,
+  `net.tcp_listen_on_raw` (`"::1"`, `"[::1]"`, `"::"`) and the WebSocket
+  dial do the same. A `tcp` sandbox grant names an IPv6 host as
+  `"[::1]:8443"`, or `"[::1]"` for any port, and a grant for one family
+  never admits the other. Every listener, dial and resolver now goes through
+  one header, `std/net/aether_net_addr.h`.
+
+### Fixed
+
+- **The pure TLS client checks an IPv6 address against the certificate's
+  iPAddress SANs.** `tls13_cert.check_hostname` recognised only dotted IPv4
+  literals; any other host went to dNSName matching, so `https://[::1]/`
+  failed against a certificate naming `IP:::1`, and a certificate listing
+  the *DNS name* `::1` was accepted for the address ::1. An IPv6 literal is
+  now parsed (RFC 4291 text form; a zone or an embedded dotted tail is
+  refused) and matched against 16-byte SANs only; a host with a colon that
+  does not parse is refused, never tried as a name.
+
 ## [0.842.0]
 
 ### Fixed
