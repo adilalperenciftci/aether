@@ -1,0 +1,1 @@
+- **Offer X25519MLKEM768 by default on the pure TLS client, and accept it on the server (#2483).** The pure-Aether TLS 1.3 client now offers post-quantum hybrid key exchange by default in `connect_full` alongside classical X25519 and secp256r1. The pure TLS server accepts X25519MLKEM768, enforces FIPS 203 §7.2 encapsulation key checks, and responds with the hybrid key share.

@@ -154,25 +154,33 @@ client_hello(random: ptr, session_id: byte[], x25519_pub: ptr) -> ptr {
 // (RFC 6066 §3). CDNs require SNI to select the right certificate. An empty
 // host omits the extension (identical to the bare client_hello).
 client_hello_sni(random: ptr, session_id: byte[], x25519_pub: ptr, host: string) -> ptr {
-    return client_hello_full(random, session_id, GROUP_X25519, bytes.view(x25519_pub)[0..32], 0, null, host)
+    return client_hello_full(random, session_id, GROUP_X25519, bytes.view(x25519_pub)[0..32], 0, null, 0, null, host)
 }
 
-// Build a ClientHello offering both x25519 and secp256r1 in supported_groups,
-// carrying a key_share for `group` (its `pubkey`/`pubkey_len`) and optionally a
-// second key_share for `group2` (pass group2=0 to omit). Offering both shares
-// lets a server that prefers the other group complete without a
-// HelloRetryRequest. x25519 share = 32-byte public; secp256r1 share = 65-byte
-// uncompressed point (0x04 || X || Y). The HRR retry path uses a single share.
-client_hello_full(random: ptr, session_id: byte[], group: int, pubkey: byte[], group2: int, pubkey2: byte[], host: string) -> ptr {
+// Build a ClientHello offering up to three groups (e.g. X25519MLKEM768, x25519,
+// secp256r1) in supported_groups, carrying key_shares for each offered group.
+// Pass group2=0 or group3=0 to omit the respective entry.
+client_hello_full(random: ptr, session_id: byte[], group: int, pubkey: byte[], group2: int, pubkey2: byte[], group3: int, pubkey3: byte[], host: string) -> ptr {
     if session_id.len < 0 { panic("tls13_hs.client_hello_full: the `session_id` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     int sid_len = session_id.len
-    if pubkey.len < 0 { panic("tls13_hs.client_hello_full: the `pubkey` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
-    int pubkey_len = pubkey.len
-    if pubkey2.len < 0 { panic("tls13_hs.client_hello_full: the `pubkey2` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
-    int pubkey2_len = pubkey2.len
-    // Generous fixed buffer; this CH is ~230 bytes + the hostname.
-    buf = bytes.new(1024)
-    bytes.set(buf, 1023, 0) // force full zero-fill
+    pubkey_len = 0
+    if group != 0 {
+        if pubkey.len < 0 { panic("tls13_hs.client_hello_full: the `pubkey` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+        pubkey_len = pubkey.len
+    }
+    pubkey2_len = 0
+    if group2 != 0 {
+        if pubkey2.len < 0 { panic("tls13_hs.client_hello_full: the `pubkey2` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+        pubkey2_len = pubkey2.len
+    }
+    pubkey3_len = 0
+    if group3 != 0 {
+        if pubkey3.len < 0 { panic("tls13_hs.client_hello_full: the `pubkey3` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+        pubkey3_len = pubkey3.len
+    }
+    // Generous fixed buffer for up to 3 key shares + extensions.
+    buf = bytes.new(2048)
+    bytes.set(buf, 2047, 0) // force full zero-fill
 
     // Reserve the 4-byte handshake header; fill length at the end.
     body = 4
@@ -222,13 +230,19 @@ client_hello_full(random: ptr, session_id: byte[], group: int, pubkey: byte[], g
     off = put8(buf, off, 2) // list len
     off = put16(buf, off, 0x0304) // TLS 1.3
 
-    // supported_groups (10): { x25519, secp256r1 } — offer both so a server
-    // that won't do x25519 can HelloRetryRequest secp256r1.
+    // supported_groups (10): list all offered groups
+    num_groups = 0
+    if group != 0 { num_groups = num_groups + 1 }
+    if group2 != 0 { num_groups = num_groups + 1 }
+    if group3 != 0 { num_groups = num_groups + 1 }
+
+    sg_body = 2 + num_groups * 2
     off = put16(buf, off, 10)
-    off = put16(buf, off, 6) // ext body len = 2 (list len) + 2*2
-    off = put16(buf, off, 4) // list len
-    off = put16(buf, off, GROUP_X25519)
-    off = put16(buf, off, GROUP_SECP256R1)
+    off = put16(buf, off, sg_body) // ext body len
+    off = put16(buf, off, num_groups * 2) // list len
+    if group != 0 { off = put16(buf, off, group) }
+    if group2 != 0 { off = put16(buf, off, group2) }
+    if group3 != 0 { off = put16(buf, off, group3) }
 
     // signature_algorithms (13):
     //   { ecdsa_p256_sha256, ecdsa_p384_sha384, rsa_pss_rsae_sha256, ed25519 }
@@ -260,22 +274,29 @@ client_hello_full(random: ptr, session_id: byte[], group: int, pubkey: byte[], g
     off = put8(buf, off, 8) // ProtocolName length
     off = put_ascii(buf, off, "http/1.1")
 
-    // key_share (51): a KeyShareEntry {group, key<len>} for `group`, plus an
-    // optional second entry (group2/pubkey2) so we can pre-offer both x25519 and
-    // secp256r1 and let the server pick without a HelloRetryRequest round-trip.
-    entry1 = 2 + 2 + pubkey_len
-    shares_len = entry1
+    // key_share (51): a KeyShareEntry {group, key<len>} for each offered group.
+    shares_len = 0
+    if group != 0 { shares_len = shares_len + 2 + 2 + pubkey_len }
     if group2 != 0 { shares_len = shares_len + 2 + 2 + pubkey2_len }
+    if group3 != 0 { shares_len = shares_len + 2 + 2 + pubkey3_len }
+
     off = put16(buf, off, 51)
     off = put16(buf, off, 2 + shares_len) // ext body: client_shares<2> + entries
     off = put16(buf, off, shares_len) // client_shares length
-    off = put16(buf, off, group)
-    off = put16(buf, off, pubkey_len)
-    off = put_bytes(buf, off, pubkey)
+    if group != 0 {
+        off = put16(buf, off, group)
+        off = put16(buf, off, pubkey_len)
+        off = put_bytes(buf, off, pubkey)
+    }
     if group2 != 0 {
         off = put16(buf, off, group2)
         off = put16(buf, off, pubkey2_len)
         off = put_bytes(buf, off, pubkey2)
+    }
+    if group3 != 0 {
+        off = put16(buf, off, group3)
+        off = put16(buf, off, pubkey3_len)
+        off = put_bytes(buf, off, pubkey3)
     }
 
     // fill extensions length
@@ -731,7 +752,8 @@ parse_client_hello(msg: byte[], out: *ChParsed) -> string {
         }
         if ext_type == 0x0033 {
             // key_share: client_shares<0..2^16-1> of { group(2), len(2), key }.
-            // Take the first entry whose group we can complete.
+            // Prefer post-quantum X25519MLKEM768 (1216 bytes) if offered,
+            // otherwise fallback to classical X25519 (32 bytes).
             if ext_len >= 2 {
                 ks_total = get16(msg, d)
                 q = d + 2
@@ -742,15 +764,26 @@ parse_client_hello(msg: byte[], out: *ChParsed) -> string {
                     klen = get16(msg, q + 2)
                     kstart = q + 4
                     if kstart + klen > ks_end { q = ks_end } else {
-                        if out.group == 0 {
-                            if g == GROUP_X25519 {
-                                if klen == 32 {
-                                    kb = bytes.new(klen)
-                                    bytes.copy_from_slice(kb, 0, msg[kstart..kstart + klen])
-                                    out.group = g
-                                    out.key_share = kb
-                                    out.key_share_len = klen
-                                }
+                        if g == GROUP_X25519MLKEM768 {
+                            if klen != 1216 {
+                                return "client hello: invalid X25519MLKEM768 key share length"
+                            }
+                            if out.key_share != null {
+                                bytes.free(out.key_share)
+                                out.key_share = null
+                            }
+                            kb = bytes.new(klen)
+                            bytes.copy_from_slice(kb, 0, msg[kstart..kstart + klen])
+                            out.group = g
+                            out.key_share = kb
+                            out.key_share_len = klen
+                        } else if g == GROUP_X25519 && out.group == 0 {
+                            if klen == 32 {
+                                kb = bytes.new(klen)
+                                bytes.copy_from_slice(kb, 0, msg[kstart..kstart + klen])
+                                out.group = g
+                                out.key_share = kb
+                                out.key_share_len = klen
                             }
                         }
                         q = kstart + klen

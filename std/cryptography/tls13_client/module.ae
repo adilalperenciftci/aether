@@ -720,29 +720,53 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
         sock, dial_err = tcp.connect(host, port)
         if string.equals(dial_err, "") != 1 { return null, dial_err }
     }
-    // Initial key exchange group is x25519, using the caller's private scalar.
-    // On a HelloRetryRequest we may switch to secp256r1 with a fresh scalar.
-    cur_group = tls13_hs.GROUP_X25519
-    cur_priv = x25519_priv // NOT owned here (caller's); P-256 retry owns its own
-    own_priv = 0 // 1 once we allocate a retry scalar we must free
-    // Offer BOTH an x25519 and a secp256r1 key_share up front, so a server that
-    // prefers P-256 completes without a HelloRetryRequest round-trip. We keep
-    // the P-256 ephemeral private in case the server selects secp256r1.
+
+    // Ephemerals: ML-KEM-768 keypair for the post-quantum hybrid share
+    ek, dk, kerr = mlkem.mlkem768_keygen()
+    if kerr != "" {
+        if adopt_sock == null { tcp.close(sock) }
+        return null, kerr
+    }
+
+    // Ephemerals: x25519 and secp256r1
+    cur_xpriv = x25519_priv
+    own_xpriv = 0
+    if cur_xpriv == null {
+        cur_xpriv = rand_into(32)
+        own_xpriv = 1
+    }
     p256_priv = rand_into(32)
-    x_pub, x_pub_len = keyshare_for_group(tls13_hs.GROUP_X25519, x25519_priv)
+
+    x_pub, x_pub_len = keyshare_for_group(tls13_hs.GROUP_X25519, cur_xpriv)
     p_pub, p_pub_len = keyshare_for_group(tls13_hs.GROUP_SECP256R1, p256_priv)
-    pub = x_pub // primary keyshare (x25519); cleanup frees this
-    _pub_len = x_pub_len
+
+    // Build hybrid share = ML-KEM ek (1184) || X25519 pub (32) = 1216 bytes
+    ek_len = bytes.length(ek)
+    hybrid = bytes.new(ek_len + 32)
+    bytes.set(hybrid, ek_len + 32 - 1, 0)
+    bytes.copy_from_bytes(hybrid, 0, ek, 0, ek_len)
+    bytes.copy_from_bytes(hybrid, ek_len, x_pub, 0, 32)
+
     rnd = rand_into(32)
     sid = rand_into(32)
-    ch = tls13_hs.client_hello_full(rnd, bytes.view(sid)[0..32], tls13_hs.GROUP_X25519, bytes.view(x_pub)[0..x_pub_len], tls13_hs.GROUP_SECP256R1, bytes.view(p_pub)[0..p_pub_len], host)
-    bytes.free(p_pub) // copied into the CH; keep only p256_priv
+
+    // Pre-offer GROUP_X25519MLKEM768 (hybrid), GROUP_X25519 (x_pub), and GROUP_SECP256R1 (p_pub)
+    ch = tls13_hs.client_hello_full(rnd, bytes.view(sid)[0..32], tls13_hs.GROUP_X25519MLKEM768, bytes.view(hybrid)[0..ek_len + 32], tls13_hs.GROUP_X25519, bytes.view(x_pub)[0..x_pub_len], tls13_hs.GROUP_SECP256R1, bytes.view(p_pub)[0..p_pub_len], host)
+
+    bytes.free(p_pub)
+    bytes.free(hybrid)
+    pub = x_pub // primary x25519 pub; cleanup_hello frees it
+
     ch_len = bytes.length(ch)
     tr = transcript_new()
     transcript_add(tr, bytes.view(ch)[0..ch_len])
     serr = send_plaintext_handshake(sock, bytes.view(ch)[0..ch_len])
     if string.equals(serr, "") != 1 {
-        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); tcp.close(sock)
+        bytes.free(ek); bytes.free(dk)
+        if own_xpriv == 1 { bytes.free(cur_xpriv) }
+        bytes.free(p256_priv)
+        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr)
+        if adopt_sock == null { tcp.close(sock) }
         return null, serr
     }
     rio = recio_new(sock)
@@ -750,7 +774,11 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
     // ServerHello (may be a HelloRetryRequest we answer once).
     shrec, shlen, sherr = recio_next_hs(rio)
     if string.equals(sherr, "") != 1 {
-        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
+        bytes.free(ek); bytes.free(dk)
+        if own_xpriv == 1 { bytes.free(cur_xpriv) }
+        bytes.free(p256_priv)
+        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio)
+        if adopt_sock == null { tcp.close(sock) }
         return null, sherr
     }
     sh_msg_len = shlen - 5
@@ -760,8 +788,12 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
     parsed = tls13_hs.ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null, key_share_len: 0, is_hello_retry: 0, psk_accepted: 0 }
     perr = tls13_hs.parse_server_hello(bytes.view(sh)[0..sh_msg_len], &parsed)
     if string.equals(perr, "") != 1 {
+        bytes.free(ek); bytes.free(dk)
+        if own_xpriv == 1 { bytes.free(cur_xpriv) }
+        bytes.free(p256_priv)
         bytes.free(sh); bytes.free(shrec)
-        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
+        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio)
+        if adopt_sock == null { tcp.close(sock) }
         return null, perr
     }
 
@@ -773,31 +805,36 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
 
         retry_group = parsed.group
         rp = null
-        if retry_group == tls13_hs.GROUP_SECP256R1 {
+        if retry_group == tls13_hs.GROUP_SECP256R1 || retry_group == tls13_hs.GROUP_X25519 {
             rp = rand_into(32)
         } else {
-            // Server asked to retry a group we don't support (or echoed x25519,
-            // which shouldn't happen after a HRR); give up.
+            bytes.free(ek); bytes.free(dk)
+            if own_xpriv == 1 { bytes.free(cur_xpriv) }
+            bytes.free(p256_priv)
             bytes.free(sh); bytes.free(shrec)
-            cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
+            cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio)
+            if adopt_sock == null { tcp.close(sock) }
             return null, "HelloRetryRequest asked for an unsupported group"
         }
         cleanup_hello(pub, rnd, sid, ch) // free CH1 + its keyshare/nonces
         bytes.free(sh); bytes.free(shrec)
 
         cur_group = retry_group
+        if own_xpriv == 1 { bytes.free(cur_xpriv) }
         cur_priv = rp
-        own_priv = 1
+        own_xpriv = 1
         pub2, pub2_len = keyshare_for_group(cur_group, cur_priv)
         rnd = rand_into(32)
         sid = rand_into(32)
-        ch = tls13_hs.client_hello_full(rnd, bytes.view(sid)[0..32], cur_group, bytes.view(pub2)[0..pub2_len], 0, null, host)
+        ch = tls13_hs.client_hello_full(rnd, bytes.view(sid)[0..32], cur_group, bytes.view(pub2)[0..pub2_len], 0, null, 0, null, host)
         ch_len = bytes.length(ch)
         transcript_add(tr, bytes.view(ch)[0..ch_len])
         serr2 = send_plaintext_handshake(sock, bytes.view(ch)[0..ch_len])
         if string.equals(serr2, "") != 1 {
+            bytes.free(ek); bytes.free(dk); bytes.free(p256_priv)
             cleanup_hello(pub2, rnd, sid, ch); bytes.free(cur_priv)
-            transcript_free(tr); recio_free(rio); tcp.close(sock)
+            transcript_free(tr); recio_free(rio)
+            if adopt_sock == null { tcp.close(sock) }
             return null, serr2
         }
         pub = pub2 // so later cleanup frees the right keyshare
@@ -805,8 +842,10 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
         // Read the real ServerHello.
         shrec, shlen, sherr = recio_next_hs(rio)
         if string.equals(sherr, "") != 1 {
+            bytes.free(ek); bytes.free(dk); bytes.free(p256_priv)
             cleanup_hello(pub, rnd, sid, ch); bytes.free(cur_priv)
-            transcript_free(tr); recio_free(rio); tcp.close(sock)
+            transcript_free(tr); recio_free(rio)
+            if adopt_sock == null { tcp.close(sock) }
             return null, sherr
         }
         sh_msg_len = shlen - 5
@@ -815,185 +854,107 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
         bytes.copy_from_bytes(sh, 0, shrec, 5, sh_msg_len)
         perr = tls13_hs.parse_server_hello(bytes.view(sh)[0..sh_msg_len], &parsed)
         if string.equals(perr, "") != 1 {
+            bytes.free(ek); bytes.free(dk); bytes.free(p256_priv)
             bytes.free(sh); bytes.free(shrec)
             cleanup_hello(pub, rnd, sid, ch); bytes.free(cur_priv)
-            transcript_free(tr); recio_free(rio); tcp.close(sock)
+            transcript_free(tr); recio_free(rio)
+            if adopt_sock == null { tcp.close(sock) }
             return null, perr
         }
         if parsed.is_hello_retry == 1 {
+            bytes.free(ek); bytes.free(dk); bytes.free(p256_priv)
             bytes.free(sh); bytes.free(shrec)
             cleanup_hello(pub, rnd, sid, ch); bytes.free(cur_priv)
-            transcript_free(tr); recio_free(rio); tcp.close(sock)
+            transcript_free(tr); recio_free(rio)
+            if adopt_sock == null { tcp.close(sock) }
             return null, "server sent a second HelloRetryRequest"
         }
     }
 
     transcript_add(tr, bytes.view(sh)[0..sh_msg_len])
 
-    // Select the private key matching the group the server chose. In the
-    // non-HRR path we offered both x25519 and secp256r1 shares; pick whichever
-    // the server's key_share names. (After a HRR, cur_group/cur_priv are already
-    // the retried group and own_priv==1.)
-    if own_priv == 0 {
-        if parsed.group == tls13_hs.GROUP_SECP256R1 {
-            cur_group = tls13_hs.GROUP_SECP256R1
-            cur_priv = p256_priv
+    // Compute the shared secret based on the group selected by the server.
+    shared = null
+    shared_len = 0
+    sherr2 = ""
+
+    if parsed.group == tls13_hs.GROUP_X25519MLKEM768 {
+        if parsed.key_share_len != 1120 {
+            sherr2 = "X25519MLKEM768 server share wrong size"
         } else {
-            cur_group = tls13_hs.GROUP_X25519
-            cur_priv = x25519_priv
+            ct = bytes.new(1088); bytes.set(ct, 1087, 0)
+            bytes.copy_from_bytes(ct, 0, parsed.key_share, 0, 1088)
+            sxpub = bytes.new(32); bytes.set(sxpub, 31, 0)
+            bytes.copy_from_bytes(sxpub, 0, parsed.key_share, 1088, 32)
+            mlk_ss, merr = mlkem.mlkem768_decaps(dk, ct)
+            x_ss, xerr = x25519.agree(cur_xpriv, sxpub)
+            if string.equals(merr, "") != 1 {
+                sherr2 = merr
+            } else if string.equals(xerr, "") != 1 {
+                sherr2 = xerr
+            } else {
+                shared = bytes.new(64); bytes.set(shared, 63, 0)
+                bytes.copy_from_bytes(shared, 0, mlk_ss, 0, 32)
+                bytes.copy_from_bytes(shared, 32, x_ss, 0, 32)
+                shared_len = 64
+            }
+            bytes.free(ct); bytes.free(sxpub)
+            if mlk_ss != null { bytes.free(mlk_ss) }
+            if x_ss != null { bytes.free(x_ss) }
         }
+    } else if parsed.group == tls13_hs.GROUP_X25519 {
+        shared, sherr2 = x25519.agree(cur_xpriv, parsed.key_share)
+        shared_len = 32
+    } else if parsed.group == tls13_hs.GROUP_SECP256R1 {
+        shared, sherr2 = ecdhe_shared(tls13_hs.GROUP_SECP256R1, p256_priv, parsed.key_share, parsed.key_share_len)
+        shared_len = 32
+    } else {
+        sherr2 = "server chose an unoffered group"
     }
 
-    shared, agerr = ecdhe_shared(cur_group, cur_priv, parsed.key_share, parsed.key_share_len)
-    if string.equals(agerr, "") != 1 {
+    bytes.free(ek); bytes.free(dk); bytes.free(p256_priv)
+    if own_xpriv == 1 { bytes.free(cur_xpriv) }
+
+    if string.equals(sherr2, "") != 1 || shared == null {
         if parsed.key_share != null { bytes.free(parsed.key_share) }
         bytes.free(sh); bytes.free(shrec)
-        cleanup_hello(pub, rnd, sid, ch); if own_priv == 1 { bytes.free(cur_priv) }
-        transcript_free(tr); recio_free(rio); tcp.close(sock)
-        return null, agerr
+        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio)
+        if adopt_sock == null { tcp.close(sock) }
+        return null, sherr2
     }
+
     // Negotiate the record AEAD + key-schedule hash from the chosen suite.
     _rec_aead, _rec_key_len, _hash_algo, _hash_len, suite_err = suite_params(parsed.cipher_suite)
     if string.equals(suite_err, "") != 1 {
         if parsed.key_share != null { bytes.free(parsed.key_share) }
         bytes.free(shared); bytes.free(sh); bytes.free(shrec)
-        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
+        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio)
+        if adopt_sock == null { tcp.close(sock) }
         return null, suite_err
     }
 
-    // Derive keys from the (classical) 32-byte ECDHE secret and run the shared
-    // post-ServerHello handshake tail (flight read, auth, Finished).
-    result, result_err = run_handshake_tail(sock, rio, tr, host, bytes.view(shared)[0..32], parsed.cipher_suite, client_cert, client_cert_len, client_key, insecure, cafile)
+    // Derive keys and run shared post-ServerHello handshake tail.
+    result, result_err = run_handshake_tail(sock, rio, tr, host, bytes.view(shared)[0..shared_len], parsed.cipher_suite, client_cert, client_cert_len, client_key, insecure, cafile)
 
     bytes.free(shared)
     if parsed.key_share != null { bytes.free(parsed.key_share) }
     bytes.free(sh); bytes.free(shrec)
     cleanup_hello(pub, rnd, sid, ch); transcript_free(tr)
-    if own_priv == 1 { bytes.free(cur_priv) } // P-256 retry scalar (HRR path)
-    bytes.free(p256_priv) // the pre-offered P-256 ephemeral
     if result == null {
-        recio_free(rio); tcp.close(sock)
+        recio_free(rio)
+        if adopt_sock == null { tcp.close(sock) }
     }
     return result, result_err
 }
 
-// Post-quantum connect: offer the X25519MLKEM768 hybrid group (RFC-draft
-// X25519+ML-KEM-768, the group Chrome/Cloudflare default to), with x25519 as a
-// classical fallback share. Generates its own ephemerals (the hybrid private is
-// a pair: an X25519 scalar + a 2400-byte ML-KEM decapsulation key). On the
-// server's ServerHello it either does the hybrid key exchange (ML-KEM decaps ||
-// X25519 agree -> 64-byte shared secret) or, if the server fell back to x25519,
-// the classical exchange. Same authentication + Finished as connect() via the
-// shared tail. Returns a live ClientConn or (null, error).
+// Post-quantum connect: thin wrapper around connect(), which now offers
+// X25519MLKEM768 by default.
 connect_pq(host: string, port: int) -> (ptr, string) {
-    sock, dial_err = tcp.connect(host, port)
-    if string.equals(dial_err, "") != 1 { return null, dial_err }
-
-    // Ephemerals: an ML-KEM-768 keypair (keep dk to decapsulate) and an X25519
-    // scalar (keep to agree). keygen seeds itself from the CSPRNG and fails
-    // rather than hand back a key from a failed draw.
-    ek, dk, kerr = mlkem.mlkem768_keygen()
-    if kerr != "" {
-        tcp.close(sock)
-        return null, kerr
-    }
-    xpriv = rand_into(32)
-    xpub = x25519.base_point(xpriv)
-
-    // Client hybrid share = ML-KEM ek(1184) || X25519 pub(32) = 1216 bytes.
-    ek_len = bytes.length(ek)
-    hybrid = bytes.new(ek_len + 32)
-    bytes.set(hybrid, ek_len + 32 - 1, 0)
-    bytes.copy_from_bytes(hybrid, 0, ek, 0, ek_len)
-    bytes.copy_from_bytes(hybrid, ek_len, xpub, 0, 32)
-
-    rnd = rand_into(32)
-    sid = rand_into(32)
-    ch = tls13_hs.client_hello_pq(rnd, bytes.view(sid)[0..32], hybrid, ek_len + 32, xpub, host)
-    ch_len = bytes.length(ch)
-    tr = transcript_new()
-    transcript_add(tr, bytes.view(ch)[0..ch_len])
-    serr = send_plaintext_handshake(sock, bytes.view(ch)[0..ch_len])
-    if string.equals(serr, "") != 1 {
-        bytes.free(ek); bytes.free(dk); bytes.free(xpriv); bytes.free(xpub); bytes.free(hybrid)
-        cleanup_hello(null, rnd, sid, ch); transcript_free(tr); tcp.close(sock)
-        return null, serr
-    }
-    rio = recio_new(sock)
-
-    shrec, shlen, sherr = recio_next_hs(rio)
-    if string.equals(sherr, "") != 1 {
-        bytes.free(ek); bytes.free(dk); bytes.free(xpriv); bytes.free(xpub); bytes.free(hybrid)
-        cleanup_hello(null, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
-        return null, sherr
-    }
-    sh_msg_len = shlen - 5
-    sh = bytes.new(sh_msg_len)
-    bytes.set(sh, sh_msg_len - 1, 0)
-    bytes.copy_from_bytes(sh, 0, shrec, 5, sh_msg_len)
-    transcript_add(tr, bytes.view(sh)[0..sh_msg_len])
-    parsed = tls13_hs.ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null, key_share_len: 0, is_hello_retry: 0, psk_accepted: 0 }
-    perr = tls13_hs.parse_server_hello(bytes.view(sh)[0..sh_msg_len], &parsed)
-
-    result = null
-    result_err = perr
-    if string.equals(perr, "") == 1 {
-        // Compute the shared secret from the group the server selected.
-        shared = null
-        shared_len = 0
-        sherr2 = ""
-        if parsed.group == tls13_hs.GROUP_X25519MLKEM768 {
-            // Server share = ML-KEM ct(1088) || X25519 pub(32) = 1120 bytes.
-            if parsed.key_share_len != 1120 {
-                sherr2 = "X25519MLKEM768 server share wrong size"
-            } else {
-                ct = bytes.new(1088); bytes.set(ct, 1087, 0)
-                bytes.copy_from_bytes(ct, 0, parsed.key_share, 0, 1088)
-                sxpub = bytes.new(32); bytes.set(sxpub, 31, 0)
-                bytes.copy_from_bytes(sxpub, 0, parsed.key_share, 1088, 32)
-                mlk_ss, merr = mlkem.mlkem768_decaps(dk, ct)
-                x_ss, xerr = x25519.agree(xpriv, sxpub)
-                if string.equals(merr, "") != 1 {
-                    sherr2 = merr
-                } else if string.equals(xerr, "") != 1 {
-                    sherr2 = xerr
-                } else {
-                    // Hybrid shared secret = ML-KEM ss(32) || X25519 ss(32).
-                    shared = bytes.new(64); bytes.set(shared, 63, 0)
-                    bytes.copy_from_bytes(shared, 0, mlk_ss, 0, 32)
-                    bytes.copy_from_bytes(shared, 32, x_ss, 0, 32)
-                    shared_len = 64
-                }
-                bytes.free(ct); bytes.free(sxpub); bytes.free(mlk_ss)
-                if x_ss != null { bytes.free(x_ss) }
-            }
-        } else {
-            if parsed.group == tls13_hs.GROUP_X25519 {
-                // Server fell back to classical x25519.
-                shared, sherr2 = x25519.agree(xpriv, parsed.key_share)
-                shared_len = 32
-            } else {
-                sherr2 = "server chose an unoffered group"
-            }
-        }
-
-        if string.equals(sherr2, "") != 1 || shared == null {
-            result_err = sherr2
-            if string.equals(sherr2, "") == 1 { result_err = "PQ key exchange failed" }
-        } else {
-            result, result_err = run_handshake_tail(sock, rio, tr, host, bytes.view(shared)[0..shared_len], parsed.cipher_suite, null, 0, null, 0, "")
-            bytes.free(shared)
-        }
-    }
-
-    bytes.free(ek); bytes.free(dk); bytes.free(xpriv); bytes.free(xpub); bytes.free(hybrid)
-    if parsed.key_share != null { bytes.free(parsed.key_share) }
-    bytes.free(sh); bytes.free(shrec)
-    cleanup_hello(null, rnd, sid, ch); transcript_free(tr)
-    if result == null {
-        recio_free(rio); tcp.close(sock)
-    }
-    return result, result_err
+    priv = rand_into(32)
+    if priv == null { return null, "no randomness for key share" }
+    conn, err = connect(host, port, priv)
+    bytes.free(priv)
+    return conn, err
 }
 
 // The shared post-ServerHello handshake tail: derive handshake keys from the

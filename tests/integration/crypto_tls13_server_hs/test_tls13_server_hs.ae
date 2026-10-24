@@ -14,6 +14,7 @@
 
 import std.cryptography.tls13_hs
 import std.bytes
+import std.string
 
 extern exit(code: int)
 
@@ -239,6 +240,55 @@ main() {
     bytes.free(cv)
     bytes.free(sig)
     println("ok   the server flight builders emit well-formed messages")
+
+    // ---- 6. parse_client_hello with X25519MLKEM768 ----
+    r6 = filled(32, 1)
+    s6 = filled(32, 9)
+    p6 = filled(32, 50)
+    hy = filled(1216, 7)
+    pqch = tls13_hs.client_hello_pq(r6, bytes.view(s6)[0..32], hy, 1216, p6, "example.com")
+    pqn = bytes.length(pqch)
+    pqc = ChParsed { random: null, session_id: null, session_id_len: 0,
+        cipher_suite: 0, group: 0, key_share: null, key_share_len: 0,
+        has_sni: 0, saw_supported_versions: 0 }
+    pqerr = tls13_hs.parse_client_hello(bytes.view(pqch)[0..pqn], &pqc)
+    if pqerr != "" {
+        println("FAIL 6: parse_client_hello rejected PQ ClientHello: ${pqerr}")
+        fails = fails + 1
+    } else {
+        if pqc.group != tls13_hs.GROUP_X25519MLKEM768 {
+            println("FAIL 6: group ${pqc.group}, want 0x11EC")
+            fails = fails + 1
+        }
+        if pqc.key_share_len != 1216 {
+            println("FAIL 6: key_share_len ${pqc.key_share_len}, want 1216")
+            fails = fails + 1
+        }
+    }
+    if pqerr == "" { println("ok   parse_client_hello prefers X25519MLKEM768 group") }
+    tls13_hs.free_ch(&pqc)
+    bytes.free(pqch)
+    bytes.free(hy)
+
+    bad_hy = filled(500, 3)
+    bad_pqch = tls13_hs.client_hello_pq(r6, bytes.view(s6)[0..32], bad_hy, 500, p6, "example.com")
+    bad_pqn = bytes.length(bad_pqch)
+    bad_pqc = ChParsed { random: null, session_id: null, session_id_len: 0,
+        cipher_suite: 0, group: 0, key_share: null, key_share_len: 0,
+        has_sni: 0, saw_supported_versions: 0 }
+    bad_pqerr = tls13_hs.parse_client_hello(bytes.view(bad_pqch)[0..bad_pqn], &bad_pqc)
+    if string.contains(bad_pqerr, "invalid X25519MLKEM768") == 1 {
+        println("ok   parse_client_hello rejects invalid X25519MLKEM768 share length")
+    } else {
+        println("FAIL 6: expected invalid length error, got '${bad_pqerr}'")
+        fails = fails + 1
+    }
+    tls13_hs.free_ch(&bad_pqc)
+    bytes.free(bad_pqch)
+    bytes.free(bad_hy)
+    bytes.free(r6)
+    bytes.free(s6)
+    bytes.free(p6)
 
     if fails != 0 {
         println("tls13_server_hs: ${fails} failure(s)")
