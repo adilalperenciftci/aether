@@ -59,6 +59,8 @@ int aether_net_wouldblock(void) { return 0; }
     #include <fcntl.h>
 #endif
 #include "aether_net_addr.h"
+#include "../../runtime/utils/aether_thread.h"   /* the family memo's lock, aether_now_ns */
+#include <limits.h>
 
 /* recv returned <= 0: distinguish "peer idle, socket still alive"
  * (SO_RCVTIMEO fired, or a nonblocking socket with nothing buffered) from
@@ -96,6 +98,240 @@ void aether_net_init(void) {
     net_initialized = 1;
 }
 
+/* ---- Dialling (see aether_net_addr.h) ---------------------------------- */
+
+typedef struct {
+    char host[128];
+    int  port;
+    int  family;
+} NetFamilyMemo;
+
+#define NET_FAMILY_MEMO_SLOTS 32
+static NetFamilyMemo net_family_memo[NET_FAMILY_MEMO_SLOTS];
+static int net_family_memo_next = 0;
+/* CRITICAL_SECTION, which the thread shim maps pthread_mutex_t to on Windows,
+ * has no static initialiser, so the lock is created once through an atomic
+ * gate there (the same shape as the HTTP pool's in aether_http.c). */
+#if defined(_WIN32)
+#include <stdatomic.h>
+static pthread_mutex_t net_family_memo_mutex;
+static atomic_int      net_family_memo_state = 0;   /* 0 unset, 1 setting, 2 ready */
+static pthread_mutex_t* net_family_memo_lock(void) {
+    int expected = 0;
+    if (atomic_compare_exchange_strong(&net_family_memo_state, &expected, 1)) {
+        pthread_mutex_init(&net_family_memo_mutex, NULL);
+        atomic_store(&net_family_memo_state, 2);
+    } else {
+        while (atomic_load(&net_family_memo_state) != 2) { /* one-shot spin */ }
+    }
+    return &net_family_memo_mutex;
+}
+#else
+static pthread_mutex_t net_family_memo_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t* net_family_memo_lock(void) { return &net_family_memo_mutex; }
+#endif
+
+static int net_family_lookup(const char* host, int port) {
+    int family = 0;
+    if (!host || strlen(host) >= sizeof net_family_memo[0].host) return 0;
+    pthread_mutex_lock(net_family_memo_lock());
+    for (int i = 0; i < NET_FAMILY_MEMO_SLOTS; i++) {
+        if (net_family_memo[i].family && net_family_memo[i].port == port &&
+            strcmp(net_family_memo[i].host, host) == 0) {
+            family = net_family_memo[i].family;
+            break;
+        }
+    }
+    pthread_mutex_unlock(net_family_memo_lock());
+    return family;
+}
+
+void aether_net_note_family(const char* host, int port, int family) {
+    if (!host || strlen(host) >= sizeof net_family_memo[0].host) return;
+    pthread_mutex_lock(net_family_memo_lock());
+    int slot = -1;
+    for (int i = 0; i < NET_FAMILY_MEMO_SLOTS; i++) {
+        if (net_family_memo[i].family && net_family_memo[i].port == port &&
+            strcmp(net_family_memo[i].host, host) == 0) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        slot = net_family_memo_next;
+        net_family_memo_next = (net_family_memo_next + 1) % NET_FAMILY_MEMO_SLOTS;
+        strcpy(net_family_memo[slot].host, host);
+        net_family_memo[slot].port = port;
+    }
+    net_family_memo[slot].family = family;
+    pthread_mutex_unlock(net_family_memo_lock());
+}
+
+void aether_net_order(const char* host, int port, AetherAddrList* addrs) {
+    int family = net_family_lookup(host, port);
+    if (!family || addrs->n < 2) return;
+    /* A stable partition: the remembered family first, each side in
+     * getaddrinfo's order. */
+    AetherAddrList sorted;
+    sorted.n = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < addrs->n; i++) {
+            int match = addrs->ss[i].ss_family == family;
+            if (match == (pass == 0)) {
+                sorted.ss[sorted.n] = addrs->ss[i];
+                sorted.len[sorted.n] = addrs->len[i];
+                sorted.n++;
+            }
+        }
+    }
+    *addrs = sorted;
+}
+
+int aether_net_connect_addr(const struct sockaddr_storage* addr, socklen_t len,
+                            long long timeout_ns, const char** why, int* timed_out) {
+    *timed_out = 0;
+    int sockfd = (int)socket(addr->ss_family, SOCK_STREAM, 0);
+    if (sockfd < 0) {
+        *why = "could not create socket";
+        return -1;
+    }
+    if (timeout_ns <= 0) {
+        if (connect(sockfd, (const struct sockaddr*)addr, len) < 0) {
+            close(sockfd);
+            *why = "connection failed";
+            return -1;
+        }
+        return sockfd;
+    }
+
+#ifdef _WIN32
+    u_long nb = 1;
+    ioctlsocket(sockfd, FIONBIO, &nb);
+#else
+    int flags = fcntl(sockfd, F_GETFL, 0);
+    if (flags >= 0) fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
+#endif
+    if (connect(sockfd, (const struct sockaddr*)addr, len) < 0) {
+#ifdef _WIN32
+        int err = WSAGetLastError();
+        int in_progress = (err == WSAEWOULDBLOCK || err == WSAEINPROGRESS);
+#else
+        int in_progress = (errno == EINPROGRESS || errno == EWOULDBLOCK);
+#endif
+        if (!in_progress) {
+            close(sockfd);
+            *why = "connection failed";
+            return -1;
+        }
+        /* Watch both the writable set (success) and the exception set
+         * (failure). On POSIX, a refused non-blocking connect makes the
+         * socket writable with SO_ERROR=ECONNREFUSED. On Windows, Winsock
+         * signals connect failures via the *exception* fd set instead, NOT
+         * writable -- so a select that watches only wfds waits the full
+         * timeout for refused connects rather than failing fast. SO_ERROR
+         * distinguishes success from failure afterwards. */
+#ifdef _WIN32
+        /* Winsock's fd_set is a small array of SOCKET handles, not a bitmap
+         * indexed by descriptor, so it has no FD_SETSIZE hazard for a single
+         * socket. */
+        fd_set wfds, efds;
+        FD_ZERO(&wfds); FD_SET(sockfd, &wfds);
+        FD_ZERO(&efds); FD_SET(sockfd, &efds);
+        struct timeval tv;
+        tv.tv_sec  = (long)(timeout_ns / 1000000000LL);
+        tv.tv_usec = (long)((timeout_ns / 1000LL) % 1000000LL);
+        int sel = select(sockfd + 1, NULL, &wfds, &efds, &tv);
+#else
+        /* poll, not select: a POSIX fd_set is a bitmap of FD_SETSIZE bits,
+         * and FD_SET on a descriptor at or above it writes past the end. A
+         * process serving many connections (a proxy, which is what dials
+         * most often) passes 1024 descriptors easily. POLLOUT covers both
+         * outcomes: a refused non-blocking connect reports the socket ready
+         * with SO_ERROR set, which the check below reads. */
+        struct pollfd pfd;
+        pfd.fd = sockfd;
+        pfd.events = POLLOUT;
+        pfd.revents = 0;
+        long long timeout_ms = (timeout_ns + 999999LL) / 1000000LL;
+        if (timeout_ms > INT_MAX) timeout_ms = INT_MAX;
+        int sel = poll(&pfd, 1, (int)timeout_ms);
+#endif
+        if (sel == 0) {
+            close(sockfd);
+            *why = "connect timeout";
+            *timed_out = 1;
+            return -1;
+        }
+        if (sel < 0) {
+            close(sockfd);
+            *why = "select on connect failed";
+            return -1;
+        }
+        int so_err = 0;
+        socklen_t slen = sizeof(so_err);
+        if (getsockopt(sockfd, SOL_SOCKET, SO_ERROR, (char*)&so_err, &slen) < 0
+            || so_err != 0) {
+            close(sockfd);
+            *why = "connection failed";
+            return -1;
+        }
+    }
+    /* Back to blocking for the send/recv path, which uses SO_*TIMEO. */
+#ifdef _WIN32
+    nb = 0;
+    ioctlsocket(sockfd, FIONBIO, &nb);
+#else
+    if (flags >= 0) fcntl(sockfd, F_SETFL, flags);
+#endif
+    return sockfd;
+}
+
+int aether_net_dial_addrs(const char* host, int port, AetherAddrList* addrs,
+                          long long timeout_ns, const char** why) {
+    *why = "could not resolve host";
+    if (!addrs || addrs->n <= 0) return -1;
+    aether_net_order(host, port, addrs);
+
+    const long long first_try = (long long)AETHER_DIAL_FIRST_TRY_MS * 1000000LL;
+    unsigned long long deadline = timeout_ns > 0
+        ? aether_now_ns() + (unsigned long long)timeout_ns : 0;
+    int again[AETHER_ADDR_MAX];
+    int n_again = 0;
+
+    for (int pass = 0; pass < 2; pass++) {
+        int count = pass == 0 ? addrs->n : n_again;
+        for (int k = 0; k < count; k++) {
+            int i = pass == 0 ? k : again[k];
+            int last = pass == 1 || k == count - 1;
+            long long left = 0;   /* 0: no limit */
+            if (deadline) {
+                unsigned long long now = aether_now_ns();
+                if (now >= deadline) { *why = "connect timeout"; return -1; }
+                left = (long long)(deadline - now);
+            }
+            long long t = left;
+            if (!last) t = (left > 0 && left < first_try) ? left : first_try;
+            int timed_out = 0;
+            int fd = aether_net_connect_addr(&addrs->ss[i], addrs->len[i], t, why, &timed_out);
+            if (fd >= 0) {
+                if (addrs->n > 1) aether_net_note_family(host, port, addrs->ss[i].ss_family);
+                return fd;
+            }
+            if (pass == 0 && !last && timed_out) again[n_again++] = i;
+        }
+    }
+    return -1;
+}
+
+int aether_net_dial(const char* host, int port, long long timeout_ns, const char** why) {
+    AetherAddrList addrs;
+    if (aether_addr_resolve(host, port, &addrs) != 0) {
+        *why = "could not resolve host";
+        return -1;
+    }
+    return aether_net_dial_addrs(host, port, &addrs, timeout_ns, why);
+}
+
 // Set read/write timeouts on a socket so blocking operations don't hang
 // indefinitely on dead or slow peers.  Default: 30 seconds.
 static void net_set_socket_timeouts(int fd, int timeout_sec) {
@@ -123,18 +359,9 @@ TcpSocket* tcp_connect_raw(const char* host, int port) {
      * shared, process-static struct, so concurrent connects on different
      * threads race and corrupt each other's resolved address. getaddrinfo is
      * thread-safe and returns caller-owned memory. Each address the host has,
-     * IPv6 or IPv4, is tried in turn. */
-    AetherAddrList addrs;
-    if (aether_addr_resolve(host, port, &addrs) != 0) return NULL;
-    int sockfd = -1;
-    for (int i = 0; i < addrs.n && sockfd < 0; i++) {
-        sockfd = (int)socket(addrs.ss[i].ss_family, SOCK_STREAM, 0);
-        if (sockfd < 0) continue;
-        if (connect(sockfd, (struct sockaddr*)&addrs.ss[i], addrs.len[i]) < 0) {
-            close(sockfd);
-            sockfd = -1;
-        }
-    }
+     * IPv6 or IPv4, is tried as aether_net_dial_addrs describes. */
+    const char* why = NULL;
+    int sockfd = aether_net_dial(host, port, 0, &why);
     if (sockfd < 0) return NULL;
 
     net_set_socket_timeouts(sockfd, 30);

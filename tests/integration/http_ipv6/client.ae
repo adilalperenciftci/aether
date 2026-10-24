@@ -1,24 +1,48 @@
-// The client half of test_http_ipv6.sh: one GET of URL through
+// The client half of test_http_ipv6.sh: a GET of URL through
 // std.http.client (pure-Aether TLS for https when AETHER_PURE_TLS=1), with
 // CAFILE pinned when set. Prints "STATUS <code> BODY <body>", or "ERR: <why>".
+//
+// REPEAT=n makes n GETs in this one process, each on a fresh connection,
+// and adds "ELAPSED_MS <total>": the dial's memory of which address family
+// connected lives in the process, so only repeats in one process show it.
 
 import std.http.client
 import std.cryptography.tls13_client
+import std.string
 import std.os
 
-main() {
-    req = client.request("GET", os.getenv("URL"))
+// One GET: the line to print, "ERR: ..." on a transport failure.
+get_once(url: string) -> string {
+    req = client.request("GET", url)
     client.set_timeout(req, 10s)
+    client.set_header(req, "Connection", "close")
     ca = os.getenv("CAFILE")
     if ca != null {
         if ca != "" { client.set_cafile(req, ca) }
     }
     resp, err = client.send_request(req)
     client.request_free(req)
-    if err != "" {
-        println("ERR: ${err}")
-        return
-    }
-    println("STATUS ${client.response_status(resp)} BODY ${client.response_body(resp)}")
+    if err != "" { return "ERR: ${err}" }
+    line = "STATUS ${client.response_status(resp)} BODY ${client.response_body(resp)}"
     client.response_free(resp)
+    return line
+}
+
+main() {
+    url = os.getenv("URL")
+    n = 1
+    rep = os.getenv("REPEAT")
+    if rep != null {
+        v, perr = string.to_int(rep)
+        if perr == "" && v > 0 { n = v }
+    }
+    started = os.now_monotonic_ms()
+    line = ""
+    i = 0
+    while i < n {
+        line = get_once(url)
+        if string.starts_with(line, "ERR: ") == 1 { i = n } else { i = i + 1 }
+    }
+    println(line)
+    if n > 1 { println("ELAPSED_MS ${os.now_monotonic_ms() - started}") }
 }

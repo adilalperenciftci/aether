@@ -200,7 +200,11 @@ if openssl s_server -help 2>&1 | grep -q -- '-tls1_2'; then
         P=$(( 20000 + ($$ * 7 + try * 1009) % 40000 ))
         # No MSYS2_ARG_CONV_EXCL here: the -cert/-key paths must be translated
         # for a native openssl.exe, and there is no /CN= argument to protect.
-        openssl s_server -accept "$P" -cert "$TMP/leaf.pem" -key "$TMP/leaf.key" \
+        # -4: IPv4 only, the family wait_port probes. Left to itself
+        # s_server may also listen on IPv6 without serving it (seen on
+        # Windows), and the client, dialling "localhost" with ::1 first,
+        # then waits on a ClientHello nobody reads.
+        openssl s_server -4 -accept "$P" -cert "$TMP/leaf.pem" -key "$TMP/leaf.key" \
             -tls1_2 -www >"$TMP/s12.log" 2>&1 &
         spid=$!
         PIDS="$PIDS $spid"

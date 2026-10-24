@@ -3672,21 +3672,12 @@ HttpWsConn* http_ws_connect(const char* url) {
     int  pr = ws_parse_url(url, host, sizeof(host), &port, path, sizeof(path), &tls);
     if (pr != 0) return NULL;
 
-    /* Resolve + connect, trying each address the host resolves to in turn
-     * (IPv6 and IPv4 alike). getaddrinfo rather than gethostbyname: the
+    /* Resolve + connect, over each address the host resolves to (IPv6 and
+     * IPv4 alike) as aether_net_dial_addrs describes. getaddrinfo rather than gethostbyname: the
      * latter returns a pointer into a process-static struct, which two
      * threads dialling at once would race on. */
-    AetherAddrList addrs;
-    if (aether_addr_resolve(host, port, &addrs) != 0) return NULL;
-    int fd = -1;
-    for (int i = 0; i < addrs.n && fd < 0; i++) {
-        fd = (int)socket(addrs.ss[i].ss_family, SOCK_STREAM, 0);
-        if (fd < 0) continue;
-        if (connect(fd, (struct sockaddr*)&addrs.ss[i], addrs.len[i]) != 0) {
-            close(fd);
-            fd = -1;
-        }
-    }
+    const char* why = NULL;
+    int fd = aether_net_dial(host, port, 0, &why);
     if (fd < 0) return NULL;
 #ifdef SO_NOSIGPIPE
     int nosigpipe = 1;

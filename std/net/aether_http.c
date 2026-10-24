@@ -1992,137 +1992,17 @@ static const char* http_tls_backend_missing(void) {
 #endif
 }
 
-/* Connect a fresh socket to one address, within `timeout_ns` when it is
- * positive (non-blocking connect, then wait), else with a plain blocking
- * connect. Returns the descriptor, in blocking mode, or -1 with *why set. */
-static int http_connect_one(const struct sockaddr_storage* addr, socklen_t addr_len,
-                            int64_t timeout_ns, const char** why) {
-    int sockfd = (int)socket(addr->ss_family, SOCK_STREAM, 0);
-    if (sockfd < 0) {
-        *why = "could not create socket";
-        return -1;
-    }
-    if (timeout_ns <= 0) {
-        if (connect(sockfd, (const struct sockaddr*)addr, addr_len) < 0) {
-            close(sockfd);
-            *why = "connection failed";
-            return -1;
-        }
-        return sockfd;
-    }
-
-#ifdef _WIN32
-    u_long nb = 1;
-    ioctlsocket(sockfd, FIONBIO, &nb);
-#else
-    int flags = fcntl(sockfd, F_GETFL, 0);
-    if (flags >= 0) fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
-#endif
-    int connect_rc = connect(sockfd, (const struct sockaddr*)addr, addr_len);
-    if (connect_rc < 0) {
-#ifdef _WIN32
-        int err = WSAGetLastError();
-        int in_progress = (err == WSAEWOULDBLOCK || err == WSAEINPROGRESS);
-#else
-        int in_progress = (errno == EINPROGRESS || errno == EWOULDBLOCK);
-#endif
-        if (!in_progress) {
-            close(sockfd);
-            *why = "connection failed";
-            return -1;
-        }
-        /* Watch both the writable set (success) and the exception set
-         * (failure). On POSIX, a refused non-blocking connect makes the
-         * socket writable with SO_ERROR=ECONNREFUSED — only `wfds` matters.
-         * On Windows, Winsock signals connect failures via the *exception*
-         * fd set instead, NOT writable — so a select that watches only wfds
-         * waits the full timeout for refused connects rather than failing
-         * fast. Watching both makes select fire on either outcome; SO_ERROR
-         * distinguishes success from failure afterwards. */
-#ifdef _WIN32
-        /* Winsock's fd_set is a small array of SOCKET handles, not a bitmap
-         * indexed by descriptor, so it has no FD_SETSIZE hazard for a single
-         * socket. */
-        fd_set wfds, efds;
-        FD_ZERO(&wfds); FD_SET(sockfd, &wfds);
-        FD_ZERO(&efds); FD_SET(sockfd, &efds);
-        struct timeval tv;
-        tv.tv_sec  = (time_t)(timeout_ns / 1000000000LL);
-        tv.tv_usec = (long)((timeout_ns / 1000LL) % 1000000LL);
-        int sel = select(sockfd + 1, NULL, &wfds, &efds, &tv);
-#else
-        /* poll, not select: a POSIX fd_set is a bitmap of FD_SETSIZE bits,
-         * and FD_SET on a descriptor at or above it writes past the end. A
-         * process serving many connections (a proxy, which is what dials most
-         * often) passes 1024 descriptors easily, and the corruption would
-         * land on the stack. poll takes the descriptor by value and has no
-         * such bound. POLLOUT covers both outcomes: a refused non-blocking
-         * connect reports the socket ready with SO_ERROR set, which the check
-         * below reads. */
-        struct pollfd pfd;
-        pfd.fd = sockfd;
-        pfd.events = POLLOUT;
-        pfd.revents = 0;
-        int64_t timeout_ms = (timeout_ns + 999999LL) / 1000000LL;
-        if (timeout_ms > INT_MAX) timeout_ms = INT_MAX;
-        int sel = poll(&pfd, 1, (int)timeout_ms);
-#endif
-        if (sel == 0) {
-            close(sockfd);
-            *why = "connect timeout";
-            return -1;
-        }
-        if (sel < 0) {
-            close(sockfd);
-            *why = "select on connect failed";
-            return -1;
-        }
-        /* Check SO_ERROR — distinguishes "writable because connected" from
-         * "writable because failed". On Windows the failure surfaces via
-         * efds; on POSIX via wfds with so_err set. SO_ERROR works the same
-         * in both cases. */
-        int so_err = 0;
-        socklen_t slen = sizeof(so_err);
-        if (getsockopt(sockfd, SOL_SOCKET, SO_ERROR, (char*)&so_err, &slen) < 0
-            || so_err != 0) {
-            close(sockfd);
-            *why = "connection failed";
-            return -1;
-        }
-    }
-    /* Restore blocking mode for the send/recv path — those use
-     * setsockopt(SO_*TIMEO) for their timeouts. */
-#ifdef _WIN32
-    nb = 0;
-    ioctlsocket(sockfd, FIONBIO, &nb);
-#else
-    if (flags >= 0) fcntl(sockfd, F_SETFL, flags);
-#endif
-    return sockfd;
-}
-
-static int http_dial(HttpClientRequest* req, const AetherAddrList* addrs,
+static int http_dial(HttpClientRequest* req, AetherAddrList* addrs,
+                     const char* dial_host, int dial_port,
                      const char* host, int port, int use_tls, int via_proxy,
                      Transport* out, char** out_err) {
-    /* Each address the host resolved to, in turn: a name with an IPv6 and an
-     * IPv4 address still connects when one family is unreachable from here.
-     * Under a timeout the attempts share it: each gets an equal part of what
-     * is left, so one address that drops packets cannot spend it all, and the
-     * last gets the rest. */
-    const char* why = "could not resolve host";
-    int sockfd = -1;
-    uint64_t deadline = req->timeout_ns > 0
-        ? aether_now_ns() + (uint64_t)req->timeout_ns : 0;
-    for (int i = 0; i < addrs->n && sockfd < 0; i++) {
-        int64_t budget = 0;
-        if (deadline) {
-            uint64_t now = aether_now_ns();
-            if (now >= deadline) { why = "connect timeout"; break; }
-            budget = (int64_t)((deadline - now) / (uint64_t)(addrs->n - i));
-            if (budget <= 0) budget = 1;
-        }
-        sockfd = http_connect_one(&addrs->ss[i], addrs->len[i], budget, &why);
-    }
+    /* Each address the dial host resolved to, as aether_net_dial_addrs
+     * describes: a short first try on all but the last, the request's
+     * timeout across all of them, and the family that connected tried first
+     * next time. */
+    const char* why = NULL;
+    int sockfd = aether_net_dial_addrs(dial_host, dial_port, addrs,
+                                       req->timeout_ns > 0 ? req->timeout_ns : 0, &why);
     if (sockfd < 0) {
         ae_set_err(out_err, why);
         return -1;
@@ -2839,6 +2719,8 @@ static void upstream_reset(HttpUpstreamConn* out) {
     out->reused = 0;
     out->connecting = 0;
     out->addr_next = 0;
+    out->dial_host[0] = '\0';
+    out->dial_port = 0;
 }
 
 /* Dial `host` from its `first` resolved address on. Non-blocking, so only an
@@ -2851,6 +2733,16 @@ static int upstream_dial(const char* host, int port, int first, HttpUpstreamConn
     AetherAddrList addrs;
     int resolved = 0;
     if (!resolve_dial_addr(host, port, &addrs, &resolved)) return -1;
+    /* The family that last connected to this upstream first: a connect in
+     * flight is waited on, not cut short, so the order is what keeps a slow
+     * refusal (Windows takes about two seconds over ::1) to the first
+     * connection rather than every one. */
+    aether_net_order(host, port, &addrs);
+    out->dial_host[0] = '\0';
+    if (addrs.n > 1 && strlen(host) < sizeof(out->dial_host)) {
+        strcpy(out->dial_host, host);
+        out->dial_port = port;
+    }
 
     for (int i = first; i < addrs.n; i++) {
         int fd = (int)socket(addrs.ss[i].ss_family, SOCK_STREAM, 0);
@@ -2871,6 +2763,8 @@ static int upstream_dial(const char* host, int port, int first, HttpUpstreamConn
         out->addr_next = i + 1 < addrs.n ? i + 1 : 0;
         if (connect(fd, (struct sockaddr*)&addrs.ss[i], addrs.len[i]) == 0) {
             out->connecting = 0;
+            if (out->dial_host[0])
+                aether_net_note_family(out->dial_host, out->dial_port, addrs.ss[i].ss_family);
             return fd;
         }
 #ifdef _WIN32
@@ -2957,6 +2851,10 @@ int http_upstream_connected(HttpUpstreamConn* c) {
         return errno == ENOTCONN ? 0 : -1;
 
     c->connecting = 0;
+    if (c->dial_host[0]) {
+        aether_net_note_family(c->dial_host, c->dial_port, peer.ss_family);
+        c->dial_host[0] = '\0';
+    }
     return 1;
 }
 
@@ -3262,7 +3160,7 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
         }
 
         char* dial_err = NULL;
-        if (http_dial(req, &serv_addr, host, port, use_tls, via_proxy, &t, &dial_err) != 0) {
+        if (http_dial(req, &serv_addr, dial_host, dial_port, host, port, use_tls, via_proxy, &t, &dial_err) != 0) {
             response->error = string_new(dial_err ? dial_err : "connection failed");
             free(dial_err);
             return response;
@@ -3324,7 +3222,7 @@ send_request:
              * skipped; do it now. A failure here just means no retry. */
             if (resolve_dial_addr(dial_host, dial_port, &serv_addr,
                                   &serv_addr_resolved)
-                && http_dial(req, &serv_addr, host, port, use_tls, via_proxy, &t, &rd_err) == 0) {
+                && http_dial(req, &serv_addr, dial_host, dial_port, host, port, use_tls, via_proxy, &t, &rd_err) == 0) {
                 free(rd_err);
                 goto send_request;
             }
@@ -3521,7 +3419,7 @@ send_request:
         /* Pooled connection, so the resolve was skipped; do it now. */
         if (resolve_dial_addr(dial_host, dial_port, &serv_addr,
                               &serv_addr_resolved)
-            && http_dial(req, &serv_addr, host, port, use_tls, via_proxy, &t, &rd_err) == 0) {
+            && http_dial(req, &serv_addr, dial_host, dial_port, host, port, use_tls, via_proxy, &t, &rd_err) == 0) {
             free(rd_err);
             aether_caps_free(full_response, cap);
             full_response = NULL;

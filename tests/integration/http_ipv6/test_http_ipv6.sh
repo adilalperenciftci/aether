@@ -12,7 +12,11 @@
 #      and 127.0.0.1, over plain HTTP, over TLS (wss://, OpenSSL server)
 #      and over pure-Aether TLS 1.3 (SSE and the long poll; see streams.ae
 #      for why wss is not run against the pure server)
-#   6. under libaether_sandbox.so (Linux), a tcp grant for 127.0.0.1 admits
+#   6. a name whose first address hangs (localhost -> ::1, held by
+#      blackhole.py, the server on 127.0.0.1): the first connection moves
+#      on after a short try, and later ones go straight to the family that
+#      worked
+#   7. under libaether_sandbox.so (Linux), a tcp grant for 127.0.0.1 admits
 #      127.0.0.1 and ::ffff:127.0.0.1 but not ::1, and one for [::1] admits
 #      ::1 alone: a grant for one family never opens the other
 #
@@ -190,7 +194,40 @@ else
     fi
 fi
 
-# --- 6. tcp grants don't cross families ---
+# --- 6. a slow first address costs one short try, once ---
+PY="$(sh "$ROOT/tests/scripts/find_python.sh" 2>/dev/null)" || PY=""
+SLOW_NOTE="slow-first-address part skipped"
+if [ -n "$PY" ] && [ "$WILDCARD" = yes ] && \
+   [ "$($PY -I -c 'import socket; print(socket.getaddrinfo("localhost", 80, 0, socket.SOCK_STREAM)[0][0] == socket.AF_INET6)' 2>/dev/null)" = True ]; then
+    start "127.0.0.1" "$TMP/s6.log" || fail "could not bind 127.0.0.1"
+    $PY -I "$SCRIPT_DIR/blackhole.py" "$PORT" "$TMP/bh.ready" >"$TMP/bh.log" 2>&1 &
+    BH_PID=$!
+    _i=0
+    while [ ! -f "$TMP/bh.ready" ] && [ "$_i" -lt 100 ]; do sleep 0.1; _i=$((_i + 1)); done
+    if [ -f "$TMP/bh.ready" ]; then
+        _out=$(env URL="http://localhost:$PORT/" REPEAT=8 "$TMP/cli" 2>&1) || :
+        stop_server "$BH_PID"
+        case "$_out" in
+            *"STATUS 200 BODY ipv6-ok peer=127.0.0.1"*) ;;
+            *) printf '%s\n' "$_out" | sed 's/^/    cli: /'; fail "localhost with a hanging ::1 did not reach 127.0.0.1" ;;
+        esac
+        _ms=$(printf '%s\n' "$_out" | sed -n 's/^ELAPSED_MS //p')
+        # One short try (250 ms) on the first connection, none after it.
+        [ -n "$_ms" ] && [ "$_ms" -lt 1500 ] \
+            || fail "8 connections to localhost took ${_ms:-?} ms with ::1 hanging (want < 1500: one short try, then the family that worked)"
+        SLOW_NOTE="hanging ::1 cost ${_ms} ms over 8 connections"
+    else
+        stop_server "$BH_PID"
+        SLOW_NOTE="slow-first-address part skipped: could not hold ::1:$PORT"
+    fi
+    stop_server "$SRV_PID"; SRV_PID=""
+elif [ -z "$PY" ]; then
+    SLOW_NOTE="slow-first-address part skipped: no Python"
+else
+    SLOW_NOTE="slow-first-address part skipped: localhost does not resolve to ::1 first here"
+fi
+
+# --- 7. tcp grants don't cross families ---
 PRELOAD="$ROOT/build/libaether_sandbox.so"
 if [ "$(uname -s)" = Linux ] && [ -f "$PRELOAD" ]; then
     # dial GRANT TARGET EXPECTED: the listener is on ::1 for an IPv6
@@ -214,4 +251,4 @@ else
     SANDBOX_NOTE="grant part skipped: no LD_PRELOAD sandbox here"
 fi
 
-echo "  [PASS] http_ipv6: ::1, $DUAL_NOTE, localhost-stays-IPv4, $TLS_NOTE, $STREAMS_NOTE, $SANDBOX_NOTE"
+echo "  [PASS] http_ipv6: ::1, $DUAL_NOTE, localhost-stays-IPv4, $TLS_NOTE, $STREAMS_NOTE, $SLOW_NOTE, $SANDBOX_NOTE"

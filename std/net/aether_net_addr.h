@@ -209,4 +209,35 @@ static inline int aether_addr_port(const struct sockaddr_storage* addr) {
     return 0;
 }
 
+/* Dialling, in std/net/aether_net.c (one copy, shared by std.net, the HTTP
+ * client, its proxy and the WebSocket dial).
+ *
+ * A name with more than one address is dialled the way RFC 8305 ("Happy
+ * Eyeballs") intends, sequentially: every address but the last gets a short
+ * first attempt (AETHER_DIAL_FIRST_TRY_MS), the last gets the rest of the
+ * budget, and an address that only timed out gets a second attempt after. An
+ * IPv6 address that refuses slowly -- Windows retries a refused SYN for about
+ * two seconds, so "localhost" resolving to ::1 first costs that on every
+ * connection to a server listening on 127.0.0.1 -- no longer sets the pace.
+ *
+ * The family that connected is remembered per host and port, and tried first
+ * next time, so the cost is paid once rather than per connection. */
+#define AETHER_DIAL_FIRST_TRY_MS 250
+
+/* Connect a fresh socket to `addr`: within `timeout_ns` when positive, else
+ * blocking. Returns the descriptor in blocking mode, or -1 with *why set and
+ * *timed_out 1 when the attempt ran out of time rather than failed. */
+int aether_net_connect_addr(const struct sockaddr_storage* addr, socklen_t len,
+                            long long timeout_ns, const char** why, int* timed_out);
+/* Dial `host`:`port` over the already-resolved `addrs` (reordered in place
+ * by the remembered family). `timeout_ns` <= 0 means no limit. */
+int aether_net_dial_addrs(const char* host, int port, AetherAddrList* addrs,
+                          long long timeout_ns, const char** why);
+/* Resolve, then aether_net_dial_addrs. */
+int aether_net_dial(const char* host, int port, long long timeout_ns, const char** why);
+/* The remembered family: put its addresses first. */
+void aether_net_order(const char* host, int port, AetherAddrList* addrs);
+/* Remember that `family` connected to `host`:`port`. */
+void aether_net_note_family(const char* host, int port, int family);
+
 #endif // AETHER_NET_ADDR_H

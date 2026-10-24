@@ -116,6 +116,11 @@ struct HttpUpstreamConnOpaque {
     /* The resolved address to try when the connect in flight fails, or 0
      * when there is none (a pooled connection, or the last address). */
     int  addr_next;
+    /* What a fresh dial was for, so the family that connects can be
+     * remembered (aether_net_note_family) once the connect completes. Empty
+     * for a pooled connection, and for a name with one address. */
+    char dial_host[128];
+    int  dial_port;
     char pool_key[512];
 };
 
