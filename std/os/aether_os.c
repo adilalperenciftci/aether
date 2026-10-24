@@ -1257,6 +1257,22 @@ static void aether_child_reset_signals(void) {
     }
 }
 
+/* A child starts with its parent's standard streams, and exec closes any
+ * descriptor marked close-on-exec. A parent that marks 0, 1 and 2 that way
+ * (Node does) therefore spawned children with no stdin, stdout or stderr, and
+ * a program that needs them failed in ways nothing named: chromedriver cannot
+ * start Chrome with stdin closed ("Failed to create Chrome process"), and the
+ * first file a child opened took descriptor 0. fork leaves the flag set on the
+ * child's copies; clear it on those three, which is what "inherits the
+ * parent's streams" means. A stream the parent has closed stays closed. Only
+ * fcntl, so it is legal between fork and exec like the reset above. */
+static void aether_child_keep_stdio(void) {
+    for (int fd = 0; fd <= 2; fd++) {
+        int fl = fcntl(fd, F_GETFD);
+        if (fl >= 0 && (fl & FD_CLOEXEC)) fcntl(fd, F_SETFD, fl & ~FD_CLOEXEC);
+    }
+}
+
 /* Every pipe here is made with aether_pipe_cloexec and every fork is
  * aether_fork (runtime/utils/aether_spawn.h, #2917, #3028, #3046): a pipe
  * closes on exec in every child, the ends a child keeps are moved onto its
@@ -1280,6 +1296,7 @@ int os_run(const char* prog, void* argv_list, void* env_list) {
     if (pid == 0) {
         // Child
         aether_child_reset_signals();
+        aether_child_keep_stdio();
         if (envp) {
             execve(prog, av, envp);
         } else {
@@ -1336,6 +1353,7 @@ char* os_run_capture_raw(const char* prog, void* argv_list, void* env_list) {
     if (pid == 0) {
         // Child: redirect stdout to pipe write end, close read end
         aether_child_reset_signals();
+        aether_child_keep_stdio();
         close(pipefd[0]);
         if (aether_child_fd(pipefd[1], 1) < 0) _exit(127);
         if (pipefd[1] != 1) close(pipefd[1]);
@@ -1455,6 +1473,7 @@ _tuple_string_int_string os_run_capture_status_raw(const char* prog, void* argv_
     }
     if (pid == 0) {
         aether_child_reset_signals();
+        aether_child_keep_stdio();
         close(pipefd[0]);
         if (aether_child_fd(pipefd[1], 1) < 0) _exit(127);
         if (pipefd[1] != 1) close(pipefd[1]);
@@ -1621,6 +1640,7 @@ _tuple_int_int_string os_run_pipe_raw(const char* prog, void* argv_list, void* e
     if (pid == 0) {
         /* Child — wire pipefd[1] to fd 3 and tell child where it is. */
         aether_child_reset_signals();
+        aether_child_keep_stdio();
         close(pipefd[0]);
         if (aether_child_fd(pipefd[1], 3) < 0) _exit(127);
         /* Close the original write end if dup2 didn't already (it
@@ -1731,6 +1751,7 @@ _tuple_int_string os_spawn_raw(const char* prog, void* argv_list, void* env_list
     if (pid == 0) {
         /* Child — no pipe, no fd 3, no AETHER_IPC_FD. Plain exec. */
         aether_child_reset_signals();
+        aether_child_keep_stdio();
         if (envp) {
             execve(prog, av, envp);
             /* execve doesn't PATH-resolve; fall back to execvp so a bare
@@ -1824,6 +1845,7 @@ _tuple_int_string os_spawn_to_raw(const char* prog, void* argv_list, void* env_l
     }
     if (pid == 0) {
         aether_child_reset_signals();
+        aether_child_keep_stdio();
         setpgid(0, 0);
         int nul = open("/dev/null", O_RDONLY);
         if (nul >= 0 && nul != 0) {
@@ -2143,6 +2165,7 @@ _tuple_int_string os_run_supervised_raw(const char* prog, void* argv_list, void*
     }
     if (pid == 0) {
         aether_child_reset_signals();
+        aether_child_keep_stdio();
         /* Child: become our own process-group leader before exec so the
          * parent can address the whole subtree as -pid. Setting it in
          * both child and parent (below) closes the fork/exec race. */
@@ -2343,6 +2366,7 @@ _tuple_string_string_int_string os_run_full_raw(const char* prog, void* argv_lis
     if (pid == 0) {
         /* Child: wire stdin/stdout/stderr to the pipes, close the rest. */
         aether_child_reset_signals();
+        aether_child_keep_stdio();
         close(in_pipe[1]); close(out_pipe[0]); close(err_pipe[0]);
         if (aether_child_fd(in_pipe[0], 0) < 0)  _exit(127);
         if (aether_child_fd(out_pipe[1], 1) < 0) _exit(127);

@@ -461,6 +461,7 @@ static void ev_lend_rxbuf(EvConn* c);
 static int  ev_respond_from(EvDriver* d, EvConn* c);
 static int  ev_begin_upstream(EvDriver* d, EvConn* c);
 static int  ev_begin_retry(EvDriver* d, EvConn* c);
+static int  ev_upstream_failed(EvDriver* d, EvConn* c, const char* why, int release);
 static int  ev_finish_upstream(EvDriver* d, EvConn* c);
 static int  ev_advance(EvDriver* d, EvConn* c);
 
@@ -816,7 +817,10 @@ static int ev_begin_retry(EvDriver* d, EvConn* c) {
     if (use_tls) { free(path); return -1; }
 
     int fd = http_upstream_acquire(host, port, &c->up);
-    if (fd < 0) { free(path); return -1; }
+    if (fd < 0) {
+        free(path);
+        return ev_upstream_failed(d, c, "connection failed", 0);
+    }
 
     int body_len = 0;
     const char* body = http_request_body_of(c->px.outbound, &body_len);
@@ -928,6 +932,26 @@ static int ev_expire(EvDriver* d, EvConn* c) {
  * means.
  */
 
+/* The upstream could not be had, or failed before it answered. The client is
+ * owed an answer all the same, and it is the blocking path's: the failure goes
+ * to the proxy exchange as a response with an error, which counts it against
+ * the upstream, retries where it may (another upstream, or the same again) and
+ * otherwise makes the 502 or 504. Returning -1 here instead closed the client's
+ * connection with nothing written. `release` is 1 when an upstream connection
+ * was taken and has to be given up first. */
+static int ev_upstream_failed(EvDriver* d, EvConn* c, const char* why, int release) {
+    ev_timer_set(d, c, 0);
+    if (release) ev_drop_upstream(d, c);
+    ev_reclaim_rxbuf(c);
+    HttpResponse* resp = http_response_alloc_failed(why);
+    if (!resp) return -1;
+    c->px.resp = resp;
+    if (aether_proxy_exchange_resume(&c->px, 0) == PX_NEED_SEND) {
+        return ev_begin_retry(d, c);
+    }
+    return ev_respond_from(d, c);
+}
+
 /* The request is complete: run the proxy up to the point where it needs the
  * upstream, then get a connection and a serialised head ready to go. */
 static int ev_begin_upstream(EvDriver* d, EvConn* c) {
@@ -984,7 +1008,10 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
     if (use_tls) { free(path); return -1; }
 
     int fd = http_upstream_acquire(host, port, &c->up);
-    if (fd < 0) { free(path); return -1; }
+    if (fd < 0) {
+        free(path);
+        return ev_upstream_failed(d, c, "connection failed", 0);
+    }
 
     int body_len = 0;
     const char* body = http_request_body_of(c->px.outbound, &body_len);
@@ -1148,7 +1175,11 @@ static int ev_advance(EvDriver* d, EvConn* c) {
 #endif
         case EV_UPSTREAM_DIAL: {
             int done = http_upstream_connected(&c->up);
-            if (done < 0) return -1;
+            if (done < 0) {
+                int r = ev_upstream_failed(d, c, "connection failed", 1);
+                if (r <= 0) return r;
+                continue;
+            }
             if (done == 0) return 0;   /* woken for something else; keep waiting */
             c->state = EV_UPSTREAM_SEND;
             continue;
@@ -1168,7 +1199,12 @@ static int ev_advance(EvDriver* d, EvConn* c) {
                 if (r <= 0) return r;
                 continue;
             }
-            if (r <= 0) return r;
+            if (r < 0) {
+                r = ev_upstream_failed(d, c, "send failed", 1);
+                if (r <= 0) return r;
+                continue;
+            }
+            if (r == 0) return 0;
             c->state = EV_UPSTREAM_RECV;
             continue;
         }
@@ -1186,7 +1222,12 @@ static int ev_advance(EvDriver* d, EvConn* c) {
                 if (r <= 0) return r;
                 continue;
             }
-            if (r <= 0) return r;
+            if (r < 0) {
+                r = ev_upstream_failed(d, c, "connection closed before a response", 1);
+                if (r <= 0) return r;
+                continue;
+            }
+            if (r == 0) return 0;
             r = ev_finish_upstream(d, c);
             if (r <= 0) return r;
             continue;

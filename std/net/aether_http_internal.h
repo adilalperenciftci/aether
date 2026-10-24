@@ -159,6 +159,7 @@ const char* http_request_content_type_of(const HttpClientRequest* req);
 
 /* An empty response object, and filling one in from a complete buffer. */
 HttpResponse* http_response_alloc_empty(void);
+HttpResponse* http_response_alloc_failed(const char* why);
 void http_response_fill_from_bytes(HttpResponse* response, char* buf, size_t len);
 
 /* Serialising a request head. Both drivers put the same bytes on the wire. */
