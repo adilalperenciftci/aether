@@ -70,7 +70,7 @@ cd aether
 ./install.sh
 ```
 
-Installs to `~/.aether` and adds `ae` to your PATH. Restart your terminal or run `source ~/.bashrc`, `~/.zshrc`, or `~/.bash_profile`.
+Installs to `~/.aether` and adds `ae` to your PATH. Restart your terminal or run `source ~/.bashrc`, `~/.zshrc`, or `~/.bash_profile`. Add `--contrib-too` (`./install.sh --contrib-too`) to also build and install the native contrib modules (sqlite, embedded Python/Lua/…) whose dev libraries your machine has.
 
 **Windows, download and run:**
 
