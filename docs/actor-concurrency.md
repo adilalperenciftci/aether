@@ -136,6 +136,8 @@ if (current_core_id >= 0 && current_core_id == atomic_load_explicit(&actor->assi
 
 For single-int messages, the code generator emits an inline path that stores the value directly in `msg.payload_int`, bypassing pool allocation.
 
+A `ptr` field (a `std.bytes` handle, a `*T`) crosses as the pointer, with no copy. To hand the buffer over rather than share it, send it with `move`: `r ! Chunk { data: move buf }`. The sender's `buf` is then moved-from, and any later use of it is a compile error naming the line of the move. See [`move`](isolated.md#move-handing-a-buffer-over-2975).
+
 ### Receiving Messages
 
 The `receive` block in the actor definition becomes the step function. The code generator emits a computed goto dispatch table for message handler selection:

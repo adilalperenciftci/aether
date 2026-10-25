@@ -3169,6 +3169,26 @@ static ASTNode* parse_unary_expression_inner(Parser* parser) {
         return create_unary_expression(operand, operator);
     }
 
+    // #2975: `move x` hands x's value over and leaves x moved-from. `move` is
+    // contextual, not reserved: it is the operator only when the next token,
+    // on the same line, is a name. Everything else spelled `move` stays a
+    // name, so `fs.move(a, b)`, a glob-imported `move(dst, src, n)` and a
+    // program's own `move()` keep working.
+    if (operator->type == TOKEN_IDENTIFIER && operator->value &&
+        strcmp(operator->value, "move") == 0) {
+        Token* next = peek_ahead(parser, 1);
+        if (next && next->type == TOKEN_IDENTIFIER && next->line == operator->line) {
+            advance_token(parser);
+            int errors_before = aether_error_count();
+            ASTNode* operand = parse_unary_expression(parser);
+            if (!operand) {
+                missing_operand(parser, operator, errors_before, "a name to move");
+                return NULL;
+            }
+            return create_unary_expression(operand, operator);
+        }
+    }
+
     // #890: prefix `&` is the address-of operator on an lvalue —
     // `&local.field`, `&(p as *T).field`, `&local`, `&arr[i]`. It lowers to
     // C's `&` and is typed as a pointer, so a C extern with a `&struct->field`

@@ -1,0 +1,96 @@
+// #2975: `move` hands a buffer to an actor without copying it. The receiver
+// gets the sender's own data pointer, owns the buffer from then on and frees
+// it; the sender's binding is moved-from, and using it again is a compile
+// error (tests/integration/buffer_move_reject). A rebinding revives the name,
+// so the same local can carry a second buffer.
+//
+// `move` is contextual: it is the operator only before a name, so the
+// std.mem and std.fs functions called `move`, and a program's own, still
+// parse as calls (the end of main).
+
+import std.bytes
+import std.mem
+
+const SIZE = 67108864 // 64 MiB
+
+message Chunk { data: ptr, addr: long }
+
+actor Receiver {
+    state intact = 0 // chunks that arrived with their length and bytes
+    state same = 0 // chunks whose data pointer was the sender's
+    receive {
+        Chunk(data, addr) -> {
+            n = bytes.length(data)
+            if n > 0 && bytes.get(data, 0) == 42 && bytes.get(data, n - 1) == 99 {
+                intact = intact + 1
+            }
+            if mem.ptr_to_long(bytes.data(data)) == addr { same = same + 1 }
+            bytes.free(data) // the receiver owns it now
+        }
+    }
+}
+
+// A program's own function named `move`.
+move(steps: int) -> int {
+    return steps * 2
+}
+
+fn marked(n: int) -> ptr {
+    b = bytes.new(n)
+    bytes.set(b, n - 1, 99)
+    bytes.set(b, 0, 42)
+    return b
+}
+
+main() {
+    println("=== move a buffer into a message (#2975) ===")
+    failures = 0
+    r = spawn(Receiver())
+
+    buf = marked(SIZE)
+    addr = mem.ptr_to_long(bytes.data(buf))
+    r ! Chunk { data: move buf, addr: addr }
+
+    // A rebinding revives `buf`.
+    buf = marked(16)
+    addr2 = mem.ptr_to_long(bytes.data(buf))
+    r ! Chunk { data: move buf, addr: addr2 }
+
+    wait_for_idle()
+    if r.intact != 2 {
+        println("  FAIL ${r.intact} of 2 chunks arrived intact")
+        failures = failures + 1
+    }
+    if r.same != 2 {
+        println("  FAIL ${r.same} of 2 chunks kept the sender's data pointer")
+        failures = failures + 1
+    }
+
+    // `move` before anything but a name is a name.
+    if move(21) != 42 {
+        println("  FAIL a function named move was not called")
+        failures = failures + 1
+    }
+    src = marked(8)
+    dst = bytes.new(8)
+    bytes.set(dst, 7, 0)
+    mem.move(bytes.data(dst), bytes.data(src), 8)
+    if bytes.get(dst, 0) != 42 || bytes.get(dst, 7) != 99 {
+        println("  FAIL mem.move did not copy")
+        failures = failures + 1
+    }
+    bytes.free(src)
+    bytes.free(dst)
+
+    if failures == 0 {
+        println("  PASS both buffers arrived whole, at the sender's address")
+        println("")
+        println("All PASS")
+    } else {
+        println("")
+        println("${failures} FAILURE(S)")
+        exit(1)
+    }
+}
+
+extern exit(code: int)
