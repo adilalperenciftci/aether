@@ -1518,6 +1518,9 @@ test-install: compiler ae stdlib
 	rm -rf "$$tmpdir" "$$projdir" && \
 	echo "  [PASS] Install smoke test" || \
 	(echo "  [FAIL] Install smoke test"; rm -rf "$$tmpdir" "$$projdir" 2>/dev/null; exit 1)
+	@# install.sh --contrib-too, its unknown-flag refusal, and make install's
+	@# refusal to default PREFIX as root.
+	@MAKE="$(MAKE)" sh tests/scripts/check_install_options.sh
 
 # Release archive smoke test: packages a tarball exactly like release.yml,
 # extracts it (simulating `ae version install`), and verifies ae init + ae run
@@ -2325,9 +2328,28 @@ endif
 	@echo "✓ Release build complete: $(BUILD_DIR)/aetherc-release$(EXE_EXT)"
 	@ls -lh $(BUILD_DIR)/aetherc-release$(EXE_EXT)
 
-# Install to system
-PREFIX ?= /usr/local
+# Install. The default prefix is the user's own ~/.aether, the same as
+# install.sh and docs/install-layout.md, so an install needs no sudo and
+# cannot leave a root-owned toolchain in /usr/local that every other checkout
+# then falls back to (ae's last-resort compiler lookup and the compiler's
+# last-resort std lookup both probe /usr/local). A system install says so:
+# `sudo make install PREFIX=/usr/local`.
+ifeq ($(origin PREFIX),undefined)
+PREFIX := $(HOME)/.aether
+PREFIX_DEFAULTED := 1
+endif
+# Under sudo, $(HOME) is usually root's, so a habitual `sudo make install`
+# would land in /root/.aether. Refuse that and say what to type instead.
+define REFUSE_ROOT_DEFAULT_PREFIX
+	@if [ "$(PREFIX_DEFAULTED)" = 1 ] && [ "$$(id -u 2>/dev/null)" = 0 ]; then \
+		echo "make $@: running as root with no PREFIX, which would install into $(PREFIX)."; \
+		echo "  For your own user:  make $@               (no sudo; installs to ~/.aether)"; \
+		echo "  For the system:     sudo make $@ PREFIX=/usr/local"; \
+		exit 1; \
+	fi
+endef
 install: $(VERSION_HEADER) release-build ae stdlib
+	$(REFUSE_ROOT_DEFAULT_PREFIX)
 	@echo "==================================="
 	@echo "Installing Aether to $(PREFIX)"
 	@echo "==================================="
@@ -2582,6 +2604,7 @@ contrib:
 #   [build]
 #   link_flags = "-laether_sqlite -lsqlite3"
 install-contrib: contrib
+	$(REFUSE_ROOT_DEFAULT_PREFIX)
 	@echo "==================================="
 	@echo "Installing contrib modules to $(PREFIX)"
 	@echo "==================================="

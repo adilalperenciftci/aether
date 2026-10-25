@@ -705,6 +705,7 @@ fn free_cert_chain(chain: ptr) {
 
 // ---- @extern C entry points ----
 
+// Consumes fd on every path; a successful connection owns it until close_conn.
 @c_callback("aether_pure_tls_server_accept")
 pure_tls_server_accept(fd: int, cert_path: string, key_path: string) -> ptr {
     sock = tcp_socket_from_fd_owned(fd)
@@ -754,7 +755,7 @@ pure_tls_server_accept(fd: int, cert_path: string, key_path: string) -> ptr {
     list_free(lens_list)
 
     if err != "" {
-        if sconn != null { close_conn(sconn) }
+        if sconn != null { close_conn(sconn) } else { tcp.close(sock) }
         return null
     }
     return sconn

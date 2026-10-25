@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Aether Language Installer
 # Usage: ./install.sh              (installs to ~/.aether)
+#        ./install.sh --contrib-too (also builds + installs the contrib archives)
 #        ./install.sh /usr/local   (installs to /usr/local, needs sudo)
 #        ./install.sh --editor-only (installs only editor extension)
+# Flags and the prefix combine in any order: ./install.sh --contrib-too /opt/ae
 set -eo pipefail
 
 # Always run from the repository root (where this script lives).
@@ -46,13 +48,36 @@ first_line() {
     printf '%s\n' "${out%%$'\n'*}"
 }
 
-# Handle --editor-only flag
-if [ "$1" = "--editor-only" ]; then
-    EDITOR_ONLY=1
+# Arguments: flags in any order, plus at most one bare path, the prefix
+# (default ~/.aether).
+#   --editor-only   install only the editor extension
+#   --contrib-too   also build the contrib archives (libaether_<x>.a) and
+#                   install them, the same as `make install-contrib`
+# An unknown --flag is an error rather than a prefix, so a typo cannot
+# install into a directory named after it.
+EDITOR_ONLY=0
+CONTRIB_TOO=0
+INSTALL_DIR=""
+for arg in "$@"; do
+    case "$arg" in
+        --editor-only) EDITOR_ONLY=1 ;;
+        --contrib-too) CONTRIB_TOO=1 ;;
+        -*)
+            echo "install.sh: unknown option '$arg' (accepted: --editor-only, --contrib-too, and an install prefix)" >&2
+            exit 2
+            ;;
+        *)
+            if [ -n "$INSTALL_DIR" ]; then
+                echo "install.sh: more than one install prefix given ('$INSTALL_DIR' and '$arg')" >&2
+                exit 2
+            fi
+            INSTALL_DIR="$arg"
+            ;;
+    esac
+done
+# --editor-only has always installed for the current user only.
+if [ "$EDITOR_ONLY" -eq 1 ] || [ -z "$INSTALL_DIR" ]; then
     INSTALL_DIR="$HOME/.aether"
-else
-    EDITOR_ONLY=0
-    INSTALL_DIR="${1:-$HOME/.aether}"
 fi
 BIN_DIR="$INSTALL_DIR/bin"
 
@@ -487,6 +512,27 @@ if [ "$EDITOR_ONLY" -eq 0 ]; then
     if [ -f build/MANIFEST ]; then
         install -m 644 build/MANIFEST "$SRC_DIR/MANIFEST" 2>/dev/null \
             || cp build/MANIFEST "$SRC_DIR/MANIFEST" 2>/dev/null || true
+    fi
+
+    # --contrib-too: build the contrib archives and install them. This runs
+    # before the version is registered below, so the archives are part of the
+    # versions/<v> snapshot and `ae use` carries them. `make contrib` builds
+    # each module whose system library this machine has and skips the rest,
+    # so a missing library is reported, not fatal.
+    if [ "$CONTRIB_TOO" -eq 1 ]; then
+        info "Building contrib archives..."
+        CONTRIB_LOG="$(mktemp)"
+        if $MAKE_CMD CC="$CC_BIN" install-contrib PREFIX="$INSTALL_DIR" >"$CONTRIB_LOG" 2>&1; then
+            grep -E '^  lib/aether/' "$CONTRIB_LOG" | sed 's/^  /  installed /' || true
+            grep -E ' SKIP \(|^  [0-9]+ built' "$CONTRIB_LOG" || true
+            ok "Contrib archives installed to $LIB_DIR"
+        else
+            tail -20 "$CONTRIB_LOG" | sed 's/^/    /'
+            rm -f "$CONTRIB_LOG"
+            error "Building or installing the contrib archives failed (output above)."
+            exit 1
+        fi
+        rm -f "$CONTRIB_LOG"
     fi
 
     # Register installed version in ~/.aether/versions/ so that:

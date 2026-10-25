@@ -525,8 +525,10 @@ int tcp_receive_into_raw(TcpSocket* sock, void* buf, int cap) {
 int tcp_close(TcpSocket* sock) {
     if (!sock) return -1;
 
-    if (sock->connected) {
+    /* A peer EOF/error clears connected, but the handle still owns fd. */
+    if (sock->fd >= 0) {
         close(sock->fd);
+        sock->fd = -1;
         sock->connected = 0;
     }
 

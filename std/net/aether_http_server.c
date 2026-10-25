@@ -245,7 +245,9 @@ SSL_CTX* aether_http_client_ssl_ctx(void);
 #endif
 
 AETHER_WEAK void* aether_pure_tls_server_accept(int fd, const char* cert_path, const char* key_path) {
-    (void)fd; (void)cert_path; (void)key_path;
+    (void)cert_path; (void)key_path;
+    /* The bridge consumes fd even when no implementation is linked. */
+    close(fd);
     return NULL;
 }
 AETHER_WEAK int aether_pure_tls_server_send(void* pure_conn, const void* buf, int len) {
@@ -732,6 +734,9 @@ static void conn_close(HttpConn* c) {
     if (c->pure_tls) {
         pt_server_close(c->pure_tls);
         c->pure_tls = NULL;
+        /* The TLS connection owned and closed this descriptor. It may
+         * already have been reused by another thread. */
+        c->fd = -1;
     }
 #ifdef AETHER_HAS_OPENSSL
     if (c->ssl) {
@@ -5566,7 +5571,7 @@ void http_server_drain_connection(HttpServer* server, int client_fd) {
         if (server->is_pure_tls) {
             void* pure_conn = pt_server_accept(conn->fd, server->cert_path, server->key_path);
             if (!pure_conn) {
-                close(client_fd);
+                /* pt_server_accept consumes the fd on failure too. */
                 free(conn);
                 return;
             }

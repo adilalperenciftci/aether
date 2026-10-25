@@ -25,14 +25,19 @@ from-source / HEAD case specifically.
 git clone https://github.com/aether-lang-dev/aether.git
 cd aether
 
-make ae                      # build the compiler (aetherc) + the `ae` CLI, no tests
-sudo make install            # install ae, aetherc, libaether.a, stdlib to /usr/local
-
-# Optional: native contrib modules (sqlite, host_python, …), built only
-# where the dev libraries are present; the rest are skipped, not fatal.
-make contrib
-sudo make install-contrib
+./install.sh --contrib-too   # build from this tree, install to ~/.aether, no sudo
 ```
+
+That builds the compiler, the `ae` CLI and the stdlib from the checkout,
+installs them to `~/.aether`, and (with `--contrib-too`) builds and installs
+the native contrib archives (sqlite, host_python, …) for each module whose dev
+library is present; the rest are skipped, not fatal. Leave the flag off if you
+don't use contrib. No tests run.
+
+Prefer this to `sudo make install`. An install under `/usr/local` is
+root-owned and shared by every checkout and session on the machine, and both
+`ae` and the compiler fall back to it when they find nothing earlier, so a
+stale one quietly supplies the wrong version and needs `sudo` to remove.
 
 Then, in a consumer project, `import std.X` / `import contrib.X` resolve,
 and you link Aether-as-a-library with **`$(ae cflags)`** (never hand-rolled
@@ -106,16 +111,27 @@ once so that archive exists).
 ### 2. Install (still no tests)
 
 ```sh
-sudo make install            # PREFIX defaults to /usr/local
+./install.sh                 # installs to ~/.aether; add --contrib-too for contrib
 ```
 
-`make install` builds the optimized compiler, the `ae` CLI, and the
-stdlib archive, then lays them down, **it has no test dependency**.
-Override the location with `PREFIX`:
+`install.sh` builds from the tree around it and installs to `~/.aether`. It
+also records the build under `~/.aether/versions/`, so `ae use <version>`
+switches between it and any other installed version, and it adds
+`~/.aether/bin` to your `PATH` in your shell rc. Flags and an install prefix
+combine in any order (`./install.sh --contrib-too /opt/aether`).
+
+`make install` lays down the same files without the version record or the rc
+change. Its `PREFIX` also defaults to `~/.aether`:
 
 ```sh
-make install PREFIX="$HOME/.local"     # no sudo needed for a user prefix
+make install                           # ~/.aether, no sudo
+make install PREFIX="$HOME/.local"     # any prefix you own
+sudo make install PREFIX=/usr/local    # a system install, deliberately
 ```
+
+As root, `make install` and `make install-contrib` refuse to run without an
+explicit `PREFIX`, because under `sudo` `$HOME` is root's and the default
+would land in `/root/.aether`.
 
 What lands where (full reference: [install-layout.md](install-layout.md)):
 
@@ -127,19 +143,20 @@ $(PREFIX)/share/aether/…                     # shipped source, MANIFEST, contr
 
 Make sure `$(PREFIX)/bin` is on your `PATH`.
 
-> **Alternative, user-local install via `./install.sh`.** This
-> source-builds and installs to `~/.aether` and patches your shell rc.
-> Note it installs `ae`/`aetherc` and the contrib *descriptors* (so
-> `import contrib.X` resolves) but does **not** build the contrib native
-> `.a` archives, for those, run the contrib targets below against the
-> same prefix.
+Without `--contrib-too`, `install.sh` installs the contrib *descriptors* (so
+`import contrib.X` resolves) but not the native `.a` archives.
 
 ### 3. Contrib modules (optional, deps-permitting)
 
 ```sh
+./install.sh --contrib-too   # as part of the install, or separately:
 make contrib                 # probe + build only what your system can
-sudo make install-contrib    # install the built archives + descriptors
+make install-contrib         # install the built archives + descriptors to ~/.aether
 ```
+
+`--contrib-too` installs the archives before the version is recorded, so they
+are part of `~/.aether/versions/<v>` and `ae use` carries them; a separate
+`make install-contrib` is not recorded there.
 
 `make contrib` runs `tests/scripts/contrib_build.sh`, which probes each
 module's dependency and builds only the ones it finds. Expected output
@@ -198,9 +215,8 @@ To move to a newer `HEAD`:
 
 ```sh
 git pull
-make clean && make ae        # clean rebuild, incremental sometimes misses aetherc reshapes
-sudo make install
-make contrib && sudo make install-contrib   # if you use contrib
+make clean                   # clean rebuild, incremental sometimes misses aetherc reshapes
+./install.sh --contrib-too   # drop the flag if you don't use contrib
 ```
 
 `ae --version` describes the binary in front of you: the version it was
@@ -254,7 +270,8 @@ Rules of thumb:
   any compiler reshape are picked up.
 - Use a writable `PREFIX=…` to avoid `sudo`, and make sure
   `$(PREFIX)/bin` is on `PATH` (or invoke `ae` by absolute path as
-  above). The default `PREFIX` is `/usr/local`.
+  above). The default `PREFIX` is `~/.aether`; as root, `make install`
+  refuses to run without an explicit one.
 - A `--emit=lib` link error mentioning `recompile with -fPIC` means a
   stale pre-0.181 `libaether.a`; rebuild from current `HEAD`.
 - If `ae --version` and the `VERSION` file disagree, the binary is stale:
