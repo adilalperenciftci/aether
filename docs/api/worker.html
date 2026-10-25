@@ -163,8 +163,8 @@
     </div>
     <div class="function" id="wait" data-name="wait">
       <h3 class="function-name">wait <span class="kind">fn</span></h3>
-      <pre class="usage"><code>wait() <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="doc">Block until every submitted job has completed AND had its completion delivered, running those completions on the calling thread. Returns how many completions ran, or -1 when a main-thread poster is installed (there the host loop delivers, so waiting on that thread would block the very thread that has to deliver; pump the host loop instead). This is the headless batch join: no poll loop, and unlike pool_shutdown it leaves the pool running, so a reusable function can wait once per batch and be called again. i = 0 while i &lt; n { worker.run(|| { return compute(i) }, |r: ptr| { collect(r) }) i = i + 1 } worker.wait()          // every collect() has run by here</p>
+      <pre class="usage"><code>wait() <span class="arrow">-&gt;</span> (int, string)</code></pre>
+      <p class="doc">Block until every submitted job has completed AND had its completion delivered, running those completions on the calling thread. Returns how many completions ran and &quot;&quot;, or -1 and the reason when a main-thread poster is installed (there the host loop delivers, so waiting on that thread would block the very thread that has to deliver; pump the host loop instead). This is the headless batch join: no poll loop, and unlike pool_shutdown it leaves the pool running, so a reusable function can wait once per batch and be called again. i = 0 while i &lt; n { worker.run(|| { return compute(i) }, |r: ptr| { collect(r) }) i = i + 1 } worker.wait()          // every collect() has run by here</p>
     </div>
     <div class="function" id="map" data-name="map">
       <h3 class="function-name">map <span class="kind">fn</span></h3>

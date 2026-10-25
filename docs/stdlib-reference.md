@@ -38,7 +38,7 @@ header comment is the authoritative description.
 | `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 148 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
 | `std.hash` | Fast non-cryptographic hashes and checksums: FNV, MurmurHash3, SipHash, CRC-32. | 6 | [guide](../std/hash/README.md) · [source](../std/hash/module.ae) |
 | `std.host` | Primitives for Aether scripts embedded in a host application. | 14 | [guide](../std/host/README.md) · [source](../std/host/module.ae) |
-| `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 132 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
+| `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 142 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
 | `std.http1` | Pure-Aether HTTP/1.1 response reader (RFC 9112). | 14 | [guide](../std/http1/README.md) · [source](../std/http1/module.ae) |
 | `std.intarr` | Fixed-size packed-int buffer. | 15 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
 | `std.intmap` | Hash map from `long` keys to `long` values, for integer-keyed counting and lookup. | 12 | [guide](../std/intmap/README.md) · [source](../std/intmap/module.ae) |
@@ -2202,12 +2202,14 @@ All wrappers auto-free the underlying response and return an error string for tr
 **Server Lifecycle:**
 - `http.server_create(port)` - Create server (never fails)
 - `http.server_set_host(server, host)` - Set bind address before `server_start`. Default is `"0.0.0.0"`. Pass `"127.0.0.1"` to bind loopback only, useful in tests because macOS / Windows firewalls don't prompt on loopback binds. A host name binds the IPv4 address it resolves to; one that does not resolve fails the bind.
-- `http.server_bind(server, host, port)` → `string` - Bind to address, return error string
-- `http.server_start(server)` → `string` - Start serving (blocking), return error string
+- `http.server_bind(server, host, port)` → `string` - Bind to address; `""` on success, else the reason (`"cannot bind 0.0.0.0:8080: Address already in use"`)
+- `http.server_start(server)` → `string` - Start serving (blocking); `""` once stopped, else the reason. With no monitor chosen it uses `console_monitor`
+- `http.monitor(server) { listening() |host, port| {...}  stopped() |host, port| {...} }` - The server's monitor: closures it calls when it starts listening and when it stops. The server prints nothing itself
+- `http.console_monitor(server)` / `http.null_monitor(server)` - The stock monitors: the "Server running at" banner, or silence
 - `http.server_stop(server)` - Stop server
 - `http.server_free(server)` - Free server
 
-Raw externs: `http_server_bind_raw`, `http_server_start_raw`.
+Raw externs: `http_server_bind_raw`, `http_server_start_raw`, and `http_server_error(server)`, the reason the last bind or start failed (`""` if it did not).
 
 **Static file serving:**
 - `http.serve_file(res, filepath)` - Serve a single file. Zero-copy: under HTTP/1.1 cleartext on Linux/macOS, takes the `sendfile(2)` fast path (zero heap allocation for the body); falls back to a buffered read for TLS / HTTP/2 / Range requests / Windows. `Content-Type` resolved via `http.mime_type(filepath)`.
@@ -3805,11 +3807,11 @@ cooperative builds, pool sizing) is documented at the top of
 - `worker.run(work, done)` - Run `work` on a pool thread; `done` receives its
   `ptr` result on the loop thread. Concurrency is bounded by the pool, so job
   N+1 queues behind the N in flight.
-- `worker.wait()` → `int` - Block until every submitted job has completed
-  **and** had its completion delivered, running those completions on the
-  calling thread. Returns how many ran, or -1 if a main-thread poster is
-  installed (there the host loop delivers, so waiting on that thread would
-  block the very thread that has to deliver). This is the headless batch
+- `worker.wait()` → `(int, string)` - Block until every submitted job has
+  completed **and** had its completion delivered, running those completions
+  on the calling thread. Returns how many ran and `""`, or -1 and the reason
+  if a main-thread poster is installed (there the host loop delivers, so
+  waiting on that thread would block the very thread that has to deliver). This is the headless batch
   join: no poll loop, and unlike `pool_shutdown` it leaves the pool running,
   so a reusable helper can wait once per batch and be called again.
 - `worker.map(items, f)` → `ptr` - Bounded parallel map: apply `f` to every

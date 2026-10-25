@@ -3290,6 +3290,10 @@ check-docs: compiler ae stdlib check-api-docs
 	@# and those legs run the same `make ci`. The skip is announced rather
 	@# than silent, so a box that has quietly lost python3 is visible in the
 	@# log instead of reading as a pass.
+	@#
+	@# check_std_silent (#3131) holds std to the stdlib-module-pattern rule
+	@# that a module writes nothing to stdout or stderr unasked. It reads the
+	@# tree, so the same reasoning covers it.
 	@py=""; \
 	for cand in python3 python "py -3"; do \
 	    if $$cand -c "import sys" >/dev/null 2>&1; then py="$$cand"; break; fi; \
@@ -3299,6 +3303,8 @@ check-docs: compiler ae stdlib check-api-docs
 	    $$py tests/scripts/check_stdlib_index.py && \
 	    $$py tests/scripts/check_module_readmes.py && \
 	    $$py tests/scripts/check_shipped_module_leaves.py && \
+	    $$py tests/scripts/test_check_std_silent.py && \
+	    $$py tests/scripts/check_std_silent.py && \
 	    NPROC=$(NPROC) $$py tests/scripts/check_doc_blocks.py; \
 	else \
 	    echo "  [SKIP] documentation examples — no working Python found"; \

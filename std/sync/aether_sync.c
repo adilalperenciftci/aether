@@ -51,6 +51,7 @@ typedef struct aether_sync_atomic {
  * (including a foreign std.http pool worker where the panic unwind may not be
  * installed), so the missing NULL check surfaces at the call site that has it. */
 static void aether_sync_null_fatal(const char* op) {
+    /* silent-ok: last line before abort */
     fprintf(stderr,
             "fatal: std.sync.%s called on a NULL cell -- atomic_new() returned "
             "NULL (memory cap exceeded / OOM) and the result was not checked "

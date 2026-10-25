@@ -778,14 +778,19 @@ char* create_string(Arena* arena) {
 FILE* f = fopen("file.txt", "r");
 fread(buffer, 1, 100, f);  // Crashes if f is NULL
 
-// GOOD: Check for errors
-FILE* f = fopen("file.txt", "r");
-if (!f) {
-    fprintf(stderr, "Failed to open file\n");
-    return -1;
-}
-defer(fclose(f));
+// GOOD: Check for errors, and return the reason
+FILE* f = fopen(path, "rb");
+if (!f) return "cannot open file";  // the caller decides whether anyone sees it
+size_t n = fread(buffer, 1, 100, f);
+fclose(f);
+if (n == 0) return "file is empty";
+return "";
 ```
+
+Library code reports through its return value and never prints: the program
+calling it decides what reaches stdout or stderr, and a library loaded by a JVM
+or Python host must not write into the host's output. See "std is silent" in
+[docs/stdlib-module-pattern.md](docs/stdlib-module-pattern.md).
 
 ### Platform-Specific Code
 

@@ -407,8 +407,8 @@ int aether_worker_pending(void) {
  * Returns the number of completions delivered, or -1 when a main-thread
  * poster is installed: there, completions are routed to the host to
  * marshal onto the loop thread, so a wait on that same thread would
- * block the very thread that has to deliver them. Failing fast with a
- * diagnostic beats an unexplained hang; GUI hosts already have their
+ * block the very thread that has to deliver them. Failing fast with an
+ * error beats an unexplained hang; GUI hosts already have their
  * loop and do not need this call.
  *
  * No polling: the wait blocks on a condition variable signalled when a
@@ -421,13 +421,7 @@ int aether_worker_wait(void) {
     pthread_mutex_lock(&g_lock);
     int have_poster = (g_poster.fn != NULL);
     pthread_mutex_unlock(&g_lock);
-    if (have_poster) {
-        fprintf(stderr,
-                "aether: worker.wait() with a main-thread poster installed; "
-                "completions are delivered by the host loop, not by wait(). "
-                "Pump the host loop instead.\n");
-        return -1;
-    }
+    if (have_poster) return -1;   /* worker.wait() names the reason (#3131) */
 
     int ran = 0;
     for (;;) {
