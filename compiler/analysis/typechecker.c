@@ -5066,6 +5066,7 @@ AeTokenType get_token_type_from_string(const char* str) {
     if (strcmp(str, "<<") == 0) return TOKEN_LSHIFT;
     if (strcmp(str, ">>") == 0) return TOKEN_RSHIFT;
     if (strcmp(str, "in") == 0) return TOKEN_IN;  // #1046 bit_set membership
+    if (strcmp(str, "move") == 0) return TOKEN_MOVE;  // #2975 contextual `move x`
 
     return TOKEN_ERROR;
 }
@@ -8381,8 +8382,6 @@ static int is_param_owned_or_kept(ASTNode* fn, const char* name) {
             if (p->node_type && p->node_type->kind == TYPE_ISOLATED) return 1;
             if (p->annotation && (annotation_has_marker(p->annotation, "keep_param") ||
                                   annotation_has_marker(p->annotation, "into_param"))) return 1;
-            if (fn->node_type && fn->node_type->kind == TYPE_FUNCTION &&
-                fn_type_param_mode(fn->node_type, i) != FN_MODE_BORROWED) return 1;
             return 0;
         }
     }
@@ -8518,7 +8517,7 @@ static void iso_check(ASTNode* node, IsoSet* moved, IsoSet* iso, IsoContext* ctx
                 }
                 if (ctx->fn && is_fn_parameter(ctx->fn, nm) && !name_has(&ctx->rebound, nm) && !is_param_owned_or_kept(ctx->fn, nm)) {
                     char msg[256];
-                    snprintf(msg, sizeof(msg), "cannot move borrowed parameter '%s': parameter must be annotated with @keep or @into to transfer ownership", nm);
+                    snprintf(msg, sizeof(msg), "cannot move borrowed parameter '%s': the function borrows it for the call; declare it `%s: @keep ptr` to hand it on", nm, nm);
                     type_error(msg, node->line, node->column);
                     return;
                 }
@@ -8570,20 +8569,25 @@ static void iso_check(ASTNode* node, IsoSet* moved, IsoSet* iso, IsoContext* ctx
             return;
         }
 
+        /* A deferred statement runs when its block ends, so it is checked
+         * there, after everything a later statement moved, and in LIFO
+         * order: `defer bytes.free(b)` followed by `move b` is a use after
+         * the move. Checking it where it is registered as well would see a
+         * consume there and then report the real run as a second use. */
         case AST_BLOCK: {
-            ASTNode* defers[32];
+            ASTNode* defers[64];
             int defer_count = 0;
             for (int i = 0; i < node->child_count; i++) {
                 ASTNode* child = node->children[i];
-                if (child && child->type == AST_DEFER_STATEMENT) {
-                    if (defer_count < 32) defers[defer_count++] = child;
+                if (child && child->type == AST_DEFER_STATEMENT && defer_count < 64) {
+                    defers[defer_count++] = child;
+                    continue;
                 }
                 iso_check(child, moved, iso, ctx);
             }
-            for (int d = 0; d < defer_count; d++) {
-                if (defers[d]->child_count > 0) {
-                    iso_check(defers[d]->children[0], moved, iso, ctx);
-                }
+            for (int d = defer_count - 1; d >= 0; d--) {
+                for (int c = 0; c < defers[d]->child_count; c++)
+                    iso_check(defers[d]->children[c], moved, iso, ctx);
             }
             return;
         }
@@ -15564,6 +15568,22 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     (lane_scalar_kind(ot->kind) == TYPE_FLOAT32 || lane_scalar_kind(ot->kind) == TYPE_FLOAT)) {
                     char msg[160];
                     snprintf(msg, sizeof(msg), "'~' is not defined on %s: it has float lanes",
+                             type_name_of_kind(ot->kind));
+                    type_error(msg, expr->line, expr->column);
+                    return 0;
+                }
+                /* #2975: `move` hands a buffer over, so it takes a `ptr` (a
+                 * std.bytes handle, a `*T`). Nothing else has an owner to
+                 * hand over: a scalar is copied, and a string already moves
+                 * on a send when it is uniquely held (#2922), so `move` on
+                 * one would claim a transfer the runtime decides anyway. */
+                if (expr->value && strcmp(expr->value, "move") == 0 && ot &&
+                    ot->kind != TYPE_PTR && ot->kind != TYPE_UNKNOWN) {
+                    char msg[256];
+                    snprintf(msg, sizeof(msg),
+                             "`move` hands over a `ptr` buffer, and this is %s: "
+                             "a value that is not a pointer is copied, and a string "
+                             "moves on its own when nothing else holds it",
                              type_name_of_kind(ot->kind));
                     type_error(msg, expr->line, expr->column);
                     return 0;

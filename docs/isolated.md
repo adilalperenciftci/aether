@@ -86,10 +86,60 @@ names already moved:
 - **Loops**: the body is analyzed twice, so consuming a loop-external Isolated
   inside the body (which would repeat across iterations) is caught, while a
   value created fresh and consumed each iteration is fine.
+- **`match` / `switch`**: like `if`, each arm starts from the incoming set
+  and the join is the union of the arms that complete.
+- **`defer`**: a deferred statement is checked where its block ends, which is
+  when it runs, in LIFO order. `defer bytes.free(b)` followed by `move b` is a
+  use after the move; `defer take(it)` on an Isolated value is its one use.
+- **Closures**: a closure that names a moved value is a use of it where the
+  closure is written. A closure's own body is checked on its own.
 - **Rebinding**: assigning or re-declaring a name revives it (a fresh binding),
   so `it = isolate(...)` after a previous `consume(it)` is allowed.
 
-The diagnostic is `use of moved value '<name>'` (error code E0200).
+The diagnostic is `use of moved value '<name>': line <n> moved it, and it
+cannot be used again` (error code E0200), naming the line of the move.
+
+## `move`: handing a buffer over (#2975)
+
+A `ptr` buffer (a `std.bytes` handle, a `*T`) sent in a message crosses as the
+pointer, so sender and receiver would share it. `move` makes the hand-over
+explicit and checked:
+
+```aether,fragment
+message Chunk { data: ptr }
+
+r ! Chunk { data: move buf }   // the receiver owns buf's buffer now
+bytes.length(buf)              // E0200: line 3 moved it
+```
+
+`move buf` evaluates to `buf` and leaves `buf` moved-from: the same move
+checker as above rejects any later use of the name on any path that reaches
+it, including a second send, a free, a `defer` and a closure. Nothing is
+copied: the receiver gets the sender's data pointer, so a 64 MiB buffer costs
+what a small one does (`tests/regression/test_zerocopy_buffer_move.ae`
+asserts the pointer). The emitted C stores the value into the message and
+nulls the sender's local in the same expression.
+
+Refused, each with its own message:
+
+- a value that is not a `ptr`: a scalar is copied anyway, and a string already
+  moves on a send when nothing else holds it (#2922), so `move` would claim a
+  transfer the runtime makes on its own;
+- a borrowed parameter: a function's `ptr` parameter is borrowed for the call
+  (the ownership model's R3), so handing it on needs `b: @keep ptr`;
+- a variable a closure captures, moved inside the closure;
+- a field (`move box.b`) or an element (`move xs[i]`) of something still live.
+
+`move` is contextual, not reserved: it is the operator only before a name on
+the same line. `fs.move(a, b)`, `mem.move(dst, src, n)` (bare after
+`import std.mem (*)`), a program's own `move()` and a variable called `move`
+are unaffected.
+
+**What is not done yet.** The receiver owns the buffer and frees it as it
+would any other; the runtime does not. A receiver that drops the buffer
+without freeing it leaks it, and so does a message still queued when its
+receiver dies. Freeing it there needs the runtime to know how to free a
+`ptr`, which it does not, and the dead-actor delivery rules in #2974.
 
 ## What lowers and runs today, and what is a follow-up
 
