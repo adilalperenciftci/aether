@@ -7850,6 +7850,46 @@ static Type* lookup_message_field_type(SymbolTable* table, const char* message_n
     return NULL;
 }
 
+/* #3164: a receive arm binds a message's fields by name, `Connect(next)`, or
+ * `Connect(next: n)` to bind the field `next` as `n`. An arm naming a field
+ * the message does not have (`Connect(n)`, read as a positional binding)
+ * went on with the name untyped, and codegen's `_pattern->n` failed in C:
+ * "'Connect' has no member named 'n'". Say so at the arm, with the fields
+ * the message has and the rename form. A message this file does not define
+ * is left to the check that reports it. */
+static void report_missing_message_field(SymbolTable* table, ASTNode* pattern, ASTNode* field) {
+    if (!pattern || !pattern->value || !field || !field->value) return;
+    Symbol* msg_sym = lookup_symbol(table, pattern->value);
+    if (!msg_sym || !msg_sym->node || msg_sym->node->type != AST_MESSAGE_DEFINITION) return;
+    ASTNode* msg_def = msg_sym->node;
+    char fields[256] = "";
+    const char* first = NULL;
+    size_t used = 0;
+    for (int i = 0; i < msg_def->child_count; i++) {
+        ASTNode* f = msg_def->children[i];
+        if (!f || f->type != AST_MESSAGE_FIELD || !f->value) continue;
+        if (strcmp(f->value, field->value) == 0) return;   /* it has one */
+        if (!first) first = f->value;
+        int w = snprintf(fields + used, sizeof(fields) - used, "%s%s",
+                         used ? ", " : "", f->value);
+        if (w < 0 || (size_t)w >= sizeof(fields) - used) break;
+        used += (size_t)w;
+    }
+    char msg[512], hint[300];
+    if (first) {
+        snprintf(msg, sizeof(msg), "message '%s' has no field '%s'; its fields are %s",
+                 pattern->value, field->value, fields);
+        snprintf(hint, sizeof(hint),
+                 "an arm binds a field by its name: `%s(%s)`, or `%s(%s: %s)` to bind it as `%s`",
+                 pattern->value, first, pattern->value, first, field->value, field->value);
+    } else {
+        snprintf(msg, sizeof(msg), "message '%s' has no field '%s'; it has no fields",
+                 pattern->value, field->value);
+        snprintf(hint, sizeof(hint), "match it with no bindings: `%s -> { ... }`", pattern->value);
+    }
+    type_error_hint(msg, hint, field->line, field->column);
+}
+
 // Validate that message constructor field values match declared field types
 static void typecheck_message_constructor(ASTNode* constructor, SymbolTable* table) {
     if (!constructor || constructor->type != AST_MESSAGE_CONSTRUCTOR || !constructor->value) return;
@@ -8045,6 +8085,7 @@ int typecheck_actor_definition(ASTNode* actor, SymbolTable* table) {
                                 // Look up actual field type from message definition
                                 Type* field_type = lookup_message_field_type(table, pattern->value, field->value);
                                 if (!field_type) {
+                                    report_missing_message_field(table, pattern, field);
                                     field_type = create_type(TYPE_UNKNOWN);
                                 }
                                 // Use pattern variable name if present (field: var), else field name

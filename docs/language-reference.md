@@ -3226,26 +3226,56 @@ Actors are the core concurrency primitive with encapsulated state and message ha
 
 ### Actor Definition
 
-```aether,fragment
+```aether,run
+message Increment {
+    amount: int
+}
+
+message Move {
+    dx: int
+    dy: int
+}
+
+message Show {}
+
 actor Counter {
-    state count = 0;
+    state count = 0
+    state x = 0
 
     receive {
         Increment(amount) -> {
-            count = count + amount;
+            count = count + amount
         }
-        GetCount() -> {
-            print(count);
-            print("\n");
+        Move(dx: step, dy) -> {
+            x = x + step + dy
         }
-        _ -> {
-            print("Unknown message\n");
+        Show -> {
+            println("count ${count}, x ${x}")
         }
     }
 }
+
+main() {
+    c = spawn(Counter())
+    c ! Increment { amount: 5 }
+    c ! Move { dx: 2, dy: 1 }
+    c ! Show {}
+    wait_for_idle()
+}
+```
+```output
+count 5, x 3
 ```
 
-An actor has one arm per message: an arm matches by the message alone, so a second arm for a message the actor already receives (in the same `receive` block or another) could never run, and the compiler refuses it, naming the first.
+An arm binds the message's fields **by name**: `Increment(amount)` binds the
+field `amount`, `Move(dx: step, dy)` binds the field `dx` as `step` and `dy`
+as itself, in any order, and an arm may leave fields out (`Show` binds none).
+A name that is no field of the message is an error at the arm, naming the
+fields it has (#3164); so is a binding named like a state of the actor, which
+the `field: name` form renames. An actor has one arm per message: an arm
+matches by the message alone, so a second arm for a message the actor already
+receives (in the same `receive` block or another) could never run, and the
+compiler refuses it, naming the first.
 
 ### Receive Timeouts
 
