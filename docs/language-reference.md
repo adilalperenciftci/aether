@@ -3483,6 +3483,12 @@ if err != "" {
 An ask to a dead actor, in either form, ends at once rather than after the
 timeout, and so does one whose actor dies before replying.
 
+An ask made inside a handler blocks the asking actor's core until the reply.
+The actor it asks is moved off that core first if it was there, as an actor
+the handler spawned is, so it runs elsewhere and answers (#3196). An actor
+that stays on the waiting core, or a message queued to it, waits for the
+reply too: an asked actor that asks one of those in turn times out (#3197).
+
 ### Reply Statement
 
 The `reply` statement sends a response back to the waiting `?` caller. Omitting

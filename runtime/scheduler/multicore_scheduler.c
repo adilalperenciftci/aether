@@ -2990,9 +2990,11 @@ static void send_through_core(ActorBase* actor, Message msg, int from_core) {
     // communicating actors gather on one core and their sends turn local. A
     // ring gathers in its first lap. Asked for only once it had run, as it
     // used to be, an actor in a chain was never asked: the next one is idle
-    // when the message reaches it (#3090).
+    // when the message reaches it (#3090). Not for an ask (#3196): the
+    // asking core runs nothing until the reply comes, so its target moved
+    // there could not run to give it.
     if (from_core >= 0 && from_core == current_core_id && !actor->auto_process &&
-        from_core != target_core) {
+        from_core != target_core && !g_pending_reply_slot) {
         atomic_store_explicit(&actor->migrate_to, from_core, memory_order_relaxed);
     }
 
@@ -3401,6 +3403,26 @@ void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg
     pthread_mutex_init(&slot->mutex, NULL);
     pthread_cond_init(&slot->cond, NULL);
     atomic_init(&slot->refcount, 2);  // asker + actor handler
+
+    /* An ask blocks this thread until the reply. Made by a handler, this is
+     * a core's scheduler thread, which then steps nothing else, so a target
+     * on this core could not run to answer (#3196): an actor a handler
+     * spawned starts on its spawner's core, and a steal is made by the
+     * victim core's own loop (#3090), which waits here. This core owns the
+     * target, which is not running, so it moves it to its least busy other
+     * core first, as that loop would. A move it cannot make (a message of
+     * the target in flight, no room there) leaves the ask as it was. */
+    if (current_core_id >= 0 && current_core_id < num_cores && num_cores > 1 &&
+        !target->auto_process && (void*)target != g_current_step_actor &&
+        atomic_load_explicit(&target->assigned_core, memory_order_acquire) == current_core_id) {
+        int dst = -1, fewest = 0;
+        for (int i = 0; i < num_cores; i++) {
+            if (i == current_core_id) continue;
+            int n = atomic_load_explicit(&schedulers[i].actor_count, memory_order_relaxed);
+            if (dst < 0 || n < fewest) { dst = i; fewest = n; }
+        }
+        if (dst >= 0) move_actor(&schedulers[current_core_id], target, dst, -1);
+    }
 
     // Stash the slot in the thread-local so aether_send_message propagates it
     // into Message._reply_slot.  This supports concurrent asks to the same actor
