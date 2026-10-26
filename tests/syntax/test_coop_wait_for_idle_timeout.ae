@@ -1,8 +1,9 @@
 // Test: wait_for_idle() waits for an armed receive timeout to fire (#3219).
-// The cooperative scheduler gave up after 100 idle rounds of a millisecond,
-// so an `after` longer than that never fired before wait_for_idle()
-// returned. Both schedulers now wait for the countdown, as the multicore one
-// did (#3102); the end of main does not.
+// The cooperative scheduler's poll counted each check of an armed countdown
+// as work, so its wait spun on the CPU until the deadline. It now sleeps
+// while the countdown runs, bounded as the multicore one is (#3102), and the
+// countdown still fires before wait_for_idle() returns; the end of main does
+// not wait for it.
 
 message Ping {}
 

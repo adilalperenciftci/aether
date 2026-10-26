@@ -153,7 +153,39 @@ static void test_ask_relief_other_actor_runs(void) {
     free(d);
 }
 
+/* An ask to an actor of the same core whose message is still in the batch
+ * the core was delivering: P and T get one message each in one batch while B
+ * holds core 0, and P's handler asks T. The ask's message waited behind T's
+ * batched one, which nothing placed, to the timeout. */
+static void test_ask_relief_target_held_in_batch(void) {
+    scheduler_init(2);
+    ReliefActor* b = relief_actor(0);
+    ReliefActor* p = relief_actor(0);
+    ReliefActor* t = relief_actor(0);
+    b->pause_ms = 150;
+    p->ask = (ActorBase*)t;
+    scheduler_start();
+
+    relief_send(b);          // core 0 is busy for 150 ms
+    relief_sleep_ms(30);
+    relief_send(p);
+    relief_send(t);          // behind P's, in the same batch
+    int done = relief_wait_done(p, 6000);
+    scheduler_shutdown();
+    scheduler_cleanup();
+
+    ASSERT_TRUE(done);
+    ASSERT_EQ(43, atomic_load(&p->result));
+    ASSERT_TRUE(atomic_load(&p->took_ms) < 1000);
+    ASSERT_EQ(2, atomic_load(&t->got));
+    free(b);
+    free(p);
+    free(t);
+}
+
 void register_ask_relief_tests(void) {
+    register_test_with_category("Ask relief: a same-core target held in the batch",
+        test_ask_relief_target_held_in_batch, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Ask relief: a chain back to the waiting core",
         test_ask_relief_chain_back_to_waiting_core, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Ask relief: the waiting core's other actors run",

@@ -969,6 +969,8 @@ TEST_SRC = tests/runtime/test_harness.c \
            tests/runtime/test_worksteal_race.c \
            tests/runtime/test_ask_relief.c \
            tests/runtime/test_sender_move_order.c \
+           tests/runtime/test_actor_thread_sends.c \
+           tests/runtime/test_overflow_reentry.c \
            tests/runtime/test_http_server.c \
            tests/runtime/test_resource_caps.c \
            tests/runtime/test_libaether_caps.c \

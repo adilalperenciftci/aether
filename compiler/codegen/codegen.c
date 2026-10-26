@@ -2167,6 +2167,8 @@ int message_owns_fields(CodeGenerator* gen, const char* name) {
  * message whose fields own something. */
 int program_releases_messages(CodeGenerator* gen) {
     if (!gen->program) return 0;
+    if (gen->releases_messages && gen->releases_messages_of == gen->program)
+        return gen->releases_messages == 2;
     int actors = 0, owning = 0;
     for (int i = 0; i < gen->program->child_count && !(actors && owning); i++) {
         ASTNode* def = gen->program->children[i];
@@ -2176,6 +2178,8 @@ int program_releases_messages(CodeGenerator* gen) {
         else if (def->type == AST_MESSAGE_DEFINITION && def->value &&
                  message_owns_fields(gen, def->value)) owning = 1;
     }
+    gen->releases_messages = actors && owning ? 2 : 1;
+    gen->releases_messages_of = gen->program;
     return actors && owning;
 }
 

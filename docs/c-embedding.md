@@ -294,7 +294,14 @@ The `ActorBase` contains:
 - `dead`: Set once the actor panicked or was released; it is skipped after
 - `alloc_size`, `destroy_state`, `scheduler_owned`: How the scheduler frees it
 - `inbox`, `thread_parked`: For an actor with its own thread (`auto_process`),
-  where every sender puts its messages and whether the thread sleeps idle
+  where every sender puts its messages and whether the thread sleeps idle.
+  That thread is not its core's scheduler thread, so what its step sends
+  goes as a foreign thread's sends do, through the locked channel (#3246),
+  and an ask it makes waits without stepping anything for the core
+- `step_payload`, `step_type`: The message a generated handler is running on,
+  for the step barrier to drop if the handler panics (#3142)
+- `release_message`: Releases what a dropped message's fields own; NULL for
+  an actor you register, whose messages are yours
 - `inflight`: Messages for the actor on their way through a core's queues;
   it moves to another core only while this is 0
 

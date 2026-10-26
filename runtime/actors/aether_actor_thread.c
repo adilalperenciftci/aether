@@ -34,15 +34,17 @@ int aether_actor_thread_start(pthread_t* thread, void* actor) {
 void* aether_actor_thread(void* arg) {
     ActorBase* actor = (ActorBase*)arg;
 
-    // Set TLS core id so that generated send code (scheduler_send_local /
-    // scheduler_send_remote) routes same-core messages directly into this
-    // actor's SPSC queue, bypassing the incoming_queue → scheduler roundtrip.
-    current_core_id = actor->assigned_core;
+    // This thread is not its core's scheduler thread, so it sends as every
+    // thread the scheduler does not own does: through the foreign channel,
+    // under its lock (#3246). With the core's id it wrote straight into the
+    // core's mailboxes, its own queue and other cores' queues from that core,
+    // whose single producer is the core's thread, and messages were lost or
+    // delivered twice.
+    current_core_id = -1;
 
-    // With that id, a send from this actor's step to another actor of the
-    // core steps that actor right here (work inlining) and touches it after
-    // its step, so this thread reads like a core and publishes an epoch like
-    // one (#2517): from here until it exits, refreshed at the top of the loop.
+    // The step reads actors from the tables (the ones its handler sends to),
+    // so this thread publishes an epoch as a reader (#2517): from here until
+    // it exits, refreshed at the top of the loop.
     scheduler_reader_online();
 
     int idle = 0;

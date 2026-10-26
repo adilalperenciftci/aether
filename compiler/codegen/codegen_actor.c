@@ -1086,12 +1086,22 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                             print_line(gen, "}");
                         } else {
                             // Two-field inline: reconstruct from payload_int + payload_ptr.
-                            // A message with no fields travels with no payload:
-                            // nothing to record for a panic.
-                            if (msg_def && msg_def->fields)
+                            // A message with no fields travels with no payload
+                            // unless an ask sent it: only then is there one to
+                            // record for a panic.
+                            if (msg_def && msg_def->fields) {
                                 emit_handler_on_payload(gen, actor->value, pattern->value);
-                            else
+                            } else {
+                                print_line(gen, "if (unlikely(_msg_data != NULL)) {");
+                                indent(gen);
+                                emit_handler_on_payload(gen, actor->value, pattern->value);
+                                unindent(gen);
+                                print_line(gen, "} else {");
+                                indent(gen);
                                 print_line(gen, "%s_handle_%s(self, _msg_data);", actor->value, pattern->value);
+                                unindent(gen);
+                                print_line(gen, "}");
+                            }
                             /* Same release-fields call as the single-
                              * int branch above (#466). */
                             if (msg_def) {

@@ -687,8 +687,16 @@ static void requeue_own(int core, ActorBase* actor, Message msg) {
 // relief steps nothing, so this core's own buffer goes through its own
 // queue, as a large one does, never through the path that steps what it
 // delivers.
+// Set while a flush runs on this thread. Its own-core path steps actors
+// before it takes their entries off the buffer, and a step that flushes in
+// turn (an inline send, a relief) would deliver those entries again and
+// leave the outer loop counting from a buffer it changed (#3247): the inner
+// call leaves the flush to the one under way.
+static AETHER_TLS int tls_overflow_flushing = 0;
+
 static void overflow_flush_ex(int from_core, int own) {
-    if (!tls_overflow_any) return;
+    if (!tls_overflow_any || tls_overflow_flushing) return;
+    tls_overflow_flushing = 1;
     int from_idx = (from_core >= 0 && from_core < MAX_CORES) ? from_core : MAX_CORES;
     int any = 0;
     int flushed = 0;
@@ -811,7 +819,13 @@ static void overflow_flush_ex(int from_core, int own) {
     if (direct_processed > 0 && from_core >= 0) {
         schedulers[from_core].messages_processed += direct_processed;
     }
-    tls_overflow_any = any;
+    /* From the buffers, not from `any`: a step in the own-core path may have
+     * appended to a buffer the loop had already passed, and a flag cleared
+     * over it hid the entry from every later flush (#3247). */
+    int left = any;
+    for (int t = 0; t < num_cores && !left; t++) left = tls_overflow[t].count > 0;
+    tls_overflow_any = left;
+    tls_overflow_flushing = 0;
 }
 
 static void overflow_flush(int from_core) {
@@ -1091,9 +1105,10 @@ static _Atomic uint64_t g_external_reader[AETHER_EXTERNAL_READER_SLOTS];
 static AETHER_TLS int t_reclaim_core_thread = 0;
 
 // Readers that are neither a core thread nor a bracketed walk (#2517): a
-// per-actor thread (aether_actor_thread) sets current_core_id, so a send it
-// makes to an actor of its core steps that actor on itself (work inlining in
-// scheduler_send_local) and touches it after the step. Such a thread holds a
+// per-actor thread (aether_actor_thread) runs a step whose sends read their
+// targets' state (dead, assigned_core, inflight) and may touch them after the
+// step. It sends as a foreign thread (#3246), so it never steps another actor
+// itself, but it reads them as a core does. Such a thread holds a
 // record for as long as it runs and treats it as a core treats its
 // `reclaim_epoch`: the epoch in it is refreshed at the top of its loop, the
 // one point where it holds no actor it found through a table. The records
@@ -1799,6 +1814,8 @@ void* AETHER_HOT scheduler_thread(void* arg) {
         // Process coalesced batch with minimal overhead
         for (int i = 0; i < sched->coalesce_buffer.count; i++) {
             ActorBase* actor = (ActorBase*)sched->coalesce_buffer.actors[i];
+            // Taken into its mailbox by a relief during a step (#3197).
+            if (unlikely(!actor)) continue;
             Message msg = sched->coalesce_buffer.messages[i];
 
             // Target died after this message was enqueued: drop it with
@@ -1946,6 +1963,7 @@ void* AETHER_HOT scheduler_thread(void* arg) {
         // actors are asked again now. O(coalesce_count), not O(actor_count).
         for (int mi = 0; mi < sched->coalesce_buffer.count; mi++) {
             ActorBase* mig_actor = (ActorBase*)sched->coalesce_buffer.actors[mi];
+            if (unlikely(!mig_actor)) continue;
             int mig_to = atomic_load_explicit(&mig_actor->migrate_to, memory_order_relaxed);
             if (unlikely(mig_to >= 0 && mig_to != sched->core_id &&
                          atomic_load_explicit(&mig_actor->assigned_core, memory_order_relaxed) == sched->core_id)) {
@@ -3551,6 +3569,7 @@ static void reply_slot_fail(ActorReplySlot* slot, int why) {
  * ------------------------------------------------------------------------- */
 #define ASK_RELIEF_NS 1000000ULL          /* 1 ms */
 #define ASK_RELIEF_BUSY_NS 50000ULL       /* 50 us, after a relief that did something */
+#define ASK_RELIEF_IDLE_MAX_NS 8000000ULL /* 8 ms, the gap reliefs that find nothing grow to */
 #define ASK_RELIEF_DELIVER_MAX 4096       /* messages placed per relief */
 #define ASK_RELIEF_SCAN_MAX 4096          /* actors looked at per relief */
 
@@ -3562,6 +3581,44 @@ static int relief_batch_holds(const Scheduler* sched, const void* actor) {
     return 0;
 }
 
+/* The batch's messages for actors of this core that are not stepping, into
+ * their mailboxes in order, taken out of the batch: they are the oldest each
+ * has, and an actor asked while its message waited there was stepped by
+ * nothing until the ask timed out. The loop skips a taken entry. An actor
+ * stepping (its step lock held: the asker, one below it, the one make_room
+ * is making room in) keeps its entries, and so does one whose mailbox fills,
+ * from that entry on, so none of its messages passes another. */
+static int relief_claim_batch(Scheduler* sched) {
+    ActorBase* kept[64];
+    int nkept = 0, taken = 0;
+    for (int k = sched->coalesce_buffer.next; k < sched->coalesce_buffer.count; k++) {
+        ActorBase* actor = (ActorBase*)sched->coalesce_buffer.actors[k];
+        if (!actor) continue;
+        int skip = 0;
+        for (int j = 0; j < nkept && !skip; j++) skip = kept[j] == actor;
+        if (skip) continue;
+        int mine = !actor->auto_process && actor->step &&
+                   !atomic_load_explicit(&actor->dead, memory_order_acquire) &&
+                   atomic_load_explicit(&actor->assigned_core, memory_order_acquire) == sched->core_id;
+        int placed = 0;
+        if (mine && !atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire)) {
+            placed = mailbox_send(&actor->mailbox, sched->coalesce_buffer.messages[k]);
+            atomic_flag_clear_explicit(&actor->step_lock, memory_order_release);
+        }
+        if (placed) {
+            sched->coalesce_buffer.actors[k] = NULL;
+            inflight_leave(actor, 1);
+            atomic_store_explicit(&actor->active, 1, memory_order_relaxed);
+            taken++;
+        } else if (nkept < 64) {
+            kept[nkept++] = actor;
+        } else {
+            break;   // more actors refused than tracked: the rest waits for the loop
+        }
+    }
+    return taken;
+}
+
 /* The queue's next message, where the loop would put it, or 0 when it has to
  * wait for the loop. */
 static int relief_place(Scheduler* sched, ActorBase* actor, Message* msg) {
@@ -3570,12 +3627,12 @@ static int relief_place(Scheduler* sched, ActorBase* actor, Message* msg) {
         scheduler_drop_dead_message(sched, actor, msg);
         return 1;
     }
+    if (relief_batch_holds(sched, actor)) return 0;
     // An actor with a thread of its own takes it in its inbox, from any thread.
     if (actor->auto_process) {
         scheduler_actor_thread_deliver(actor, *msg);
         return 1;
     }
-    if (relief_batch_holds(sched, actor)) return 0;
     int ac = atomic_load_explicit(&actor->assigned_core, memory_order_acquire);
     if (ac != sched->core_id) {
         // Another core's now: forwarded, still counted, as the loop does.
@@ -3592,6 +3649,7 @@ static int relief_place(Scheduler* sched, ActorBase* actor, Message* msg) {
 }
 
 static int relief_deliver(Scheduler* sched) {
+    int claimed = relief_claim_batch(sched);
     int budget = ASK_RELIEF_DELIVER_MAX;
     for (int q = 0; q <= MAX_CORES && budget > 0; q++) {
         LockFreeQueue* fq = &sched->from_queues[q];
@@ -3602,12 +3660,13 @@ static int relief_deliver(Scheduler* sched) {
             budget--;
         }
     }
-    return ASK_RELIEF_DELIVER_MAX - budget;
+    return claimed + ASK_RELIEF_DELIVER_MAX - budget;
 }
 
 /* The core to take `actor` to: the one waiting on it, else one parked for
- * want of work, else the least loaded one not waiting in an ask (a core in a
- * long step shows no load, and runs nothing either); -1 for none. */
+ * want of work, else the one with the fewest messages queued for it, not
+ * waiting in an ask (a core in a long step runs nothing either, and its
+ * queue shows it); -1 for none. */
 static int relief_destination(const Scheduler* sched, ActorBase* actor) {
     int best = -1, best_work = 0, best_parked = 0;
     for (int k = 0; k < num_cores; k++) {
@@ -3618,7 +3677,8 @@ static int relief_destination(const Scheduler* sched, ActorBase* actor) {
             continue;
         }
         int parked = atomic_load_explicit(&s->parked, memory_order_relaxed) != 0;
-        int work = atomic_load_explicit(&s->work_count, memory_order_relaxed);
+        int work = 0;
+        for (int q = 0; q <= MAX_CORES; q++) work += queue_size(&s->from_queues[q]);
         if (best < 0 || parked > best_parked || (parked == best_parked && work < best_work)) {
             best = k;
             best_work = work;
@@ -3703,8 +3763,9 @@ void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg
     Scheduler* asking_core = NULL;
     ActorBase* outer_target = NULL;
     ActorReplySlot* outer_slot = NULL;
-    if (current_core_id >= 0 && current_core_id < num_cores &&
-        !(g_current_step_actor && ((ActorBase*)g_current_step_actor)->auto_process)) {
+    /* Only a core's own scheduler thread (#3246): it alone may step for the
+     * core, deliver its queues and move its actors. */
+    if (t_reclaim_core_thread && current_core_id >= 0 && current_core_id < num_cores) {
         asking_core = &schedulers[current_core_id];
         while (atomic_flag_test_and_set_explicit(&asking_core->actor_lock.lock, memory_order_acquire))
             AETHER_PAUSE();
@@ -3735,9 +3796,22 @@ void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg
     uint64_t waited_from = asking_core ? aether_now_ns() : 0;
     uint64_t deadline_ns = waited_from + (uint64_t)timeout_ms * 1000000ULL;
     uint64_t relief_at = waited_from + ASK_RELIEF_NS;
+    uint64_t relief_gap = ASK_RELIEF_NS;   // doubles while reliefs find nothing
 
     pthread_mutex_lock(&slot->mutex);
     while (!slot->reply_ready && !slot->failed) {
+        /* The target is this core's, with a message still in the batch the
+         * loop was delivering when the ask began: the ask's own message
+         * waits behind it, and nothing would place either (#3197). The
+         * relief's delivery takes them into its mailbox, in order, now. */
+        if (asking_core && !target->auto_process &&
+            atomic_load_explicit(&target->assigned_core, memory_order_acquire) == current_core_id &&
+            relief_batch_holds(asking_core, target)) {
+            pthread_mutex_unlock(&slot->mutex);
+            int got = relief_deliver(asking_core);
+            pthread_mutex_lock(&slot->mutex);
+            if (got > 0) continue;
+        }
         /* The target is this core's: this thread steps it, a message at a
          * time, until the reply comes or it has nothing left (#3220). An
          * ask it makes in turn does the same for its own target, so a chain
@@ -3771,7 +3845,13 @@ void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg
                 pthread_mutex_unlock(&slot->mutex);
                 int busy = ask_relieve(asking_core);
                 pthread_mutex_lock(&slot->mutex);
-                relief_at = aether_now_ns() + (busy ? ASK_RELIEF_BUSY_NS : ASK_RELIEF_NS);
+                // Soon after one that did something; further apart while
+                // they find nothing, up to ASK_RELIEF_IDLE_MAX_NS.
+                uint64_t next = busy ? ASK_RELIEF_BUSY_NS : relief_gap;
+                relief_gap = busy ? ASK_RELIEF_NS
+                                  : (relief_gap * 2 < ASK_RELIEF_IDLE_MAX_NS ? relief_gap * 2
+                                                                             : ASK_RELIEF_IDLE_MAX_NS);
+                relief_at = aether_now_ns() + next;
                 continue;
             }
             uint64_t until = relief_at < deadline_ns ? relief_at : deadline_ns;
@@ -3806,6 +3886,18 @@ void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg
         atomic_flag_clear_explicit(&asking_core->actor_lock.lock, memory_order_release);
     }
 
+    /* The replier lets go of the slot just after it wakes this thread, from
+     * its own thread. Answered or failed, the ask waits for that, a few
+     * instructions, and frees the slot here: what an ask allocated is gone
+     * when it returns, whatever the other thread's timing (#3245). A timed
+     * out ask does not wait; its replier frees the slot when it comes. */
+    if (*status != AETHER_ASK_TIMED_OUT) {
+        int spins = 0;
+        while (atomic_load_explicit(&slot->refcount, memory_order_acquire) > 1) {
+            if (++spins < 256) AETHER_PAUSE();
+            else aether_sched_yield();
+        }
+    }
     reply_slot_decref(slot);
     return result;
 }
