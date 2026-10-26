@@ -20,6 +20,7 @@
 #include <unistd.h>
 #endif
 #include "parser/tokens.h"
+#include "parser/lexer.h"
 #include "ast.h"
 #include "parser/parser.h"
 #include "analysis/typechecker.h"
@@ -1407,8 +1408,8 @@ int compile_source(const char* input_path, const char* output_path) {
     }
     Token* last = tokens[token_count - 1];
     if (last->type == TOKEN_ERROR) {
-        aether_error_with_code(last->value, last->line, last->column,
-                               AETHER_ERR_SYNTAX);
+        aether_error_full(last->value, last->line, last->column,
+                          lexer_error_help(last->value), NULL, AETHER_ERR_SYNTAX);
         free_tokens(tokens, token_count);
         free(source);
         return 0;

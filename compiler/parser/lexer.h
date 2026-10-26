@@ -27,6 +27,9 @@ Token* read_string(void);
 // Decode the escape at p (p[0] is the backslash); returns the bytes it spans (#2512).
 int lexer_decode_escape(const char* p, char* out);
 Token* read_number(void);
+// The help line for a lexer error token's message, or NULL for the
+// generic syntax help (#3155).
+const char* lexer_error_help(const char* message);
 Token* read_identifier(void);
 Token* read_raw_identifier(void);
 

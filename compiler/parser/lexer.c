@@ -299,66 +299,109 @@ Token* read_string(void) {
     return token;
 }
 
+/* Digit separators (#3155). An underscore in a number literal goes between
+ * two digits of one run: `1_000_000`, `3.141_592`, `1e1_0`, `0xFF_FF`,
+ * `0o7_55`, `0b1010_0101`, `30_000ms`. The same rule holds in every base,
+ * and in the integer digits, the fraction, the exponent and a duration's
+ * digits alike. Anywhere else (at the end, two in a row, beside the `.`
+ * or the exponent's `e`, straight after `0x`) it is a compile error naming
+ * the `_`. Decimal literals took no separator at all before: `1_000` was the
+ * number 1 and then the name `_000`, which the type checker reported as an
+ * undefined variable. The other bases skipped every `_`, wherever it stood.
+ *
+ * A misplaced `_` is consumed with the literal, so the error points at it
+ * and nothing after the number is misread; the first one is reported. */
+static const char* SEPARATOR_MESSAGE = "misplaced `_` in a number";
+static int separator_line;
+static int separator_column;
+
+static int is_dec_digit(int c) { return c >= '0' && c <= '9'; }
+static int is_hex_digit(int c) { return isxdigit(c) != 0; }
+static int is_oct_digit(int c) { return c >= '0' && c <= '7'; }
+static int is_bin_digit(int c) { return c == '0' || c == '1'; }
+
+/* The `_` at the current position: valid when the character before it in
+ * the literal and the one after it in the source are digits of `digit`. */
+static void take_separator(const char* buffer, int i, int (*digit)(int)) {
+    int before = i > 0 && digit((unsigned char)buffer[i - 1]);
+    int after = current_pos + 1 < source_length && digit((unsigned char)source[current_pos + 1]);
+    if (!(before && after) && separator_line == 0) {
+        separator_line = current_line;
+        separator_column = current_column;
+    }
+    advance();
+}
+
+const char* lexer_error_help(const char* message) {
+    if (message && strcmp(message, SEPARATOR_MESSAGE) == 0) {
+        return "an underscore goes between two digits, as in 1_000_000 or 0xFF_FF";
+    }
+    return NULL;
+}
+
+/* Append the next source character to the literal's buffer, growing it. */
+static int append_char(char** buffer, int* capacity, int i) {
+    if (i >= *capacity - 1) {
+        *capacity *= 2;
+        char* grown = realloc(*buffer, *capacity);
+        if (!grown) return -1;
+        *buffer = grown;
+    }
+    (*buffer)[i] = advance();
+    return i + 1;
+}
+
+/* The finished literal: its token, or the error for a misplaced `_`. */
+static Token* number_token(char* buffer, int i) {
+    buffer[i] = '\0';
+    Token* token;
+    if (separator_line != 0) {
+        token = create_token(TOKEN_ERROR, SEPARATOR_MESSAGE, separator_line, separator_column);
+    } else {
+        token = create_token(TOKEN_NUMBER, buffer, token_start_line, token_start_column);
+    }
+    free(buffer);
+    return token;
+}
+
 Token* read_number(void) {
     int capacity = MAX_IDENTIFIER_LENGTH;
     char* buffer = malloc(capacity);
     int i = 0;
+    separator_line = 0;
+    separator_column = 0;
 
     // Check for hex (0x), octal (0o), binary (0b) prefixes
     if (peek() == '0' && current_pos + 1 < source_length) {
         char next = source[current_pos + 1];
+        int (*digit)(int) = NULL;
         if (next == 'x' || next == 'X') {
-            // Hex literal: 0x[0-9a-fA-F]+
-            buffer[i++] = advance(); // '0'
-            buffer[i++] = advance(); // 'x'
-            while (current_pos < source_length && (isxdigit((unsigned char)peek()) || peek() == '_')) {
-                if (peek() == '_') { advance(); continue; }
-                if (i >= capacity - 1) { capacity *= 2; char* nb = realloc(buffer, capacity); if (!nb) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column); } buffer = nb; }
-                buffer[i++] = advance();
-            }
-            buffer[i] = '\0';
-            Token* token = create_token(TOKEN_NUMBER, buffer, token_start_line, token_start_column);
-            free(buffer);
-            return token;
+            digit = is_hex_digit;        // 0x[0-9a-fA-F]+
         } else if (next == 'o' || next == 'O') {
-            // Octal literal: 0o[0-7]+
-            buffer[i++] = advance(); // '0'
-            buffer[i++] = advance(); // 'o'
-            while (current_pos < source_length && ((peek() >= '0' && peek() <= '7') || peek() == '_')) {
-                if (peek() == '_') { advance(); continue; }
-                if (i >= capacity - 1) { capacity *= 2; char* nb = realloc(buffer, capacity); if (!nb) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column); } buffer = nb; }
-                buffer[i++] = advance();
-            }
-            buffer[i] = '\0';
-            Token* token = create_token(TOKEN_NUMBER, buffer, token_start_line, token_start_column);
-            free(buffer);
-            return token;
+            digit = is_oct_digit;        // 0o[0-7]+
         } else if (next == 'b' || next == 'B') {
-            // Binary literal: 0b[01]+
+            digit = is_bin_digit;        // 0b[01]+
+        }
+        if (digit) {
             buffer[i++] = advance(); // '0'
-            buffer[i++] = advance(); // 'b'
-            while (current_pos < source_length && (peek() == '0' || peek() == '1' || peek() == '_')) {
-                if (peek() == '_') { advance(); continue; }
-                if (i >= capacity - 1) { capacity *= 2; char* nb = realloc(buffer, capacity); if (!nb) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column); } buffer = nb; }
-                buffer[i++] = advance();
+            buffer[i++] = advance(); // 'x', 'o' or 'b'
+            while (current_pos < source_length && (digit((unsigned char)peek()) || peek() == '_')) {
+                if (peek() == '_') { take_separator(buffer, i, digit); continue; }
+                i = append_char(&buffer, &capacity, i);
+                if (i < 0) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column); }
             }
-            buffer[i] = '\0';
-            Token* token = create_token(TOKEN_NUMBER, buffer, token_start_line, token_start_column);
-            free(buffer);
-            return token;
+            return number_token(buffer, i);
         }
     }
 
     // Decimal literal (with optional dot for floats)
     // Don't consume '.' if followed by another '.' (range operator '..')
-    while (current_pos < source_length && (isdigit((unsigned char)peek()) || (peek() == '.' && (current_pos + 1 >= source_length || source[current_pos + 1] != '.')))) {
-        if (i >= capacity - 1) {
-            capacity *= 2;
-            char* new_buf = realloc(buffer, capacity);
-            if (!new_buf) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column); }
-            buffer = new_buf;
-        }
-        buffer[i++] = advance();
+    while (current_pos < source_length &&
+           (isdigit((unsigned char)peek()) || peek() == '_' ||
+            (peek() == '.' && (current_pos + 1 >= source_length || source[current_pos + 1] != '.')))) {
+        if (peek() == '_') { take_separator(buffer, i, is_dec_digit); continue; }
+        i = append_char(&buffer, &capacity, i);
+        if (i < 0) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column); }
     }
 
     /* Scientific notation: `e` or `E`, an optional sign, then at least one
@@ -372,30 +415,25 @@ Token* read_number(void) {
      * The full shape is required before anything is consumed, so a bare `e`
      * or a trailing `1e` is left exactly as it lexed before and the letter
      * stays available to whatever follows. Hex, octal and binary literals
-     * return earlier and never reach here, so the `E` in `0x1E` is safe. */
+     * return earlier and never reach here, so the `E` in `0x1E` is safe. An
+     * `_` where the first digit belongs (`1e_5`) is a misplaced separator,
+     * and the exponent is read on so the error names it. */
     int has_exponent = 0;
     if (current_pos < source_length && (peek() == 'e' || peek() == 'E')) {
         int look = current_pos + 1;
         if (look < source_length && (source[look] == '+' || source[look] == '-')) look++;
-        if (look < source_length && isdigit((unsigned char)source[look])) {
-            int take = (look - current_pos) + 1;   /* e[, sign], first digit */
+        int first = look;
+        while (first < source_length && source[first] == '_') first++;
+        if (first < source_length && isdigit((unsigned char)source[first])) {
+            int take = look - current_pos;   /* e[, sign] */
             for (int k = 0; k < take; k++) {
-                if (i >= capacity - 1) {
-                    capacity *= 2;
-                    char* new_buf = realloc(buffer, capacity);
-                    if (!new_buf) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column); }
-                    buffer = new_buf;
-                }
-                buffer[i++] = advance();
+                i = append_char(&buffer, &capacity, i);
+                if (i < 0) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column); }
             }
-            while (current_pos < source_length && isdigit((unsigned char)peek())) {
-                if (i >= capacity - 1) {
-                    capacity *= 2;
-                    char* new_buf = realloc(buffer, capacity);
-                    if (!new_buf) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column); }
-                    buffer = new_buf;
-                }
-                buffer[i++] = advance();
+            while (current_pos < source_length && (isdigit((unsigned char)peek()) || peek() == '_')) {
+                if (peek() == '_') { take_separator(buffer, i, is_dec_digit); continue; }
+                i = append_char(&buffer, &capacity, i);
+                if (i < 0) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column); }
             }
             has_exponent = 1;
         }
@@ -425,31 +463,20 @@ Token* read_number(void) {
         if (isalpha((unsigned char)after_unit) || after_unit == '_') break;
 
         for (int u = 0; u < unit_len; u++) {
-            if (i >= capacity - 1) {
-                capacity *= 2;
-                char* new_buf = realloc(buffer, capacity);
-                if (!new_buf) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column); }
-                buffer = new_buf;
-            }
-            buffer[i++] = advance();
+            i = append_char(&buffer, &capacity, i);
+            if (i < 0) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column); }
         }
 
         while (current_pos < source_length &&
-               (isdigit((unsigned char)peek()) || (peek() == '.' && (current_pos + 1 >= source_length || source[current_pos + 1] != '.')))) {
-            if (i >= capacity - 1) {
-                capacity *= 2;
-                char* new_buf = realloc(buffer, capacity);
-                if (!new_buf) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column); }
-                buffer = new_buf;
-            }
-            buffer[i++] = advance();
+               (isdigit((unsigned char)peek()) || peek() == '_' ||
+                (peek() == '.' && (current_pos + 1 >= source_length || source[current_pos + 1] != '.')))) {
+            if (peek() == '_') { take_separator(buffer, i, is_dec_digit); continue; }
+            i = append_char(&buffer, &capacity, i);
+            if (i < 0) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column); }
         }
     }
 
-    buffer[i] = '\0';
-    Token* token = create_token(TOKEN_NUMBER, buffer, token_start_line, token_start_column);
-    free(buffer);
-    return token;
+    return number_token(buffer, i);
 }
 
 Token* read_identifier(void) {

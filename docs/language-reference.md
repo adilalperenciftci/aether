@@ -460,7 +460,7 @@ The full surface lives in `std.string` (alongside `string.array_*` for the legac
 
 ### Numeric Literal Formats
 
-Integer literals support hex, octal, and binary notation. Underscore separators are allowed anywhere in digits for readability.
+Integer literals support hex, octal, and binary notation.
 
 | Format | Prefix | Example | Value |
 |--------|--------|---------|-------|
@@ -469,11 +469,36 @@ Integer literals support hex, octal, and binary notation. Underscore separators 
 | Octal | `0o` / `0O` | `0o377` | 255 |
 | Binary | `0b` / `0B` | `0b1111_1111` | 255 |
 
-```aether,fragment
-mask = 0xFF
-flags = 0b1010_0101
-perms = 0o755
-big = 1_000_000
+An underscore separates two digits, for readability, in every form: the
+digits of an integer, the fraction and the exponent of a float, a duration's
+digits, and the digits after a `0x`, `0o` or `0b` prefix (#3155). It changes
+nothing about the value.
+
+```aether,run
+main() {
+    mask = 0xFF_FF
+    flags = 0b1010_0101
+    perms = 0o755
+    big = 1_000_000
+    long huge = 3_000_000_000
+    rate = 1_234.567_8
+    println("${mask} ${flags} ${perms} ${big} ${huge} ${rate} ${30_000ms}")
+}
+```
+```output
+65535 165 493 1000000 3000000000 1234.57 30s
+```
+
+An underscore anywhere else, at the end of the digits, beside another `_`,
+beside the `.` or the exponent's `e`, or straight after the prefix, is a
+compile error at the `_`:
+
+```aether,fails
+main() {
+    n = 1_000_
+}
+// error[E0100]: misplaced `_` in a number
+// help: an underscore goes between two digits, as in 1_000_000 or 0xFF_FF
 ```
 
 All numeric literal formats work with bitwise operators and in any expression context.

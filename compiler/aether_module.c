@@ -1421,7 +1421,8 @@ static ASTNode* module_parse_source(const char* file_path, char* source) {
      * block" there instead. */
     Token* last = tokens[token_count - 1];
     if (last->type == TOKEN_ERROR) {
-        aether_error_with_code(last->value, last->line, last->column, AETHER_ERR_SYNTAX);
+        aether_error_full(last->value, last->line, last->column,
+                          lexer_error_help(last->value), NULL, AETHER_ERR_SYNTAX);
         aether_error_set_source(saved_err_filename, saved_err_source);
         free_tokens(tokens, token_count);
         lexer_restore(&saved);
