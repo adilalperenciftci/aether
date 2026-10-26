@@ -9,8 +9,8 @@
 #   2. A request without X-Forwarded-For doesn't get an X-Real-IP
 #      header (handler sees ip=).
 #   3. Whitespace around the leftmost token is stripped.
-#   4. Re-running the middleware against an already-tagged request
-#      is idempotent (no duplicate X-Real-IP appended).
+#   4. An X-Real-IP the client sent is replaced by the client the
+#      middleware resolved, never trusted, and never doubled (#3169).
 #
 # Skips cleanly when curl is missing.
 
@@ -107,21 +107,18 @@ RESP4=$(curl --silent --show-error --max-time 5 \
     echo "  [FAIL] expected ip=203.0.113.42, got '$RESP4'"; exit 1
 }
 
-# Test 5 — Idempotency: client already supplies X-Real-IP. Our
-# middleware must not append a second one (would mask the first).
-# We send X-Real-IP=already-set ALONGSIDE X-Forwarded-For=1.2.3.4;
-# the handler should see the original X-Real-IP=already-set, NOT
-# the extracted-from-XFF value. (This protects against "client
-# spoofs X-Real-IP" only when the trusted edge already strips it;
-# the doc warns about this trust model.)
+# Test 5: the client supplies its own X-Real-IP beside X-Forwarded-For.
+# It is replaced by the client the middleware resolved, 1.2.3.4, and
+# not doubled. The middleware used to keep it, which let any client
+# name itself (#3169: a header the client sends is no client identity).
 RESP5=$(curl --silent --show-error --max-time 5 \
               -H 'X-Real-IP: already-set' \
               -H 'X-Forwarded-For: 1.2.3.4' \
               "$URL" 2>"$TMPDIR/c5.err") || {
     echo "  [FAIL] curl 5 failed:"; cat "$TMPDIR/c5.err"; exit 1
 }
-[ "$RESP5" = "ip=already-set" ] || {
-    echo "  [FAIL] expected ip=already-set (idempotent), got '$RESP5'"; exit 1
+[ "$RESP5" = "ip=1.2.3.4" ] || {
+    echo "  [FAIL] expected ip=1.2.3.4 (the client's X-Real-IP replaced), got '$RESP5'"; exit 1
 }
 
 echo "  [PASS] real_ip middleware (X-Forwarded-For extraction)"
