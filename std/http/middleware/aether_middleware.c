@@ -1255,12 +1255,14 @@ static void real_ip_text(const unsigned char a[16], char* buf, size_t cap) {
 
 /* X-Real-IP is `ip`, the client resolved here, or gone when there is none:
  * a client can send that header itself, so one on the request is never
- * kept (#3169). Through the server's request edits (#3234): this replaced
- * strings with free() and grew the header arrays to one past what they held,
- * which an arena-backed request and a reused one cannot take. */
+ * kept (#3169): none of them, a second one included, which used to stay and
+ * reach an upstream that reads the last X-Real-IP (#3239). Through the
+ * server's request edits (#3234): this replaced strings with free() and grew
+ * the header arrays to one past what they held, which an arena-backed request
+ * and a reused one cannot take. */
 static void real_ip_set_header(HttpRequest* req, const char* ip) {
+    http_request_remove_header(req, "X-Real-IP");
     if (ip) http_request_set_header(req, "X-Real-IP", ip);
-    else    http_request_remove_header(req, "X-Real-IP");
 }
 
 /* The client a request came from, through the proxies `trusted` names

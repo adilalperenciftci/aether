@@ -692,6 +692,30 @@ TEST(http_request_edit_an_arena_backed_request) {
 }
 #endif  /* !_WIN32 */
 
+/* X-Real-IP is something a client can send, so use_real_ip leaves none of a
+ * client's on the request (#3169). It replaced the first and kept a second,
+ * which reached an upstream that reads the last X-Real-IP (#3239). */
+TEST(http_real_ip_drops_every_x_real_ip_a_client_sent) {
+    const char* raw =
+        "GET / HTTP/1.1\r\nX-Real-IP: 1.1.1.1\r\nHost: h\r\nx-real-ip: 2.2.2.2\r\n\r\n";
+    HttpRequest* req = http_parse_request(raw);
+    ASSERT_NOT_NULL(req);
+    req->remote_addr = strdup("127.0.0.1");
+    AetherRealIpOpts* real_ip = aether_real_ip_opts_new("", "10.0.0.0/8");
+    ASSERT_NOT_NULL(real_ip);
+    ASSERT_EQ(1, aether_middleware_real_ip(req, NULL, real_ip));
+    int seen = 0;
+    for (int i = 0; i < req->header_count; i++) {
+        if (strcasecmp(req->header_keys[i], "X-Real-IP") != 0) continue;
+        seen++;
+        ASSERT_STREQ("127.0.0.1", req->header_values[i]);
+    }
+    ASSERT_EQ(1, seen);
+    ASSERT_STREQ("h", http_get_header(req, "Host"));
+    aether_real_ip_opts_free(real_ip);
+    http_request_free(req);
+}
+
 /* A request object parsed into again keeps its header arrays, which hold
  * HTTP_MAX_HEADERS (#3234). use_real_ip, adding the X-Real-IP a request did
  * not carry, grew them to one past the headers they held, which shrank them,
