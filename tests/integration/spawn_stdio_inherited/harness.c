@@ -12,7 +12,14 @@
  * errno from a pipe, which takes the lowest free descriptors: here 0 and 2.
  * The child has to move the write end off 2 and close it there before the
  * exec. Left open, the child keeps it, and the spawn waits for the child to
- * end instead of returning once it has started. */
+ * end instead of returning once it has started.
+ *
+ * Then every set of 0, 1 and 2 closed in the parent (#3199). The pipes and
+ * the file a spawn makes take those slots, and the child installs its own
+ * stdio from them: installed in place, one overwrote another still to be
+ * installed, or the close of an original closed what had been installed.
+ * os.run_full's child lost its stdout with the parent's 1 or 2 closed, and
+ * os.spawn_proc_to's child its output file with the parent's 0 closed. */
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,6 +33,12 @@ extern tuple_int_string os_wait_raw(int token);
 extern int os_kill_raw(int pid, int sig);
 extern void* list_new(void);
 extern int list_add_raw(void* list, void* item);
+typedef struct { const void* _0; const void* _1; int _2; const char* _3; } tuple_run_full;
+extern tuple_run_full os_run_full_raw(const char* prog, void* argv_list, void* env_list,
+                                      const char* stdin_data, int stdin_len);
+extern tuple_int_string os_spawn_to_raw(const char* prog, void* argv_list, void* env_list,
+                                        const char* out_path);
+extern const char* aether_string_data(const void* s);
 
 static double seconds(void) {
     struct timespec ts;
@@ -61,8 +74,69 @@ static int closed_stdio_spawn(void) {
     return 0;
 }
 
+static const char* text(const void* s) {
+    const char* t = s ? aether_string_data(s) : NULL;
+    return t ? t : "";
+}
+
+/* Each set of the parent's 0, 1 and 2 closed: os.run_full feeds the child
+ * stdin and reads its stdout and stderr apart, os.spawn_proc_to writes both
+ * streams to a file. */
+static int closed_slots(const char* dir) {
+    char path[4096];
+    snprintf(path, sizeof path, "%s/spawn_to.out", dir);
+    void* full_av = list_new();
+    list_add_raw(full_av, (void*)"-c");
+    list_add_raw(full_av, (void*)"cat; echo out; echo err >&2");
+    void* to_av = list_new();
+    list_add_raw(to_av, (void*)"-c");
+    list_add_raw(to_av, (void*)"echo out; echo err >&2");
+    int fails = 0;
+    for (int set = 1; set < 8; set++) {
+        int saved[3];
+        for (int fd = 0; fd < 3; fd++) saved[fd] = fcntl(fd, F_DUPFD_CLOEXEC, 10);
+        for (int fd = 0; fd < 3; fd++) {
+            if (set & (1 << fd)) close(fd);
+        }
+        tuple_run_full r = os_run_full_raw("/bin/sh", full_av, (void*)0, "in\n", 3);
+        tuple_int_string t = os_spawn_to_raw("/bin/sh", to_av, (void*)0, path);
+        tuple_int_string w = { -1, "" };
+        if (t._0 > 0) w = os_wait_raw(t._0);
+        for (int fd = 0; fd < 3; fd++) {
+            dup2(saved[fd], fd);
+            close(saved[fd]);
+        }
+        char closed[8];
+        int n = 0;
+        for (int fd = 0; fd < 3; fd++) {
+            if (set & (1 << fd)) closed[n++] = (char)('0' + fd);
+        }
+        closed[n] = '\0';
+        if (strcmp(text(r._0), "in\nout\n") != 0 || strcmp(text(r._1), "err\n") != 0 || r._2 != 0) {
+            printf("FAIL: run_full with %s closed in the parent: stdout '%s' stderr '%s' exit %d err '%s'\n",
+                   closed, text(r._0), text(r._1), r._2, r._3 ? r._3 : "");
+            fails++;
+        }
+        char got[64] = { 0 };
+        int fd = open(path, O_RDONLY);
+        if (fd >= 0) {
+            ssize_t k = read(fd, got, sizeof got - 1);
+            if (k < 0) got[0] = '\0';
+            close(fd);
+        }
+        if (t._0 <= 0 || w._0 != 0 || strcmp(got, "out\nerr\n") != 0) {
+            printf("FAIL: spawn_proc_to with %s closed in the parent: token %d exit %d file '%s' err '%s'\n",
+                   closed, t._0, w._0, got, t._1 ? t._1 : "");
+            fails++;
+        }
+    }
+    if (fails) return 1;
+    printf("PASS: run_full and spawn_proc_to wire their stdio with any of 0, 1 and 2 closed in the parent\n");
+    return 0;
+}
+
 int main(int argc, char** argv) {
-    if (argc < 2) { fprintf(stderr, "usage: %s <probe-script>\n", argv[0]); return 2; }
+    if (argc < 3) { fprintf(stderr, "usage: %s <probe-script> <scratch-dir>\n", argv[0]); return 2; }
 
     for (int fd = 0; fd <= 2; fd++) {
         int fl = fcntl(fd, F_GETFD);
@@ -78,5 +152,6 @@ int main(int argc, char** argv) {
     tuple_int_string w = os_wait_raw(sp._0);
     if (w._0 != 0) { printf("FAIL: the probe exited %d: a standard stream was closed in the child\n", w._0); return 1; }
     printf("PASS: the spawned child has stdin, stdout and stderr\n");
-    return closed_stdio_spawn();
+    int rc = closed_stdio_spawn();
+    return closed_slots(argv[2]) | rc;
 }

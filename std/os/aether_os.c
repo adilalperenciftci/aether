@@ -226,15 +226,24 @@ static int aether_child_fd(int fd, int target);   /* below */
  * that succeeds closes the pipe unwritten, so the parent reads EOF. The
  * parent reads it before anything else and reports the failure in the
  * call's own shape, as Windows does, which looks the program up before any
- * child exists.
+ * child exists. The child moves its end with aether_child_lift_fd. */
+
+/* In a forked child: move `fd` off 0 to 3 and return where it went. A child
+ * installs pipe ends and files on 0, 1 and 2 (and 3 for os.run_pipe), and
+ * when the parent has some of its own closed, the descriptors it made can
+ * sit on those slots. Installed in place, one would overwrite another still
+ * to be installed, and the close of an original would close what had been
+ * installed there: os.run_full's child lost its stdout when the parent's
+ * was closed, os.spawn_proc_to's its output file when the parent's stdin
+ * was (#3199). So every descriptor a child installs is moved first, and so
+ * is the exec-error pipe's end (#3170), which the wiring would overwrite.
  *
- * In the child: move the pipe's write end off 0 to 3, which the child's own
- * wiring overwrites (its stdio, and fd 3 for os.run_pipe). The copy closes
- * on exec. The original is closed: a slot from 0 to 2 is one the parent had
- * closed, and aether_child_keep_stdio clears its close-on-exec flag, so left
- * open it would outlive the exec and the parent would wait for the program
- * to end. */
-static int aether_child_errfd(int fd) {
+ * The copy closes on exec. The original is closed: a slot from 0 to 2 is
+ * one the parent had closed, and aether_child_keep_stdio clears its
+ * close-on-exec flag, so left open it would outlive the exec (the
+ * exec-error pipe's end would make the parent wait for the program to
+ * end). */
+static int aether_child_lift_fd(int fd) {
     if (fd > 3) return fd;
     int moved = fcntl(fd, F_DUPFD_CLOEXEC, 4);
     close(fd);
@@ -311,8 +320,10 @@ static FILE* aether_os_shell_open(const char* cmd, pid_t* out_pid) {
     }
     if (pid == 0) {
         close(errp[0]);
-        int ef = aether_child_errfd(errp[1]);
-        if (aether_child_fd(pipefd[1], 1) < 0) aether_child_exec_failed(ef);
+        int ef = aether_child_lift_fd(errp[1]);
+        int out = aether_child_lift_fd(pipefd[1]);
+        if (aether_child_fd(out, 1) < 0) aether_child_exec_failed(ef);
+        close(out);
         execl(AETHER_OS_SHELL, "sh", "-c", "--", cmd, (char*)NULL);
         aether_child_exec_failed(ef);
     }
@@ -382,7 +393,7 @@ static int aether_os_system_posix(const char* cmd) {
         if (!quit_ignored) sigaction(SIGQUIT, &dfl, NULL);
         sigprocmask(SIG_SETMASK, &omask, NULL);
         close(errp[0]);
-        int ef = aether_child_errfd(errp[1]);
+        int ef = aether_child_lift_fd(errp[1]);
         execl(AETHER_OS_SHELL, "sh", "-c", "--", cmd, (char*)NULL);
         aether_child_exec_failed(ef);
     }
@@ -1395,7 +1406,7 @@ int os_run(const char* prog, void* argv_list, void* env_list) {
         aether_child_reset_signals();
         aether_child_keep_stdio();
         close(errp[0]);
-        int ef = aether_child_errfd(errp[1]);
+        int ef = aether_child_lift_fd(errp[1]);
         if (envp) {
             execve(prog, av, envp);
         } else {
@@ -1420,7 +1431,8 @@ int os_run(const char* prog, void* argv_list, void* env_list) {
 }
 
 
-/* In a forked child: make `fd` the descriptor `target`, open across exec. */
+/* In a forked child: make `fd` the descriptor `target`, open across exec.
+ * `fd` comes from aether_child_lift_fd, so it is never another target. */
 static int aether_child_fd(int fd, int target) {
     if (fd == target) return fcntl(target, F_SETFD, 0) == -1 ? -1 : target;
     return dup2(fd, target);
@@ -1468,9 +1480,10 @@ char* os_run_capture_raw(const char* prog, void* argv_list, void* env_list) {
         aether_child_keep_stdio();
         close(pipefd[0]);
         close(errp[0]);
-        int ef = aether_child_errfd(errp[1]);
-        if (aether_child_fd(pipefd[1], 1) < 0) aether_child_exec_failed(ef);
-        if (pipefd[1] != 1) close(pipefd[1]);
+        int ef = aether_child_lift_fd(errp[1]);
+        int out = aether_child_lift_fd(pipefd[1]);
+        if (aether_child_fd(out, 1) < 0) aether_child_exec_failed(ef);
+        close(out);
         if (envp) {
             execve(prog, av, envp);
         } else {
@@ -1607,9 +1620,10 @@ _tuple_string_int_string os_run_capture_status_raw(const char* prog, void* argv_
         aether_child_keep_stdio();
         close(pipefd[0]);
         close(errp[0]);
-        int ef = aether_child_errfd(errp[1]);
-        if (aether_child_fd(pipefd[1], 1) < 0) aether_child_exec_failed(ef);
-        if (pipefd[1] != 1) close(pipefd[1]);
+        int ef = aether_child_lift_fd(errp[1]);
+        int out = aether_child_lift_fd(pipefd[1]);
+        if (aether_child_fd(out, 1) < 0) aether_child_exec_failed(ef);
+        close(out);
         if (envp) execve(prog, av, envp);
         else      execvp(prog, av);
         aether_child_exec_failed(ef);
@@ -1802,12 +1816,10 @@ _tuple_int_int_string os_run_pipe_raw(const char* prog, void* argv_list, void* e
         aether_child_keep_stdio();
         close(pipefd[0]);
         close(errp[0]);
-        int ef = aether_child_errfd(errp[1]);
-        if (aether_child_fd(pipefd[1], 3) < 0) aether_child_exec_failed(ef);
-        /* Close the original write end if dup2 didn't already (it
-         * does when pipefd[1] != 3; the conditional close is a
-         * defensive no-op when dup2 was a self-dup). */
-        if (pipefd[1] != 3) close(pipefd[1]);
+        int ef = aether_child_lift_fd(errp[1]);
+        int chan = aether_child_lift_fd(pipefd[1]);
+        if (aether_child_fd(chan, 3) < 0) aether_child_exec_failed(ef);
+        close(chan);
         /* AETHER_IPC_FD tells the child via env that fd 3 carries
          * the parent channel. The child's ipc.parent_channel()
          * reads this and returns the int — a future change can
@@ -1915,7 +1927,7 @@ _tuple_int_string os_spawn_raw(const char* prog, void* argv_list, void* env_list
         aether_child_reset_signals();
         aether_child_keep_stdio();
         close(errp[0]);
-        int ef = aether_child_errfd(errp[1]);
+        int ef = aether_child_lift_fd(errp[1]);
         if (envp) {
             execve(prog, av, envp);
             /* execve doesn't PATH-resolve; fall back to execvp so a bare
@@ -2029,15 +2041,16 @@ _tuple_int_string os_spawn_to_raw(const char* prog, void* argv_list, void* env_l
         aether_child_keep_stdio();
         setpgid(0, 0);
         close(errp[0]);
-        int ef = aether_child_errfd(errp[1]);
+        int ef = aether_child_lift_fd(errp[1]);
+        int out = aether_child_lift_fd(fd);
         int nul = open("/dev/null", O_RDONLY);
         if (nul >= 0 && nul != 0) {
             dup2(nul, 0);
             close(nul);
         }
-        if (aether_child_fd(fd, 1) < 0) aether_child_exec_failed(ef);
+        if (aether_child_fd(out, 1) < 0) aether_child_exec_failed(ef);
         if (dup2(1, 2) < 0) aether_child_exec_failed(ef);
-        if (fd != 1 && fd != 2) close(fd);
+        close(out);
         if (envp) {
             execve(prog, av, envp);
             execvp(prog, av);
@@ -2371,7 +2384,7 @@ _tuple_int_string os_run_supervised_raw(const char* prog, void* argv_list, void*
          * both child and parent (below) closes the fork/exec race. */
         if (new_process_group) setpgid(0, 0);
         close(errp[0]);
-        int ef = aether_child_errfd(errp[1]);
+        int ef = aether_child_lift_fd(errp[1]);
         if (envp) execve(prog, av, envp);
         else      execvp(prog, av);
         aether_child_exec_failed(ef);
@@ -2587,13 +2600,14 @@ _tuple_string_string_int_string os_run_full_raw(const char* prog, void* argv_lis
         aether_child_reset_signals();
         aether_child_keep_stdio();
         close(in_pipe[1]); close(out_pipe[0]); close(err_pipe[0]); close(errp[0]);
-        int ef = aether_child_errfd(errp[1]);
-        if (aether_child_fd(in_pipe[0], 0) < 0)  aether_child_exec_failed(ef);
-        if (aether_child_fd(out_pipe[1], 1) < 0) aether_child_exec_failed(ef);
-        if (aether_child_fd(err_pipe[1], 2) < 0) aether_child_exec_failed(ef);
-        if (in_pipe[0] != 0) close(in_pipe[0]);
-        if (out_pipe[1] != 1) close(out_pipe[1]);
-        if (err_pipe[1] != 2) close(err_pipe[1]);
+        int ef = aether_child_lift_fd(errp[1]);
+        int in_fd = aether_child_lift_fd(in_pipe[0]);
+        int out_fd = aether_child_lift_fd(out_pipe[1]);
+        int err_fd = aether_child_lift_fd(err_pipe[1]);
+        if (aether_child_fd(in_fd, 0) < 0)  aether_child_exec_failed(ef);
+        if (aether_child_fd(out_fd, 1) < 0) aether_child_exec_failed(ef);
+        if (aether_child_fd(err_fd, 2) < 0) aether_child_exec_failed(ef);
+        close(in_fd); close(out_fd); close(err_fd);
         if (envp) execve(prog, av, envp);
         else      execvp(prog, av);
         aether_child_exec_failed(ef);
