@@ -24,16 +24,10 @@ main() {
     url = os.getenv("URL")
     req = client.request("GET", url)
     client.set_timeout(req, 10s)
-    // os.getenv returns null for an unset variable, which compares unequal
-    // to "" -- test for null first.
     ca = os.getenv("CAFILE")
-    if ca != null {
-        if ca != "" { client.set_cafile(req, ca) }
-    }
+    if ca != "" { client.set_cafile(req, ca) }
     insecure = os.getenv("INSECURE")
-    if insecure != null {
-        if insecure == "1" { client.set_insecure(req, 1) }
-    }
+    if insecure == "1" { client.set_insecure(req, 1) }
     resp, err = client.send_request(req)
     client.request_free(req)
     if err != "" {

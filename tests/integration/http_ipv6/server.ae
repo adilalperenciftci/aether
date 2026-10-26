@@ -36,7 +36,7 @@ main() {
         exit(1)
     }
     cert = os.getenv("CERT_PATH")
-    if cert != null {
+    if cert != "" {
         tls_err = http.server_set_tls(raw, cert, os.getenv("KEY_PATH"))
         if tls_err != "" {
             println("FAIL: server_set_tls: ${tls_err}")

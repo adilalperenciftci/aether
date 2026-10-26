@@ -55,9 +55,7 @@ fetch(url: string, stream: int) -> (ptr, string) {
     req = client.request("GET", url)
     client.set_timeout(req, 10s)
     ca = os.getenv("CAFILE")
-    if ca != null {
-        if ca != "" { client.set_cafile(req, ca) }
-    }
+    if ca != "" { client.set_cafile(req, ca) }
     if stream == 1 {
         resp, err = client.send_stream(req)
         client.request_free(req)
@@ -134,7 +132,7 @@ main() {
     scheme = "http"
     ws_scheme = "ws"
     cert = os.getenv("CERT_PATH")
-    if cert != null {
+    if cert != "" {
         _ = tinyweb.with_tls(server, cert, os.getenv("KEY_PATH"))
         scheme = "https"
         ws_scheme = "wss"

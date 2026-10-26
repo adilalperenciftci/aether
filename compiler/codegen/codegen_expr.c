@@ -6000,15 +6000,20 @@ static void emit_text_nul_args(CodeGenerator* gen, const ASTNode* text) {
     }
 }
 
-/* True when `n` spells the null pointer in a comparison: the identifier
- * `NULL`, or a bare literal `0` — but NOT the one-character string
- * literal `"0"`. Both literals carry the text `0` in `value`; only the
+/* True when `n` spells the null pointer in a comparison: the `null` keyword,
+ * the identifier `NULL`, or a bare literal `0`, but NOT the one-character
+ * string literal `"0"`. Both literals carry the text `0` in `value`; only the
  * string one is TYPE_STRING at parse time (create_literal_node), so
  * that is what tells them apart. Pre-#2206 `s != "0"` was taken for a
  * null check and emitted a bare pointer compare against a `.rodata`
  * literal, which was never equal (and drew clang's -Wstring-compare). */
 static int is_null_compare_operand(const ASTNode* n) {
-    if (!n || !n->value) return 0;
+    if (!n) return 0;
+    /* #3129: the `null` keyword. `s == null` asks whether there is a string
+     * at all, a pointer test; it went to string_equals, which happened to
+     * answer it only while a null string compared unequal to everything. */
+    if (n->type == AST_NULL_LITERAL) return 1;
+    if (!n->value) return 0;
     if (n->type == AST_IDENTIFIER) return strcmp(n->value, "NULL") == 0;
     if (n->type != AST_LITERAL) return 0;
     if (n->node_type && n->node_type->kind == TYPE_STRING) return 0;

@@ -17,9 +17,7 @@ get_once(url: string) -> string {
     client.set_timeout(req, 10s)
     client.set_header(req, "Connection", "close")
     ca = os.getenv("CAFILE")
-    if ca != null {
-        if ca != "" { client.set_cafile(req, ca) }
-    }
+    if ca != "" { client.set_cafile(req, ca) }
     resp, err = client.send_request(req)
     client.request_free(req)
     if err != "" { return "ERR: ${err}" }
@@ -32,7 +30,7 @@ main() {
     url = os.getenv("URL")
     n = 1
     rep = os.getenv("REPEAT")
-    if rep != null {
+    if rep != "" {
         v, perr = string.to_int(rep)
         if perr == "" && v > 0 { n = v }
     }

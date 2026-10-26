@@ -26,14 +26,14 @@ extern http_server_port(server: ptr) -> int
 // Marker-file paths come from env so the runner can tee into a tmp dir.
 @c_callback on_started(server: ptr, ud: ptr) {
     path = os_getenv("MARKER_PATH")
-    if path != 0 {
+    if path != "" {
         fs.write(path, "STARTED\n")
     }
 }
 
 @c_callback on_stopped(server: ptr, ud: ptr) {
     path = os_getenv("MARKER_PATH")
-    if path != 0 {
+    if path != "" {
         fs.write(path, "STOPPED\n")
     }
 }

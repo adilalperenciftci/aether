@@ -231,7 +231,7 @@ fn run_set(dir: string, name: string, kind: int, k: int, stride: int) -> int {
 main() {
     stride = 1
     sv = os.getenv("WYCHEPROOF_STRIDE")
-    if sv != 0 { stride = atoi(sv) }
+    if sv != "" { stride = atoi(sv) }
     if stride < 1 { stride = 1 }
 
     dir = "tests/vectors/wycheproof"

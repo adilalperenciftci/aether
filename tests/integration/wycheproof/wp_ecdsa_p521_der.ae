@@ -88,11 +88,9 @@ fn hash66(b: ptr, n: int) -> ptr {
 main() {
     stride = 10
     wf = os.getenv("WYCHEPROOF_FULL")
-    if wf != 0 {
-        if wf == "1" { stride = 1 }
-    }
+    if wf == "1" { stride = 1 }
     sv = os.getenv("WYCHEPROOF_STRIDE")
-    if sv != 0 { stride = atoi(sv) }
+    if sv != "" { stride = atoi(sv) }
     if stride < 1 { stride = 1 }
 
     doc, ferr = fs.read("tests/vectors/wycheproof/ecdsa_secp521r1_sha512_test.json")

@@ -51,11 +51,9 @@ main() {
     // sampling loses no regression coverage. WYCHEPROOF_FULL=1 runs all.
     stride = 5
     wf = os.getenv("WYCHEPROOF_FULL")
-    if wf != 0 {
-        if wf == "1" { stride = 1 }
-    }
+    if wf == "1" { stride = 1 }
     sv = os.getenv("WYCHEPROOF_STRIDE")
-    if sv != 0 { stride = atoi(sv) }
+    if sv != "" { stride = atoi(sv) }
     if stride < 1 { stride = 1 }
     doc, ferr = fs.read("tests/vectors/wycheproof/ed25519_test.json")
     if ferr != "" {

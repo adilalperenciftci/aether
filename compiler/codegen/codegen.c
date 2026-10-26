@@ -9113,8 +9113,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "static inline const char* _aether_map_put_closure(void* map, const char* key, void* box) {");
     print_line(gen, "    return map_put_closure_owned(map, key, box) ? \"\" : \"map.put failed\";");
     print_line(gen, "}");
+    /* #3129: a null string is the empty text wherever it is read as text. */
     print_line(gen, "static inline const char* _aether_safe_str(const void* s) {");
-    print_line(gen, "    if (!s) return \"(null)\";");
+    print_line(gen, "    if (!s) return \"\";");
     print_line(gen, "    return aether_string_data(s);");
     print_line(gen, "}");
     /* Owned-print helpers: a heap-producing CALL in bare print/println
@@ -9123,8 +9124,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * expression. Bare identifiers never route here, their scope-exit
      * defer owns the free. */
     /* #2521: a string value is written by its length, so one holding a NUL
-     * prints whole; printf's %s stopped at the NUL. NULL prints as
-     * `(null)`, as _aether_safe_str reads it. */
+     * prints whole; printf's %s stopped at the NUL. A null string prints
+     * nothing, as _aether_safe_str reads it (#3129). */
     print_line(gen, "extern size_t aether_print_string(FILE* f, const void* s, int newline);");
     print_line(gen, "static inline int _aether_print_str(const void* s) {");
     print_line(gen, "    return (int)aether_print_string(stdout, s, 0);");

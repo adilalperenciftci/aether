@@ -2861,7 +2861,7 @@ main() {
 
     // Get environment variable
     home = os.getenv("HOME")
-    if home != 0 {
+    if home != "" {
         println("HOME = ${home}")
     }
 }
@@ -2870,7 +2870,7 @@ main() {
 **Functions:**
 - `os.system(cmd)` - Run shell command, returns exit code (0 = success, POSIX convention)
 - `os.exec(cmd)` → `(string, string)` - Run command and capture stdout, return `(output, err)`
-- `os.getenv(name)` - Get environment variable (returns string, or null if not set, infallible)
+- `os.getenv(name)` - Get environment variable (returns string, or null if not set, infallible). The null string reads as `""`, so `os.getenv("X") != ""` asks whether `X` is set to something; `os.getenv("X") == null` tells unset apart from set to the empty string (#3129).
 - `os.setenv(name, value)` → `string` - Set environment variable, returns "" on success or an error string. Same C-side function as `io.setenv` use `os.setenv` when you've already imported `std.os` for `os.getenv`.
 - `os.temp_dir()` → `string` - The directory for scratch files, with no trailing separator. Windows resolves it through `GetTempPathW` (which already does the documented `TMP` → `TEMP` → `USERPROFILE` → Windows-directory cascade); POSIX reads `TMPDIR` and falls back to `/tmp`. Always returns a non-empty path, so `"${os.temp_dir()}/name"` needs no check. **Prefer this to a hardcoded `/tmp`**, which works on POSIX and under an MSYS2 shell but fails on a native Windows build, a bug that passes every local check.
 - `os.unsetenv(name)` → `string` - Unset environment variable, returns "" on success or an error string. Same C-side function as `io.unsetenv`.
@@ -3514,9 +3514,9 @@ main() {
     io.print_int(42)
     io.print_line("")
 
-    // getenv is infallible, returns the value or null if unset
+    // getenv is infallible: the value, or null if unset, which reads as ""
     home = io.getenv("HOME")
-    if home != 0 {
+    if home != "" {
         io.print_line(home)
     }
 

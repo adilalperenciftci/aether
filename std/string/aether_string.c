@@ -252,10 +252,14 @@ int string_char_at(const void* str, int index) {
 /* By length and bytes, embedded NULs included. `==` and `!=` on strings
  * compile to this (#2515), so it keeps a fast path: two plain C strings
  * (literals, C returns) carry no length but their NUL, and strcmp settles
- * them in one pass. */
+ * them in one pass. A null string is the empty text here, as string.length
+ * reads it (#3129): `os.getenv("X") != ""` is false for an unset X. Whether
+ * there is a string at all is `s == null`, which codegen emits as a
+ * pointer test and never sends here. */
 int string_equals(const void* a, const void* b) {
     if (a == b) return 1;
-    if (!a || !b) return 0;
+    if (!a) return str_len(b) == 0;
+    if (!b) return str_len(a) == 0;
     if (!is_aether_string(a) && !is_aether_string(b))
         return strcmp((const char*)a, (const char*)b) == 0;
     size_t la = str_len(a), lb = str_len(b);
@@ -270,12 +274,13 @@ int string_equals(const void* a, const void* b) {
  * was true, and either could change with the libc (#1640). memcmp over the
  * shorter run, not strcmp: an AetherString may carry embedded NULs, and
  * strcmp would stop at the first one and report two different strings equal.
- * A null sorts before any string, so a missing operand cannot read as
- * "equal to everything". */
+ * A null string is the empty text, as in string_equals (#3129): it equals
+ * "" and sorts before every other string, so a missing operand cannot read
+ * as "equal to everything". */
 int string_compare(const void* a, const void* b) {
     if (a == b) return 0;
-    if (!a) return -1;
-    if (!b) return 1;
+    if (!a) return str_len(b) == 0 ? 0 : -1;
+    if (!b) return str_len(a) == 0 ? 0 : 1;
     /* `<`, `<=`, `>`, `>=` on strings compile to this (#2515); two plain C
      * strings take strcmp, as in string_equals. */
     if (!is_aether_string(a) && !is_aether_string(b)) {
@@ -974,8 +979,9 @@ size_t aether_interp_format(char* out, size_t cap, FILE* f, const char* fmt, va_
         if (*p == 's') {
             /* By length: an AetherString's bytes, a plain char* to its NUL. */
             const void* s = va_arg(ap, const void*);
+            /* A null string is the empty text (#3129): it adds nothing,
+             * where it used to add C's "(null)". */
             if (s) interp_put(&k, str_data(s), str_len(s));
-            else interp_put(&k, "(null)", 6);
             p++;
             continue;
         }
@@ -1066,7 +1072,8 @@ size_t aether_write_bytes(FILE* f, const char* p, size_t n, int newline) {
 }
 
 size_t aether_print_string(FILE* f, const void* s, int newline) {
-    if (!s) return aether_write_bytes(f, "(null)", 6, newline);
+    /* A null string is the empty text (#3129), so it prints nothing. */
+    if (!s) return aether_write_bytes(f, "", 0, newline);
     return aether_write_bytes(f, str_data(s), str_len(s), newline);
 }
 

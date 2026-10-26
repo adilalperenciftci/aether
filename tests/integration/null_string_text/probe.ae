@@ -1,0 +1,45 @@
+// #3129: a null string is the empty text wherever it is read as text, and
+// `s == null` is what asks whether there is a string at all.
+//
+// os.getenv hands back the null string for an unset variable. `!= ""` read
+// that null as set (string_equals took null for unequal to everything), and
+// printing or interpolating it wrote C's "(null)". A string whose text is
+// "(null)" is a string like any other.
+
+import std.os
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3129: ${msg}")
+        exit(1)
+    }
+}
+
+main() {
+    v = os.getenv("AE_3129_SURELY_UNSET_VARIABLE")
+    check(v == null, "an unset variable is the null string")
+    check(v == "", "the null string == \"\"")
+    check(!(v != ""), "the null string is not != \"\"")
+    check(string.equals(v, "") == 1, "string.equals reads it as \"\" too")
+    check(string.length(v) == 0, "string.length reads it as \"\"")
+    check("[${v}]" == "[]", "interpolation adds nothing for it")
+
+    empty = ""
+    check(empty != null, "the empty string is a string, not null")
+    check(empty == v, "the empty string == the null string, by text")
+
+    text = "(null)"
+    check(text != null, "a string reading (null) is not null")
+    check(text != v, "and its text is not the empty text")
+
+    check(!(v < ""), "the null string does not sort before \"\"")
+    check(v < "a", "it sorts before any other string")
+    check(string.compare(v, "") == 0, "string.compare puts it level with \"\"")
+
+    // Printed, it writes nothing: the line below is empty.
+    println(v)
+    println("ok")
+}

@@ -600,7 +600,7 @@ After `as` the parser also accepts a primitive **value cast**: `n as int` and ot
 
 ### Null
 
-The `null` keyword represents a null pointer, typed as `ptr`:
+The `null` keyword represents a null pointer, typed as `ptr`. In a `string` slot it is the null string: it reads as the empty text, and `s == null` tells it apart from `""` ([Comparison Operators](#comparison-operators)):
 
 ```aether,fragment
 x = null             // inferred: ptr
@@ -3264,6 +3264,8 @@ receive {
 | `>=` | Greater or equal | `a >= b` |
 
 > **String comparison:** When both operands are strings, `==` and `!=` compare by content, not by pointer identity: two strings are equal when they have the same length and the same bytes, embedded NULs included, however they were allocated. `<`, `<=`, `>` and `>=` order them byte by byte over their whole length, a string after any proper prefix of it. A string comparison in a function-clause guard (`f(s) when s == "bob"`) works the same way.
+>
+> **A null string is the empty text** wherever it is read as text: `==`, `!=` and the ordering operators, `string.equals`, `string.length`, printing and interpolation (#3129). So `os.getenv("X") != ""` is false for an unset `X`, and `"[${s}]"` is `"[]"` for a null `s`, where it used to give C's `(null)`. Whether there is a string at all is `s == null` (or `s != null`), which compares the pointer: an unset variable is `null`, a variable set to the empty string is not.
 
 ### Bitwise Operators
 
