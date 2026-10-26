@@ -4,8 +4,11 @@
 # used to keep its own copy, the copies drifted, and neither had
 # runtime/aether_resource_caps.c, which std/string's release path calls
 # (aether_caps_free), so the first program that freed a counted string did
-# not link on either target. One path per line, from the repository root;
-# a line that starts with # is a comment.
+# not link on either target. The list is closed under reference: every
+# runtime function a listed file calls is defined by a listed file (std/string
+# calls std/collections/aether_stringseq.c, std/collections calls
+# std/alloc), so a program links whichever of them it reaches. One path per
+# line, from the repository root; a line that starts with # is a comment.
 runtime/scheduler/aether_scheduler_coop.c
 runtime/scheduler/scheduler_optimizations.c
 runtime/config/aether_optimization_config.c
@@ -46,6 +49,8 @@ std/collections/aether_pqueue.c
 std/collections/aether_intarr.c
 std/collections/aether_longarr.c
 std/collections/aether_bits.c
+std/collections/aether_stringseq.c
+std/alloc/aether_alloc.c
 std/json/aether_json.c
 std/fs/aether_fs.c
 std/log/aether_log.c
