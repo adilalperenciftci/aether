@@ -3008,6 +3008,48 @@ static void reject_pointer_argument(ASTNode* call, ASTNode* arg, Type* arg_type,
     type_error(emsg, arg->line, arg->column);
 }
 
+/* An optional is never unwrapped implicitly (is_type_compatible's #340
+ * rule): a binding or a `return` of a `T?` where a `T` goes is refused, and
+ * so is an argument. Lenient, argument checking passed a `string?` to a
+ * `string` parameter (`shout(maybe(1))`), and only the C compiler refused
+ * the `ae_opt_string` (#3153). */
+static void reject_optional_argument(SymbolTable* table, ASTNode* call, ASTNode* arg,
+                                     Type* arg_type, Type* param_type, int index,
+                                     const char* param_name) {
+    if (!arg_type || !param_type || arg_type->kind != TYPE_OPTIONAL ||
+        !arg_type->element_type || arg_type->element_type->kind == TYPE_UNKNOWN ||
+        param_type->kind == TYPE_UNKNOWN || param_type->kind == TYPE_OPTIONAL)
+        return;
+    char emsg[512];
+    snprintf(emsg, sizeof(emsg), "Argument %d '%s' of '%s': expected %s, got %s",
+             index, param_name ? param_name : "?", call->value ? call->value : "?",
+             type_spelled(param_type), type_spelled(arg_type));
+    /* A local first bound in a branch or loop body is one variable for the
+     * function: what makes it optional may be another body's binding,
+     * while the one in sight binds a plain value. Say so. */
+    int hoisted = 0;
+    for (SymbolTable* t = table; t && t->parent && !hoisted && arg->type == AST_IDENTIFIER &&
+                                 arg->value; t = t->parent) {
+        Symbol* s = lookup_symbol_local(t, arg->value);
+        hoisted = s && s->branch_hoisted;
+    }
+    if (hoisted) {
+        char hint[512];
+        snprintf(hint, sizeof(hint),
+                 "'%s' is one variable for the whole function, as a local first bound in a "
+                 "branch or loop body is, and a binding of it elsewhere makes it %s: give that "
+                 "value a name of its own, or unwrap this one with `%s ?? fallback`",
+                 arg->value, type_spelled(arg_type), arg->value);
+        type_error_hint(emsg, hint, arg->line, arg->column);
+    } else if (is_assignable(arg_type->element_type, param_type))
+        type_error_hint(emsg,
+                        "an optional may hold no value: give it one with `v ?? fallback`, "
+                        "or take it out with `v!` (which panics on none) or a `match`",
+                        arg->line, arg->column);
+    else
+        type_error(emsg, arg->line, arg->column);
+}
+
 /* #2516: a fixed-size array parameter (`xs: int[3]`) takes an array of
  * that element type and length: the callee copies that many elements and
  * its `xs.len` is the declared length. A longer or shorter array, a slice
@@ -20595,6 +20637,7 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
             }
 
             Type* param_type = param->node_type;
+            int errors_before = error_count;
             /* #480: a distinct-typed parameter (or a distinct argument to a
              * non-distinct parameter) requires an explicit `as` cast at the
              * call boundary — the capability-token use case (`GrantedFD =
@@ -20728,6 +20771,20 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
             if (param_type)
                 slice_coerce_slot(&call->children[arg_slot], param_type,
                                   symbol->node->type == AST_EXTERN_FUNCTION);
+
+            /* An optional is not unwrapped into the parameter (#3153), when
+             * no check above has spoken. An extern's arguments are checked
+             * against its types below. */
+            if (param_type && symbol->node->type != AST_EXTERN_FUNCTION &&
+                error_count == errors_before) {
+                ASTNode* garg = call->children[arg_slot];
+                Type* ga = garg ? infer_type(garg, table) : NULL;
+                if (ga) {
+                    reject_optional_argument(table, call, garg, ga, param_type, arg_slot + 1,
+                                             param->value);
+                    free_type(ga);
+                }
+            }
 
             if (!param_type || param_type->kind != TYPE_DURATION) continue;
 
