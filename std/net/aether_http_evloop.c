@@ -968,6 +968,11 @@ static int ev_begin_retry_ex(EvDriver* d, EvConn* c, int next_addr) {
     free(path);   /* the head holds the request line now */
     if (!c->head) return -1;
 
+    /* The receive buffer may still be lent to the attempt this one replaces:
+     * a 5xx with retries left comes here from ev_finish_upstream with it in
+     * the exchange. Clearing the exchange dropped the only pointer to it,
+     * 16 KiB or more per retry (#3249). */
+    ev_reclaim_rxbuf(c);
     memset(&c->x, 0, sizeof(c->x));
     http_exchange_init(&c->x, &c->up.t, c->head, c->head_len, body, body_len,
                        http_request_method_of(c->px.outbound));
