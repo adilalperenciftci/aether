@@ -12,8 +12,10 @@
   and ends with the exact output it prints, and examples/README.md is the
   path, one row per example with a link into the reference. `make
   check-examples` (an Aether checker, tests/examples/check.ae) runs in
-  `make ci` in place of the old build-only step, and `make examples` is it.
-  It builds every example, fails on a warning (coded or not), type-checks
+  `make ci` in place of the old build-only step, and `make examples` is it
+  (under cmd.exe, `make examples` builds them with `ae examples`, as it did).
+  It builds every example, as many at once as the machine has cores, fails
+  on a warning (coded or not), type-checks
   the ones that import a contrib bridge, and runs each one that ends in an
   `// Output:` block, with the tree's own `ae` first on PATH, and compares
   what it prints. It also requires a `// Needs:` line on the ones that

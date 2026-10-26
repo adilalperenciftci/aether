@@ -31,7 +31,9 @@
 // the command writes, stdout and stderr together: an example writes
 // nothing to stderr that its Output block does not show.
 //
-//     check [--ae PATH] [--timeout SECS] [--expect N] DIR
+//     check [--ae PATH] [--timeout SECS] [--jobs N] [--expect N] DIR
+//
+// The builds run --jobs at a time; the runs one at a time, in order.
 //
 // Exits 1 on a problem; with --expect, unless exactly N were found (the
 // self-test over tests/examples/fixture). `make check-examples` runs both.
@@ -40,6 +42,7 @@ import std.fs
 import std.os
 import std.io
 import std.list
+import std.mem
 import std.string
 import std.collections
 
@@ -448,6 +451,7 @@ main() {
     ae = "build/ae"
     timeout = 60
     expect = -1
+    jobs = 1
     root = ""
     argc = os.args_count()
     i = 1
@@ -462,13 +466,19 @@ main() {
         } else if a == "--expect" && i + 1 < argc {
             i = i + 1
             expect = string.get_int(os.args_get(i))
+        } else if a == "--jobs" && i + 1 < argc {
+            i = i + 1
+            jobs = string.get_int(os.args_get(i))
+            if jobs < 1 {
+                jobs = 1
+            }
         } else {
             root = normalize(string.replace_all(a, "\\", "/"))
         }
         i = i + 1
     }
     if root == "" {
-        say("usage: check [--ae PATH] [--timeout SECS] [--expect N] DIR")
+        say("usage: check [--ae PATH] [--timeout SECS] [--jobs N] [--expect N] DIR")
         exit(2)
     }
     exe_ext = ""
@@ -544,11 +554,19 @@ main() {
         i = i + 1
     }
 
-    // Pass 2: check each one, build the entries and run those that say
-    // what they print.
+    // Pass 2: check each one, and queue the entries: what builds them, if
+    // anything, and what runs them, if they say what they print.
     ran = 0
     built = 0
     checked = 0
+    q_p = collections.string_list_new() // the example
+    q_verb = collections.string_list_new() // "build", "check", or "" (nothing to build)
+    q_prog = collections.string_list_new() // what runs, "" when nothing does
+    q_run = collections.string_list_new() // its Run line, for the messages
+    q_output = collections.string_list_new() // its Output block
+    q_bargs = list.new() // the build's argv (a list), or null
+    q_args = list.new() // the run's argv (a list)
+    q_i = list.new() // its source index: run_<i>.out
     ne = collections.string_list_size(sources)
     i = 0
     while i < ne {
@@ -587,20 +605,23 @@ main() {
         if string.contains(ex.run, "\"") == 1 || string.contains(ex.run, "'") == 1 || (tool != "ae" && tool != "sh") || nw < 2 {
             say("${p}:${ex.run_line}: Run must be `ae ...` or `sh ...`, with no quoting: ${ex.run}")
             problems = problems + 1
+            collections.string_list_free(words)
             i = i + 1
             continue
         }
         if names_itself(ex, words) == 0 {
             say("${p}:${ex.run_line}: Run does not name this file: ${ex.run}")
             problems = problems + 1
+            collections.string_list_free(words)
             i = i + 1
             continue
         }
 
         // What runs, and with what: a built binary or the command itself.
         prog = ""
+        verb = ""
+        bargs = null
         args = list.new()
-        failed = 0
         if tool == "ae" && collections.string_list_get(words, 1) == "run" {
             // An example that imports a contrib module is type-checked:
             // the bridge's archive comes from `make contrib`, which make ci
@@ -622,25 +643,6 @@ main() {
                 _o1 = list.add(bargs, "-o")
                 _o2 = list.add(bargs, bin)
             }
-            bout, berr, bcode, bspawn = os.run_full(ae, bargs, null, "")
-            list.free(bargs)
-            log = "${bout}${berr}"
-            if bspawn != "" || bcode != 0 {
-                say("${p}: ${ae} ${verb} failed (exit ${bcode}${bspawn}):")
-                say_indented(log)
-                problems = problems + 1
-                failed = 1
-            } else if prints_a_warning(log) {
-                say("${p}: ${ae} ${verb} prints a warning; an example builds clean:")
-                say_indented(log)
-                problems = problems + 1
-                failed = 1
-            }
-            if verb == "build" {
-                built = built + 1
-            } else {
-                checked = checked + 1
-            }
             prog = "${bin}${exe_ext}"
             k = k + 1
             while k < nw {
@@ -658,11 +660,113 @@ main() {
                 k = k + 1
             }
         }
-
         // A file that imports a contrib bridge is type-checked, not built,
         // so there is nothing of it to run.
-        if failed == 0 && ex.has_output && ex.needs == "" && !ex.uses_contrib {
-            out_file = "${out_dir}/run_${i}.out"
+        if !(ex.has_output && ex.needs == "" && !ex.uses_contrib) {
+            prog = ""
+        }
+        collections.string_list_add(q_p, p)
+        collections.string_list_add(q_verb, verb)
+        collections.string_list_add(q_prog, prog)
+        collections.string_list_add(q_run, ex.run)
+        collections.string_list_add(q_output, ex.output)
+        _qb = list.add(q_bargs, bargs)
+        _qa = list.add(q_args, args)
+        _qi = list.add(q_i, mem.long_to_ptr(i as long))
+        collections.string_list_free(words)
+        i = i + 1
+    }
+
+    // The builds, `jobs` at a time: each one is a compile, most of what this
+    // gate costs, and they share nothing but the cache. One at a time they
+    // took 45 s of every CI leg. Each one's output is in a file of its own,
+    // read in queue order below.
+    nq = collections.string_list_size(q_p)
+    codes = list.new()
+    spawn_errs = collections.string_list_new()
+    k = 0
+    while k < nq {
+        _c = list.add(codes, mem.long_to_ptr(0 as long))
+        collections.string_list_add(spawn_errs, "")
+        k = k + 1
+    }
+    live_tok = list.new()
+    live_q = list.new()
+    next = 0
+    while next < nq || list.size(live_tok) > 0 {
+        while next < nq && list.size(live_tok) < jobs {
+            if collections.string_list_get(q_verb, next) == "" {
+                next = next + 1
+                continue
+            }
+            tok, serr = os.spawn_proc_to(ae, list.at(q_bargs, next), null, "${out_dir}/build_${next}.log")
+            if serr != "" {
+                collections.string_list_set(spawn_errs, next, serr)
+                list.set(codes, next, mem.long_to_ptr(-1 as long))
+            } else {
+                _t = list.add(live_tok, mem.long_to_ptr(tok as long))
+                _x = list.add(live_q, mem.long_to_ptr(next as long))
+            }
+            next = next + 1
+        }
+        if list.size(live_tok) == 0 {
+            continue
+        }
+        done, code, werr = os.wait_any(live_tok)
+        if werr != "" {
+            code = -1
+        }
+        m = 0
+        while m < list.size(live_tok) {
+            if mem.ptr_to_long(list.at(live_tok, m)) as int == done {
+                list.set(codes, mem.ptr_to_long(list.at(live_q, m)) as int, mem.long_to_ptr(code as long))
+                list.remove(live_tok, m)
+                list.remove(live_q, m)
+                break
+            }
+            m = m + 1
+        }
+    }
+    list.free(live_tok)
+    list.free(live_q)
+
+    // Each entry in order: its build, then its run. The runs stay one at a
+    // time: some listen on a port of their own.
+    k = 0
+    while k < nq {
+        p = collections.string_list_get(q_p, k)
+        verb = collections.string_list_get(q_verb, k)
+        prog = collections.string_list_get(q_prog, k)
+        args = list.at(q_args, k)
+        failed = 0
+        if verb != "" {
+            bcode = mem.ptr_to_long(list.at(codes, k)) as int
+            bspawn = collections.string_list_get(spawn_errs, k)
+            log, _lerr = fs.read("${out_dir}/build_${k}.log")
+            if bspawn != "" || bcode != 0 {
+                say("${p}: ${ae} ${verb} failed (exit ${bcode}${bspawn}):")
+                say_indented(log)
+                problems = problems + 1
+                failed = 1
+            } else if prints_a_warning(log) {
+                say("${p}: ${ae} ${verb} prints a warning; an example builds clean:")
+                say_indented(log)
+                problems = problems + 1
+                failed = 1
+            }
+            if verb == "build" {
+                built = built + 1
+            } else {
+                checked = checked + 1
+            }
+            _d = fs.delete("${out_dir}/build_${k}.log")
+            list.free(list.at(q_bargs, k))
+        }
+        if failed == 0 && prog != "" {
+            si = mem.ptr_to_long(list.at(q_i, k)) as int
+            run = collections.string_list_get(q_run, k)
+            want = collections.string_list_get(q_output, k)
+            out_file = "${out_dir}/run_${si}.out"
             text, status, timed_out, rerr2 = run_bounded(prog, args, out_file, timeout)
             got = as_block(text)
             if rerr2 != "" {
@@ -672,11 +776,11 @@ main() {
                 say("${p}: still running after ${timeout} s, stopped")
                 problems = problems + 1
             } else if status != 0 {
-                say("${p}: `${ex.run}` exits ${status}; it printed:")
+                say("${p}: `${run}` exits ${status}; it printed:")
                 show_block(got)
                 problems = problems + 1
-            } else if got != ex.output {
-                say("${p}: the output differs from its Output block at line ${first_difference(got, ex.output)}; it printed:")
+            } else if got != want {
+                say("${p}: the output differs from its Output block at line ${first_difference(got, want)}; it printed:")
                 show_block(got)
                 problems = problems + 1
             } else {
@@ -684,9 +788,12 @@ main() {
             }
         }
         list.free(args)
-        collections.string_list_free(words)
-        i = i + 1
+        k = k + 1
     }
+    list.free(codes)
+    list.free(q_bargs)
+    list.free(q_args)
+    list.free(q_i)
 
     say("examples: ${collections.string_list_size(entries)} examples (${built} built, ${checked} type-checked, ${ran} run and matched their output): ${problems} problem(s)")
     if expect >= 0 {

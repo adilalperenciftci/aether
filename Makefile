@@ -1827,7 +1827,14 @@ benchmark: benchmark-results
 # run and compared with the output it says it prints. It used to build each
 # file with aetherc and the C compiler alone, which an example run as a
 # project, with --lib, by a script or through a contrib bridge cannot be.
+# The checker's recipe is POSIX shell; under cmd.exe (WINDOWS_NATIVE)
+# `make examples` builds every example with `ae examples`, as it always has.
+ifdef WINDOWS_NATIVE
+examples: compiler ae stdlib
+	@.\$(BUILD_DIR)\ae.exe examples
+else
 examples: check-examples
+endif
 
 
 # Standalone aether-lsp binary — kept as a transitional alias for editor
@@ -3124,11 +3131,11 @@ EXAMPLES_TIMEOUT ?= 60
 check-examples: compiler ae stdlib
 	@mkdir -p $(BUILD_DIR)/examples_check
 	@./$(BUILD_DIR)/ae$(EXE_EXT) build tests/examples/check.ae -o $(BUILD_DIR)/examples_check/check
-	@./$(EXAMPLES_CHECKER) --ae ./$(BUILD_DIR)/ae$(EXE_EXT) --timeout 2 --expect 15 tests/examples/fixture \
+	@./$(EXAMPLES_CHECKER) --ae ./$(BUILD_DIR)/ae$(EXE_EXT) --timeout 2 --jobs $(NPROC) --expect 15 tests/examples/fixture \
 	    > $(BUILD_DIR)/examples_check/self_test.log 2>&1 || \
 	    { cat $(BUILD_DIR)/examples_check/self_test.log; exit 1; }
 	@PATH="$$(pwd)/$(BUILD_DIR):$$PATH" ./$(EXAMPLES_CHECKER) --ae ./$(BUILD_DIR)/ae$(EXE_EXT) \
-	    --timeout $(EXAMPLES_TIMEOUT) examples
+	    --timeout $(EXAMPLES_TIMEOUT) --jobs $(NPROC) examples
 
 # The C a program gets when the C compiler is not GCC-compatible
 # (AETHER_GCC_COMPAT 0, which is what MSVC compiles): strict C11 under gcc,
