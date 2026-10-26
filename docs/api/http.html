@@ -115,6 +115,7 @@
     <li><a href="#server_put">server_put</a></li>
     <li><a href="#server_delete">server_delete</a></li>
     <li><a href="#server_use_middleware">server_use_middleware</a></li>
+    <li><a href="#server_use_middleware_loop_safe">server_use_middleware_loop_safe</a></li>
     <li><a href="#get_header">get_header</a></li>
     <li><a href="#get_query_param">get_query_param</a></li>
     <li><a href="#get_path_param">get_path_param</a></li>
@@ -602,7 +603,7 @@
       <h3 class="function-name">server_set_access_log_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>server_set_access_log_raw(server, format, output_path) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">server: ptr, format: string, output_path: string</span></p>
-      <p class="doc">Built-in access logger (#260 Tier 3 / F1). format: &quot;combined&quot; or &quot;json&quot;. output_path: file path (opened with &quot;ab&quot; — appends), &quot;-&quot; for stderr, or &quot;&quot; to disable. Returns &quot;&quot; on success.</p>
+      <p class="doc">Built-in access logger (#260 Tier 3 / F1). format: &quot;combined&quot; or &quot;json&quot;. output_path: file path (opened with &quot;ab&quot; — appends), &quot;-&quot; for stderr, or &quot;&quot; to disable. Returns &quot;&quot; on success. One line per response, a proxied one and one a middleware answered included (#3213). Loop-safe (#3214): a gateway that logs keeps the proxy event loop, which appends the line itself, as nginx writes its access log.</p>
     </div>
     <div class="function" id="server_set_access_log" data-name="server_set_access_log">
       <h3 class="function-name">server_set_access_log <span class="kind">fn</span></h3>
@@ -613,7 +614,7 @@
       <h3 class="function-name">server_set_metrics_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>server_set_metrics_raw(server, metrics_endpoint) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">server: ptr, metrics_endpoint: string</span></p>
-      <p class="doc">Built-in per-route metrics (#260 Tier 3 / F2). Tracks request counts, error rates, latency histograms; exposes the standard Prometheus text format on the configured endpoint (default &quot;/metrics&quot;). Returns &quot;&quot; on success.</p>
+      <p class="doc">Built-in per-route metrics (#260 Tier 3 / F2). Tracks request counts, error rates, latency histograms; exposes the standard Prometheus text format on the configured endpoint (default &quot;/metrics&quot;). Returns &quot;&quot; on success. Loop-safe like the access logger (#3214): the proxy event loop counts the responses it sends.</p>
     </div>
     <div class="function" id="server_set_metrics" data-name="server_set_metrics">
       <h3 class="function-name">server_set_metrics <span class="kind">fn</span></h3>
@@ -799,7 +800,13 @@
       <h3 class="function-name">server_use_middleware <span class="kind">extern</span></h3>
       <pre class="usage"><code>server_use_middleware(server, middleware, user_data)</code></pre>
       <p class="signature"><span class="sig-params">server: ptr, middleware: ptr, user_data: ptr</span></p>
-      <p class="doc">HTTP Server - middleware</p>
+      <p class="doc">HTTP Server - middleware A middleware is a `@c_callback` (req, res, user_data) -&gt; int: 1 to go on down the chain, 0 when it answered into `res`. They run in registration order, before the route handler.</p>
+    </div>
+    <div class="function" id="server_use_middleware_loop_safe" data-name="server_use_middleware_loop_safe">
+      <h3 class="function-name">server_use_middleware_loop_safe <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_use_middleware_loop_safe(server, middleware, user_data, release)</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, middleware: ptr, user_data: ptr, release: ptr</span></p>
+      <p class="doc">The same for a middleware that never blocks: CPU work, a short mutex, nothing that waits on I/O, a lock held elsewhere or another thread (#3214). `release` runs on `user_data` when the server is freed, or pass null to keep it yours. On Linux and macOS a server in front of a std.http.proxy mount keeps serving its plain-HTTP connections from the proxy event loop, which runs the middleware ahead of the mount itself, only when every one of them is loop-safe; a middleware registered with `server_use_middleware` may block (a database call in an auth check), so one ahead of the mount gives each connection a worker thread instead. A loop-safe middleware that blocks after all stalls every connection on its loop thread. Elsewhere this is `server_use_middleware`.</p>
     </div>
     <div class="function" id="get_header" data-name="get_header">
       <h3 class="function-name">get_header <span class="kind">extern</span></h3>

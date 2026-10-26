@@ -147,6 +147,10 @@ const char* http_server_set_health_probes_raw(HttpServer* s, const char* lp, con
 void http_server_use_request_hook(HttpServer* s, HttpRequestHook h, void* u) {
     (void)s; (void)h; (void)u;
 }
+void http_server_use_request_hook_loop_safe(HttpServer* s, HttpRequestHook h, void* u) {
+    (void)s; (void)h; (void)u;
+}
+int http_server_evloop_connections(HttpServer* s) { (void)s; return 0; }
 const char* http_server_set_access_log_raw(HttpServer* s, const char* f, const char* p) {
     (void)s; (void)f; (void)p; return "";
 }
@@ -189,6 +193,10 @@ void http_server_put(HttpServer* s, const char* p, HttpHandler h, void* u) { (vo
 void http_server_delete(HttpServer* s, const char* p, HttpHandler h, void* u) { (void)s; (void)p; (void)h; (void)u; }
 void http_server_use_middleware(HttpServer* s, HttpMiddleware m, void* u) { (void)s; (void)m; (void)u; }
 void http_server_use_middleware_owned(HttpServer* s, HttpMiddleware m, void* u, void (*r)(void*)) {
+    (void)s; (void)m; (void)u; (void)r;
+}
+void http_server_use_middleware_loop_safe(HttpServer* s, HttpMiddleware m, void* u,
+                                          void (*r)(void*)) {
     (void)s; (void)m; (void)u; (void)r;
 }
 void http_server_use_response_transformer(HttpServer* s, HttpResponseTransformer x, void* u) {
@@ -476,6 +484,14 @@ typedef struct HttpConn {
      * the client may still be sending: conn_close then closes in stages
      * (conn_linger) rather than resetting the refusal away. */
     int   linger_on_close;
+    /* A request the proxy event loop took through the middleware ahead of
+     * its proxy mount, handed over with its connection when the mount did
+     * not take it (http_server_adopt_request, #3214): handle_one_request
+     * dispatches it from `pending_from` before reading anything. */
+    HttpRequest*        pending_req;
+    HttpServerResponse* pending_res;
+    HttpMiddlewareNode* pending_from;
+    int64_t             pending_t_start;
 } HttpConn;
 
 /* The parking lot holds HttpConn by pointer and needs exactly two things from
@@ -666,6 +682,66 @@ static int sendfile_eligible(HttpConn* c, HttpRequest* req) {
     return 1;
 }
 
+/* A file http_serve_file staged on `res` (sendfile_fd), read into its body
+ * and closed: what a connection that cannot take sendfile gets, and what
+ * the proxy event loop always does with one, since it sends from memory
+ * (#3214). The 2 GiB cap is conservative: buffered bodies above that are
+ * unusual for static serves and would memory-press a runtime that doesn't
+ * intend the cost. The fast path (sendfile) has no such limit. */
+static void response_load_staged_file(HttpServerResponse* res) {
+    if (res->sendfile_fd < 0) return;
+    long long size = res->sendfile_size;
+    if (size >= 0 && size <= (long long)0x7FFFFFFF) {
+        /* Cap-aware (#343): file size is OS-supplied and
+         * unbounded from the plugin host's perspective; gate via
+         * the caps allocator. The matching free in
+         * http_server_response_free passes res->body_cap. */
+        size_t buf_cap = (size_t)size + 1;
+        char* buf = (char*)aether_caps_malloc(buf_cap);
+        if (buf) {
+            size_t total = 0;
+#ifndef _WIN32
+            lseek(res->sendfile_fd, 0, SEEK_SET);
+            while (total < (size_t)size) {
+                ssize_t n = read(res->sendfile_fd, buf + total,
+                                 (size_t)size - total);
+                if (n <= 0) break;
+                total += (size_t)n;
+            }
+#endif
+            if (total == (size_t)size) {
+                buf[size] = '\0';
+                aether_caps_free(res->body, res->body_cap);
+                res->body = buf;
+                res->body_length = (size_t)size;
+                res->body_cap = buf_cap;
+            } else {
+                aether_caps_free(buf, buf_cap);
+            }
+        }
+    }
+#ifndef _WIN32
+    close(res->sendfile_fd);
+#endif
+    res->sendfile_fd = -1;
+}
+
+/* `res` as the bytes that go on the wire, into *buf (grown as needed).
+ * RFC 9110 section 9.3.2: a HEAD response carries the headers the GET would
+ * have carried and no body. Sending one desynchronises a persistent
+ * connection, the client reads those bytes as the start of the next
+ * response. Shared by the worker path and the proxy event loop (#3214). */
+static char* response_serialize_wire(HttpRequest* req, HttpServerResponse* res,
+                                     char** buf, size_t* cap, size_t* out_len) {
+    int head_only = req && req->method && strcmp(req->method, "HEAD") == 0;
+    char*  body     = res->body;
+    size_t body_len = res->body_length;
+    if (head_only) { res->body = NULL; res->body_length = 0; }
+    char* out = http_response_serialize_into(res, buf, cap, out_len);
+    if (head_only) { res->body = body; res->body_length = body_len; }
+    return out;
+}
+
 /* Send `res` to `conn`. When res->sendfile_fd is set AND the
  * request/connection is sendfile-eligible, takes the zero-copy
  * path: serialize headers only (body is NULL on this path), cork
@@ -724,58 +800,16 @@ static int send_response_with_optional_sendfile(HttpConn* conn,
             }
         }
     } else if (res->sendfile_fd >= 0) {
-        /* Ineligible: read the fd into res->body before serializing.
-         * The 2 GiB cap is conservative — buffered bodies above that
-         * are unusual for static serves and would memory-press a
-         * runtime that doesn't intend the cost. The fast path
-         * (sendfile) has no such limit. */
-        long long size = res->sendfile_size;
-        if (size >= 0 && size <= (long long)0x7FFFFFFF) {
-            /* Cap-aware (#343): file size is OS-supplied and
-             * unbounded from the plugin host's perspective; gate via
-             * the caps allocator. The matching free in
-             * http_server_response_free passes res->body_cap. */
-            size_t buf_cap = (size_t)size + 1;
-            char* buf = (char*)aether_caps_malloc(buf_cap);
-            if (buf) {
-                size_t total = 0;
-#ifndef _WIN32
-                lseek(res->sendfile_fd, 0, SEEK_SET);
-                while (total < (size_t)size) {
-                    ssize_t n = read(res->sendfile_fd, buf + total,
-                                     (size_t)size - total);
-                    if (n <= 0) break;
-                    total += (size_t)n;
-                }
-#endif
-                if (total == (size_t)size) {
-                    buf[size] = '\0';
-                    aether_caps_free(res->body, res->body_cap);
-                    res->body = buf;
-                    res->body_length = (size_t)size;
-                    res->body_cap = buf_cap;
-                } else {
-                    aether_caps_free(buf, buf_cap);
-                }
-            }
-        }
-#ifndef _WIN32
-        close(res->sendfile_fd);
-#endif
-        res->sendfile_fd = -1;
+        /* Ineligible: read the fd into res->body before serializing. */
+        response_load_staged_file(res);
     }
 
     if (!sent_via_sendfile) {
-        size_t resp_len = 0;
-        char*  body      = res->body;
-        size_t body_len  = res->body_length;
-        if (head_only) { res->body = NULL; res->body_length = 0; }
-        char* response_str = http_response_serialize_len(res, &resp_len);
-        if (head_only) { res->body = body; res->body_length = body_len; }
-        if (response_str) {
-            conn_send(conn, response_str, (int)resp_len);
-            free(response_str);
-        }
+        char*  buf = NULL;
+        size_t cap = 0, resp_len = 0;
+        if (response_serialize_wire(req, res, &buf, &cap, &resp_len))
+            conn_send(conn, buf, (int)resp_len);
+        free(buf);
     }
 
     return force_close;
@@ -1287,7 +1321,8 @@ const char* http_server_set_health_probes_raw(HttpServer* server,
 // =================================================================
 
 static void server_add_request_hook(HttpServer* server, HttpRequestHook hook,
-                                    void* user_data, void (*release)(void*));
+                                    void* user_data, void (*release)(void*),
+                                    int loop_safe);
 
 typedef struct {
     char* format;       /* "combined" or "json" */
@@ -1411,7 +1446,10 @@ const char* http_server_set_access_log_raw(HttpServer* server,
         st->own_fp = 1;
     }
 
-    server_add_request_hook(server, access_log_hook, st, access_log_release);
+    /* Loop-safe (#3214): a line formatted and appended to a file, which is
+     * how nginx writes its access log from its event loop. Logging to "-"
+     * writes stderr, which stalls only while whatever reads it does. */
+    server_add_request_hook(server, access_log_hook, st, access_log_release, 1);
     return "";
 }
 
@@ -1634,7 +1672,8 @@ const char* http_server_set_metrics_raw(HttpServer* server,
     if (!st) return "out of memory";
     pthread_mutex_init(&st->lock, NULL);
     st->server = server;
-    server_add_request_hook(server, metrics_hook, st, metrics_release);
+    /* Loop-safe (#3214): counters, and a mutex held for one list lookup. */
+    server_add_request_hook(server, metrics_hook, st, metrics_release, 1);
     const char* endpoint = (metrics_endpoint && *metrics_endpoint)
         ? metrics_endpoint : "/metrics";
     http_server_get(server, endpoint, metrics_handler, st);
@@ -2506,23 +2545,6 @@ void* http_server_proxy_opts(HttpServer* server) {
     return NULL;
 }
 
-/* May the proxy event loop serve this server's connections? It runs the
- * proxy exchange alone, so only where that is all a proxied request gets
- * on the worker path: the proxy is the chain's first middleware, and no
- * request hook is registered. For a chain with use_real_ip, a rate limiter
- * or basic auth ahead of the proxy the loop skipped them, and a proxied
- * request went past the auth on Linux (#3203); the access log and metrics,
- * which observe every response (run_request_hooks), were skipped the same
- * way (#3213). Response transformers are the route handler's and do not
- * touch a proxied response on either path. Middleware after the proxy sees
- * only what the proxy passes on, which the loop hands back to the worker
- * path. */
-int http_server_evloop_serves(HttpServer* server) {
-    return server && server->middleware_chain &&
-           server->middleware_chain->middleware == aether_middleware_reverse_proxy &&
-           !server->request_hook_chain;
-}
-
 void http_response_set_header(HttpServerResponse* res, const char* key, const char* value) {
     if (!res) return;
     /* A header carrying a line ending would be written into the response head
@@ -2867,12 +2889,30 @@ void http_server_delete(HttpServer* server, const char* path, HttpHandler handle
     http_server_add_route(server, "DELETE", path, handler, user_data);
 }
 
+static void server_add_middleware(HttpServer* server, HttpMiddleware middleware,
+                                  void* user_data, void (*release)(void*),
+                                  int loop_safe);
+
 void http_server_use_middleware(HttpServer* server, HttpMiddleware middleware, void* user_data) {
-    http_server_use_middleware_owned(server, middleware, user_data, NULL);
+    server_add_middleware(server, middleware, user_data, NULL, 0);
 }
 
 void http_server_use_middleware_owned(HttpServer* server, HttpMiddleware middleware,
                                       void* user_data, void (*release)(void*)) {
+    server_add_middleware(server, middleware, user_data, release, 0);
+}
+
+/* A middleware that says it never blocks (#3214): the proxy event loop runs
+ * it when it sits ahead of the proxy. The two registrations above stay not
+ * loop-safe, because a program's middleware may block. */
+void http_server_use_middleware_loop_safe(HttpServer* server, HttpMiddleware middleware,
+                                          void* user_data, void (*release)(void*)) {
+    server_add_middleware(server, middleware, user_data, release, 1);
+}
+
+static void server_add_middleware(HttpServer* server, HttpMiddleware middleware,
+                                  void* user_data, void (*release)(void*),
+                                  int loop_safe) {
     HttpMiddlewareNode* node = (HttpMiddlewareNode*)malloc(sizeof(HttpMiddlewareNode));
     if (!node) {
         /* Not installed: what it would have owned goes now. */
@@ -2883,6 +2923,7 @@ void http_server_use_middleware_owned(HttpServer* server, HttpMiddleware middlew
     node->user_data = user_data;
     node->next = NULL;
     node->release = release;
+    node->loop_safe = loop_safe;
     /* Append to the end of the chain so registration order matches
      * execution order — what every HTTP framework does, what the
      * std.http.middleware factories assume, and what the
@@ -2918,8 +2959,67 @@ struct HttpRequestHookNode {
      * server owns (the access logger, the metrics collector); NULL for a
      * hook the caller registered, whose state stays the caller's. */
     void (*release)(void*);
+    /* 1 when the registration said the hook never blocks, so the proxy
+     * event loop may run it (#3214). */
+    int loop_safe;
     struct HttpRequestHookNode* next;
 };
+
+/* The first proxy mount in the chain, or NULL. */
+static HttpMiddlewareNode* server_proxy_node(HttpServer* server) {
+    for (HttpMiddlewareNode* n = server ? server->middleware_chain : NULL; n; n = n->next)
+        if (n->middleware == aether_middleware_reverse_proxy) return n;
+    return NULL;
+}
+
+/* May the proxy event loop serve this server's connections? A proxied
+ * request gets on the loop exactly what it gets on the worker path: the
+ * middleware ahead of the proxy, the proxy exchange, the request hooks on
+ * the response. The loop runs all of them itself (#3214), so each has to be
+ * safe to run there, which its registration says: a loop thread holds
+ * hundreds of connections, and a middleware that waits on a database stalls
+ * every one of them. One that is not loop-safe, ahead of the proxy or among
+ * the hooks, sends the server's connections to the worker path, where it
+ * runs as it always did. Before #3214 the loop ran the proxy exchange alone,
+ * so it served only a server with the proxy first and no hook: it had
+ * skipped use_real_ip, the rate limiter and basic auth ahead of the proxy
+ * (#3203), and the access log and metrics (#3213). Response transformers
+ * are the route handler's and do not touch a proxied response on either
+ * path. Middleware after the proxy sees only what the proxy passes on,
+ * which the loop gives the worker path (http_server_adopt_request). */
+int http_server_evloop_serves(HttpServer* server) {
+    if (!server) return 0;
+    HttpMiddlewareNode* proxy = server_proxy_node(server);
+    if (!proxy) return 0;
+    for (HttpMiddlewareNode* n = server->middleware_chain; n != proxy; n = n->next)
+        if (!n->loop_safe) return 0;
+    for (struct HttpRequestHookNode* h = server->request_hook_chain; h; h = h->next)
+        if (!h->loop_safe) return 0;
+    return 1;
+}
+
+int http_server_has_before_proxy(HttpServer* server) {
+    HttpMiddlewareNode* proxy = server_proxy_node(server);
+    return proxy && proxy != server->middleware_chain;
+}
+
+/* The chain up to the first proxy mount, as handle_one_request runs it (the
+ * same loop, stopped short of the mount, whose exchange the caller drives
+ * itself). */
+int http_server_run_before_proxy(HttpServer* server, HttpRequest* req,
+                                 HttpServerResponse* res) {
+    HttpMiddlewareNode* proxy = server_proxy_node(server);
+    for (HttpMiddlewareNode* n = server->middleware_chain; n && n != proxy; n = n->next) {
+        if (!n->middleware(req, res, n->user_data)) return 0;
+    }
+    return 1;
+}
+
+/* Whether a gateway runs on the loop at all is otherwise invisible: the
+ * responses are the same either way, by design (#3214). */
+int http_server_evloop_connections(HttpServer* server) {
+    return server ? http_evloop_taken((HttpEvLoop*)server->evloop) : 0;
+}
 
 /* SSE route node (#260 Tier 2). */
 struct HttpSseRoute {
@@ -4105,12 +4205,20 @@ static int ws_send_handshake(HttpConn* conn, const char* client_key) {
 }
 
 static void server_add_request_hook(HttpServer* server, HttpRequestHook hook,
-                                    void* user_data, void (*release)(void*)) {
+                                    void* user_data, void (*release)(void*),
+                                    int loop_safe) {
     struct HttpRequestHookNode* node =
         (struct HttpRequestHookNode*)malloc(sizeof(*node));
+    if (!node) {
+        /* Not installed: what it would have owned goes now, as a middleware's
+         * does. The node used to be written through unchecked. */
+        if (release && user_data) release(user_data);
+        return;
+    }
     node->hook = hook;
     node->user_data = user_data;
     node->release = release;
+    node->loop_safe = loop_safe;
     node->next = NULL;
     if (!server->request_hook_chain) {
         server->request_hook_chain = node;
@@ -4125,7 +4233,15 @@ void http_server_use_request_hook(HttpServer* server,
                                   HttpRequestHook hook,
                                   void* user_data) {
     if (!server || !hook) return;
-    server_add_request_hook(server, hook, user_data, NULL);
+    server_add_request_hook(server, hook, user_data, NULL, 0);
+}
+
+/* A hook that says it never blocks (#3214): the proxy event loop runs it. */
+void http_server_use_request_hook_loop_safe(HttpServer* server,
+                                            HttpRequestHook hook,
+                                            void* user_data) {
+    if (!server || !hook) return;
+    server_add_request_hook(server, hook, user_data, NULL, 1);
 }
 
 void http_server_use_response_transformer(HttpServer* server,
@@ -4297,6 +4413,10 @@ static HttpRoute* http_resolve_route(HttpServer* server, HttpRequest* req) {
     return head_to_get;
 }
 
+static int response_settle_keep_alive(HttpServer* server, HttpRequest* req,
+                                      HttpServerResponse* res, int requests_served,
+                                      int max_requests, int holds_worker);
+
 /* Per-request slice of the connection lifecycle. Returns:
  *    1 — request was processed; caller may loop for another request
  *        on the same connection (subject to keep-alive policy).
@@ -4315,6 +4435,30 @@ static HttpRoute* http_resolve_route(HttpServer* server, HttpRequest* req) {
 static int finish_response(HttpServer* server, HttpConn* conn,
                            HttpRequest* req, HttpServerResponse* res,
                            int requests_served, int max_requests) {
+    int will_keep_alive = response_settle_keep_alive(server, req, res, requests_served,
+                                                     max_requests, 1);
+
+    /* Issue #383 zero-copy: dispatched via the helper so the same
+     * behaviour applies whether we got here from the route handler
+     * or from a middleware short-circuit (the chain at line ~2270
+     * also calls this helper). */
+    int force_close = send_response_with_optional_sendfile(conn, res, req);
+    if (force_close) will_keep_alive = 0;
+
+    // Cleanup
+    http_request_free(req);
+    http_server_response_free(res);
+    return will_keep_alive;
+}
+
+/* Whether the connection carries another request after `res`, stated in
+ * its headers: a definite length and the Connection header, and Keep-Alive
+ * when the server caps requests per connection. finish_response's decision,
+ * and the proxy event loop's for a response a middleware answered (#3214),
+ * where `holds_worker` is 0: a connection on the loop costs no worker. */
+static int response_settle_keep_alive(HttpServer* server, HttpRequest* req,
+                                      HttpServerResponse* res, int requests_served,
+                                      int max_requests, int holds_worker) {
     /* Decide whether this response keeps the connection open.
      * Three things can force close:
      *   - keep-alive disabled on the server,
@@ -4341,7 +4485,7 @@ static int finish_response(HttpServer* server, HttpConn* conn,
      * for no one's benefit (#1663). Keeping this rule on made the server
      * close 284 of 300 idle keep-alive connections, which is the behaviour
      * parking exists to remove. */
-    if (will_keep_alive && !server->park_lot && http_pool_pending() > 0) {
+    if (will_keep_alive && holds_worker && !server->park_lot && http_pool_pending() > 0) {
         will_keep_alive = 0;
     }
 
@@ -4382,17 +4526,6 @@ static int finish_response(HttpServer* server, HttpConn* conn,
     } else {
         http_response_set_header(res, "Connection", "close");
     }
-
-    /* Issue #383 zero-copy: dispatched via the helper so the same
-     * behaviour applies whether we got here from the route handler
-     * or from a middleware short-circuit (the chain at line ~2270
-     * also calls this helper). */
-    int force_close = send_response_with_optional_sendfile(conn, res, req);
-    if (force_close) will_keep_alive = 0;
-
-    // Cleanup
-    http_request_free(req);
-    http_server_response_free(res);
     return will_keep_alive;
 }
 
@@ -4504,26 +4637,32 @@ static void conn_resolve_addrs(HttpConn* c) {
     fd_end_text(c->fd, 0, c->local_addr, sizeof(c->local_addr), &c->local_port);
 }
 
-/* The peer and the local address of the plain-HTTP connection on `fd`,
- * copied into `req` as http_request_copy_conn_meta does for an HttpConn.
+/* The peer and the local address of the connection on `fd`, resolved once
+ * for the connection as conn_resolve_addrs does for an HttpConn (#1719).
  * The proxy event loop (aether_http_evloop.c) serves its connections
  * without an HttpConn, and its requests read "" for both: the proxy's
- * X-Forwarded-For named the hop "unknown" on Linux (#3169). The strings are
- * the request's, freed by http_request_free; a parse does not reset them,
- * so a connection's request takes them once. */
-void http_request_copy_fd_meta(HttpRequest* req, int fd) {
-    if (!req) return;
-    char text[INET6_ADDRSTRLEN];
-    int port = 0;
-    fd_end_text(fd, 1, text, sizeof(text), &port);
+ * X-Forwarded-For named the hop "unknown" on Linux (#3169). `is_tls` is the
+ * connection's: the loop terminates TLS too, and its requests said plain
+ * HTTP to every middleware that asked (#3214). */
+void http_conn_meta_from_fd(HttpConnMeta* meta, int fd, int is_tls) {
+    if (!meta) return;
+    fd_end_text(fd, 1, meta->remote_addr, sizeof(meta->remote_addr), &meta->remote_port);
+    fd_end_text(fd, 0, meta->local_addr, sizeof(meta->local_addr), &meta->local_port);
+    meta->is_tls = is_tls ? 1 : 0;
+}
+
+/* `meta` copied into `req`, replacing what it held, as
+ * http_request_copy_conn_meta does for an HttpConn. The strings are the
+ * request's, freed by http_request_free; a parse does not reset them. */
+void http_request_set_conn_meta(HttpRequest* req, const HttpConnMeta* meta) {
+    if (!req || !meta) return;
     free(req->remote_addr);
-    req->remote_addr = text[0] ? strdup(text) : NULL;
-    req->remote_port = text[0] ? port : 0;
-    fd_end_text(fd, 0, text, sizeof(text), &port);
+    req->remote_addr = meta->remote_addr[0] ? strdup(meta->remote_addr) : NULL;
+    req->remote_port = meta->remote_addr[0] ? meta->remote_port : 0;
     free(req->local_addr);
-    req->local_addr = text[0] ? strdup(text) : NULL;
-    req->local_port = text[0] ? port : 0;
-    req->is_tls = 0;
+    req->local_addr = meta->local_addr[0] ? strdup(meta->local_addr) : NULL;
+    req->local_port = meta->local_addr[0] ? meta->local_port : 0;
+    req->is_tls = meta->is_tls;
 }
 
 /* Connection-level metadata that handlers learn from the kernel rather
@@ -4713,6 +4852,46 @@ static void run_request_hooks(HttpServer* server, HttpRequest* req,
         h->hook(req, res, duration_us, h->user_data);
 }
 
+/* The same hooks on the clock they measure with, for the proxy event loop,
+ * which runs them on the responses it sends (#3214). */
+int64_t http_server_clock_us(void) {
+    return http_now_us();
+}
+
+void http_server_run_request_hooks(HttpServer* server, HttpRequest* req,
+                                   HttpServerResponse* res, int64_t t_start_us) {
+    if (server && req && res) run_request_hooks(server, req, res, t_start_us);
+}
+
+/* A middleware's answer on the proxy event loop (#3214), made into the bytes
+ * the worker path would send for it, by the same steps in the same order:
+ * the hooks (dispatch_request's short-circuit), then finish_response's
+ * keep-alive decision and headers, then the send short of sendfile, which
+ * the loop never waits on: a staged file is dropped for HEAD and otherwise
+ * read into the body, as send_response_with_optional_sendfile does for a
+ * connection that cannot take it. */
+int http_server_answer_bytes(HttpServer* server, HttpRequest* req,
+                             HttpServerResponse* res, int64_t t_start_us,
+                             int requests_served, char** buf, size_t* cap,
+                             size_t* out_len) {
+    if (!server || !req || !res || !buf || !cap || !out_len) return -1;
+    run_request_hooks(server, req, res, t_start_us);
+    int keep = response_settle_keep_alive(server, req, res, requests_served,
+                                          server->keep_alive_max, 0);
+    if (res->sendfile_fd >= 0 && req->method && strcmp(req->method, "HEAD") == 0) {
+        close(res->sendfile_fd);
+        res->sendfile_fd = -1;
+    }
+    response_load_staged_file(res);
+    if (!response_serialize_wire(req, res, buf, cap, out_len)) return -1;
+    return keep;
+}
+
+static int dispatch_request(HttpServer* server, HttpConn* conn,
+                            HttpRequest* req, HttpServerResponse* res,
+                            HttpMiddlewareNode* from, int64_t t_start,
+                            int requests_served, int max_requests);
+
 static int handle_one_request(HttpServer* server, HttpConn* conn,
                               int requests_served, int max_requests) {
     int64_t t_start = http_now_us();
@@ -4724,6 +4903,19 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
     }
     /* Reclaim space at the head if the previous request consumed it. */
     conn_buf_compact(conn);
+
+    /* A request the proxy event loop already took through the middleware
+     * ahead of its proxy mount (http_server_adopt_request, #3214): it goes
+     * on from the mount, read and parsed as it is. */
+    if (conn->pending_req) {
+        HttpRequest* req = conn->pending_req;
+        HttpServerResponse* res = conn->pending_res;
+        conn->pending_req = NULL;
+        conn->pending_res = NULL;
+        res->takeover_conn = conn;
+        return dispatch_request(server, conn, req, res, conn->pending_from,
+                                conn->pending_t_start, requests_served, max_requests);
+    }
 
 #ifdef AETHER_HAS_NGHTTP2
     /* Prior-knowledge h2 detection (RFC 7540 §3.5). When the server
@@ -5017,8 +5209,24 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
     HttpServerResponse* res = http_response_create();
     res->takeover_conn = conn;
 
+    return dispatch_request(server, conn, req, res, server->middleware_chain,
+                            t_start, requests_served, max_requests);
+}
+
+/* `req` through the server from middleware `from` on: the rest of the
+ * chain, the upgrades, the route handler, the transformers and the hooks,
+ * and the response sent. Owns `req` and `res`; returns as
+ * handle_one_request does. handle_one_request starts at the chain's head. A
+ * request the proxy event loop took through the middleware ahead of its
+ * proxy mount, which the mount then passed on, starts after the mount
+ * (http_server_adopt_request, #3214): what ran on the loop is not run
+ * again, so a rate limiter does not count it twice. */
+static int dispatch_request(HttpServer* server, HttpConn* conn,
+                            HttpRequest* req, HttpServerResponse* res,
+                            HttpMiddlewareNode* from, int64_t t_start,
+                            int requests_served, int max_requests) {
     // Execute middleware chain
-    HttpMiddlewareNode* middleware = server->middleware_chain;
+    HttpMiddlewareNode* middleware = from;
     int should_continue = 1;
 
     while (middleware && should_continue) {
@@ -5728,19 +5936,53 @@ int http_server_adopt_connection(HttpServer* server, int client_fd,
                                             prebuffered, prebuffered_len);
 }
 
+static HttpConn* adopt_conn_new(int client_fd, void* ssl,
+                                const char* prebuffered, int prebuffered_len);
+
 int http_server_adopt_tls_connection(HttpServer* server, int client_fd, void* ssl,
                                      const char* prebuffered, int prebuffered_len) {
     if (!server || client_fd < 0) return -1;
-
-    HttpConn* conn = (HttpConn*)calloc(1, sizeof(HttpConn));
+    HttpConn* conn = adopt_conn_new(client_fd, ssl, prebuffered, prebuffered_len);
     if (!conn) return -1;
+    conn_serve(server, conn);
+    return 0;
+}
+
+/* The proxy event loop ran the middleware ahead of the first proxy mount on
+ * this request, and the mount did not take it (#3214). Running the chain
+ * again from the bytes would count the request twice in a rate limiter and
+ * undo nothing a middleware did to it; the worker path goes on from the
+ * middleware after the mount instead, with the request as it stands. */
+int http_server_adopt_request(HttpServer* server, int client_fd, void* ssl,
+                              HttpRequest* req, HttpServerResponse* res,
+                              int64_t t_start_us, int requests_served,
+                              const char* prebuffered, int prebuffered_len) {
+    if (!server || client_fd < 0 || !req || !res) return -1;
+    HttpMiddlewareNode* proxy = server_proxy_node(server);
+    HttpConn* conn = adopt_conn_new(client_fd, ssl, prebuffered, prebuffered_len);
+    if (!conn) return -1;
+    conn->requests_served = requests_served;
+    conn->pending_req = req;
+    conn->pending_res = res;
+    conn->pending_from = proxy ? proxy->next : NULL;
+    conn->pending_t_start = t_start_us;
+    conn_serve(server, conn);
+    return 0;
+}
+
+/* A connection given to the worker path by the proxy event loop, with the
+ * bytes the loop read past what it served. */
+static HttpConn* adopt_conn_new(int client_fd, void* ssl,
+                                const char* prebuffered, int prebuffered_len) {
+    HttpConn* conn = (HttpConn*)calloc(1, sizeof(HttpConn));
+    if (!conn) return NULL;
     conn->fd = client_fd;
     conn->applied_recv_timeout_ms = -1;
 
     if (prebuffered && prebuffered_len > 0) {
         if (conn_buf_ensure(conn, prebuffered_len + 1) != 0) {
             free(conn);
-            return -1;
+            return NULL;
         }
         memcpy(conn->buf, prebuffered, (size_t)prebuffered_len);
         conn->write_pos = prebuffered_len;
@@ -5762,9 +6004,7 @@ int http_server_adopt_tls_connection(HttpServer* server, int client_fd, void* ss
 #else
     (void)ssl;
 #endif
-
-    conn_serve(server, conn);
-    return 0;
+    return conn;
 }
 
 void http_server_drain_connection(HttpServer* server, int client_fd) {
@@ -5778,8 +6018,8 @@ void http_server_drain_connection(HttpServer* server, int client_fd) {
      *
      * A refusal costs nothing, because the connection has not been touched
      * yet and the worker path is still right below. */
-    /* A server changed since the loop started may have middleware ahead of
-     * the proxy now, or a hook, which the loop would skip. */
+    /* A server changed since the loop started may have a middleware ahead
+     * of the proxy now, or a hook, that is not loop-safe (#3214). */
     if (server->evloop && !server->h2_enabled && http_server_evloop_serves(server)) {
         if (http_evloop_submit((HttpEvLoop*)server->evloop, client_fd) == 0) return;
     }

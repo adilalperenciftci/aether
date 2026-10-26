@@ -16,6 +16,12 @@
  *
  * It handles plain HTTP proxying. TLS, HTTP/2, upgrades and streaming bodies
  * stay on the worker path, which is why this is a driver and not a rewrite.
+ *
+ * What runs around the proxy runs here too when its registration says it
+ * never blocks (#3214): the middleware ahead of the first proxy mount, one of
+ * which may answer instead of the proxy, and the request hooks on each
+ * response sent. A server with any other ahead of the mount, or any other
+ * hook, is not served here (http_server_evloop_serves).
  */
 
 typedef struct HttpEvLoop HttpEvLoop;
@@ -31,6 +37,10 @@ int http_evloop_submit(HttpEvLoop* loop, int client_fd);
 
 /* How many connections the drivers are holding, for tests and reporting. */
 int http_evloop_active(HttpEvLoop* loop);
+
+/* How many connections the drivers have taken since the loop started, for
+ * tests and reporting (#3214). */
+int http_evloop_taken(HttpEvLoop* loop);
 
 void http_evloop_stop(HttpEvLoop* loop);
 

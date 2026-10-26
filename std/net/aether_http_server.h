@@ -149,6 +149,11 @@ typedef struct HttpMiddlewareNode {
      * registered with http_server_use_middleware_owned owns its user data
      * and gives it back with the server (#3171). */
     void (*release)(void*);
+    /* 1 when the registration said the middleware never blocks, so the
+     * proxy event loop may run it (http_server_use_middleware_loop_safe,
+     * #3214). A program's middleware may block (a database call in an auth
+     * verifier) and is not loop-safe unless it says so. */
+    int loop_safe;
 } HttpMiddlewareNode;
 
 // Forward declare these so the HttpServer struct can hold them as
@@ -504,6 +509,17 @@ void http_server_use_middleware(HttpServer* server, HttpMiddleware middleware, v
  * the plain way leaves its user data to whoever made it. */
 void http_server_use_middleware_owned(HttpServer* server, HttpMiddleware middleware,
                                       void* user_data, void (*release)(void*));
+/* As http_server_use_middleware_owned (`release` may be NULL), for a
+ * middleware that never blocks: CPU work, a short mutex, nothing that waits
+ * on I/O or on another thread. On Linux and macOS a server whose middleware
+ * ahead of its first proxy mount are all loop-safe, and whose request hooks
+ * are, keeps serving its plain-HTTP connections from the proxy event loop,
+ * which runs them itself (#3214); one that is not sends every connection to
+ * a worker thread of its own. A loop-safe middleware that blocks stalls
+ * every connection its loop thread holds. std's use_real_ip,
+ * use_rate_limit, use_cors, use_vhost and use_rewrite register this way. */
+void http_server_use_middleware_loop_safe(HttpServer* server, HttpMiddleware middleware,
+                                          void* user_data, void (*release)(void*));
 
 // Response-transformer chain (#260 Tier 1). Registered transformers
 // run AFTER the route handler emits a response and BEFORE the
@@ -541,9 +557,19 @@ void http_request_free(HttpRequest* req);
 // Copy a connection's peer and local address and its TLS state into a
 // request it carries; every request, HTTP/1.1 or h2, gets them (#3175).
 void http_request_copy_conn_meta(HttpRequest* req, struct HttpConn* conn);
-// The same for a plain-HTTP connection held by its fd alone: the proxy
-// event loop's, which has no HttpConn (#3169).
-void http_request_copy_fd_meta(HttpRequest* req, int fd);
+// The same for a connection held by its fd alone: the proxy event loop's,
+// which has no HttpConn (#3169). Resolved once per connection, as an
+// HttpConn caches them (#1719), and copied into each request the loop
+// builds on it (#3214). The text fields are "" when a lookup failed.
+typedef struct {
+    char remote_addr[64];   /* room for INET6_ADDRSTRLEN */
+    char local_addr[64];
+    int  remote_port;
+    int  local_port;
+    int  is_tls;
+} HttpConnMeta;
+void http_conn_meta_from_fd(HttpConnMeta* meta, int fd, int is_tls);
+void http_request_set_conn_meta(HttpRequest* req, const HttpConnMeta* meta);
 
 // Response building
 HttpServerResponse* http_response_create(void);
@@ -821,9 +847,18 @@ int http_chunked_end(HttpChunkedStream* stream);
 // route handler emits the response and after any response
 // transformers have run. Used by the built-in access logger and
 // metrics collector below; user code can register custom hooks too.
+// A hook registered this way is not loop-safe (see below).
 void http_server_use_request_hook(HttpServer* server,
                                   HttpRequestHook hook,
                                   void* user_data);
+// The same, for a hook that never blocks (#3214), as
+// http_server_use_middleware_loop_safe says of a middleware: the proxy event
+// loop runs it on the responses it sends. The access logger (one line
+// appended to a file, as nginx writes its access log from its event loop)
+// and the metrics collector register this way.
+void http_server_use_request_hook_loop_safe(HttpServer* server,
+                                            HttpRequestHook hook,
+                                            void* user_data);
 
 // Built-in access logger (#260 Tier 3 / F1). Writes one log line
 // per completed request. `format` selects the wire format:
@@ -971,10 +1006,54 @@ void http_format_clf_time(char* out, size_t out_size, const struct tm* tmv);
 /* The reverse proxy's options when one is mounted on this server, else NULL.
  * The event driver runs the proxy exchange itself and needs them. */
 void* http_server_proxy_opts(HttpServer* server);
-// 1 when the proxy event loop may serve the connection alone: the reverse
-// proxy is the chain's first middleware, and no request hook (the access
-// log, metrics) is registered, either of which the loop would skip.
+// 1 when the proxy event loop may serve the connection: a reverse proxy is
+// mounted, and every middleware ahead of the first mount and every request
+// hook is loop-safe (#3214), so the loop can run them itself. Anything else
+// could block the loop, and the connection gets a worker (#3203, #3213).
 int http_server_evloop_serves(HttpServer* server);
+
+// What the proxy event loop runs of the worker path, here so the two paths
+// share it and cannot disagree about what a request gets (#3214).
+//
+// 1 when a middleware is registered ahead of the first proxy mount.
+int http_server_has_before_proxy(HttpServer* server);
+// Run the middleware ahead of the first proxy mount on `req`, in order, as
+// handle_one_request runs the chain. 1: each continued, the proxy is next.
+// 0: one answered, into `res`.
+int http_server_run_before_proxy(HttpServer* server, HttpRequest* req,
+                                 HttpServerResponse* res);
+// The clock the request hooks' durations are measured on, in microseconds,
+// and the hooks on a response about to be sent, whose request began at
+// `t_start_us`.
+int64_t http_server_clock_us(void);
+void http_server_run_request_hooks(HttpServer* server, HttpRequest* req,
+                                   HttpServerResponse* res, int64_t t_start_us);
+// A middleware's answer, made into the bytes the worker path would send for
+// it (finish_response): the hooks observe it, the keep-alive decision is
+// made and stated in its headers, a staged file is read into the body and a
+// HEAD response carries no body. The bytes go into *buf, grown as needed.
+// `requests_served` counts the responses already sent on the connection.
+// Returns 1 when the connection carries another request after it, 0 when it
+// is to be closed, -1 when the bytes could not be built.
+int http_server_answer_bytes(HttpServer* server, HttpRequest* req,
+                             HttpServerResponse* res, int64_t t_start_us,
+                             int requests_served, char** buf, size_t* cap,
+                             size_t* out_len);
+// Take a connection whose current request has been through the middleware
+// ahead of the first proxy mount, which then did not take it (another path,
+// another method): the worker path goes on from the middleware after that
+// mount, as if the chain had never stopped, then serves the connection's
+// next requests. The server takes `req` and `res` when this returns 0 and
+// leaves them with the caller otherwise; `prebuffered` is what was read past
+// the request. `ssl` as for http_server_adopt_tls_connection.
+int http_server_adopt_request(HttpServer* server, int client_fd, void* ssl,
+                              HttpRequest* req, HttpServerResponse* res,
+                              int64_t t_start_us, int requests_served,
+                              const char* prebuffered, int prebuffered_len);
+// The connections the proxy event loop has taken since the server started:
+// 0 when it runs none (Windows, wasi, or a server it does not serve). For
+// tests and diagnostics: whether a gateway is on the loop at all (#3214).
+int http_server_evloop_connections(HttpServer* server);
 
 
 /* Take a connection the event driver does not own, with the bytes it has

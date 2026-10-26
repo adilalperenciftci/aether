@@ -99,12 +99,9 @@ hooks (the access log, metrics) see every response, a proxied one and one
 a middleware refused included. Response transformers (`use_gzip`,
 `use_error_pages`) are the route handler's: a proxied response passes on
 as the upstream sent it, as with nginx's `gzip_proxied off`. On Linux and
-macOS a server whose proxied requests get the proxy exchange and nothing
-else (the proxy is its first middleware, and it has no request hook)
-serves its plain-HTTP connections from an event loop, without a thread
-per connection. Anything more keeps the ordinary per-connection path, so
-nothing is skipped (#3203, #3213). Running that work on the event loop
-too is tracked in #3214.
+macOS the event driver runs all of that itself when each piece is
+registered as never blocking; see
+[Middleware and hooks on the driver](#middleware-and-hooks-on-the-driver).
 
 ```aether,fragment
 proxy.mount_match(server, "/repos/:repo/info", primary_pool, primary_opts, "GET,HEAD")
@@ -362,7 +359,69 @@ path, and need no configuration to do so:
 A request the proxy does not own, a health endpoint, an admin route, or
 anything another middleware answers, is handed to the general server path
 along with whatever has already been read from the socket. Routing, middleware
-and handlers behave exactly as they do without the driver.
+and handlers behave exactly as they do without the driver: a request the
+middleware before the first mount already ran on goes on from the middleware
+after the mount, so none of it runs twice and a rate limiter counts it once.
+
+### Middleware and hooks on the driver
+
+The driver runs everything a proxied request gets on the per-connection
+path (#3214): the middleware registered before the first proxy mount, in
+order, one of which may answer instead of the proxy (a 429 from the rate
+limiter, a CORS preflight, an unknown host), then the proxy exchange, then
+the request hooks on each response it sends. A middleware's answer leaves
+the connection kept alive or closed as the per-connection path would.
+
+Whatever the driver runs holds up every connection on its thread while it
+runs, so it runs only what was registered as never blocking: loop-safe.
+std's own `use_real_ip`, `use_rate_limit`, `use_cors`, `use_vhost` and
+`use_rewrite` are, and so are the access log (a line appended to a file,
+as nginx writes its access log from its event loop) and the metrics.
+`use_basic_auth`, `use_bearer_auth` and `use_session_auth` call your
+verifier, which may wait on a database, and `use_static_files` reads files:
+they are not. A middleware your program registers with
+`http.server_use_middleware` is not either, because it may block. One that
+does not (CPU work, a short mutex) says so by registering with
+`http.server_use_middleware_loop_safe`:
+
+```aether
+import std.http
+import std.http.proxy
+
+// Refuses a request that names no tenant. CPU work only: loop-safe.
+@c_callback tenant_header(req: ptr, res: ptr, ud: ptr) -> int {
+    if http.get_header(req, "X-Tenant") == null {
+        http.response_set_status(res, 400)
+        http.response_set_body(res, "X-Tenant is required")
+        return 0
+    }
+    return 1
+}
+
+main() {
+    server = http.server_create(8080)
+    http.server_set_host(server, "127.0.0.1")
+    // The last argument would free the user data with the server.
+    http.server_use_middleware_loop_safe(server, tenant_header, null, null)
+    err = proxy.mount_simple(server, "/", "http://127.0.0.1:9000", 30)
+    if err != "" {
+        println("proxy: ${err}")
+        return
+    }
+    http.server_start(server)
+}
+```
+
+A server with a middleware before the first mount, or a request hook, that
+is not loop-safe keeps the per-connection path for every connection, where
+everything runs as it always has. The responses are the same on either
+path; what changes is how many threads it takes to serve them. A loop-safe
+middleware that blocks after all stalls every connection on its thread.
+When a gateway uses the request hooks, or a middleware before the mount,
+the driver answers from a response object (the hooks observe it, and a
+middleware may have put headers on it), where a bare proxy answers straight
+from the upstream's bytes. Windows has no event loop, and always uses the
+per-connection path.
 
 The upstream timeout (`proxy.pool_set_request_timeout`) applies as it always
 has. The driver keeps the deadline itself rather than taking it from the

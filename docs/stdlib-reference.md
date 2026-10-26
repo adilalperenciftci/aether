@@ -38,7 +38,7 @@ header comment is the authoritative description.
 | `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 150 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
 | `std.hash` | Fast non-cryptographic hashes and checksums: FNV, MurmurHash3, SipHash, CRC-32. | 6 | [guide](../std/hash/README.md) · [source](../std/hash/module.ae) |
 | `std.host` | Primitives for Aether scripts embedded in a host application. | 14 | [guide](../std/host/README.md) · [source](../std/host/module.ae) |
-| `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 143 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
+| `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 144 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
 | `std.http1` | Pure-Aether HTTP/1.1 response reader (RFC 9112). | 14 | [guide](../std/http1/README.md) · [source](../std/http1/module.ae) |
 | `std.intarr` | Fixed-size packed-int buffer. | 15 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
 | `std.intmap` | Hash map from `long` keys to `long` values, for integer-keyed counting and lookup. | 12 | [guide](../std/intmap/README.md) · [source](../std/intmap/module.ae) |
@@ -2229,6 +2229,7 @@ Raw externs: `http_server_bind_raw`, `http_server_start_raw`, and `http_server_e
 - `http.server_put(server, path, handler, user_data)` - Register PUT route
 - `http.server_delete(server, path, handler, user_data)` - Register DELETE route
 - `http.server_use_middleware(server, middleware, user_data)` - Add middleware
+- `http.server_use_middleware_loop_safe(server, middleware, user_data, release)` - Add a middleware that never blocks (CPU work, a short mutex), so the proxy event loop may run it (#3214): on Linux and macOS a server with a `std.http.proxy` mount stays on the loop only when every middleware before the first mount and every request hook is loop-safe. `release` frees `user_data` with the server, or `null` keeps it the program's. A middleware added with `server_use_middleware` is not loop-safe.
 
 **Server Configuration:**
 - `http.server_set_tls(server, cert_path, key_path)` → `string` - Enable HTTPS with PEM cert + key.
@@ -2238,8 +2239,8 @@ Raw externs: `http_server_bind_raw`, `http_server_start_raw`, and `http_server_e
 - `http.server_set_h2_concurrent_dispatch(server, worker_count)` → `string` - Routes h2 stream handlers onto the shared `std.worker` thread pool, sized to `worker_count`. `worker_count > 0` lets streams across all h2 connections execute their handlers in parallel; `worker_count == 0` (default) keeps dispatch sequential on each connection thread. POSIX-only; on Windows the call is a silent no-op. See `docs/http-server.md` for the architecture rationale (pool threads vs actors, one shared pool vs per-connection).
 - `http.server_shutdown_graceful(server, timeout)` → `string` - Stop accepting new connections, drain in-flight requests for up to a `Duration`, exit. h2 sessions emit a `GOAWAY` frame so peers know not to start new streams while existing ones complete.
 - `http.server_set_health_probes(server, live_path, ready_path, ready_check, ud)` → `string` - Built-in `/healthz` (always 200) + `/readyz` (200 only when the readiness check returns 1).
-- `http.server_set_access_log(server, format, output_path)` → `string` - Built-in access logger. `format` is `"combined"` or `"json"`; `output_path` is a file path, `"-"` for stderr, or `""` to disable.
-- `http.server_set_metrics(server, endpoint)` → `string` - Prometheus-compatible counters/histograms at the configured endpoint (default `"/metrics"`).
+- `http.server_set_access_log(server, format, output_path)` → `string` - Built-in access logger. `format` is `"combined"` or `"json"`; `output_path` is a file path, `"-"` for stderr, or `""` to disable. Loop-safe (#3214).
+- `http.server_set_metrics(server, endpoint)` → `string` - Prometheus-compatible counters/histograms at the configured endpoint (default `"/metrics"`). Loop-safe (#3214).
 
 **Request Accessors:**
 - `http.request_method(req)` → `string` - HTTP method (`GET`, `POST`, `PUT`, …); empty if `req` is null.
@@ -2307,6 +2308,8 @@ main() {
 - `middleware.use_static_files(server, url_prefix, root)` → `string` - Mount a directory under a URL prefix; `..` traversal blocked.
 - `middleware.rewrite_new()` → `ptr` - The opts `use_rewrite` takes; null when allocation fails.
 - `middleware.use_rewrite(server, opts)` → `string` - Prefix-rewrite rules; build via `middleware.rewrite_add_rule(opts, from, to)`.
+
+`use_real_ip`, `use_rate_limit`, `use_cors`, `use_vhost` and `use_rewrite` are loop-safe: in front of a `std.http.proxy` mount, on Linux and macOS, the proxy's event loop runs them itself (#3214). The auth middleware call the program's verifier and `use_static_files` reads files, so they are not: one of them before the mount gives each connection a worker thread instead. The responses are the same either way. See [http-reverse-proxy.md](http-reverse-proxy.md#middleware-and-hooks-on-the-driver).
 
 **Response transformers (run after the route handler emits the response, not on one a middleware answered: a proxied response, a 401, a 429):**
 - `middleware.use_gzip(server, min_size, level)` → `string` - Gzip the response body when the client sends `Accept-Encoding: gzip` and the body is at least `min_size` bytes; level 1 (fastest) to 9 (best), 0 = default 6.
