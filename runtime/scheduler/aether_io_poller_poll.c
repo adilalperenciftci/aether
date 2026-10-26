@@ -62,6 +62,14 @@ typedef ULONG nfds_t;
 typedef struct {
     struct pollfd* fds;     // pollfd array
     unsigned*      ids;     // registration number of each entry
+    /* 1 for an entry registered with AETHER_IO_EDGE: it stays after it
+     * fires, level-triggered, which is what aether_io_poller.h promises a
+     * backend with no edge mode does. Every other entry is one-shot. The
+     * proxy event loop registers a connection once for its whole life, and
+     * with the entry removed after its first event it stopped hearing the
+     * client: the third request on a kept-alive connection was never read
+     * (#3214, found running the loop on this backend under Cygwin). */
+    unsigned char* persist;
     int count;              // Number of active entries
     int capacity;           // Allocated size
     unsigned next_id;
@@ -188,9 +196,11 @@ int aether_io_poller_init(AetherIoPoller* poller) {
     pb->capacity = 64; // Start small, grow as needed
     pb->fds = calloc(pb->capacity, sizeof(struct pollfd));
     pb->ids = calloc(pb->capacity, sizeof(unsigned));
-    if (!pb->fds || !pb->ids) {
+    pb->persist = calloc(pb->capacity, sizeof(unsigned char));
+    if (!pb->fds || !pb->ids || !pb->persist) {
         free(pb->fds);
         free(pb->ids);
+        free(pb->persist);
         free(pb);
         return -1;
     }
@@ -221,6 +231,7 @@ int aether_io_poller_add(AetherIoPoller* poller, int fd, void* actor, uint32_t e
     for (int i = 0; i < pb->count; i++) {
         if (pb->fds[i].fd == AETHER_POLL_FD(fd)) {
             pb->fds[i].events = want;
+            pb->persist[i] = (events & AETHER_IO_EDGE) ? 1 : 0;
 #if AETHER_POLL_SHARED
             wake_signal(pb);
 #endif
@@ -240,6 +251,9 @@ int aether_io_poller_add(AetherIoPoller* poller, int fd, void* actor, uint32_t e
         unsigned* new_ids = realloc(pb->ids, new_cap * sizeof(unsigned));
         if (!new_ids) { POLL_UNLOCK(pb); return -1; }
         pb->ids = new_ids;
+        unsigned char* new_persist = realloc(pb->persist, (size_t)new_cap);
+        if (!new_persist) { POLL_UNLOCK(pb); return -1; }
+        pb->persist = new_persist;
         pb->capacity = new_cap;
     }
 
@@ -248,6 +262,7 @@ int aether_io_poller_add(AetherIoPoller* poller, int fd, void* actor, uint32_t e
     pfd->events = want;
     pfd->revents = 0;
     pb->ids[pb->count] = ++pb->next_id;
+    pb->persist[pb->count] = (events & AETHER_IO_EDGE) ? 1 : 0;
     pb->count++;
 #if AETHER_POLL_SHARED
     wake_signal(pb);
@@ -264,6 +279,7 @@ int aether_io_poller_edge_capable(void) {
 static void remove_at(PollBackend* pb, int i) {
     pb->fds[i] = pb->fds[pb->count - 1];
     pb->ids[i] = pb->ids[pb->count - 1];
+    pb->persist[i] = pb->persist[pb->count - 1];
     pb->count--;
 }
 
@@ -359,8 +375,9 @@ static int poll_once(PollBackend* pb, AetherIoEvent* out, int max_events,
             if (rev & (POLLERR | POLLHUP))   out[count].events |= AETHER_IO_ERROR;
             count++;
 
-            // Emulate one-shot: remove fired fd (same as EPOLLONESHOT)
-            remove_at(pb, at);
+            // Emulate one-shot: remove fired fd (same as EPOLLONESHOT),
+            // unless it was registered to stay.
+            if (!pb->persist[at]) remove_at(pb, at);
         }
     }
     POLL_UNLOCK(pb);
@@ -406,7 +423,9 @@ int aether_io_poller_poll(AetherIoPoller* poller, AetherIoEvent* out, int max_ev
         if (pb->fds[i].revents & (POLLERR | POLLHUP))   out[count].events |= AETHER_IO_ERROR;
         count++;
 
-        // Emulate one-shot: remove fired fd (same as EPOLLONESHOT)
+        // Emulate one-shot: remove fired fd (same as EPOLLONESHOT),
+        // unless it was registered to stay.
+        if (pb->persist[i]) continue;
         remove_at(pb, i);
         i--; // Re-check swapped entry
     }
@@ -425,6 +444,7 @@ void aether_io_poller_destroy(AetherIoPoller* poller) {
 #endif
         free(pb->fds);
         free(pb->ids);
+        free(pb->persist);
         free(pb);
         poller->backend_data = NULL;
     }
