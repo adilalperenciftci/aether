@@ -72,7 +72,9 @@ is_excluded() {
 # the caller hangs anyway. We fork the command into its OWN process group
 # and, on timeout, `kill -KILL` the whole group (-pid), taking `leaks`
 # AND `prog` down together. perl ships on every macOS runner. Exit code
-# 124 == timed out.
+# 124 == timed out. With BOUNDED_DIAG set, the command it names runs first,
+# with the group's id as its last argument, while the group still runs: a
+# hang is looked at before it is killed (#3202).
 run_bounded() {
     _secs="$1"; shift
     perl -e '
@@ -82,7 +84,11 @@ run_bounded() {
         if (!defined $pid) { exit 127; }
         if ($pid == 0) { POSIX::setpgid(0, 0); exec(@ARGV); exit 127; }
         my $timed_out = 0;
-        local $SIG{ALRM} = sub { $timed_out = 1; kill("KILL", -$pid); };
+        local $SIG{ALRM} = sub {
+            $timed_out = 1;
+            system("sh", "-c", "$ENV{BOUNDED_DIAG} $pid") if $ENV{BOUNDED_DIAG};
+            kill("KILL", -$pid);
+        };
         alarm($s);
         waitpid($pid, 0);
         my $rc = $?;
@@ -139,23 +145,19 @@ check_one() {
     # after run_bounded kills the process group. A file has no such reader
     # dependency — the shell waits only for run_bounded.
     lk_out="$tmpdir/leaks_$t.out"
-    MallocStackLogging=1 run_bounded "$LEAKS_TIMEOUT" leaks --atExit -- "$bin" >"$lk_out" 2>&1
+    diag_out="$tmpdir/diag_$t.out"
+    MallocStackLogging=1 BOUNDED_DIAG="sh '$0' --diag '$diag_out' '$bin'" \
+        run_bounded "$LEAKS_TIMEOUT" leaks --atExit -- "$bin" >"$lk_out" 2>&1
     lrc=$?
     if [ "$lrc" -eq 124 ]; then
-        # Where it stopped, before it is reaped: the program's output so far
-        # and the stacks of every process still running it (the program and
-        # the children it spawned of itself), so a hang names its cause
-        # rather than only its time (#3202).
+        # Where it stopped: the output so far, and the processes and stacks
+        # --diag took before the kill (#3202), so a hang names its cause
+        # rather than only its time.
         {
             echo "  [FAIL] $t: leaks(1) TIMED OUT (>${LEAKS_TIMEOUT}s) — program did not exit"
             echo "      output so far:"
             tail -20 "$lk_out" | sed 's/^/        /'
-            for pid in $(pgrep -f "$bin" 2>/dev/null); do
-                echo "      stacks of pid $pid: $(ps -o command= -p "$pid" 2>/dev/null)"
-                sample "$pid" 1 2>/dev/null |
-                    sed -n '/^Call graph:/,/^Total number in stack/p' | head -60 |
-                    sed 's/^/        /'
-            done
+            [ -f "$diag_out" ] && head -200 "$diag_out" | sed 's/^/      /'
         } >"$report"
         cat "$report"
         # `leaks` runs the target in its own process group, so the
@@ -188,6 +190,29 @@ check_one() {
     fi
     rm -f "$bin" "$lk_out" "$tmpdir/build_$t.log"
 }
+
+# What a timed-out leaks(1) run was doing, taken by run_bounded before it
+# kills the run: `--diag OUT BIN PGID` writes to OUT every process of the
+# run's group or running BIN (leaks itself, the program, the copies of
+# itself a program spawns), each with a sample(1) of its stacks.
+if [ "${1:-}" = "--diag" ]; then
+    out="$2"; bin="$3"; pgid="$4"
+    unset MallocStackLogging
+    pids="$(ps -A -o pid=,pgid=,command= |
+        awk -v g="$pgid" -v b="$bin" '($2 == g || index($0, b)) && !/--diag/ { print $1 }')"
+    {
+        echo "processes (pid ppid pgid stat elapsed command):"
+        for pid in $pids; do
+            ps -o pid=,ppid=,pgid=,stat=,etime=,command= -p "$pid" 2>/dev/null | sed 's/^/  /'
+        done
+        for pid in $pids; do
+            echo "stacks of $pid:"
+            sample "$pid" 1 2>&1 | sed -n '/^Call graph:/,/^Total number in stack/p' |
+                head -80 | sed 's/^/  /'
+        done
+    } >"$out" 2>&1
+    exit 0
+fi
 
 # A worker: `run_macos_leaks.sh --one TEST TMPDIR`, one per program, run
 # by the fan-out below.

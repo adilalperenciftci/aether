@@ -683,9 +683,10 @@ static void requeue_own(int core, ActorBase* actor, Message msg) {
 // This makes the cost O(drained) instead of O(total), eliminating the
 // multi-MB memmoves that caused phase-2 stalls with large overflow.
 //
-// `own` 0 leaves this core's own buffer as it is: a relief (#3197) runs
-// while a step is under way on this thread and steps nothing, and the
-// own-core path steps what it delivers.
+// `own` 0 is a relief's (#3197): a step is under way on this thread and the
+// relief steps nothing, so this core's own buffer goes through its own
+// queue, as a large one does, never through the path that steps what it
+// delivers.
 static void overflow_flush_ex(int from_core, int own) {
     if (!tls_overflow_any) return;
     int from_idx = (from_core >= 0 && from_core < MAX_CORES) ? from_core : MAX_CORES;
@@ -695,10 +696,6 @@ static void overflow_flush_ex(int from_core, int own) {
     for (int t = 0; t < num_cores; t++) {
         OverflowBuf* b = &tls_overflow[t];
         if (b->count == 0) continue;
-        if (t == from_core && !own) {
-            any = 1;
-            continue;
-        }
 
         // ── OWN-CORE (small overflow): direct mailbox + step() ─────────
         // Bypass the from_queue entirely for low-contention fast path.
@@ -708,7 +705,7 @@ static void overflow_flush_ex(int from_core, int own) {
         // that queue was full, so the queue's are older, and delivered past
         // them it was stepped first (#3093: 511 of a sender's messages
         // overtaken by its next 128).
-        if (t == from_core && from_core >= 0 && b->count <= 4096 &&
+        if (own && t == from_core && from_core >= 0 && b->count <= 4096 &&
             queue_size(&schedulers[from_core].from_queues[from_core]) == 0) {
             int start = b->head;
             int orig_count = b->count;
@@ -1612,6 +1609,19 @@ static void scheduler_drop_dead_message(Scheduler* sched, ActorBase* actor, Mess
     atomic_fetch_add_explicit(&sched->messages_processed, 1, memory_order_relaxed);
 }
 
+// Whether nothing sent from core `core` is still on its way: no core's queue
+// from it holds a message, and this thread (that core's) has no overflow.
+// A core receives through one queue per sending core and drains them in
+// index order, so an actor that left `core` with a message still in one of
+// them could have its next message, sent from its new core, delivered
+// first (#3240). Called on `core`'s own thread.
+static int core_outbound_idle(int core) {
+    if (tls_overflow_any) return 0;
+    for (int k = 0; k < num_cores; k++)
+        if (queue_size(&schedulers[k].from_queues[core]) > 0) return 0;
+    return 1;
+}
+
 // Move `actor` from `sched`, its core, to core `dst`, on `sched`'s own thread
 // while it steps nothing (or relieves its core from an ask, #3197): every
 // move of an actor between cores is made here
@@ -1627,6 +1637,10 @@ static int move_actor(Scheduler* sched, ActorBase* actor, int dst, int slot_hint
     if (dst < 0 || dst >= num_cores || dst == sched->core_id || actor->auto_process ||
         atomic_load_explicit(&actor->dead, memory_order_acquire))
         return 0;
+    /* What the actor sent from here and is still on its way leaves no
+     * order behind it: moved, its next messages leave from another core's
+     * queues, which a receiver may drain first (#3240). */
+    if (!core_outbound_idle(sched->core_id)) return 0;
     Scheduler* to = &schedulers[dst];
     OptimizedSpinlock* first  = sched->core_id < dst ? &sched->actor_lock : &to->actor_lock;
     OptimizedSpinlock* second = sched->core_id < dst ? &to->actor_lock : &sched->actor_lock;
@@ -1660,7 +1674,6 @@ static int move_actor(Scheduler* sched, ActorBase* actor, int dst, int slot_hint
             actor_table_remove_locked(sched, at);
             atomic_store_explicit(&actor->assigned_core, dst, memory_order_release);
             atomic_store_explicit(&actor->migrate_to, -1, memory_order_relaxed);
-            atomic_store_explicit(&actor->lent_to, -1, memory_order_release);   // a lend ends (#3197)
             actor_table_push_locked(to, actor);
             move_end(actor);
             moved = 1;
@@ -1706,67 +1719,6 @@ static int make_room(Scheduler* sched, ActorBase* actor) {
         AETHER_PAUSE();
     }
     return 1;
-}
-
-/* Whether a lent actor has something to step: a message, or a receive
- * timeout that is due. */
-static int lent_work(ActorBase* actor) {
-    if (atomic_load_explicit(&actor->mailbox.count, memory_order_acquire) > 0) return 1;
-    uint64_t armed = actor->last_activity_ns;
-    if (actor->timeout_ns == 0 || armed == 0) return 0;
-    uint64_t now = aether_now_ns();
-    return now > armed && now - armed >= actor->timeout_ns;
-}
-
-/* The actors other cores lent this one while they wait in asks (#3197),
- * stepped under their step locks as the loop steps its own: the owner's
- * relief delivers their messages, this thread takes them, the mailbox's one
- * producer and one consumer. A lend ends once its owner runs its loop again,
- * or the actor moved, died or was lent elsewhere; the slot is cleared then.
- * Returns whether anything was stepped. */
-static int step_lent(Scheduler* sched) {
-    int me = sched->core_id;
-    int stepped_any = 0;
-    for (int k = 0; k < AETHER_LEND_MAX; k++) {
-        ActorBase* actor = atomic_load_explicit(&sched->lent[k], memory_order_acquire);
-        if (!actor) continue;
-        int owner = atomic_load_explicit(&actor->assigned_core, memory_order_acquire);
-        if (atomic_load_explicit(&actor->lent_to, memory_order_acquire) != me ||
-            atomic_load_explicit(&actor->dead, memory_order_acquire) ||
-            owner < 0 || owner >= num_cores || owner == me ||
-            atomic_load_explicit(&schedulers[owner].asking, memory_order_acquire) == 0) {
-            int lent = me;
-            atomic_compare_exchange_strong_explicit(&actor->lent_to, &lent, -1,
-                                                    memory_order_acq_rel, memory_order_relaxed);
-            atomic_store_explicit(&sched->lent[k], NULL, memory_order_release);
-            atomic_fetch_sub_explicit(&sched->lent_count, 1, memory_order_acq_rel);
-            continue;
-        }
-        if (!lent_work(actor) ||
-            atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire))
-            continue;
-        int processed = 0;
-        do {
-            aether_step_safe(actor);
-            processed++;
-        } while (processed < 64 &&
-                 atomic_load_explicit(&actor->mailbox.count, memory_order_acquire) > 0 &&
-                 atomic_load_explicit(&actor->lent_to, memory_order_acquire) == me);
-        atomic_flag_clear_explicit(&actor->step_lock, memory_order_release);
-        sched->messages_processed += processed;
-        stepped_any = 1;
-    }
-    return stepped_any;
-}
-
-/* For the park's last look: a lent actor with work. */
-static int lent_has_work(Scheduler* sched) {
-    if (atomic_load_explicit(&sched->lent_count, memory_order_acquire) <= 0) return 0;
-    for (int k = 0; k < AETHER_LEND_MAX; k++) {
-        ActorBase* actor = atomic_load_explicit(&sched->lent[k], memory_order_acquire);
-        if (actor && lent_work(actor)) return 1;
-    }
-    return 0;
 }
 
 void* AETHER_HOT scheduler_thread(void* arg) {
@@ -2001,11 +1953,6 @@ void* AETHER_HOT scheduler_thread(void* arg) {
             }
         }
 
-        // Actors another core lent this one while it waits in an ask (#3197).
-        if (unlikely(atomic_load_explicit(&sched->lent_count, memory_order_relaxed) > 0) &&
-            step_lent(sched))
-            work_done = 1;
-
         // Scan actor list for SPSC messages and migration when idle.
         // With heavy from_queue traffic, migration is already handled above.
         if (sched->coalesce_buffer.count == 0) {
@@ -2224,7 +2171,7 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                     // seen here. Neither order sleeps on pending work.
                     atomic_thread_fence(memory_order_seq_cst);
                     if (atomic_load_explicit(&sched->running, memory_order_acquire) &&
-                        !has_pending_cross_core(sched) && !lent_has_work(sched)) {
+                        !has_pending_cross_core(sched)) {
                         struct timespec deadline;
                         int wait_ms = atomic_load_explicit(&g_core_park_ms, memory_order_relaxed);
                         aether_park_deadline(&deadline, wait_ms > 0 ? wait_ms : park_ms);
@@ -2379,10 +2326,6 @@ void scheduler_init(int cores) {
         schedulers[i].relief_cursor = 0;
         schedulers[i].coalesce_buffer.count = 0;
         schedulers[i].coalesce_buffer.next = 0;
-        for (int k = 0; k < AETHER_LEND_MAX; k++)
-            atomic_store_explicit(&schedulers[i].lent[k], NULL, memory_order_relaxed);
-        atomic_store_explicit(&schedulers[i].lent_count, 0, memory_order_relaxed);
-        memset(schedulers[i].lent_out, 0, sizeof(schedulers[i].lent_out));
     }
     actor_park_init_once();
     atomic_store_explicit(&g_sched_state, 2, memory_order_release);
@@ -2767,7 +2710,6 @@ int scheduler_register_actor(ActorBase* actor, int preferred_core) {
     actor->scheduler_owned = 0;
     actor->release_message = NULL;   // its messages are the caller's (#3142)
     actor->step_payload = NULL;
-    atomic_init(&actor->lent_to, -1);
     atomic_init(&actor->inbox, NULL);
     atomic_init(&actor->thread_parked, 0);
     return register_actor(actor, preferred_core);
@@ -3473,7 +3415,6 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
     atomic_init(&actor->inbox, NULL);
     atomic_init(&actor->thread_parked, 0);
     atomic_init(&actor->inflight, 0);
-    atomic_init(&actor->lent_to, -1);
     atomic_init(&actor->assigned_core, preferred_core);
     atomic_init(&actor->migrate_to, -1);
     atomic_init(&actor->reply_slot, NULL);
@@ -3580,36 +3521,36 @@ static void reply_slot_fail(ActorReplySlot* slot, int why) {
  * timeout, and every other actor of the core waited with the asker.
  *
  * So the waiting thread, once its wait has lasted ASK_RELIEF_NS and then
- * every ASK_RELIEF_NS, does the part of its loop that steps nothing:
+ * every ASK_RELIEF_NS (ASK_RELIEF_BUSY_NS after a relief that did
+ * something), does the part of its loop that steps nothing:
  *
- * - its deferred sends to other cores go out;
- * - the messages queued for its actors go into their mailboxes, in order: a
- *   sender's queue is taken up to the first message that cannot be placed
- *   now (its actor's mailbox is full, the batch the loop was delivering when
- *   the wait began still holds a message for it, it is another core's or
- *   has a thread of its own), which the loop delivers once it runs again;
- * - its actors with work (a message, a receive timeout due) go to a core
- *   that will run them: the core waiting on that very actor, whose thread
- *   steps it, else a parked core, else the least loaded core that is not
- *   waiting in an ask. One with no message in flight is moved there, by
- *   move_actor as every move between cores is. One with a message still
- *   queued here (behind its full mailbox, say) cannot be, and is lent
- *   instead: that core steps it under its step lock while it stays this
- *   core's, the reliefs here go on delivering its messages, and a later
- *   relief moves it once nothing of it is in flight. A lend ends when this
- *   core's loop runs again. An actor stepping on this thread (the asker,
- *   and any below it) holds its step lock and stays.
+ * - its deferred sends go out, its own core's through its own queue;
+ * - its queued messages go where the loop would put them, in order: into
+ *   its actors' mailboxes, to an actor's own thread, or on to the core an
+ *   actor moved to. A sender's queue is taken up to the first message that
+ *   cannot go now (its actor's mailbox is full, or the batch the loop was
+ *   delivering when the wait began still holds a message for it), which
+ *   the loop delivers once it runs again;
+ * - its actors with work (a message, a receive timeout due) and nothing in
+ *   flight are moved by move_actor, as every move between cores is, to a
+ *   core that will run them: the core waiting on that very actor, whose
+ *   thread steps it, else a parked core, else the least loaded core that
+ *   is not waiting in an ask. move_actor moves nothing while a message sent
+ *   from this core is still on its way (#3240). An actor stepping on this
+ *   thread (the asker, and any below it) holds its step lock and stays.
  *
- * A relief that did something is followed by the next ASK_RELIEF_BUSY_NS
- * later, so a lent actor's messages keep coming.
+ * An actor with more messages queued than its mailbox holds keeps a message
+ * in flight, and moved, it could be overtaken by what its senders send
+ * next: it waits for the ask, as before (#3241).
  *
  * Nothing is stepped here. An actor stepped on this thread would run inside
  * the asker's handler, and one that asked the asker in turn could never be
- * answered; run on another core's thread, an ask of the asker waits there
- * until the asker's handler is done, as it would have.
+ * answered; moved to another core it runs on that core's thread, and an ask
+ * of the asker waits there until the asker's handler is done, as it would
+ * have.
  * ------------------------------------------------------------------------- */
 #define ASK_RELIEF_NS 1000000ULL          /* 1 ms */
-#define ASK_RELIEF_BUSY_NS 50000ULL       /* 50 us, while a relief has work */
+#define ASK_RELIEF_BUSY_NS 50000ULL       /* 50 us, after a relief that did something */
 #define ASK_RELIEF_DELIVER_MAX 4096       /* messages placed per relief */
 #define ASK_RELIEF_SCAN_MAX 4096          /* actors looked at per relief */
 
@@ -3629,11 +3570,22 @@ static int relief_place(Scheduler* sched, ActorBase* actor, Message* msg) {
         scheduler_drop_dead_message(sched, actor, msg);
         return 1;
     }
-    if (actor->auto_process ||
-        atomic_load_explicit(&actor->assigned_core, memory_order_acquire) != sched->core_id ||
-        relief_batch_holds(sched, actor) ||
-        !mailbox_send(&actor->mailbox, *msg))
-        return 0;
+    // An actor with a thread of its own takes it in its inbox, from any thread.
+    if (actor->auto_process) {
+        scheduler_actor_thread_deliver(actor, *msg);
+        return 1;
+    }
+    if (relief_batch_holds(sched, actor)) return 0;
+    int ac = atomic_load_explicit(&actor->assigned_core, memory_order_acquire);
+    if (ac != sched->core_id) {
+        // Another core's now: forwarded, still counted, as the loop does.
+        if (ac < 0 || ac >= num_cores ||
+            !queue_enqueue(&schedulers[ac].from_queues[sched->core_id], actor, *msg))
+            return 0;
+        sched_wake(&schedulers[ac]);
+        return 1;
+    }
+    if (!mailbox_send(&actor->mailbox, *msg)) return 0;
     inflight_leave(actor, 1);
     atomic_store_explicit(&actor->active, 1, memory_order_relaxed);
     return 1;
@@ -3651,50 +3603,6 @@ static int relief_deliver(Scheduler* sched) {
         }
     }
     return ASK_RELIEF_DELIVER_MAX - budget;
-}
-
-/* Wakes core `to` for an actor taken or lent to it: its loop from its park,
- * or, when it waits in an ask on that actor, its wait through the slot. The
- * slot is read and signalled under the core's lock, under which the asker
- * puts it back before letting it go. */
-static void relief_wake(Scheduler* to) {
-    if (atomic_load_explicit(&to->asking, memory_order_acquire) > 0) {
-        while (atomic_flag_test_and_set_explicit(&to->actor_lock.lock, memory_order_acquire))
-            AETHER_PAUSE();
-        ActorReplySlot* slot = atomic_load_explicit(&to->ask_slot, memory_order_acquire);
-        if (slot) {
-            pthread_mutex_lock(&slot->mutex);
-            pthread_cond_signal(&slot->cond);
-            pthread_mutex_unlock(&slot->mutex);
-        }
-        atomic_flag_clear_explicit(&to->actor_lock.lock, memory_order_release);
-    }
-    sched_wake(to);
-}
-
-/* Lends `actor`, which has work but cannot be moved (a message of it is
- * still queued here, behind a full mailbox), to core `dst`: its loop, or its
- * wait when it waits on this actor, steps it under the actor's step lock
- * while the actor stays this core's, so no message of it is overtaken. This
- * core's reliefs go on delivering its messages. Returns 1 when lent. */
-static int relief_lend(Scheduler* sched, ActorBase* actor, int dst) {
-    int none = -1;
-    if (!atomic_compare_exchange_strong_explicit(&actor->lent_to, &none, dst,
-                                                 memory_order_acq_rel, memory_order_relaxed))
-        return 0;   // lent already
-    Scheduler* to = &schedulers[dst];
-    for (int k = 0; k < AETHER_LEND_MAX; k++) {
-        ActorBase* empty = NULL;
-        if (atomic_compare_exchange_strong_explicit(&to->lent[k], &empty, actor,
-                                                    memory_order_acq_rel, memory_order_relaxed)) {
-            atomic_fetch_add_explicit(&to->lent_count, 1, memory_order_acq_rel);
-            sched->lent_out[dst] = 1;
-            relief_wake(to);
-            return 1;
-        }
-    }
-    atomic_store_explicit(&actor->lent_to, -1, memory_order_release);   // no room there
-    return 0;
 }
 
 /* The core to take `actor` to: the one waiting on it, else one parked for
@@ -3723,8 +3631,8 @@ static int relief_destination(const Scheduler* sched, ActorBase* actor) {
 static int relief_evacuate(Scheduler* sched) {
     int n = 0;
     AetherActorTable* table = actor_table_snapshot(sched, &n);
-    if (n <= 0) return 0;
-    int done = 0;
+    if (n <= 0 || !core_outbound_idle(sched->core_id)) return 0;
+    int moved = 0;
     ActorBase* waited = atomic_load_explicit(&sched->ask_target, memory_order_relaxed);
     uint64_t now = aether_now_ns();
     int start = sched->relief_cursor < n ? sched->relief_cursor : 0;
@@ -3733,43 +3641,29 @@ static int relief_evacuate(Scheduler* sched) {
         int i = (start + k) % n;
         ActorBase* actor = actor_table_read(table, i);
         // The actor this thread waits on is stepped by its wait.
-        if (!actor || actor == waited || actor->auto_process || !actor->step) continue;
+        if (!actor || actor == waited || actor->auto_process || !actor->step ||
+            atomic_load_explicit(&actor->inflight, memory_order_acquire) != 0)
+            continue;
         uint64_t armed = actor->last_activity_ns;
         int work = atomic_load_explicit(&actor->mailbox.count, memory_order_acquire) > 0 ||
                    (actor->timeout_ns > 0 && armed > 0 && now > armed &&
                     now - armed >= actor->timeout_ns);
         if (!work) continue;
         int dst = relief_destination(sched, actor);
-        if (dst < 0) continue;
-        // Moved when nothing of it is in flight, a lend ending with it;
-        // else lent, and moved by a later relief once its queued messages
-        // are all in its mailbox.
-        if (atomic_load_explicit(&actor->inflight, memory_order_acquire) == 0 &&
-            move_actor(sched, actor, dst, i, 1))
-            done++;
-        else if (atomic_load_explicit(&actor->lent_to, memory_order_acquire) < 0)
-            done += relief_lend(sched, actor, dst);
+        if (dst >= 0 && move_actor(sched, actor, dst, i, 1)) moved++;
     }
     sched->relief_cursor = (start + looked) % n;
-    return done;
+    return moved;
 }
 
-/* One relief. Returns whether the next should come soon (ASK_RELIEF_BUSY_NS):
- * it placed messages or moved or lent actors, or actors it lent wait on
- * messages still queued here, which their borrowers make room for. The
- * borrowers are woken when it placed any: what it placed may be theirs. */
+/* One relief. Returns whether it did anything (placed a message, moved an
+ * actor), when the next comes ASK_RELIEF_BUSY_NS later. */
 static int ask_relieve(Scheduler* sched) {
     overflow_flush_ex(sched->core_id, 0);
     int placed = relief_deliver(sched);
-    int done = placed + relief_evacuate(sched);
-    int lending = 0;
-    for (int k = 0; k < num_cores; k++) {
-        if (!sched->lent_out[k]) continue;
-        lending = 1;
-        if (placed > 0) relief_wake(&schedulers[k]);
-    }
-    return done > 0 || (lending && has_pending_cross_core(sched));
+    return placed + relief_evacuate(sched) > 0;
 }
+
 
 /* How deep the asks this thread steps targets for are nested (#3220): each
  * step is a frame on this thread's stack. */
@@ -3853,8 +3747,7 @@ void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg
          * with a thread of its own is that thread's to step, without the
          * step lock, whatever core id it reads (#2598). */
         if (asking_core && ask_help_depth < MAX_ASK_HELP_DEPTH && !target->auto_process &&
-            (atomic_load_explicit(&target->assigned_core, memory_order_acquire) == current_core_id ||
-             atomic_load_explicit(&target->lent_to, memory_order_acquire) == current_core_id) &&
+            atomic_load_explicit(&target->assigned_core, memory_order_acquire) == current_core_id &&
             atomic_load_explicit(&target->mailbox.count, memory_order_acquire) > 0 &&
             !atomic_load_explicit(&target->dead, memory_order_acquire) &&
             !atomic_flag_test_and_set_explicit(&target->step_lock, memory_order_acquire)) {
@@ -3909,10 +3802,8 @@ void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg
             AETHER_PAUSE();
         atomic_store_explicit(&asking_core->ask_target, outer_target, memory_order_release);
         atomic_store_explicit(&asking_core->ask_slot, outer_slot, memory_order_release);
-        int left = atomic_fetch_sub_explicit(&asking_core->asking, 1, memory_order_acq_rel) - 1;
+        atomic_fetch_sub_explicit(&asking_core->asking, 1, memory_order_acq_rel);
         atomic_flag_clear_explicit(&asking_core->actor_lock.lock, memory_order_release);
-        // The loop runs again: the borrowers end their lends of its actors.
-        if (left == 0) memset(asking_core->lent_out, 0, sizeof(asking_core->lent_out));
     }
 
     reply_slot_decref(slot);

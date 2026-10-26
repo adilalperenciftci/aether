@@ -7,7 +7,8 @@
  * them waited out its timeout, and so did every actor of the core. The
  * waiting thread now relieves its core: it delivers what is queued for its
  * actors and moves those with work to a core that runs them (the core
- * waiting on that actor, or an idle one).
+ * waiting on that actor, or an idle one). An actor with more queued than its
+ * mailbox holds stays until the ask ends (#3241).
  *
  * The actors are registered on the cores the cases need, which the
  * scheduler keeps: nothing here sends from one core to another outside an
@@ -124,7 +125,8 @@ static void test_ask_relief_chain_back_to_waiting_core(void) {
 }
 
 /* An actor of a core waiting in an ask runs meanwhile: D, on A's core, is
- * sent 50 messages while A waits 400 ms for B. They waited for A's reply. */
+ * sent 20 messages (they fit its mailbox, #3241) while A waits 400 ms for
+ * B. They waited for A's reply. */
 static void test_ask_relief_other_actor_runs(void) {
     scheduler_init(3);
     ReliefActor* b = relief_actor(1);
@@ -137,15 +139,15 @@ static void test_ask_relief_other_actor_runs(void) {
 
     relief_send(a);
     relief_sleep_ms(50);
-    for (int i = 0; i < 50; i++) relief_send(d);
+    for (int i = 0; i < 20; i++) relief_send(d);
     int done = relief_wait_done(a, 6000);
     scheduler_shutdown();
     scheduler_cleanup();
 
     ASSERT_TRUE(done);
     ASSERT_EQ(43, atomic_load(&a->result));
-    ASSERT_EQ(50, atomic_load(&a->watched));
-    ASSERT_EQ(50, atomic_load(&d->got));
+    ASSERT_EQ(20, atomic_load(&a->watched));
+    ASSERT_EQ(20, atomic_load(&d->got));
     free(a);
     free(b);
     free(d);
