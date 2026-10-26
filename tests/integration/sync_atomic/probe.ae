@@ -21,7 +21,7 @@ import std.sync
 import std.worker
 
 // Block until every submitted worker job has finished (pending == 0).
-await_all() { _w = worker.wait() }
+await_all() { worker.wait() }
 
 main() {
     passing = 0

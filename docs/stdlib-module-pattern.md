@@ -168,6 +168,51 @@ shape after the pilot has shaken out.
 |---|---|---|
 | Structured-error producer | `(value, KIND_OK, "")` | `(zero-value-or-partial, KIND_*, "reason")` |
 
+### std is silent
+
+A program built on std, or a library built with `--emit=lib` and loaded by a
+JVM, CPython or Node, finds nothing on its stdout or stderr that it did not put
+there. A module reports through the channels a program can act on:
+
+1. **Failures travel in the return value**, with the specific reason in the
+   error string: `"cannot bind 0.0.0.0:8080: Address already in use"`, not
+   `"bind failed"`. A raw extern that returns a bare `-1` leaves its reason
+   where an accessor can read it (`http_server_error(server)`).
+2. **State is readable through accessors**, as `http_server_port()` and
+   `request_remote_addr()` are.
+3. **A long-lived component offers a monitor.** A component with a lifecycle
+   (create, configure, start, stop), such as the HTTP server, calls closures
+   the program registers while configuring it, one per event and each with
+   typed arguments. The module ships its stock monitors beside it: one that
+   writes to the console, and one that says nothing. A default may be the
+   console one where a human is plainly watching: the HTTP server gives a
+   foreground server (`server_start`) the console monitor and an embedded one
+   (`server_start_background`) none, unless the program chose.
+
+    ```aether,fragment
+    srv = http.server_create(8080)
+    http.monitor(srv) {
+        listening() |host: string, port: int| { println("up on ${host}:${port}") }
+        stopped() |host: string, port: int| { flush_metrics() }
+    }
+    err = http.server_start(srv)
+    ```
+
+Exempt:
+
+- modules whose output is the product: `std.io`, `std.log`, `std.spec`, a CLI
+  parser's help text;
+- output the program explicitly asked for (`std.tracking`'s leak report);
+- one last line before `abort()` or a panic, where no caller is left to return
+  to.
+
+`make check-docs` runs `tests/scripts/check_std_silent.py`, which fails on a
+write to stdout or stderr from the C under `std/` (`std.io`, `std.log` and
+vendored sources aside). An exempt write carries `silent-ok: <why>` on its line
+or the comment line above it, so a new one needs a reason a reviewer can read.
+A stock monitor is ordinary Aether in the module's `module.ae`, which the gate
+does not read: the program chose it, or the module's documented default did.
+
 ### Docstring
 
 Every wrapper gets a short docstring stating what it does and **the

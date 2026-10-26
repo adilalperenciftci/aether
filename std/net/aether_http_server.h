@@ -155,8 +155,12 @@ typedef struct HttpMiddlewareNode {
 // fields. Their full type definitions appear with the related
 // public functions below.
 struct HttpServer; /* forward, for hook signatures */
-typedef void (*HttpLifecycleHook)(struct HttpServer* server, void* user_data);
 typedef int  (*HttpReadyCheck)(void* user_data);
+
+// An Aether closure as an extern receives it (`@retain fn(...)`): the code
+// and its captured environment. The server keeps one per monitor event
+// (#3131); fn is NULL for an event nobody asked about.
+typedef struct { void (*fn)(void); void* env; } HttpMonitorClosure;
 
 // Per-request observation hook (#260 Tier 3 — F1 logging, F2
 // metrics). Fires once per completed request with the parsed
@@ -227,12 +231,6 @@ typedef struct HttpServer {
     // handler, before serialization. See
     // http_server_use_response_transformer above.
     struct HttpResponseTransformerNode* response_transformer_chain;
-
-    // Lifecycle hooks (#260 Tier 3). NULL == not installed.
-    HttpLifecycleHook on_start;
-    void* on_start_user_data;
-    HttpLifecycleHook on_stop;
-    void* on_stop_user_data;
 
     // Health probes (#260 Tier 3). When non-zero, the route table
     // will already have routes registered for live/ready_path — the
@@ -346,6 +344,18 @@ typedef struct HttpServer {
     // do not, and each stop waited out the loop's one-second timeout.
     // -1 where there is none (Windows, WASI, or pipe() failed).
     int wake_fds[2];
+    // Why the last bind or start failed, "" when it did not (#3131). The
+    // library reports through this and the return value, never by printing.
+    char error[256];
+    // The program's monitor (#3131): the closures the server calls when it
+    // starts listening and when it stops. None by default, and nothing is
+    // printed without one. monitor_set says the program chose a monitor, an
+    // empty one included, so std.http's server_start does not install the
+    // console monitor it gives a foreground server otherwise.
+    HttpMonitorClosure mon_listening;
+    HttpMonitorClosure mon_stopped;
+    int monitor_set;
+    int mon_listening_fired;   // listening was reported; stopped follows it
 } HttpServer;
 
 // ============================================================================
@@ -373,6 +383,18 @@ typedef struct {
 // Server lifecycle
 HttpServer* http_server_create(int port);
 int http_server_bind_raw(HttpServer* server, const char* host, int port);
+// Why the last http_server_bind_raw / http_server_start_raw failed, "" if it
+// did not (#3131). Owned by the server; valid until the next bind or start.
+const char* http_server_error(HttpServer* server);
+
+// The server's monitor (#3131). Each setter replaces that event's closure and
+// marks the monitor chosen; http_server_monitor_null_raw chooses an empty
+// one. listening(host, port) fires once the server accepts connections, on
+// the thread that runs it; stopped(host, port) fires when it stops serving.
+void http_server_monitor_listening_raw(HttpServer* server, HttpMonitorClosure f);
+void http_server_monitor_stopped_raw(HttpServer* server, HttpMonitorClosure f);
+void http_server_monitor_null_raw(HttpServer* server);
+int  http_server_has_monitor(HttpServer* server);
 // Set the bind host before server_start. Default is "0.0.0.0" (all
 // interfaces). Pass "127.0.0.1" to bind loopback only — useful in
 // tests because macOS / Windows firewalls don't prompt on loopback
@@ -579,15 +601,6 @@ void http_server_set_actor_handler(HttpServer* server, void (*step_fn)(void*),
 // this on SIGTERM in their entry point. Sub-millisecond precision is
 // rounded down internally to ms (the drain spin-wait is ms-granular).
 const char* http_server_shutdown_graceful_raw(HttpServer* server, int64_t timeout_ns);
-
-// Lifecycle hooks (#260 Tier 3). on_start fires once after the
-// listen socket is bound but before the accept loop runs (good
-// place to log "ready" or set readiness probes). on_stop fires
-// after the accept loop exits but before sockets close (good place
-// to flush logs, snapshot metrics). HttpLifecycleHook typedef
-// declared earlier so the HttpServer struct could carry the field.
-void http_server_set_on_start(HttpServer* server, HttpLifecycleHook hook, void* user_data);
-void http_server_set_on_stop (HttpServer* server, HttpLifecycleHook hook, void* user_data);
 
 // Health-probe endpoints (#260 Tier 3). Registers two routes:
 //   `live_path`  always returns 200 "ok"  (process is up)

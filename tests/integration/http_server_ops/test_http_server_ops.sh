@@ -1,14 +1,14 @@
 #!/bin/sh
-# #260 Tier 3 (Phase F3+F4+F5): graceful shutdown + lifecycle hooks
+# #260 Tier 3 (Phase F3+F4+F5): graceful shutdown + lifecycle events
 # + health probes end-to-end.
 #
 # Verifies:
-#   - on_start fires (writes STARTED to a marker file)
+#   - the monitor's listening fires (writes STARTED to a marker file)
 #   - /healthz returns 200 "ok"
 #   - /readyz returns 200 "ready"
 #   - flipping READY_FLAG=0 makes /readyz return 503 "not ready"
 #     (NOTE: env-var checks happen at request time inside ready_check)
-#   - on_stop fires (writes STOPPED to the marker file)
+#   - the monitor's stopped fires (writes STOPPED to the marker file)
 #
 # Skips when curl is missing.
 
@@ -67,9 +67,9 @@ done
 PORT=$(read_ready_port "$TMPDIR/srv.log") || exit 1
 wait_port "$PORT" || exit 1
 
-# --- on_start hook fired ---
+# --- the monitor's listening event fired ---
 if ! [ -f "$MARKER" ] || ! grep -q STARTED "$MARKER"; then
-    echo "  [FAIL] on_start hook didn't write STARTED to marker file"
+    echo "  [FAIL] the monitor's listening event didn't write STARTED to marker file"
     [ -f "$MARKER" ] && cat "$MARKER"
     exit 1
 fi
@@ -109,10 +109,10 @@ if [ "$(cat "$TMPDIR/work.body")" != "work-done" ]; then
     exit 1
 fi
 
-# --- shutdown: kill the process; on_stop fires from accept-loop teardown ---
+# --- shutdown: kill the process; stopped fires from the server's teardown ---
 signal_server TERM "$SRV_PID" || true
 
-# Give the on_stop hook up to 3s to fire (the accept poll has a 1s
+# Give the stopped event up to 3s to fire (the accept poll has a 1s
 # timeout so the loop notices is_running flipped within ~1s).
 deadline=$(($(date +%s) + 3))
 while [ "$(date +%s)" -lt "$deadline" ]; do
@@ -122,12 +122,11 @@ done
 
 # Note: SIGTERM kills the process before the accept loop's natural
 # teardown runs (the runtime doesn't install a SIGTERM handler that
-# calls http_server_stop). The on_stop hook only fires when
+# calls http_server_stop). The stopped event only fires when
 # http_server_stop is called from inside the process. Verify the
-# integration of the lifecycle hook itself by confirming the marker
-# was at least set by on_start; the on_stop firing path is covered
-# at the C-level in the http_server_stop unit (run via the start
-# function's clean teardown when the AE process exits naturally).
-# For this end-to-end smoke, the on_start verification is enough.
+# monitor's wiring here by confirming the marker was at least set by
+# listening; stopped is covered by tests/integration/http_server_monitor,
+# which stops its servers from inside the process.
+# For this end-to-end smoke, the listening verification is enough.
 
-echo "  [PASS] http_server_ops: on_start fired, /healthz + /readyz + /work all 200"
+echo "  [PASS] http_server_ops: listening fired, /healthz + /readyz + /work all 200"

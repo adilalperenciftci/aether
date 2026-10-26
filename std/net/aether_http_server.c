@@ -113,6 +113,11 @@ const char* http_status_text(int code) {
 HttpServer* http_server_create(int p) { (void)p; return NULL; }
 int http_server_bind_raw(HttpServer* s, const char* h, int p) { (void)s; (void)h; (void)p; return -1; }
 int http_server_port(HttpServer* s) { (void)s; return 0; }
+const char* http_server_error(HttpServer* s) { (void)s; return "networking not built in"; }
+void http_server_monitor_listening_raw(HttpServer* s, HttpMonitorClosure f) { (void)s; (void)f; }
+void http_server_monitor_stopped_raw(HttpServer* s, HttpMonitorClosure f) { (void)s; (void)f; }
+void http_server_monitor_null_raw(HttpServer* s) { (void)s; }
+int  http_server_has_monitor(HttpServer* s) { (void)s; return 1; }
 void http_server_set_host(HttpServer* s, const char* h) { (void)s; (void)h; }
 int http_server_start_raw(HttpServer* s) { (void)s; return -1; }
 int http_server_start_background_raw(HttpServer* s) { (void)s; return -1; }
@@ -132,8 +137,6 @@ const char* http_server_set_keepalive_raw(HttpServer* s, int e, int m, int64_t i
 }
 void http_server_drain_connection(HttpServer* s, int fd) { (void)s; (void)fd; }
 const char* http_server_shutdown_graceful_raw(HttpServer* s, int64_t t) { (void)s; (void)t; return ""; }
-void http_server_set_on_start(HttpServer* s, HttpLifecycleHook h, void* u) { (void)s; (void)h; (void)u; }
-void http_server_set_on_stop (HttpServer* s, HttpLifecycleHook h, void* u) { (void)s; (void)h; (void)u; }
 const char* http_server_set_health_probes_raw(HttpServer* s, const char* lp, const char* rp,
                                               HttpReadyCheck rc, void* ud) {
     (void)s; (void)lp; (void)rp; (void)rc; (void)ud; return "";
@@ -241,6 +244,8 @@ const char* http_request_header_value(HttpRequest* r, int i) { (void)r; (void)i;
 #include <string.h>
 #include <ctype.h>
 #include <limits.h>
+#include <stdarg.h>   /* server_fail (#3131) */
+#include <errno.h>
 #include "../../runtime/utils/aether_thread.h"
 #include "../../runtime/scheduler/multicore_scheduler.h"  // ActorBase for actor dispatch (#2509)
 
@@ -1051,10 +1056,6 @@ HttpServer* http_server_create(int port) {
     server->keep_alive_max = 0;
     server->keep_alive_idle_ms = 0;
     server->response_transformer_chain = NULL;
-    server->on_start = NULL;
-    server->on_start_user_data = NULL;
-    server->on_stop = NULL;
-    server->on_stop_user_data = NULL;
     server->ready_check = NULL;
     server->ready_check_user_data = NULL;
     atomic_init(&server->inflight_connections, 0);
@@ -1101,19 +1102,70 @@ const char* http_server_set_keepalive_raw(HttpServer* server,
 }
 
 // =================================================================
-// #260 Tier 3: graceful shutdown + lifecycle hooks + health probes
+// #260 Tier 3: graceful shutdown + health probes
 // =================================================================
 
-void http_server_set_on_start(HttpServer* server, HttpLifecycleHook hook, void* user_data) {
-    if (!server) return;
-    server->on_start = hook;
-    server->on_start_user_data = user_data;
+// ---- The monitor (#3131) ----
+// The server says nothing itself: what it reports goes to closures the
+// program registers, before it starts the server. The closures are retained
+// by the extern call (`@retain fn`), so the server owns a reference to each
+// environment and gives it back when the closure is replaced or the server
+// freed.
+
+extern void aether_closure_env_free(void* env);
+
+static void monitor_slot_set(HttpMonitorClosure* slot, HttpMonitorClosure f) {
+    if (slot->env) aether_closure_env_free(slot->env);
+    *slot = f;
 }
 
-void http_server_set_on_stop(HttpServer* server, HttpLifecycleHook hook, void* user_data) {
+void http_server_monitor_listening_raw(HttpServer* server, HttpMonitorClosure f) {
     if (!server) return;
-    server->on_stop = hook;
-    server->on_stop_user_data = user_data;
+    monitor_slot_set(&server->mon_listening, f);
+    server->monitor_set = 1;
+}
+
+void http_server_monitor_stopped_raw(HttpServer* server, HttpMonitorClosure f) {
+    if (!server) return;
+    monitor_slot_set(&server->mon_stopped, f);
+    server->monitor_set = 1;
+}
+
+void http_server_monitor_null_raw(HttpServer* server) {
+    if (!server) return;
+    HttpMonitorClosure none = { NULL, NULL };
+    monitor_slot_set(&server->mon_listening, none);
+    monitor_slot_set(&server->mon_stopped, none);
+    server->monitor_set = 1;
+}
+
+int http_server_has_monitor(HttpServer* server) {
+    return server ? server->monitor_set : 0;
+}
+
+static void monitor_call_host_port(HttpMonitorClosure c, HttpServer* server) {
+    if (c.fn) ((void (*)(void*, const char*, int))c.fn)(c.env, server->host, server->port);
+}
+
+/* The server is accepting connections.
+ *
+ * A foreground server then blocks its thread, so it flushes what the program
+ * has written to stdout so far, the monitor's banner included. A flush adds
+ * no text of the server's own, and a program that prints a ready line before
+ * starting its server, and a harness reading that line through a pipe, have
+ * always relied on it: println does not flush, and the banner's flush used
+ * to push the ready line out with it. */
+static void monitor_listening(HttpServer* server) {
+    server->mon_listening_fired = 1;
+    monitor_call_host_port(server->mon_listening, server);
+    if (!server->background) fflush(stdout);
+}
+
+/* The server has stopped serving, after it reported listening. */
+static void monitor_stopped(HttpServer* server) {
+    if (!server->mon_listening_fired) return;
+    server->mon_listening_fired = 0;
+    monitor_call_host_port(server->mon_stopped, server);
 }
 
 const char* http_server_shutdown_graceful_raw(HttpServer* server, int64_t timeout_ns) {
@@ -1676,32 +1728,64 @@ void http_server_set_host(HttpServer* server, const char* host) {
     server->host = copy;
 }
 
+/* The last socket call's failure, as text: errno's on POSIX, the Winsock
+ * code's on Windows, where errno is not set. */
+static const char* socket_error_text(char* buf, size_t n) {
+#ifdef _WIN32
+    int e = WSAGetLastError();
+    switch (e) {
+        case WSAEADDRINUSE:    return "address already in use";
+        case WSAEADDRNOTAVAIL: return "address not available";
+        case WSAEACCES:        return "permission denied";
+        default: snprintf(buf, n, "Winsock error %d", e); return buf;
+    }
+#else
+    (void)buf; (void)n;
+    return strerror(errno);
+#endif
+}
+
+/* Record why the server failed, for http_server_error, and return -1 (#3131).
+ * The caller gets the reason in its error string; nothing is printed. */
+static int server_fail(HttpServer* server, const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(server->error, sizeof server->error, fmt, ap);
+    va_end(ap);
+    return -1;
+}
+
+const char* http_server_error(HttpServer* server) {
+    return server ? server->error : "server is null";
+}
+
 int http_server_bind_raw(HttpServer* server, const char* host, int port) {
     /* A name binds the address it resolves to, never every interface
      * (#2639); "::" binds both families. See aether_addr_bind. */
     struct sockaddr_storage addr;
     socklen_t addr_len = 0;
-    if (aether_addr_bind(host, port, &addr, &addr_len) != 0) {
-        fprintf(stderr, "Failed to bind socket: cannot resolve host %s\n", host);
-        return -1;
-    }
+    char why[128];
+    server->error[0] = '\0';
+    if (aether_addr_bind(host, port, &addr, &addr_len) != 0)
+        return server_fail(server, "cannot resolve host %s", host);
 
     server->socket_fd = aether_addr_listen_socket(&addr);
-    if (server->socket_fd < 0) {
-        fprintf(stderr, "Failed to create socket\n");
-        return -1;
-    }
+    if (server->socket_fd < 0)
+        return server_fail(server, "cannot create socket: %s", socket_error_text(why, sizeof why));
 
     if (bind(server->socket_fd, (struct sockaddr*)&addr, addr_len) < 0) {
         char where[300];
-        fprintf(stderr, "Failed to bind socket to %s\n", aether_addr_authority(where, sizeof where, host, port));
+        server_fail(server, "cannot bind %s: %s", aether_addr_authority(where, sizeof where, host, port),
+                    socket_error_text(why, sizeof why));
         close(server->socket_fd);
         server->socket_fd = -1;
         return -1;
     }
     
     if (listen(server->socket_fd, server->max_connections) < 0) {
-        fprintf(stderr, "Failed to listen on socket\n");
+        char where[300];
+        server_fail(server, "cannot listen on %s: %s", aether_addr_authority(where, sizeof where, host, port),
+                    socket_error_text(why, sizeof why));
         close(server->socket_fd);
         server->socket_fd = -1;
         return -1;
@@ -5861,8 +5945,10 @@ static void* accept_thread_fn(void* arg) {
 #endif
 
 static int http_server_run(HttpServer* server);
+static int http_server_serve(HttpServer* server);
 
 int http_server_start_raw(HttpServer* server) {
+    server->error[0] = '\0';
     server->is_running = 1;
     atomic_store(&server->stopping, 0);
     return http_server_run(server);
@@ -5875,6 +5961,14 @@ int http_server_start_raw(HttpServer* server) {
  * thread's first line was then overwritten by its `is_running = 1`, the loop
  * ran forever, and http_server_stop, which joins the thread (#2672), hung. */
 static int http_server_run(HttpServer* server) {
+    int rc = http_server_serve(server);
+    monitor_stopped(server);
+    return rc;
+}
+
+/* http_server_run's body: everything but the stopped report, which follows
+ * whichever way this returns once the server has reported listening. */
+static int http_server_serve(HttpServer* server) {
 
 #if !defined(_WIN32)
     /* A peer that goes away between a server deciding to answer and the answer
@@ -5902,10 +5996,8 @@ static int http_server_run(HttpServer* server) {
         server->accept_listen_fds = calloc(n_threads, sizeof(int));
         server->accept_pollers = calloc(n_threads, sizeof(AetherIoPoller));
         server->accept_threads = calloc(n_threads, sizeof(pthread_t));
-        if (!server->accept_listen_fds || !server->accept_pollers || !server->accept_threads) {
-            fprintf(stderr, "Failed to allocate accept thread state\n");
-            return -1;
-        }
+        if (!server->accept_listen_fds || !server->accept_pollers || !server->accept_threads)
+            return server_fail(server, "out of memory for the accept threads");
 
         for (int i = 0; i < n_threads; i++) {
             server->accept_listen_fds[i] = -1;
@@ -5915,14 +6007,13 @@ static int http_server_run(HttpServer* server) {
             server->accept_listen_fds[i] = create_reuseport_socket(
                 server->host, server->port, server->max_connections);
             if (server->accept_listen_fds[i] < 0) {
-                fprintf(stderr, "Failed to create SO_REUSEPORT socket for thread %d\n", i);
-                return -1;
+                char where[300];
+                return server_fail(server, "cannot open SO_REUSEPORT listener %d on %s", i,
+                                   aether_addr_authority(where, sizeof where, server->host, server->port));
             }
 
-            if (aether_io_poller_init(&server->accept_pollers[i]) < 0) {
-                fprintf(stderr, "I/O poller init failed for thread %d\n", i);
-                return -1;
-            }
+            if (aether_io_poller_init(&server->accept_pollers[i]) < 0)
+                return server_fail(server, "cannot start the I/O poller for accept thread %d", i);
 
             aether_io_poller_add(&server->accept_pollers[i],
                                  server->accept_listen_fds[i], NULL, AETHER_IO_READ);
@@ -5930,14 +6021,7 @@ static int http_server_run(HttpServer* server) {
 
         server->accept_thread_count = n_threads;
 
-        if (!server->background) {
-            char where[300];
-            printf("Server running at http://%s (%d accept threads, SO_REUSEPORT)\n",
-                   aether_addr_authority(where, sizeof where, server->host, server->port),
-                   n_threads);
-            printf("Press Ctrl+C to stop\n\n");
-            fflush(stdout);
-        }
+        monitor_listening(server);
 
         for (int i = 1; i < n_threads; i++) {
             AcceptThreadCtx* ctx = malloc(sizeof(AcceptThreadCtx));
@@ -5945,7 +6029,7 @@ static int http_server_run(HttpServer* server) {
                 // The join loop below assumes exactly n_threads accept threads;
                 // continuing with a NULL ctx would write through NULL here and
                 // leave a never-created thread to join. Fail loudly instead.
-                fprintf(stderr, "aether: failed to allocate accept-thread context\n");
+                fprintf(stderr, "aether: failed to allocate accept-thread context\n");  /* silent-ok: last line before abort */
                 abort();
             }
             ctx->server = server;
@@ -5986,25 +6070,15 @@ static int http_server_run(HttpServer* server) {
             return -1;
         }
 
-        if (aether_io_poller_init(&server->accept_poller) < 0) {
-            fprintf(stderr, "I/O poller init failed\n");
-            return -1;
-        }
+        if (aether_io_poller_init(&server->accept_poller) < 0)
+            return server_fail(server, "cannot start the I/O poller");
 
         aether_io_poller_add(&server->accept_poller, server->socket_fd, NULL, AETHER_IO_READ);
 
         int flags = fcntl(server->socket_fd, F_GETFL, 0);
         if (flags >= 0) fcntl(server->socket_fd, F_SETFL, flags | O_NONBLOCK);
 
-        if (!server->background) {
-            {
-                char where[300];
-                printf("Server running at http://%s\n",
-                       aether_addr_authority(where, sizeof where, server->host, server->port));
-            }
-            printf("Press Ctrl+C to stop\n\n");
-            fflush(stdout);
-        }
+        monitor_listening(server);
 
         accept_poller_loop(server, server->socket_fd, &server->accept_poller);
 
@@ -6020,22 +6094,7 @@ static int http_server_run(HttpServer* server) {
             return -1;
         }
 
-        if (!server->background) {
-            {
-                char where[300];
-                printf("Server running at http://%s\n",
-                       aether_addr_authority(where, sizeof where, server->host, server->port));
-            }
-            printf("Press Ctrl+C to stop\n\n");
-            fflush(stdout);
-        }
-
-        /* on_start lifecycle hook (#260 Tier 3). Fires once after
-         * the listen socket is bound, before the accept loop runs.
-         * Typical use: log "ready", flip a readiness probe to 200. */
-        if (server->on_start) {
-            server->on_start(server, server->on_start_user_data);
-        }
+        monitor_listening(server);
 
 #if AETHER_HAS_THREADS
         /* The proxy driver, when this server proxies and its connections are
@@ -6122,14 +6181,6 @@ static int http_server_run(HttpServer* server) {
         http_park_destroy((HttpParkLot*)server->park_lot);
         server->park_lot = NULL;
 #endif
-
-        /* on_stop lifecycle hook fires after the accept loop exits
-         * but BEFORE socket cleanup (so the hook still sees a live
-         * server struct). Typical use: flush logs, snapshot
-         * metrics, flip readiness probe to 503. */
-        if (server->on_stop) {
-            server->on_stop(server, server->on_stop_user_data);
-        }
     }
 
     return 0;
@@ -6275,6 +6326,7 @@ void http_server_free(HttpServer* server) {
     if (!server) return;
 
     http_server_stop(server);
+    http_server_monitor_null_raw(server);   /* gives back the closures' environments */
 
 
     if (server->cert_path) free(server->cert_path);

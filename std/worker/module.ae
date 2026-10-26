@@ -136,9 +136,9 @@ pending() -> int {
 
 // Block until every submitted job has completed AND had its completion
 // delivered, running those completions on the calling thread. Returns how
-// many completions ran, or -1 when a main-thread poster is installed (there
-// the host loop delivers, so waiting on that thread would block the very
-// thread that has to deliver; pump the host loop instead).
+// many completions ran and "", or -1 and the reason when a main-thread poster
+// is installed (there the host loop delivers, so waiting on that thread would
+// block the very thread that has to deliver; pump the host loop instead).
 //
 // This is the headless batch join: no poll loop, and unlike pool_shutdown it
 // leaves the pool running, so a reusable function can wait once per batch and
@@ -150,8 +150,12 @@ pending() -> int {
 //         i = i + 1
 //     }
 //     worker.wait()          // every collect() has run by here
-wait() -> int {
-    return aether_worker_wait()
+wait() -> (int, string) {
+    ran = aether_worker_wait()
+    if ran < 0 {
+        return -1, "worker.wait() with a main-thread poster installed: the host loop delivers completions, so pump it instead"
+    }
+    return ran, ""
 }
 
 // Bounded parallel map: apply `f` to every element of `items` on the worker
