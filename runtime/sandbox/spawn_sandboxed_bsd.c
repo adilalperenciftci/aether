@@ -26,6 +26,7 @@
 #include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <sys/wait.h>
+#include <errno.h>
 #include <fcntl.h>
 
 // From libaether.a — list operations
@@ -39,6 +40,45 @@ extern const char* aether_string_data(const void*);
 
 // The preload library's lookup, shared with the contrib process hosts.
 #include "aether_sandbox_preload_path.h"
+// The close-on-exec pipe, the fork, and what a child execs with.
+#include "../utils/aether_spawn.h"
+
+// What a child that could not run its program tells the parent, on a
+// close-on-exec pipe the exec closes unwritten: the step that failed and its
+// errno. The parent prints the reason. The child itself calls nothing
+// between fork and exec that is not async-signal-safe (#3200): it used to
+// setenv the sandbox's variables, execlp the program and print with perror
+// there, and a child of a threaded parent may do none of that,
+// since another thread may have held malloc's lock or the environment's at
+// the fork. The env, the resolved program and both argvs are made in the
+// parent instead (runtime/utils/aether_spawn.h).
+enum { SANDBOX_STEP_EXEC = 2 };
+
+static void sandbox_child_failed(int fd, int step, int code) {
+    int msg[2] = { step, errno };
+    ssize_t w;
+    do { w = write(fd, msg, sizeof msg); } while (w < 0 && errno == EINTR);
+    _exit(code);
+}
+
+// In the child: exec the program with its env. A file with no #! line,
+// which execve refuses with ENOEXEC, runs under /bin/sh, as execlp ran it.
+static void sandbox_child_exec(const char* path, char** argv, char** sh_argv, char** env) {
+    execve(path, argv, env);
+    if (errno != ENOEXEC) return;
+    execve("/bin/sh", sh_argv, env);
+    errno = ENOEXEC;
+}
+
+// In the parent: what the child reported, printed as the child used to.
+static void sandbox_report(int errfd) {
+    int msg[2] = { 0, 0 };
+    ssize_t n;
+    do { n = read(errfd, msg, sizeof msg); } while (n < 0 && errno == EINTR);
+    close(errfd);
+    if (n != (ssize_t)sizeof msg) return;
+    fprintf(stderr, "exec: %s\n", strerror(msg[1]));
+}
 
 // Serialize grants from a list to shared memory
 // Format: "category:pattern\n" lines, null-terminated
@@ -95,46 +135,71 @@ int aether_spawn_sandboxed(void* grant_list, const char* program, const char* ar
         return -1;
     }
 
-    pid_t pid = fork();
+    // What the child execs with, made here (#3200): the program on this
+    // process's PATH, its argv, the /bin/sh argv for a file with no #!
+    // line, and the env.
+    //
+    // Two-layer containment on FreeBSD, both through that env:
+    //   1. LD_PRELOAD — intercepts libc for ANY child, including
+    //      non-Aether programs (python3, bash). Userspace, cooperative,
+    //      bypassable by raw syscalls / static binaries.
+    //   2. AETHER_CAPSICUM=1 — if the child is itself an Aether
+    //      binary, its startup hook (capsicum_autosandbox.c) calls
+    //      cap_enter() after rtld has loaded, giving kernel-enforced,
+    //      unbypassable containment. A non-Aether child simply
+    //      ignores the variable, falling back to layer 1.
+    //
+    // We cannot cap_enter() the child from here ourselves:
+    // cap_enter() forbids the runtime linker, so a dynamically
+    // linked child would fail to exec. Self-sandboxing after exec is
+    // the only model that works — see capsicum_autosandbox.c.
+    char* path = aether_spawn_resolve(program);
+    if (!path) {
+        fprintf(stderr, "exec: %s\n", strerror(errno));
+        shm_unlink(shm_name);
+        return 127;
+    }
+    char* argv[] = { (char*)program, (char*)arg, NULL };
+    char* sh_argv[] = { (char*)"/bin/sh", path, (char*)arg, NULL };
+    char preload_var[sizeof preload_path + 16];
+    char shm_var[sizeof shm_name + 32];
+    snprintf(preload_var, sizeof preload_var, "LD_PRELOAD=%s", preload_path);
+    snprintf(shm_var, sizeof shm_var, "AETHER_SANDBOX_SHM=%s", shm_name);
+    const char* set[4] = { preload_var, shm_var, "AETHER_CAPSICUM=1", NULL };
+    int nset = 3;
+    if (!getenv("AETHER_SANDBOX_VERBOSE")) set[nset++] = "AETHER_SANDBOX_VERBOSE=0";
+    char** env = aether_spawn_env(aether_spawn_environ(), set, nset);
+    int errp[2];
+    if (!env || aether_pipe_cloexec(errp) != 0) {
+        free(env);
+        free(path);
+        shm_unlink(shm_name);
+        return -1;
+    }
+
+    pid_t pid = aether_fork();
     if (pid < 0) {
+        close(errp[0]);
+        close(errp[1]);
+        free(env);
+        free(path);
         shm_unlink(shm_name);
         return -1;
     }
 
     if (pid == 0) {
-        // Child: set up LD_PRELOAD and grant source, then exec
-        setenv("LD_PRELOAD", preload_path, 1);
-        setenv("AETHER_SANDBOX_SHM", shm_name, 1);
-        setenv("AETHER_SANDBOX_VERBOSE", "0", 0);
-
-        // Two-layer containment on FreeBSD:
-        //   1. LD_PRELOAD (above) — intercepts libc for ANY child,
-        //      including non-Aether programs (python3, bash). Userspace,
-        //      cooperative, bypassable by raw syscalls / static binaries.
-        //   2. AETHER_CAPSICUM=1 — if the child is itself an Aether
-        //      binary, its startup hook (capsicum_autosandbox.c) calls
-        //      cap_enter() after rtld has loaded, giving kernel-enforced,
-        //      unbypassable containment. A non-Aether child simply
-        //      ignores the variable, falling back to layer 1.
-        //
-        // We cannot cap_enter() the child from here ourselves:
-        // cap_enter() forbids the runtime linker, so a dynamically
-        // linked child would fail to exec. Self-sandboxing after exec is
-        // the only model that works — see capsicum_autosandbox.c.
-        setenv("AETHER_CAPSICUM", "1", 1);
-
-        if (arg) {
-            execlp(program, program, arg, NULL);
-        } else {
-            execlp(program, program, NULL);
-        }
-        perror("exec");
-        _exit(127);
+        close(errp[0]);
+        sandbox_child_exec(path, argv, sh_argv, env);
+        sandbox_child_failed(errp[1], SANDBOX_STEP_EXEC, 127);
     }
 
-    // Parent: wait for child
+    // Parent: report what the child could not do, then wait for it.
+    close(errp[1]);
+    free(env);
+    free(path);
+    sandbox_report(errp[0]);
     int status = 0;
-    waitpid(pid, &status, 0);
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
 
     // Cleanup shared memory
     shm_unlink(shm_name);

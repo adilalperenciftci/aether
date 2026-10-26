@@ -36,6 +36,54 @@ extern const char* aether_string_data(const void*);
 
 // The preload library's lookup, shared with the contrib process hosts.
 #include "aether_sandbox_preload_path.h"
+// The close-on-exec pipe, the fork, and what a child execs with.
+#include "../utils/aether_spawn.h"
+
+// What a child that could not run its program tells the parent, on a
+// close-on-exec pipe the exec closes unwritten: the step that failed and its
+// errno. The parent prints the reason. The child itself calls nothing
+// between fork and exec that is not async-signal-safe (#3200): it used to
+// setenv the sandbox's variables, execlp the program and print with perror
+// or fprintf there, and a child of a threaded parent may do none of that,
+// since another thread may have held malloc's lock or the environment's at
+// the fork. The env, the resolved program and both argvs are made in the
+// parent instead (runtime/utils/aether_spawn.h).
+enum { SANDBOX_STEP_FENCE = 1, SANDBOX_STEP_EXEC = 2 };
+
+static void sandbox_child_failed(int fd, int step, int code) {
+    int msg[2] = { step, errno };
+    ssize_t w;
+    do { w = write(fd, msg, sizeof msg); } while (w < 0 && errno == EINTR);
+    _exit(code);
+}
+
+// In the child: exec the program with its env. A file with no #! line,
+// which execve refuses with ENOEXEC, runs under /bin/sh, as execlp ran it.
+static void sandbox_child_exec(const char* path, char** argv, char** sh_argv, char** env) {
+    execve(path, argv, env);
+    if (errno != ENOEXEC) return;
+    execve("/bin/sh", sh_argv, env);
+    errno = ENOEXEC;
+}
+
+// In the parent: what the child reported, printed as the child used to.
+static void sandbox_report(int errfd) {
+    int msg[2] = { 0, 0 };
+    ssize_t n;
+    do { n = read(errfd, msg, sizeof msg); } while (n < 0 && errno == EINTR);
+    close(errfd);
+    if (n != (ssize_t)sizeof msg) return;
+    if (msg[0] == SANDBOX_STEP_FENCE) {
+        fprintf(stderr,
+            "[aether] cannot install seccomp clone fence: %s\n"
+            "  spawn_sandboxed requires a kernel that supports\n"
+            "  PR_SET_NO_NEW_PRIVS + PR_SET_SECCOMP "
+            "(Linux 3.5+); or grant 'fork:*' to opt out.\n",
+            strerror(msg[1]));
+    } else {
+        fprintf(stderr, "exec: %s\n", strerror(msg[1]));
+    }
+}
 
 // Serialize grants from a list to shared memory
 // Format: "category:pattern\n" lines, null-terminated
@@ -299,18 +347,45 @@ int aether_spawn_sandboxed(void* grant_list, const char* program, const char* ar
     // doing it once here keeps the contract obvious.)
     int fork_granted = is_fork_granted(grant_list);
 
-    pid_t pid = fork();
+    // What the child execs with, made here (#3200): the program on this
+    // process's PATH, its argv, the /bin/sh argv for a file with no #!
+    // line, and the env with LD_PRELOAD and the grant source in it.
+    char* path = aether_spawn_resolve(program);
+    if (!path) {
+        fprintf(stderr, "exec: %s\n", strerror(errno));
+        shm_unlink(shm_name);
+        return 127;
+    }
+    char* argv[] = { (char*)program, (char*)arg, NULL };
+    char* sh_argv[] = { (char*)"/bin/sh", path, (char*)arg, NULL };
+    char preload_var[sizeof preload_path + 16];
+    char shm_var[sizeof shm_name + 32];
+    snprintf(preload_var, sizeof preload_var, "LD_PRELOAD=%s", preload_path);
+    snprintf(shm_var, sizeof shm_var, "AETHER_SANDBOX_SHM=%s", shm_name);
+    const char* set[3] = { preload_var, shm_var, NULL };
+    int nset = 2;
+    if (!getenv("AETHER_SANDBOX_VERBOSE")) set[nset++] = "AETHER_SANDBOX_VERBOSE=0";
+    char** env = aether_spawn_env(aether_spawn_environ(), set, nset);
+    int errp[2];
+    if (!env || aether_pipe_cloexec(errp) != 0) {
+        free(env);
+        free(path);
+        shm_unlink(shm_name);
+        return -1;
+    }
+
+    pid_t pid = aether_fork();
     if (pid < 0) {
+        close(errp[0]);
+        close(errp[1]);
+        free(env);
+        free(path);
         shm_unlink(shm_name);
         return -1;
     }
 
     if (pid == 0) {
-        // Child: set up LD_PRELOAD and grant source, then exec
-        setenv("LD_PRELOAD", preload_path, 1);
-        setenv("AETHER_SANDBOX_SHM", shm_name, 1);
-        setenv("AETHER_SANDBOX_VERBOSE", "0", 0);
-
+        close(errp[0]);
         // Kernel-level clone fence: when fork:* is not granted, install
         // a seccomp filter that traps clone/clone3/fork/vfork with
         // EPERM regardless of how they're invoked. Closes the gap
@@ -318,31 +393,22 @@ int aether_spawn_sandboxed(void* grant_list, const char* program, const char* ar
         // raw `syscall(SYS_clone3,…)` would otherwise bypass the
         // LD_PRELOAD libc-symbol fence. Fail-closed: if seccomp setup
         // fails (kernel too old, etc.), refuse to exec — the caller
-        // asked for containment and we cannot deliver.
-        if (!fork_granted) {
-            if (install_clone_fence_seccomp() != 0) {
-                fprintf(stderr,
-                    "[aether] cannot install seccomp clone fence: %s\n"
-                    "  spawn_sandboxed requires a kernel that supports\n"
-                    "  PR_SET_NO_NEW_PRIVS + PR_SET_SECCOMP "
-                    "(Linux 3.5+); or grant 'fork:*' to opt out.\n",
-                    strerror(errno));
-                _exit(126);
-            }
-        }
-
-        if (arg) {
-            execlp(program, program, arg, NULL);
-        } else {
-            execlp(program, program, NULL);
-        }
-        perror("exec");
-        _exit(127);
+        // asked for containment and we cannot deliver. Building the
+        // filter is arithmetic on the stack, and installing it is two
+        // prctl calls.
+        if (!fork_granted && install_clone_fence_seccomp() != 0)
+            sandbox_child_failed(errp[1], SANDBOX_STEP_FENCE, 126);
+        sandbox_child_exec(path, argv, sh_argv, env);
+        sandbox_child_failed(errp[1], SANDBOX_STEP_EXEC, 127);
     }
 
-    // Parent: wait for child
+    // Parent: report what the child could not do, then wait for it.
+    close(errp[1]);
+    free(env);
+    free(path);
+    sandbox_report(errp[0]);
     int status = 0;
-    waitpid(pid, &status, 0);
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
 
     // Cleanup shared memory
     shm_unlink(shm_name);

@@ -185,10 +185,6 @@ extern const char* aether_string_data(const void* s);
 #include <signal.h> /* kill, sigaction — process-supervision primitives */
 #include <time.h>   /* nanosleep, struct timespec — bounded waits */
 #include <poll.h>   /* poll — deadlock-free 3-way stdio pump in os_run_full_raw */
-#include <sys/stat.h> /* stat — the PATH lookup in aether_resolve_program */
-#ifdef __APPLE__
-#include <crt_externs.h> /* _NSGetEnviron: environ is not visible to a dylib */
-#endif
 #else
 #include <windows.h>
 #include <wchar.h>
@@ -223,12 +219,7 @@ static int win_launch(const char* prog, void* argv_list, void* env_list,
 
 /* This process's environment: what a child execs with when no env is given
  * (#3201). */
-#ifdef __APPLE__
-#define aether_environ (*_NSGetEnviron())
-#else
-extern char** environ;
-#define aether_environ environ
-#endif
+#define aether_environ (aether_spawn_environ())
 
 static int aether_child_fd(int fd, int target);   /* below */
 
@@ -1343,23 +1334,11 @@ static char** build_envp_array(void* env_list) {
     return envp;
 }
 
-/* Can this process execute `path`, by its effective ids as execve judges? */
-static int aether_can_exec(const char* path) {
-#ifdef AT_EACCESS
-    return faccessat(AT_FDCWD, path, X_OK, AT_EACCESS) == 0;
-#else
-    return access(path, X_OK) == 0;
-#endif
-}
-
-/* The program a spawn runs (#3201). A name with a '/' is taken as given. A
- * bare name is looked up here, in the parent, on this process's PATH, as
- * Windows and Go do, whatever env the child is given: the first entry where
- * it is a regular file this process may execute. An empty entry is the
- * current directory, as execvp and os.which have it, and an unset PATH is
- * os.which's default. NULL with errno ENOENT when nothing is found, so the
- * spawn reports "program not found" before any fork; NULL with ENOMEM when
- * a malloc fails. malloc'd.
+/* The program a spawn runs (#3201) is resolved in the parent, by
+ * aether_spawn_resolve (runtime/utils/aether_spawn.c): a name with a '/' as
+ * given, a bare name on this process's PATH whatever env the child is
+ * given, as Windows and Go do. A name not found is "program not found"
+ * before any fork.
  *
  * It used to be the child's execvp, and with an explicit env the child's
  * execve, which does no lookup: a bare name was never found by os.run,
@@ -1367,44 +1346,18 @@ static int aether_can_exec(const char* path) {
  * os.spawn_proc_to fell back to execvp, which ran it with this process's
  * environment instead of the one given.
  *
- * Resolving here is what lets every child exec with execve and a ready env
- * (the explicit one, or environ). Between fork and exec a child then calls
- * only functions POSIX lists as async-signal-safe: sigemptyset, sigprocmask,
- * sigaction, memset, fcntl, dup2, close, open, setpgid, execve (the
- * program, then /bin/sh for a file with no #! line, as execvp does), write
- * (the exec-error pipe) and _exit. No malloc, no setenv (os.run_pipe's env
- * is built in the parent, #3200), no stdio, no execvp, whose PATH walk
+ * Resolving in the parent is what lets every child exec with execve and a
+ * ready env (the explicit one, or environ). Between fork and exec a child
+ * then calls only functions POSIX lists as async-signal-safe: sigemptyset,
+ * sigprocmask, sigaction, memset, fcntl, dup2, close, open, setpgid, execve
+ * (the program, then /bin/sh for a file with no #! line, as execvp does),
+ * write (the exec-error pipe) and _exit. No malloc, no setenv (os.run_pipe's
+ * env is built in the parent, #3200), no stdio, no execvp, whose PATH walk
  * POSIX does not promise to be safe there. */
-static char* aether_resolve_program(const char* prog) {
-    if (!prog || !*prog) { errno = ENOENT; return NULL; }
-    if (strchr(prog, '/')) return strdup(prog);
-    const char* path = getenv("PATH");
-    if (!path || !*path) path = "/usr/local/bin:/usr/bin:/bin";
-    size_t plen = strlen(prog);
-    const char* p = path;
-    for (;;) {
-        const char* end = strchr(p, ':');
-        size_t dlen = end ? (size_t)(end - p) : strlen(p);
-        const char* dir = dlen ? p : ".";
-        if (!dlen) dlen = 1;
-        char* cand = (char*)malloc(dlen + 1 + plen + 1);
-        if (!cand) return NULL;
-        memcpy(cand, dir, dlen);
-        cand[dlen] = '/';
-        memcpy(cand + dlen + 1, prog, plen + 1);
-        struct stat st;
-        if (stat(cand, &st) == 0 && S_ISREG(st.st_mode) && aether_can_exec(cand)) return cand;
-        free(cand);
-        if (!end) break;
-        p = end + 1;
-    }
-    errno = ENOENT;
-    return NULL;
-}
 
 /* What a child execs, all made in the parent before the fork (#3201). */
 typedef struct {
-    char*  path;     /* the program, resolved: aether_resolve_program */
+    char*  path;     /* the program, resolved: aether_spawn_resolve */
     char** argv;     /* build_argv_array */
     char** sh_argv;  /* /bin/sh, path, argv[1..]: for a file with no #! */
     char** envp;     /* build_envp_array: the explicit env, or NULL */
@@ -1415,7 +1368,7 @@ typedef struct {
 static const char* aether_exec_prepare(AetherExec* x, const char* prog,
                                        void* argv_list, void* env_list) {
     memset(x, 0, sizeof *x);
-    x->path = aether_resolve_program(prog);
+    x->path = aether_spawn_resolve(prog);
     if (!x->path) return errno == ENOMEM ? "out of memory" : "program not found";
     x->argv = build_argv_array(prog, argv_list);
     size_t n = 0;
@@ -1875,20 +1828,8 @@ typedef struct { int _0; int _1; int _2; const char* _3; } _tuple_int_int_int_st
  * malloc'd; its strings are environ's and a literal. NULL when malloc
  * fails. */
 static char** aether_ipc_env(void) {
-    static const char ipc[] = "AETHER_IPC_FD=";
-    char** env = aether_environ;
-    size_t n = 0;
-    while (env && env[n]) n++;
-    char** out = (char**)malloc((n + 2) * sizeof(char*));
-    if (!out) return NULL;
-    size_t k = 0;
-    for (size_t i = 0; i < n; i++) {
-        if (strncmp(env[i], ipc, sizeof ipc - 1) == 0) continue;
-        out[k++] = env[i];
-    }
-    out[k++] = (char*)"AETHER_IPC_FD=3";
-    out[k] = NULL;
-    return out;
+    static const char* const ipc[] = { "AETHER_IPC_FD=3" };
+    return aether_spawn_env(aether_environ, ipc, 1);
 }
 
 /* Spawn child with a back-channel pipe at fd 3 (write end), set
