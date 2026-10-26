@@ -188,6 +188,10 @@ void http_server_use_middleware_owned(HttpServer* s, HttpMiddleware m, void* u, 
 void http_server_use_response_transformer(HttpServer* s, HttpResponseTransformer x, void* u) {
     (void)s; (void)x; (void)u;
 }
+void http_server_use_response_transformer_owned(HttpServer* s, HttpResponseTransformer x, void* u,
+                                                void (*r)(void*)) {
+    (void)s; (void)x; (void)u; (void)r;
+}
 HttpRequest* http_parse_request(const char* r) { (void)r; return NULL; }
 const char* http_get_header(HttpRequest* r, const char* k) { (void)r; (void)k; return NULL; }
 const char* http_get_query_param(HttpRequest* r, const char* k) { (void)r; (void)k; return NULL; }
@@ -2776,6 +2780,7 @@ struct HttpResponseTransformerNode {
     HttpResponseTransformer xform;
     void* user_data;
     struct HttpResponseTransformerNode* next;
+    void (*release)(void*);   /* run on user_data by http_server_free (#3191) */
 };
 
 /* Per-request observation hook chain node (#260 Tier 3 F1/F2). */
@@ -3999,12 +4004,24 @@ void http_server_use_request_hook(HttpServer* server,
 void http_server_use_response_transformer(HttpServer* server,
                                           HttpResponseTransformer xform,
                                           void* user_data) {
-    if (!server || !xform) return;
-    struct HttpResponseTransformerNode* node =
-        (struct HttpResponseTransformerNode*)malloc(sizeof(*node));
+    http_server_use_response_transformer_owned(server, xform, user_data, NULL);
+}
+
+void http_server_use_response_transformer_owned(HttpServer* server,
+                                                HttpResponseTransformer xform,
+                                                void* user_data,
+                                                void (*release)(void*)) {
+    struct HttpResponseTransformerNode* node = (server && xform)
+        ? (struct HttpResponseTransformerNode*)malloc(sizeof(*node)) : NULL;
+    if (!node) {
+        /* Not installed: what it would have owned goes now. */
+        if (release && user_data) release(user_data);
+        return;
+    }
     node->xform = xform;
     node->user_data = user_data;
     node->next = NULL;
+    node->release = release;
     if (!server->response_transformer_chain) {
         server->response_transformer_chain = node;
     } else {
@@ -6281,6 +6298,7 @@ void http_server_free(HttpServer* server) {
         struct HttpResponseTransformerNode* xform = server->response_transformer_chain;
         while (xform) {
             struct HttpResponseTransformerNode* next = xform->next;
+            if (xform->release) xform->release(xform->user_data);   /* #3191 */
             free(xform);
             xform = next;
         }

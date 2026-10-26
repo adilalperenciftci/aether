@@ -482,6 +482,13 @@ typedef void (*HttpResponseTransformer)(HttpRequest* req,
 void http_server_use_response_transformer(HttpServer* server,
                                           HttpResponseTransformer xform,
                                           void* user_data);
+/* As above, for user data the transformer owns: http_server_free runs
+ * `release` on it (#3191), as http_server_use_middleware_owned does for a
+ * middleware's. */
+void http_server_use_response_transformer_owned(HttpServer* server,
+                                                HttpResponseTransformer xform,
+                                                void* user_data,
+                                                void (*release)(void*));
 
 // Request parsing
 HttpRequest* http_parse_request(const char* raw_request);

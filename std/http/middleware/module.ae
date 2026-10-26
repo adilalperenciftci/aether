@@ -81,8 +81,22 @@ extern aether_vhost_map_new(fallback_status: int) -> ptr
 extern aether_vhost_register_host(map: ptr, host: string) -> int
 extern aether_middleware_vhost(req: ptr, res: ptr, user_data: ptr) -> int
 
-extern http_server_use_middleware(server: ptr, middleware: ptr, user_data: ptr)
-extern http_server_use_response_transformer(server: ptr, xform: ptr, user_data: ptr)
+// Every factory below hands its options block to the server with the
+// block's own free, which http_server_free runs (#3191): the server owns
+// what a factory registers, rewrite's and error pages' opts included.
+extern http_server_use_middleware_owned(server: ptr, middleware: ptr, user_data: ptr, release: ptr)
+extern http_server_use_response_transformer_owned(server: ptr, xform: ptr, user_data: ptr, release: ptr)
+extern aether_cors_opts_free(opts: ptr)
+extern aether_basic_auth_opts_free(opts: ptr)
+extern aether_bearer_auth_opts_free(opts: ptr)
+extern aether_session_auth_opts_free(opts: ptr)
+extern aether_rate_limit_opts_free(opts: ptr)
+extern aether_vhost_map_free(map: ptr)
+extern aether_gzip_opts_free(opts: ptr)
+extern aether_static_opts_free(opts: ptr)
+extern aether_rewrite_opts_free(opts: ptr)
+extern aether_error_pages_opts_free(opts: ptr)
+extern aether_real_ip_opts_free(opts: ptr)
 
 // D2 externs.
 extern aether_gzip_opts_new(min_size: int, level: int) -> ptr
@@ -122,7 +136,7 @@ use_cors(server: ptr,
     if opts == null {
         return "cors: allocation failed"
     }
-    http_server_use_middleware(server, aether_middleware_cors, opts)
+    http_server_use_middleware_owned(server, aether_middleware_cors, opts, aether_cors_opts_free)
     return ""
 }
 
@@ -141,7 +155,8 @@ use_basic_auth(server: ptr,
     if opts == null {
         return "basic_auth: allocation failed"
     }
-    http_server_use_middleware(server, aether_middleware_basic_auth, opts)
+    http_server_use_middleware_owned(server, aether_middleware_basic_auth, opts,
+        aether_basic_auth_opts_free)
     return ""
 }
 
@@ -166,7 +181,8 @@ use_bearer_auth(server: ptr,
     if opts == null {
         return "bearer_auth: allocation failed"
     }
-    http_server_use_middleware(server, aether_middleware_bearer_auth, opts)
+    http_server_use_middleware_owned(server, aether_middleware_bearer_auth, opts,
+        aether_bearer_auth_opts_free)
     return ""
 }
 
@@ -195,7 +211,8 @@ use_session_auth(server: ptr,
     if opts == null {
         return "session_auth: allocation failed"
     }
-    http_server_use_middleware(server, aether_middleware_session_auth, opts)
+    http_server_use_middleware_owned(server, aether_middleware_session_auth, opts,
+        aether_session_auth_opts_free)
     return ""
 }
 
@@ -215,7 +232,8 @@ use_rate_limit(server: ptr, max_requests: int, window_ms: int) -> {
     if opts == null {
         return "rate_limit: allocation failed"
     }
-    http_server_use_middleware(server, aether_middleware_rate_limit, opts)
+    http_server_use_middleware_owned(server, aether_middleware_rate_limit, opts,
+        aether_rate_limit_opts_free)
     return ""
 }
 
@@ -248,7 +266,7 @@ use_vhost(server: ptr, hosts_csv: string) -> {
         i = i + 1
     }
 
-    http_server_use_middleware(server, aether_middleware_vhost, map)
+    http_server_use_middleware_owned(server, aether_middleware_vhost, map, aether_vhost_map_free)
     return ""
 }
 
@@ -296,7 +314,8 @@ use_gzip(server: ptr, min_size: int, level: int) -> {
     if opts == null {
         return "gzip: allocation failed"
     }
-    http_server_use_response_transformer(server, aether_xform_gzip, opts)
+    http_server_use_response_transformer_owned(server, aether_xform_gzip, opts,
+        aether_gzip_opts_free)
     return ""
 }
 
@@ -308,7 +327,8 @@ use_static_files(server: ptr, url_prefix: string, root: string) -> {
     if opts == null {
         return "static_files: allocation failed (root may be empty)"
     }
-    http_server_use_middleware(server, aether_middleware_static, opts)
+    http_server_use_middleware_owned(server, aether_middleware_static, opts,
+        aether_static_opts_free)
     return ""
 }
 
@@ -329,11 +349,13 @@ rewrite_add_rule(opts: ptr, from_prefix: string, to_prefix: string) -> {
     return ""
 }
 
+// The server owns `opts` from here on and frees them with itself (#3191).
 use_rewrite(server: ptr, opts: ptr) -> {
     if opts == null {
         return "rewrite: opts is null (call aether_rewrite_opts_new first)"
     }
-    http_server_use_middleware(server, aether_middleware_rewrite, opts)
+    http_server_use_middleware_owned(server, aether_middleware_rewrite, opts,
+        aether_rewrite_opts_free)
     return ""
 }
 
@@ -348,11 +370,13 @@ error_pages_register(opts: ptr, status_code: int, body: string, content_type: st
     return ""
 }
 
+// The server owns `opts` from here on and frees them with itself (#3191).
 use_error_pages(server: ptr, opts: ptr) -> {
     if opts == null {
         return "error_pages: opts is null (call aether_error_pages_opts_new first)"
     }
-    http_server_use_response_transformer(server, aether_xform_error_pages, opts)
+    http_server_use_response_transformer_owned(server, aether_xform_error_pages, opts,
+        aether_error_pages_opts_free)
     return ""
 }
 
@@ -386,6 +410,7 @@ use_real_ip(server: ptr, header_name: string) -> {
     if opts == null {
         return "real_ip: allocation failed"
     }
-    http_server_use_middleware(server, aether_middleware_real_ip, opts)
+    http_server_use_middleware_owned(server, aether_middleware_real_ip, opts,
+        aether_real_ip_opts_free)
     return ""
 }

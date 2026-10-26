@@ -553,7 +553,13 @@ Middleware shape: each is a function-pointer chain entry. Pre-handler
 middleware (cors / basic_auth / rate_limit / vhost / static_files /
 rewrite / real_ip) run before route dispatch and can short-circuit;
 response transformers (gzip / error_pages) run after the route
-handler emits the response. Order is registration order.
+handler emits the response. Order is registration order. The server
+owns what each factory registers, the opts handed to `use_rewrite` and
+`use_error_pages` included, and `http.server_free` frees them (#3191).
+A middleware a program registers itself with `http_server_use_middleware`
+leaves its user data to the program; `http_server_use_middleware_owned`
+and `http_server_use_response_transformer_owned` take a release the
+server runs on it.
 
 **Real-IP trust model.** `use_real_ip` does NOT validate that the
 request actually came through a trusted proxy. Operators must only
