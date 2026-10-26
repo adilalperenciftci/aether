@@ -5400,17 +5400,43 @@ void emit_message_array_hoists(CodeGenerator* gen, ASTNode* message, MessageDef*
  * was filled from: when it is an owned temporary (a call or interpolation
  * result held by nothing else), the temporary is freed once it is copied.
  * Nothing else frees it, so every such send leaked one string. */
-void emit_message_string_copy(CodeGenerator* gen, const char* lv, ASTNode* init) {
-    int owned_temp = init &&
+static int message_string_init_owned(CodeGenerator* gen, ASTNode* init) {
+    return init &&
         (init->type == AST_FUNCTION_CALL || init->type == AST_STRING_INTERP ||
          is_owned_string_unwrap(gen, init)) &&
         is_heap_string_expr(gen, init);
-    fprintf(gen->output,
-            "if (%s) { const char* _mt = %s; size_t _ml = aether_string_length(_mt); "
-            "%s = (const char*)string_new_with_length((void*)aether_string_data(_mt), _ml); ",
-            lv, lv, lv);
-    if (owned_temp) fprintf(gen->output, "aether_heap_str_free(_mt); ");
-    fprintf(gen->output, "} ");
+}
+
+void emit_message_string_copy(CodeGenerator* gen, const char* lv, ASTNode* init) {
+    fprintf(gen->output, "%s = _aether_msg_str(%s, %d); ", lv, lv,
+            message_string_init_owned(gen, init));
+}
+
+/* The fields of message `lv`, built from the literal `message`, that its
+ * sender still holds: every owning one but a string, which is a copy of its
+ * own (#466). Each is published (#2919) before the message can reach the
+ * receiving actor's thread, so both threads count what it holds atomically:
+ * a tuple's string taken with a plain increment and released on two threads
+ * at once lost a count, and the sender's last release freed it a second
+ * time. As emit_message_array_fills does: parts of the sequence `s`, or
+ * statements when it is NULL. A closure's environment is counted
+ * atomically already. */
+void emit_message_publishes(CodeGenerator* gen, ASTNode* message, const char* lv, TempSeq* s) {
+    for (int i = 0; i < message->child_count; i++) {
+        ASTNode* fi = message->children[i];
+        if (!fi || fi->type != AST_FIELD_INIT || !fi->value || fi->child_count == 0) continue;
+        Type* ft = message_field_type(gen->program, message->value, fi->value);
+        if (!ft || ft->kind == TYPE_STRING || ft->kind == TYPE_FUNCTION ||
+            !own_type_owns(gen, ft)) continue;
+        const char* call = own_publish_call(gen, ft, cg_internf("%s.%s", lv, fi->value));
+        if (!call) continue;
+        if (s) {
+            seq_next(gen, s);
+            fprintf(gen->output, "%s", call);
+        } else {
+            fprintf(gen->output, "%s; ", call);
+        }
+    }
 }
 
 /* The expression a message constructor gives field `name`, or NULL. */
@@ -5590,7 +5616,8 @@ int message_has_array_fields(CodeGenerator* gen, ASTNode* message) {
 /* The initializers of message literal `message` after its `._message_id`.
  * A fixed-size array is left out: C initializes no array from an array
  * value, so emit_message_array_fills fills it once the message exists. */
-void emit_message_field_inits(CodeGenerator* gen, ASTNode* message, MessageDef* msg_def) {
+void emit_message_field_inits(CodeGenerator* gen, ASTNode* message, MessageDef* msg_def,
+                              int copy_strings) {
     for (int i = 0; i < message->child_count; i++) {
         ASTNode* fi = message->children[i];
         if (!fi || fi->type != AST_FIELD_INIT || msg_array_field(gen, message->value, fi->value))
@@ -5600,14 +5627,33 @@ void emit_message_field_inits(CodeGenerator* gen, ASTNode* message, MessageDef* 
         /* A struct, an optional or a tuple that owns is taken as any place
          * of its type takes it; an optional's bare value is wrapped. */
         Type* ft = message_field_type(gen->program, message->value, fi->value);
+        MessageFieldDef* fdef = find_msg_field(msg_def, fi->value);
         if (ft && ft->kind != TYPE_STRING && ft->kind != TYPE_FUNCTION && own_type_owns(gen, ft)) {
             emit_value_take(gen, fi->children[0], ft);
         } else if (ft && ft->kind == TYPE_OPTIONAL) {
             emit_optional_coerced(gen, fi->children[0], ft);
+        } else if (copy_strings && fdef && fdef->type_kind == TYPE_STRING) {
+            fprintf(gen->output, "_aether_msg_str(");
+            emit_message_field_init(gen, fdef, fi->children[0]);
+            fprintf(gen->output, ", %d)", message_string_init_owned(gen, fi->children[0]));
         } else {
-            emit_message_field_init(gen, find_msg_field(msg_def, fi->value), fi->children[0]);
+            emit_message_field_init(gen, fdef, fi->children[0]);
         }
     }
+}
+
+/* Does message literal `message` share a field with its sender that
+ * emit_message_publishes publishes? */
+int message_needs_publish(CodeGenerator* gen, ASTNode* message) {
+    for (int i = 0; i < message->child_count; i++) {
+        ASTNode* fi = message->children[i];
+        if (!fi || fi->type != AST_FIELD_INIT || !fi->value || fi->child_count == 0) continue;
+        Type* ft = message_field_type(gen->program, message->value, fi->value);
+        if (ft && ft->kind != TYPE_STRING && ft->kind != TYPE_FUNCTION && own_type_owns(gen, ft) &&
+            own_publish_call(gen, ft, "x"))
+            return 1;
+    }
+    return 0;
 }
 
 /* Each fixed-size array field of message literal `message` filled into the
@@ -11859,7 +11905,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             emit_message_array_hoists(gen, message, msg_def);
                             fprintf(gen->output, "%s _msg = { ._message_id = %d",
                                     message->value, msg_def->message_id);
-                            emit_message_field_inits(gen, message, msg_def);
+                            emit_message_field_inits(gen, message, msg_def, 0);
                             fprintf(gen->output, " }; ");
                             emit_message_array_fills(gen, message, "_msg", NULL);
                             /* Deep-copy heap-string fields (#466).
@@ -11895,6 +11941,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                     }
                                 }
                             }
+                            emit_message_publishes(gen, message, "_msg", NULL);
                             /* #3117: in a batched loop every send joins the
                              * batch, so a payload message keeps its place
                              * among the loop's one-int ones. */
@@ -11995,7 +12042,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         fprintf(gen->output, "({ %s _msg = { ._message_id = %d",
                                 message->value, msg_def->message_id);
 
-                        emit_message_field_inits(gen, message, msg_def);
+                        emit_message_field_inits(gen, message, msg_def, 0);
                         fprintf(gen->output, " }; ");
                         emit_message_array_fills(gen, message, "_msg", NULL);
 
@@ -12013,6 +12060,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                     message_field_init_expr(message, f->name));
                             }
                         }
+                        emit_message_publishes(gen, message, "_msg", NULL);
 
                         fprintf(gen->output, "void* _ask_r = scheduler_ask_message_status(");
                         emit_send_target(gen, target, "ActorBase*", "ask");
@@ -12057,25 +12105,29 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         gen->ask_temp_counter++;
                         fprintf(gen->output, "(*(%s*)_aether_ask_helper(", c_type);
                         emit_send_target(gen, target, "ActorBase*", "ask");
-                        if (message_has_array_fields(gen, message)) {
-                            /* Its arrays are filled once it exists, so the
-                             * message is a temporary, not a literal. */
+                        /* Its strings are copies of its own, made in the
+                         * literal (#466): no statement follows it here. */
+                        if (message_has_array_fields(gen, message) || message_needs_publish(gen, message)) {
+                            /* Its arrays are filled and its shared fields
+                             * published once it exists, so the message is a
+                             * temporary, not a literal. */
                             TempSeq s;
                             fprintf(gen->output, ", ");
                             seq_open(gen, &s);
                             const char* mv = seq_let(gen, &s, message->value, "_ae_am");
                             fprintf(gen->output, "(%s){ ._message_id = %d", message->value,
                                     msg_def->message_id);
-                            emit_message_field_inits(gen, message, msg_def);
+                            emit_message_field_inits(gen, message, msg_def, 1);
                             fprintf(gen->output, " }");
                             emit_message_array_fills(gen, message, mv, &s);
+                            emit_message_publishes(gen, message, mv, &s);
                             seq_next(gen, &s);
                             fprintf(gen->output, "&%s", mv);
                             seq_close(gen, &s);
                         } else {
                             fprintf(gen->output, ", &(%s){ ._message_id = %d",
                                     message->value, msg_def->message_id);
-                            emit_message_field_inits(gen, message, msg_def);
+                            emit_message_field_inits(gen, message, msg_def, 1);
                             fprintf(gen->output, " }");
                         }
                         fprintf(gen->output, ", sizeof(%s), %d, ", message->value, timeout_ms);

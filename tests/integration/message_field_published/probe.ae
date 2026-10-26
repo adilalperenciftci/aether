@@ -1,0 +1,102 @@
+// A message field that shares a counted string with its sender is
+// published before the message reaches the receiving actor's thread
+// (#3192), so both threads count it atomically. Unpublished, the
+// receiver's release raced the sender's next take, lost a count, and the
+// sender's last release freed the string twice. A string field is the
+// message's own copy (#466), on the C path without statement expressions
+// too (#3193), so the receiver's release leaves the sender's alone.
+
+import std.string
+
+extern probe_published(s: @aether ptr) -> int
+extern exit(code: int)
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+struct Named {
+    name: string
+    n: int
+}
+
+message Pair {
+    v: (string, int)
+}
+
+message Rec {
+    r: Named
+}
+
+message PairAsk {
+    v: (string, int)
+}
+
+message Greet {
+    who: string
+}
+
+message Ack {
+    n: int
+}
+
+actor Sink {
+    receive {
+        Pair(v: x) -> {
+            s, _n = x
+            check(s == "a#", "the tuple the actor received")
+        }
+        Rec(r: x) -> {
+            check(x.name == "b#", "the struct the actor received")
+        }
+        PairAsk(v: x) -> {
+            s, n = x
+            reply Ack { n: n + string.length(s) }
+        }
+        Greet(who: w) -> {
+            reply Ack { n: string.length(w) }
+        }
+    }
+}
+
+// A string made at run time: two literals concatenated are folded into a
+// pinned literal, which is never counted.
+fresh(w: string) -> string {
+    return string.concat(w, "#")
+}
+
+pair(w: string) -> (string, int) {
+    return fresh(w), 1
+}
+
+main() {
+    h = spawn(Sink())
+
+    x = pair("a")
+    s, _n = x
+    check(probe_published(s) == 0, "a fresh string is plain-counted")
+    h ! Pair { v: x }
+    check(probe_published(s) == 1, "a tuple field's string is published at the send")
+
+    r = Named { name: fresh("b"), n: 2 }
+    h ! Rec { r: r }
+    check(probe_published(r.name) == 1, "a struct field's string is published at the send")
+
+    y = pair("c")
+    t, _m = y
+    int k = h ? PairAsk { v: y }
+    check(k == 3, "the ask's reply")
+    check(probe_published(t) == 1, "an ask's tuple field is published")
+
+    who = fresh("w")
+    int len = h ? Greet { who: who }
+    check(len == 2, "the ask with a string field")
+    check(who == "w#", "the sender's string after the ask")
+    check(probe_published(who) == 0, "a string field is copied, the sender's left as it was")
+
+    wait_for_idle()
+    println("PASS")
+}

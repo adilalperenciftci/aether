@@ -13249,7 +13249,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         // Construct the reply message (validates fields at compile time)
                         fprintf(gen->output, "{ %s _reply = { ._message_id = %d",
                                 reply_expr->value, msg_def->message_id);
-                        emit_message_field_inits(gen, reply_expr, msg_def);
+                        emit_message_field_inits(gen, reply_expr, msg_def, 0);
                         fprintf(gen->output, " }; ");
                         emit_message_array_fills(gen, reply_expr, "_reply", NULL);
 
@@ -13266,6 +13266,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                     message_field_init_expr(reply_expr, f->name));
                             }
                         }
+                        emit_message_publishes(gen, reply_expr, "_reply", NULL);
 
                         /* Send reply back to the waiting asker via the
                          * scheduler reply slot. #2528: a reply that owns

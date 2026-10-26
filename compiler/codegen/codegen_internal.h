@@ -314,7 +314,13 @@ MessageFieldDef* find_msg_field(MessageDef* msg_def, const char* name);
 Type* message_field_type(ASTNode* program, const char* msg, const char* field);
 void emit_message_field_init(CodeGenerator* gen, MessageFieldDef* fdef, ASTNode* rhs);
 int message_has_array_fields(CodeGenerator* gen, ASTNode* message);
-void emit_message_field_inits(CodeGenerator* gen, ASTNode* message, MessageDef* msg_def);
+/* copy_strings: each string field as its own copy, in the literal (the ask
+ * C without statement expressions builds as one expression); otherwise as
+ * written, copied by emit_message_string_copy once the message exists. */
+void emit_message_field_inits(CodeGenerator* gen, ASTNode* message, MessageDef* msg_def,
+                              int copy_strings);
+void emit_message_publishes(CodeGenerator* gen, ASTNode* message, const char* lv, TempSeq* s);
+int message_needs_publish(CodeGenerator* gen, ASTNode* message);
 void emit_message_array_fills(CodeGenerator* gen, ASTNode* message, const char* lv, TempSeq* s);
 void emit_message_array_hoists(CodeGenerator* gen, ASTNode* message, MessageDef* msg_def);
 
@@ -616,6 +622,7 @@ typedef enum { OWN_RETAIN, OWN_DROP, OWN_ZERO, OWN_PUBLISH } OwnOp;
 int own_type_owns(CodeGenerator* gen, Type* t);
 int own_value_composite(CodeGenerator* gen, Type* t);
 void own_emit_part(CodeGenerator* gen, Type* pt, const char* lv, OwnOp op);
+const char* own_publish_call(CodeGenerator* gen, Type* pt, const char* lv);
 void own_emit_prototypes(CodeGenerator* gen, Type* t);
 void emit_composite_take(CodeGenerator* gen, ASTNode* e, Type* t);
 void emit_owning_store(CodeGenerator* gen, const char* lv, Type* t, ASTNode* rhs, int publish);
