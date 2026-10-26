@@ -27,8 +27,6 @@ cat > "$tmp/main.ae" <<'AE'
 import std.fs
 import std.os
 import std.string
-extern file_close(file: ptr) -> int
-extern file_read_all_raw(file: ptr) -> string
 
 main() {
     dir = os.args_get(1)
@@ -37,14 +35,14 @@ main() {
     f, oerr = fs.open(p, "w")
     if oerr != "" { println("open w: ${oerr}"); return 1 }
     n, werr = fs.pwrite(f, string.bytes("ab\ncd\n"), 0)
-    _ = file_close(f)
+    _ = fs.close(f)
     sz, serr = fs.size(p)
     println("pwrite ${n} ${werr} size ${sz}")
     // 2. "r" + pread reads the bytes back exactly
     g, gerr = fs.open(p, "r")
     if gerr != "" { println("open r: ${gerr}"); return 1 }
     got, gn, perr = fs.pread(g, 16, 0)
-    _ = file_close(g)
+    _ = fs.close(g)
     println("pread ${gn} ${got == "ab\ncd\n"}")
     // 3. a file holding CRLF and a 0x1A byte is read verbatim through "r"
     q = "${dir}/crlf.bin"
@@ -52,21 +50,21 @@ main() {
     _ = fs.write_binary(q, string.bytes(raw))
     h, herr = fs.open(q, "r")
     if herr != "" { println("open r2: ${herr}"); return 1 }
-    back = file_read_all_raw(h)
-    _ = file_close(h)
+    back, _rerr = fs.read_all(h)
+    _ = fs.close(h)
     println("crlf ${string.length(back)} ${back == raw}")
     // 4. "a+" gets the 'b' after the '+' and still appends
     k, kerr = fs.open(p, "a+")
     if kerr != "" { println("open a+: ${kerr}"); return 1 }
     _, aerr = fs.pwrite(k, string.bytes("e\n"), 6)
-    _ = file_close(k)
+    _ = fs.close(k)
     sz2, _ = fs.size(p)
     println("append ${aerr} size ${sz2}")
     // 5. an explicit 't' is passed through, not turned into "wtb" (which
     //    UCRT rejects): the open succeeds
     w, terr = fs.open("${dir}/text.txt", "wt")
     println("wt ${w != null} ${terr}")
-    if w != null { _ = file_close(w) }
+    if w != null { _ = fs.close(w) }
 }
 AE
 want='pwrite 6  size 6

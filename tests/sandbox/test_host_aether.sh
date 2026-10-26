@@ -129,12 +129,12 @@ echo "=== Run sandboxed (denied file read) ==="
 cat > $AE_TMP/ae_host_test_fs.ae << 'EOF'
 import std.fs
 main() {
-    f = file_open_raw("/etc/hostname", "r")
-    if f == null {
+    f, err = fs.open("/etc/hostname", "r")
+    if err != "" {
         println("denied")
     } else {
         println("opened")
-        file_close(f)
+        _ = fs.close(f)
     }
 }
 EOF

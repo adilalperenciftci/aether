@@ -11,7 +11,7 @@
 File* file_open_raw(const char* p, const char* m) { (void)p; (void)m; return NULL; }
 AetherString* file_read_all_raw(File* f) { (void)f; return NULL; }
 int file_write_raw(File* f, const char* d, int l) { (void)f; (void)d; (void)l; return 0; }
-int file_close(File* f) { (void)f; return 0; }
+int file_close_raw(File* f) { (void)f; return 0; }
 int file_fd_raw(File* f) { (void)f; return -1; }
 int file_exists(const char* p) { (void)p; return 0; }
 int fs_path_exists(const char* p) { (void)p; return 0; }
@@ -240,7 +240,7 @@ File* file_open_raw(const char* path, const char* mode) {
     file->is_open = 1;
     /* #462: cap-account the retained path copy — a sandboxed caller can
      * craft an enormous filename to inflate filesystem-driven memory.
-     * Freed with the matching length in file_close. */
+     * Freed with the matching length in file_close_raw. */
     size_t plen = strlen(path) + 1;
     char* pcopy = (char*)aether_caps_malloc(plen);
     if (pcopy) memcpy(pcopy, path, plen);
@@ -339,17 +339,21 @@ int file_write_raw(File* file, const char* data, int length) {
     return (written == (size_t)length) ? 1 : 0;
 }
 
-int file_close(File* file) {
+/* 1 on success, 0 for a null handle, -1 when the close's flush fails: a
+ * write buffered until now is not on disk (a full disk, a lost network
+ * mount), which fs.close reports (#3179). The handle is freed either way. */
+int file_close_raw(File* file) {
     if (!file) return 0;
 
+    int rc = 1;
     if (file->is_open) {
-        fclose((FILE*)file->handle);
+        if (fclose((FILE*)file->handle) != 0) rc = -1;
         file->is_open = 0;
     }
 
     if (file->path) aether_caps_free((void*)file->path, strlen(file->path) + 1);
     aether_caps_free(file, sizeof(File));
-    return 1;
+    return rc;
 }
 
 /* ===================================================================
@@ -550,7 +554,7 @@ const char* fs_ftruncate_raw(File* file, int64_t length) {
  * fcntls_limit() before capsicum.enter() — can narrow a descriptor the
  * program opened through the stdlib rather than a raw extern. The fd
  * is owned by the handle: callers must not close() it, and it dies
- * with file_close() — which also frees the File itself, so this must
+ * with file_close_raw() — which also frees the File itself, so this must
  * never be called on a closed handle (only on null, which returns -1).
  * fflush first so the fd's view matches the FILE*'s buffered state. */
 int file_fd_raw(File* file) {

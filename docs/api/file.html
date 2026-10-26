@@ -16,7 +16,7 @@
   <h2>Exports</h2>
   <ul class="function-nav">
     <li><a href="#open_raw">open_raw</a></li>
-    <li><a href="#close">close</a></li>
+    <li><a href="#close_raw">close_raw</a></li>
     <li><a href="#read_all_raw">read_all_raw</a></li>
     <li><a href="#write_raw">write_raw</a></li>
     <li><a href="#exists">exists</a></li>
@@ -24,6 +24,8 @@
     <li><a href="#size_raw">size_raw</a></li>
     <li><a href="#fd_raw">fd_raw</a></li>
     <li><a href="#open">open</a></li>
+    <li><a href="#close">close</a></li>
+    <li><a href="#read_all">read_all</a></li>
     <li><a href="#read">read</a></li>
     <li><a href="#write">write</a></li>
     <li><a href="#delete">delete</a></li>
@@ -136,9 +138,9 @@
       <p class="signature"><span class="sig-params">path: string, mode: string</span></p>
       <p class="doc">Raw ptr/int externs (escape hatch).</p>
     </div>
-    <div class="function" id="close" data-name="close">
-      <h3 class="function-name">close <span class="kind">extern</span></h3>
-      <pre class="usage"><code>close(file) <span class="arrow">-&gt;</span> int</code></pre>
+    <div class="function" id="close_raw" data-name="close_raw">
+      <h3 class="function-name">close_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>close_raw(file) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">file: ptr</span></p>
     </div>
     <div class="function" id="read_all_raw" data-name="read_all_raw">
@@ -178,6 +180,18 @@
       <p class="signature"><span class="sig-params">path: string, mode: string</span></p>
       <p class="doc">Open a file. Returns (handle, &quot;&quot;) on success, (null, error) on failure.</p>
     </div>
+    <div class="function" id="close" data-name="close">
+      <h3 class="function-name">close <span class="kind">fn</span></h3>
+      <pre class="usage"><code>close(handle) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">handle: ptr</span></p>
+      <p class="doc">Close a handle `open` gave, and free it. Returns &quot;&quot; on success, or the reason: a write the close flushes can fail, and the data is then not on disk (#3179).</p>
+    </div>
+    <div class="function" id="read_all" data-name="read_all">
+      <h3 class="function-name">read_all <span class="kind">fn</span></h3>
+      <pre class="usage"><code>read_all(handle) <span class="arrow">-&gt;</span> (string, string)</code></pre>
+      <p class="signature"><span class="sig-params">handle: ptr</span></p>
+      <p class="doc">Read the whole of an open handle, from its start. Returns (text, &quot;&quot;) on success, (&quot;&quot;, error) on failure; the handle stays open (#3179).</p>
+    </div>
     <div class="function" id="read" data-name="read">
       <h3 class="function-name">read <span class="kind">fn</span></h3>
       <pre class="usage"><code>read(path) <span class="arrow">-&gt;</span> (string, string)</code></pre>
@@ -206,7 +220,7 @@
       <h3 class="function-name">fd <span class="kind">fn</span></h3>
       <pre class="usage"><code>fd(handle) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">handle: ptr</span></p>
-      <p class="doc">The OS-level file descriptor inside an open handle, or -1 on a null handle (#1003). Exists for capability plumbing: open through the stdlib, then narrow the descriptor with capsicum.rights_limit(file.fd(handle), ...) before capsicum.enter(). The fd is owned by the handle — do not close it directly; it is released by file_close, which also frees the handle itself, so never call fd() on a handle that has been closed.</p>
+      <p class="doc">The OS-level file descriptor inside an open handle, or -1 on a null handle (#1003). Exists for capability plumbing: open through the stdlib, then narrow the descriptor with capsicum.rights_limit(file.fd(handle), ...) before capsicum.enter(). The fd is owned by the handle — do not close it directly; it is released by close, which also frees the handle itself, so never call fd() on a handle that has been closed.</p>
     </div>
   </div>
 </main>

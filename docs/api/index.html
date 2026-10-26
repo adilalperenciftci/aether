@@ -224,7 +224,7 @@
     <a href="file.html" class="module-card">
       <h3>file</h3>
       <p>std.file - File Operations (alias for std.fs) This is a convenience module that re-exports file functions from std.fs.</p>
-      <span class="count">14 exports</span>
+      <span class="count">16 exports</span>
     </a>
     <a href="floatarr.html" class="module-card">
       <h3>floatarr</h3>
@@ -234,7 +234,7 @@
     <a href="fs.html" class="module-card">
       <h3>fs</h3>
       <p>std.fs - File System Module Import with: import std.fs Note: fs is otherwise extern-only (no std.string import) to stay a thin syscall layer.</p>
-      <span class="count">148 exports</span>
+      <span class="count">150 exports</span>
     </a>
     <a href="hash.html" class="module-card">
       <h3>hash</h3>
@@ -1031,7 +1031,7 @@
       <li class="function-item" data-name="csv_field"><a href="encoding.html#csv_field"><span class="fn-name">csv_field</span><span class="fn-module">encoding</span></a></li>
       <li class="function-item" data-name="csv_free"><a href="encoding.html#csv_free"><span class="fn-name">csv_free</span><span class="fn-module">encoding</span></a></li>
       <li class="function-item" data-name="open_raw"><a href="file.html#open_raw"><span class="fn-name">open_raw</span><span class="fn-module">file</span></a></li>
-      <li class="function-item" data-name="close"><a href="file.html#close"><span class="fn-name">close</span><span class="fn-module">file</span></a></li>
+      <li class="function-item" data-name="close_raw"><a href="file.html#close_raw"><span class="fn-name">close_raw</span><span class="fn-module">file</span></a></li>
       <li class="function-item" data-name="read_all_raw"><a href="file.html#read_all_raw"><span class="fn-name">read_all_raw</span><span class="fn-module">file</span></a></li>
       <li class="function-item" data-name="write_raw"><a href="file.html#write_raw"><span class="fn-name">write_raw</span><span class="fn-module">file</span></a></li>
       <li class="function-item" data-name="exists"><a href="file.html#exists"><span class="fn-name">exists</span><span class="fn-module">file</span></a></li>
@@ -1039,6 +1039,8 @@
       <li class="function-item" data-name="size_raw"><a href="file.html#size_raw"><span class="fn-name">size_raw</span><span class="fn-module">file</span></a></li>
       <li class="function-item" data-name="fd_raw"><a href="file.html#fd_raw"><span class="fn-name">fd_raw</span><span class="fn-module">file</span></a></li>
       <li class="function-item" data-name="open"><a href="file.html#open"><span class="fn-name">open</span><span class="fn-module">file</span></a></li>
+      <li class="function-item" data-name="close"><a href="file.html#close"><span class="fn-name">close</span><span class="fn-module">file</span></a></li>
+      <li class="function-item" data-name="read_all"><a href="file.html#read_all"><span class="fn-name">read_all</span><span class="fn-module">file</span></a></li>
       <li class="function-item" data-name="read"><a href="file.html#read"><span class="fn-name">read</span><span class="fn-module">file</span></a></li>
       <li class="function-item" data-name="write"><a href="file.html#write"><span class="fn-name">write</span><span class="fn-module">file</span></a></li>
       <li class="function-item" data-name="delete"><a href="file.html#delete"><span class="fn-name">delete</span><span class="fn-module">file</span></a></li>
@@ -1060,7 +1062,7 @@
       <li class="function-item" data-name="fill"><a href="floatarr.html#fill"><span class="fn-name">fill</span><span class="fn-module">floatarr</span></a></li>
       <li class="function-item" data-name="free"><a href="floatarr.html#free"><span class="fn-name">free</span><span class="fn-module">floatarr</span></a></li>
       <li class="function-item" data-name="file_open_raw"><a href="fs.html#file_open_raw"><span class="fn-name">file_open_raw</span><span class="fn-module">fs</span></a></li>
-      <li class="function-item" data-name="file_close"><a href="fs.html#file_close"><span class="fn-name">file_close</span><span class="fn-module">fs</span></a></li>
+      <li class="function-item" data-name="file_close_raw"><a href="fs.html#file_close_raw"><span class="fn-name">file_close_raw</span><span class="fn-module">fs</span></a></li>
       <li class="function-item" data-name="file_read_all_raw"><a href="fs.html#file_read_all_raw"><span class="fn-name">file_read_all_raw</span><span class="fn-module">fs</span></a></li>
       <li class="function-item" data-name="file_write_raw"><a href="fs.html#file_write_raw"><span class="fn-name">file_write_raw</span><span class="fn-module">fs</span></a></li>
       <li class="function-item" data-name="file_exists"><a href="fs.html#file_exists"><span class="fn-name">file_exists</span><span class="fn-module">fs</span></a></li>
@@ -1154,6 +1156,8 @@
       <li class="function-item" data-name="walk_raw"><a href="fs.html#walk_raw"><span class="fn-name">walk_raw</span><span class="fn-module">fs</span></a></li>
       <li class="function-item" data-name="watch_open_raw"><a href="fs.html#watch_open_raw"><span class="fn-name">watch_open_raw</span><span class="fn-module">fs</span></a></li>
       <li class="function-item" data-name="open"><a href="fs.html#open"><span class="fn-name">open</span><span class="fn-module">fs</span></a></li>
+      <li class="function-item" data-name="close"><a href="fs.html#close"><span class="fn-name">close</span><span class="fn-module">fs</span></a></li>
+      <li class="function-item" data-name="read_all"><a href="fs.html#read_all"><span class="fn-name">read_all</span><span class="fn-module">fs</span></a></li>
       <li class="function-item" data-name="read"><a href="fs.html#read"><span class="fn-name">read</span><span class="fn-module">fs</span></a></li>
       <li class="function-item" data-name="write"><a href="fs.html#write"><span class="fn-name">write</span><span class="fn-module">fs</span></a></li>
       <li class="function-item" data-name="delete"><a href="fs.html#delete"><span class="fn-name">delete</span><span class="fn-module">fs</span></a></li>

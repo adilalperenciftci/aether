@@ -1,0 +1,58 @@
+// std.fs and std.file close and read a handle `open` gave through public
+// functions of the module's own shapes (#3179): `close` returns "" or the
+// reason, `read_all` the text or the reason. The close was the C binding
+// file_close, an int, and reading an open handle whole had no function.
+
+import std.fs
+import std.file
+import std.os
+
+extern exit(code: int)
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    path = "${os.temp_dir()}/aether-close-read-all-${os.getpid()}.txt"
+    werr = fs.write(path, "line one\nline two\n")
+    check(werr == "", "write the fixture: ${werr}")
+
+    h, oerr = fs.open(path, "r")
+    check(oerr == "", "fs.open: ${oerr}")
+    text, rerr = fs.read_all(h)
+    check(rerr == "", "fs.read_all: ${rerr}")
+    check(text == "line one\nline two\n", "fs.read_all reads the whole file")
+    again, aerr = fs.read_all(h)
+    check(aerr == "" && again == text, "fs.read_all reads from the start again")
+    check(fs.close(h) == "", "fs.close of an open handle")
+
+    _none, nerr = fs.read_all(null)
+    check(nerr != "", "fs.read_all of null is an error")
+    check(fs.close(null) != "", "fs.close of null is an error")
+
+    w, wo = fs.open(path, "a")
+    check(wo == "", "fs.open for append: ${wo}")
+    check(fs.close(w) == "", "fs.close flushes and closes a written handle")
+
+    f, ferr = file.open(path, "r")
+    check(ferr == "", "file.open: ${ferr}")
+    ftext, frerr = file.read_all(f)
+    check(frerr == "" && ftext == text, "file.read_all reads the whole file")
+    check(file.close(f) == "", "file.close of an open handle")
+    check(file.close(null) != "", "file.close of null is an error")
+
+    // A write the close cannot flush is an error, not data lost in silence:
+    // Linux's /dev/full takes the buffered bytes and fails the flush with
+    // ENOSPC. fs.write and file.write said "" for it.
+    if fs.exists("/dev/full") == 1 {
+        check(fs.write("/dev/full", "x") != "", "fs.write reports the close that could not flush")
+        check(file.write("/dev/full", "x") != "", "file.write reports the close that could not flush")
+    }
+
+    _ = fs.delete(path)
+    println("PASS")
+}

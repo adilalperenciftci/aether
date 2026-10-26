@@ -33,9 +33,9 @@ header comment is the authoritative description.
 | `std.dir` | Directory operations, re-exported from `std.fs`. | 11 | [guide](../std/dir/README.md) · [source](../std/dir/module.ae) |
 | `std.dl` | Dynamic library loader over dlopen and LoadLibrary. | 8 | [guide](../std/dl/README.md) · [source](../std/dl/module.ae) |
 | `std.encoding` | Hex, Base64, Base32 and CSV field codecs. | 11 | [guide](../std/encoding/README.md) · [source](../std/encoding/module.ae) |
-| `std.file` | File operations, re-exported from `std.fs`. | 14 | [guide](../std/file/README.md) · [source](../std/file/module.ae) |
+| `std.file` | File operations, re-exported from `std.fs`. | 16 | [guide](../std/file/README.md) · [source](../std/file/module.ae) |
 | `std.floatarr` | Fixed-size packed-double buffer. | 15 | [guide](../std/floatarr/README.md) · [source](../std/floatarr/module.ae) |
-| `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 148 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
+| `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 150 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
 | `std.hash` | Fast non-cryptographic hashes and checksums: FNV, MurmurHash3, SipHash, CRC-32. | 6 | [guide](../std/hash/README.md) · [source](../std/hash/module.ae) |
 | `std.host` | Primitives for Aether scripts embedded in a host application. | 14 | [guide](../std/host/README.md) · [source](../std/host/module.ae) |
 | `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 133 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
@@ -1132,14 +1132,15 @@ main() {
 
 **Functions:**
 - `file.read(path)` → `(string, string)` - Read entire file (opens, reads, closes)
-- `file.write(path, content)` → `string` - Overwrite file, return error string
-- `file.open(path, mode)` → `(ptr, string)` - Low-level open (caller must `file.close`)
-- `file.close(handle)` - Close file
+- `file.write(path, content)` → `string` - Overwrite file; `""`, or the reason (including a write the closing flush could not make, such as to a full disk)
+- `file.open(path, mode)` → `(ptr, string)` - Open a handle (close it with `file.close`; `defer file.close(h)` after a successful open)
+- `file.close(handle)` → `string` - Close and free a handle; `""`, or the reason (a write the close flushes can fail, and the data is then not on disk)
+- `file.read_all(handle)` → `(string, string)` - Read the whole of an open handle from its start; the handle stays open
 - `file.size(path)` → `(int, string)` - Get size in bytes
 - `file.delete(path)` → `string` - Delete file
 - `file.exists(path)` - 1 if a **regular file** is at `path`, 0 otherwise. Returns 0 for directories, even if they exist, see `fs.exists` for the path-agnostic check.
 
-Raw externs: `file_open_raw`, `file_read_all_raw`, `file_write_raw`, `file_delete_raw`, `file_size_raw`.
+Raw externs: `file_open_raw`, `file_close_raw`, `file_read_all_raw`, `file_write_raw`, `file_delete_raw`, `file_size_raw`.
 
 ### Directories (`std.dir`)
 
@@ -1285,6 +1286,9 @@ main() {
 ```
 
 **Functions (beyond those re-exported from `std.file`/`std.dir`/`std.path`):**
+- `fs.open(path, mode)` → `(ptr, string)` - Open a handle for `fs.pread`, `fs.pwrite` and `fs.read_all`; close it with `fs.close` (`defer fs.close(h)` after a successful open).
+- `fs.close(handle)` → `string` - Close and free a handle; `""`, or the reason (a write the close flushes can fail, and the data is then not on disk).
+- `fs.read_all(handle)` → `(string, string)` - Read the whole of an open handle from its start; the handle stays open.
 - `fs.exists(path)` → `int` - **Path-agnostic** existence check: 1 if anything is at `path` (regular file, directory, symlink, fifo, ...), 0 otherwise. Distinct from `file.exists` (regular-file-only) and `dir.exists` (directory-only), those filter by type, this one doesn't. Uses `lstat(2)` so a dangling symlink counts as existing, matches POSIX `test -e`. Reach for this in tooling that probes whether a path is bound without caring what's there (build-system runtime-path discovery, "did the user pass a real path?" CLI validation).
 - `fs.write_atomic(path, data: byte[])` → `string` - Stage to `<path>.tmp.<pid>.<n>`, fsync, rename over destination. Binary-safe: the length travels with the slice (`string.bytes(s)` for a string, `bytes.view(buf)` for a `std.bytes` buffer). The tmp file is created with `O_CREAT|O_EXCL|O_NOFOLLOW` so an attacker who pre-plants a symlink at the predictable tmp path can't trick the write into following it; permissions track the process umask exactly as the previous `fopen("wb")` would have.
 - `fs.write_binary(path, data: byte[])` → `string` - Non-atomic `fopen("wb")` + `fwrite` + `fclose`. Binary-safe: the length travels with the slice. Cheaper than `write_atomic` when a partial file on crash is acceptable (scratch writes, caches).
@@ -3734,7 +3738,8 @@ main() {
         return
     }
     println("in capability mode: ${capsicum.in_mode()}")
-    fs.file_close(log)
+    cerr = fs.close(log)
+    if cerr != "" { println("close: ${cerr}") }
 }
 ```
 
