@@ -23,7 +23,7 @@ exports(
     response_write, response_write_status, response_set_header, response_json,
     route_entry, filter_entry, ws_entry, static_entry,
     end_point, filter, filter_all, web_socket, serve_static, path,
-    web_server, web_server_host,
+    web_server, web_server_host, http_server,
     with_timeout, with_keep_alive,
     with_tls,
     on_stats,
@@ -241,7 +241,7 @@ static_entry(base_path: string, directory: string) {
 //   "routes"     - list of route entries
 //   "filters"    - list of filter entries
 //   "paths"      - list of { prefix, routes, filters } for nested paths
-//   "raw_server" - ptr to the C http server (after start)
+//   "raw_server" - ptr to the C http server
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -324,6 +324,8 @@ path(_ctx: ptr, base_path: string) {
 // web_server(port) { path("/api") { ... } }
 web_server(port: int) {
     srv = map_new()
+    raw = http.server_create(port)
+    map_put(srv, "raw_server", raw)
     map_put(srv, "port", port)
     map_put(srv, "host", "127.0.0.1")
     map_put(srv, "routes", list.new())
@@ -350,6 +352,16 @@ web_server_host(host: string, port: int) {
     srv = web_server(port)
     map_put(srv, "host", host)
     return srv
+}
+
+// Returns the std.http server handle so monitor closures can be attached:
+//
+//     http.monitor(tinyweb.http_server(server)) {
+//         listening() |host: string, port: int| { … }
+//     }
+http_server(srv: ptr) -> ptr {
+    raw, _ = map.get(srv, "raw_server")
+    return raw
 }
 
 // ---------------------------------------------------------------------------
@@ -648,14 +660,11 @@ tw_start(srv: ptr) -> string {
     port_v, _ = map.get(srv, "port")
     port = mem.ptr_to_long(port_v) as int
     host, _ = map.get_string(srv, "host")
-    raw = http.server_create(port)
-    map_put(srv, "raw_server", raw)
+    raw, _ = map.get(srv, "raw_server")
     // server_bind returns "" on success, an error message otherwise.
     bind_err = http.server_bind(raw, host, port)
     if bind_err != "" {
-        // An IPv6 host is bracketed, as in a URL: "[::1]:8443".
-        where = if string.contains(host, ":") == 1 { "[${host}]" } else { host }
-        return "failed to bind ${where}:${port}: ${bind_err}"
+        return bind_err
     }
 
     // TLS, when with_tls supplied a pair. Applied before the routes so a bad

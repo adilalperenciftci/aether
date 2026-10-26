@@ -8,7 +8,6 @@ import std.list
 import std.map
 import std.tcp
 
-
 validate_token(token: string) {
     if (token == "valid-session-abc") { return "alice@example.com" }
     if (token == "valid-session-xyz") { return "bob@example.com" }
@@ -19,9 +18,8 @@ main() {
     println("=== TinyWeb Cookie + Attribute Auth Example ===\n")
 
     server = tinyweb.web_server_host("localhost", 8080) {
-
         tinyweb.path("/api") {
-            tinyweb.filter(tinyweb.ALL, "/.*") |req: ptr, res: ptr, ctx: ptr| {
+            tinyweb.filter(tinyweb.ALL, "/.*") | req: ptr, res: ptr, ctx: ptr | {
                 token = tinyweb.request_get_cookie(req, "session")
                 user = validate_token(token)
 
@@ -34,22 +32,22 @@ main() {
                 return tinyweb.CONTINUE
             }
 
-            tinyweb.end_point(tinyweb.GET, "/profile") |req: ptr, res: ptr, ctx: ptr| {
+            tinyweb.end_point(tinyweb.GET, "/profile") | req: ptr, res: ptr, ctx: ptr | {
                 user = tinyweb.ctx_get_attribute(ctx, "user")
                 tinyweb.response_write(res, "User is logged in: ${user}")
             }
 
-            tinyweb.end_point(tinyweb.GET, "/dashboard") |req: ptr, res: ptr, ctx: ptr| {
+            tinyweb.end_point(tinyweb.GET, "/dashboard") | req: ptr, res: ptr, ctx: ptr | {
                 user = tinyweb.ctx_get_attribute(ctx, "user")
                 tinyweb.response_json(res, "{\"user\":\"${user}\",\"dashboard\":true}")
             }
         }
 
-        tinyweb.end_point(tinyweb.GET, "/") |req: ptr, res: ptr, ctx: ptr| {
+        tinyweb.end_point(tinyweb.GET, "/") | req: ptr, res: ptr, ctx: ptr | {
             tinyweb.response_write(res, "Welcome! Login at /login")
         }
 
-        tinyweb.end_point(tinyweb.POST, "/login") |req: ptr, res: ptr, ctx: ptr| {
+        tinyweb.end_point(tinyweb.POST, "/login") | req: ptr, res: ptr, ctx: ptr | {
             body = tinyweb.request_get_body(req)
             tinyweb.response_set_header(res, "Set-Cookie", "session=valid-session-abc; Path=/; HttpOnly")
             tinyweb.response_write(res, "Logged in!")
