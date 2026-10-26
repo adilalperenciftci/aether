@@ -14,6 +14,712 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.850.0]
+
+### Added
+
+- **The C unit tests and the whole `.ae` corpus run under UBSan in CI.**
+  `make test-ubsan` rebuilds aetherc, ae and libaether with
+  `-fsanitize=undefined` and runs `make test` and `make test-ae` with every
+  program and C host the tests build going through the same sanitizing
+  compiler. It fails on any test failure and any UBSan report, and first
+  proves the flags took: libaether.a must call the UBSan handlers, and a
+  canary with an undefined shift must be stopped with a report. The new
+  `ubsan.yml` runs it on the PRs that touch the compiler, runtime, std, ae or
+  the Makefile, nightly and by hand (about 11 minutes). The macOS UBSan step
+  of `memory-check.yml` now fails on a report; it used to print it and pass
+  (#2488).
+
+- **`os.run_pipe` and `os.run_pipe_drain_and_wait` take an explicit env.**
+  It was refused ("explicit env unsupported"). The env given is the child's
+  whole environment, with `AETHER_IPC_FD=3` in place of any it gives. A
+  child's env built from another also replaces a variable by its whole name
+  now: a name alone (`PATH`) took `PATHEXT=...` with it (#3211).
+
+- **`middleware.rewrite_new()` and `middleware.error_pages_new()`.**
+  `use_rewrite` and `use_error_pages` take opts that only the C bindings
+  made, and the module exported neither: every program declared the extern
+  itself (#3218).
+
+### Fixed
+
+- **A null string reads as the empty text everywhere, and `== null` is a
+  pointer test.** An unset `os.getenv` result printed as `(null)`,
+  interpolated as `(null)`, and compared equal to a real string reading
+  `"(null)"`; `"" != null` was false. Now a null string reads as `""` for
+  `==`, `!=`, ordering, `string.equals`, `string.compare`, printing and
+  interpolation, while `s == null` and `s != null` against the `null`
+  keyword compare the pointer, so unset and empty stay apart (#3129).
+  std.cas, std.cryptography.tls13_client and thirteen tests dropped the
+  `== null || == ""` pairs they carried to work around it.
+
+- **Shell tests bound their own commands with the sweep's limit, never
+  timeout(1).** Five WebSocket drivers ran their client under `timeout 30` or
+  `timeout 60`, and `parse_depth_guard` ran aetherc under `timeout 60`. On
+  Windows that limit ends a hung native program with a SIGTERM to its MSYS2
+  stand-in, the signal that reaches unrelated MSYS2 shells (#2479). On macOS
+  without coreutils every deep compile in `parse_depth_guard` exited 127
+  without aetherc running, and the test passed. They use
+  `sweep_timeout_bound` now, and `check_shell_kills.py` rejects `timeout`,
+  `gtimeout` and `kill %N` in `tests/**/*.sh` (#3154).
+
+- **`http.get` and the other one-line calls name a failed status.** Every
+  response outside 2xx came back as `"http error"` (below 200, `"unexpected
+  status"`), so a 404 and a 503 read the same. They now return `"HTTP 404 Not
+  Found"`, the status and its registered reason, or the number alone for an
+  unregistered code. `http.status_text(code)` gives the reason, and the
+  server's table behind it now covers every code IANA registers: a server or
+  proxy answering 409 or 429 wrote `Unknown` on its status line, and now
+  writes `Conflict` or `Too Many Requests` (nothing for an unregistered code,
+  as RFC 9112 allows) (#3147).
+
+- **std.json exports the kinds `json.type` returns.** Its header listed
+  `JSON_NULL` to `JSON_OBJECT`, but nothing defined them, so callers compared
+  against the bare numbers 0 to 5. `json.JSON_NULL`, `json.JSON_BOOL`,
+  `json.JSON_NUMBER`, `json.JSON_STRING`, `json.JSON_ARRAY` and
+  `json.JSON_OBJECT` now exist, and std.jsonpath, std.schema, contrib/jq and
+  the liquid templates use them (#3148).
+
+- **std.log exports its levels, logs to stderr on request, and writes a `%`
+  as text.** `log.LOG_LEVEL_DEBUG` to `log.LOG_LEVEL_FATAL` replace the bare
+  0 to 4 the header described. `log.init("")` and `log.init("-")` log to
+  stderr; `""` used to fail with "cannot open log file" and print `[LOG]
+  Failed to open log file:`, and a failed open now returns an error naming
+  the file and prints nothing. `log.write` handed its message to printf as
+  the format, so `"100%s"` crashed: it now writes the text as given (C
+  callers format with `log_writef` and the `LOG_*` macros). A second init
+  after a stderr target no longer closes stderr (#3149).
+
+- **An underscore separates digits in every number literal.** A decimal
+  literal stopped at `_`, so `1_000` was the number 1 followed by the name
+  `_000` ("Undefined variable '_000'"), and the reference's own `1_000_000`
+  and `int[1_024]` did not compile; the `0x`, `0o` and `0b` forms skipped
+  every `_` wherever it stood, so `0xFF_`, `0x_FF` and `0b1__0` compiled.
+  Now one rule holds in every base, for the integer digits, the fraction,
+  the exponent and a duration's digits: an underscore goes between two
+  digits, and one at the end, doubled, beside `.` or `e`, or after the
+  prefix is error E0100 "misplaced `_` in a number" at the `_` (#3155).
+
+- **Shell tests ask `uname -s` for the platform, never the environment's
+  `OS`.** `std_ipc_bash_chain` and `std_ipc_roundtrip` skipped on Windows only
+  when `OS` was `Windows_NT`. An MSYS2 login shell started from Git Bash does
+  not carry that variable, so a sweep run from it took their POSIX path on
+  Windows and failed with "unsupported on Windows". They case on `uname -s`
+  now, and `check_platform_env.py` also rejects a shell script that reads
+  `$OS` without setting it. CONTRIBUTING.md's portability advice, which
+  recommended `os_getenv("OS") == "Windows_NT"`, recommends `os.platform()`
+  and `uname -s` (#3160).
+
+- **An optional is not unwrapped into a function's parameter.**
+  `shout(maybe(1))`, a `string?` given to a `string` parameter, passed the
+  checker and failed in C ("incompatible type for argument 1 ...
+  ae_opt_string"), as it did through a local; a binding, a `return` and a
+  field already refused it. It is E0200 at the argument now, naming
+  `?? fallback`, `!` and `match`. A local bound to a `T` in one branch or
+  loop body and to a `T?` in another is one `T?` variable, in C as in the
+  checker: the `string` loop first declared a `const char*` that the other
+  loop's `ae_opt_string` could not be stored in, and the diagnostic for
+  such a local names the other binding (#3153).
+
+- **An arrow body may follow a written result type.** `square(x: int) ->
+  int -> x * x` was read as a result type and a block body: "Expected
+  LEFT_BRACE, got ARROW", after which the block parser read the rest of the
+  file as the missing block's statements, nine errors reaching later
+  functions' parameters. `-> T -> expr` and `-> T -> { ... }` (contract
+  clauses may sit between) are now an arrow body returned against `T`, as a
+  block body's `return` is, so a value of another type is one E0200 at the
+  value (#3158).
+
+- **A bare enum member works as a `match` arm's or an `if` branch's value.**
+  Where a value's expected type is an enum (a return, a typed binding, an
+  argument, an assignment), a member may be written bare; a `match` or an
+  `if` in that place now passes the enum to each arm, so `return match d {
+  N -> S ... }` and `return if c { N } else { E }` no longer report
+  "Undefined variable" for every arm value. An arm whose pattern binds the
+  name keeps its binding (#3156).
+
+- **`as` converts an enum to an integer and an integer to an enum.** An
+  enum is a distinct type over `int`, and a binding converts it either way,
+  but `Direction.West as int` and `3 as Direction` were refused with the
+  error that describes them as allowed. A cast between two different enums,
+  which the check let through because both are enums, is now refused (#3157).
+
+- **A `try` where a value goes is one error, and `ae help` leaves out the
+  parser errors its findings explain.** `r = try { work() } catch e { ... }`
+  was "'try' is a reserved keyword and cannot be used as an identifier",
+  after which the try block's `}` closed the function and its `catch` was
+  read at top level: six errors. It is now one E0100, "`try` is a statement
+  and gives no value", with the statement form as its help, and the whole
+  try statement is stepped over; `return try { ... }` on one line says the
+  same. `ae help` on a DSL block written in YAML or HCL shape reported its
+  two findings beside the two raw syntax errors they explain; the syntax
+  errors from the first such finding's line on are now left out, and one on
+  an earlier line stays. The reference documents `panic`, `try` and `catch`
+  (#3150).
+
+- **docs/api documents std.http, std.file, std.pqueue and std.set again.**
+  docgen took the first "exports" in a module.ae, comments included, and the
+  next `(` as the export list, so std.http's page listed `this` and
+  `module` (from "re-exports ... (this module)") instead of its 133
+  exports, and the other three a single word each. The export list is now
+  the `exports (` that starts a code line. docgen also cut every string to
+  a fixed buffer without a word (names, signatures, doc blocks, the module
+  header, lines, the export table) and documented `const SEP = "/"` as `"`;
+  every string now grows to fit, and a module it cannot read or an export
+  list that never closes fails the run (#3161).
+
+- **`free` of a `make([]T, n)` buffer gives back what its elements hold.**
+  A store into an element takes a reference, but the free released only the
+  buffer, so every string, closure or string-holding struct stored into
+  one leaked (`xs = make([]string, 2); xs[0] = "built ${n}"; free(xs)` grew
+  the heap each time). A `make` buffer is now marked, and its free releases
+  each element first; a view of C memory, whose elements take nothing,
+  frees only the memory, and freeing a sub-slice is still refused (#3159).
+
+- **A receive timeout counts down again after every message.** `receive {
+  ... } after N -> { ... }` fired only for an actor that never received a
+  message: the first one zeroed the interval for good, so the reference's
+  Monitor never warned once a heartbeat had come, and a poller whose timeout
+  sends itself a Tick ticked once. The interval is kept now. The countdown
+  starts at spawn and again when the actor has handled a message, a message
+  stops it, and it fires once the interval passes with none waiting. Once it
+  has fired, only a message starts it again, so a timeout that sends nothing
+  leaves the actor idle and `wait_for_idle()` returns, and `wait_for_idle()`
+  no longer waits on the countdown of a dead actor. `site-poller.ae` paces
+  its polls with the timeout, and the reference and actor-concurrency.md
+  describe the cycle (#3162).
+
+- **`make test-ae` passes only when every test it listed reported.** On a
+  Windows machine that stopped starting processes mid-sweep (forks failing
+  with STATUS_DLL_INIT_FAILED_LOGOFF), most shell tests never ran, the
+  sweep's xargs still returned 0, and the sweep counted only the markers it
+  had. The sweep now writes the units it hands its runners to a list, names
+  every listed test that left no PASS, FAIL or SKIP marker under `=== TESTS
+  THAT NEVER REPORTED ===` and in `build/test-ae.unreported`, and fails. Its
+  verdict (`build/test-ae.verdict`) carries the listed count, which
+  `sweep_verdict.sh` holds the total to. One sed expression
+  (`tests/scripts/sweep_name.sh`) names a test for the runners and for the
+  check (#3111).
+
+- **A receive arm that names a field its message lacks is an error at the
+  arm.** An arm binds a message's fields by name (`Connect(next)`, or
+  `Connect(next: n)` to bind the field `next` as `n`); `Connect(n)`, a
+  positional reading, went on with `n` untyped and the generated C failed,
+  "'Connect' has no member named 'n'". It is now E0200 at the `n`, "message
+  'Connect' has no field 'n'; its fields are next", with the rename form as
+  its help, and the reference says how an arm binds (#3164).
+
+- **Actor state takes a written type.** `state next: actor_ref = null` was
+  three "Unexpected token in actor body" errors and the type-first form
+  refused `actor_ref` too, so an actor held a reference only as a bare
+  `state next = null`. A state now takes `name: T`, with a value or
+  without one (its type's zero), for every type a struct field takes, and
+  `state actor_ref r` is accepted; the value is checked against the written
+  type as a typed binding's is (it reached C, "makes integer from pointer"),
+  `null` going wherever a binding of the type takes it (a string, a pointer,
+  a closure, a slice), and an optional state's value is wrapped as `let x:
+  T? = v` wraps it (an int was assigned to an ae_opt_int) (#3163).
+
+- **examples/ is a path that teaches Aether, and CI checks every step of
+  it.** The directory held 119 files in loose groups with nothing saying
+  where to start, two styles of the language (`println("...");` and
+  `if (x > y)` beside the current style), memory advice the ownership model
+  retired ("manual mode is the default", `string.new` and `release` by
+  hand), examples that did not do what their names said, a stray
+  executable, and a sandbox demo whose child could never find the sandbox
+  library. Nothing checked what any of them printed. It is seven numbered
+  sections now: the language, actors, the standard library, C and other
+  languages, containing code, the tools, and whole programs. Each file is
+  one idea in current style, starts with what it teaches and how to run it,
+  and ends with the exact output it prints, and examples/README.md is the
+  path, one row per example with a link into the reference. `make
+  check-examples` (an Aether checker, tests/examples/check.ae) runs in
+  `make ci` in place of the old build-only step, and `make examples` is it
+  (under cmd.exe, `make examples` builds them with `ae examples`, as it did).
+  It builds every example, as many at once as the machine has cores, fails
+  on a warning (coded or not), type-checks
+  the ones that import a contrib bridge, and runs each one that ends in an
+  `// Output:` block, with the tree's own `ae` first on PATH, and compares
+  what it prints. It also requires a `// Needs:` line on the ones that
+  cannot run unattended, and checks that the README links every example and
+  the directory holds only source. `ae examples` follows the same headers:
+  it builds the programs and skips what is run another way, and it names
+  each output by its path, so two `main.ae` files no longer overwrite each
+  other (#3105).
+
+- **An ask has its reply's type wherever it stands, and its reply is
+  reclaimed.** Only a binding inferred an ask's type, so one given straight
+  to a function, into an interpolation or to `println` was an `int`, and a
+  string reply printed as a number (`println(e ? Label {})`). It now has its
+  reply's type in every position, its message checked as a send's is, and
+  the reply string an unbound ask hands over is released after the
+  expression that reads it, as a call's result is. Argument temporaries are
+  now read back by node whatever its kind, so no argument is evaluated twice
+  (#3165).
+
+- **Tests call std's public functions, not its raw C bindings, and the
+  raw-calls gate covers them.** 81 test files re-declared or called a std
+  module's `*_raw` externs (mostly `http_server_start_raw` and
+  `http_server_bind_raw`, under a comment that the wrapper's result could
+  not be discarded in a receive handler, which `_ =` does). Each now calls
+  the public function, its error checked where the raw result was, and
+  several old tests that only printed on success now fail on a wrong
+  result. `make check-raw-calls` runs over tests and examples too, reports a
+  module's binding re-declared outside it, and takes `// raw-ok: <why>` on a
+  test of an escape hatch itself (#3166).
+
+- **A send or an ask to a null actor reference panics.** It read the null
+  actor's fields and the process died of an access violation, past the
+  barrier that catches an actor's panic. Now it is a panic naming the
+  operation and the place (`null_actor_send: send to a null actor reference
+  at main.ae:12:5`), so a handler's send to an unconnected successor ends
+  that actor alone. The WebAssembly and ESP32 builds link the panic code
+  they now reach (#3172).
+
+- **std and contrib type-check without a warning, and `make check-warnings`
+  keeps them so.** 36 warnings lived there, several an error result a test
+  never checked (a read's error in std.zip's test, the matches of eight
+  clapae error cases): each became the check its contract implies, the two
+  calls naming their module twice (`fs.fs_is_symlink`) use the short name,
+  and the dead code went. The gate, in Aether with a self-test, runs
+  `ae check` over every .ae file under std and contrib, as many at once as
+  the machine has cores, and fails a file that does not type-check at all,
+  whose warnings the errors hide; `make ci` runs it (#3176).
+
+- **std.json and std.fs say what a string result is under the ownership
+  model.** std.json's comments explained a "uniform-heap shape" for the
+  retired heap classifier, and its code still built `string_concat("", "")`
+  and `string_concat("not a string", "")` copies to satisfy it; a literal is
+  now returned as a literal. std.fs's `read` and `read_binary` said the
+  value "IS owned and must be freed", which a caller following the
+  reference must not do: it is the caller's string, released like any
+  other (#3168).
+
+- **`fs.close` and `fs.read_all` (and `file.close`, `file.read_all`) for the
+  handle `open` gives.** The only close was the C binding `file_close`, an
+  int, and an open handle could not be read whole. `close` returns `""` or
+  the reason, and reports a write the close's flush could not make;
+  `read_all` returns the text or the reason. `fs.write` and `file.write`
+  report that failed flush too: they said `""` for a write that never
+  reached the disk (a full one, `/dev/full`). The C function is
+  `file_close_raw`, named as the other raw bindings are, so the C symbol
+  `file_close` is free for `file.close`. std.file's README showed a handle
+  write the module has no call for; its example now runs as written (#3179).
+
+- **An ask that gets no reply says why, and an ask to a dead actor ends at
+  once.** An ask to an actor that had died waited the whole timeout (5 s by
+  default) and gave the reply's zero value, which a caller could not tell
+  from a reply of 0, and a timed-out ask gave the same zero with no reason.
+  `v, err = actor ? Msg {}` now gives the reply and `""`, or the zero value
+  and `"ask timed out after N ms"`, `"the actor is dead"` or `"the actor died
+  before it replied"`. In either form an ask to a dead actor returns at once,
+  and so does one whose actor dies before replying: a dropped ask and the
+  ask a panicking handler held wake their asker instead of leaving it to
+  the timeout (#3151).
+
+- **A `size_t` the runtime takes is declared `size_t`, and the call works
+  where `size_t` is 32 bits.** `string_new_with_length`, in the generated
+  prelude and in eleven std and contrib modules, and std.alloc's and
+  std.arena's sizes were declared `long`, which is int64_t. On wasm32 the
+  linker swapped each call for a stub that traps, so the first actor
+  message that carried a string killed the program under Emscripten
+  (`RuntimeError: unreachable`). `make check-extern-widths` had taken a
+  size_t for 64 bits; it counts one as pointer-sized now, and also finds a
+  C function two shared directories define: contrib.parsers.xml_expat's
+  parser is made and freed by `xml_expat_new` and `xml_expat_free`, since
+  std.xml defines `xml_parser_new` and `xml_parser_free`. The WebAssembly
+  leg fails on a linker warning (#3185).
+
+- **A panic unwinds on newlib and picolibc (ESP-IDF).** The runtime called
+  `_longjmp`, which those libcs do not declare, so the panic code and any
+  program with a `try` did not compile for ESP32. They use plain
+  `setjmp`/`longjmp`, which there save no signal mask (#3186).
+
+- **A module function keeps a C name no extern binds.** A function `name`
+  of module `ns` is the C function `ns_name`, renamed only when the module
+  had an extern of that Aether name. One bound through
+  `@extern("ns_name")`, or another module's `extern ns_name(...)`, left
+  one C function declared twice with two types, and the build stopped in
+  the C compiler (#3187).
+
+- **`proxy.mount_simple` no longer leaks its options and pool.** It built a
+  pool and an options block holding the pool's last reference, and handed
+  the block to the server as its middleware's user data, which
+  `http_server_free` never released: about 600 bytes per mount. A
+  middleware can now own its user data (`http_server_use_middleware_owned`,
+  a release hook `http_server_free` runs), and `mount_simple` gives its
+  block to the server.
+  `proxy.mount`, `mount_methods` and `mount_match` say who frees the options
+  they take: the caller, after the server (#3171).
+
+- **`sizeof` takes any type a declaration takes.** Its operand was read as
+  one identifier, so `sizeof(int)` was "'int' is a reserved keyword and
+  cannot be used as an identifier", `sizeof(gpu.Shader)` stopped at the
+  dot, and a width name became a struct in the C (`sizeof(uint32)` was
+  `sizeof(struct uint32)`). The operand is now read by the type parser:
+  keyword types, widths, pointers, fixed-size arrays, structs (bare or
+  qualified), enums and distinct types each give the size C gives the type
+  they lower to, in a `const` too. `offsetof` takes a struct, bare or
+  qualified; another type is one error at the type, and a `sizeof` of
+  something that is not a type says so (#3174).
+
+- **std.spec colours its output only for a terminal.** Every ✓/✗ line and
+  the summary were wrapped in ANSI escapes wherever they went, into a pipe,
+  a file or a CI log, and with `NO_COLOR` set, so a suite's output could
+  not be compared or read plainly. The colour is now decided once, in one
+  place every escape goes through: never with `NO_COLOR` set, always with
+  `FORCE_COLOR` set (`NO_COLOR` wins), otherwise when stdout is a terminal.
+  `io.is_terminal(fd)` is new in std.io for the same test in any program
+  (a console on Windows, where a console stream also gets virtual terminal
+  processing so the escapes render) (#3180).
+
+- **A project's imports resolve the same from any directory.** `ae run
+  app/` and `ae build app/` pointed the source into app/ but compiled from
+  the caller's directory, so a module in app/lib was "unresolved import
+  'greet': no module of that name was found in src/, the project root, and
+  installed packages", a message naming no directory. `ae run` and `ae
+  check` from app/src failed the same way, while `ae build` from there
+  worked. Each now compiles from the project root, as `ae build` already did
+  from a subdirectory, with the paths typed relative to where the user
+  stands (`--extra`, `-o`, and now `--lib` too) re-based; `ae run` still
+  starts the program in the directory the command was typed in. A missing
+  module's error lists every directory searched, in order, in full. The
+  entry program's imports no longer sometimes look beside the file first: the
+  flag choosing that order started as whatever `malloc` returned (#3181).
+
+- **aetherc refuses an argument after its input and output.** It reads its
+  options before them, and took anything after them in silence: `aetherc
+  main.ae out.c --lib vendor` compiled without vendor, and the caller never
+  knew. Such an argument is now an error that names it and gives the
+  command as it should be written (`aetherc --lib vendor main.ae out.c`),
+  and nothing is compiled. A mode that writes no output still takes the
+  null device in that place (#3182).
+
+- **`ae help --lib dir` resolves the libraries it names.** It passed every
+  `--lib` after aetherc's input and output, where aetherc read nothing
+  (#3182), so the compile never saw the script's library: a setter
+  misspelt in that library's builder block was not reported, and the run
+  said "no diagnostics". The options go first now, and the misspelt setter
+  gets `Did you mean: superuser_token (in my_lib)?` (#3183).
+
+- **`ae help` reports a compile error that has no code.** Only
+  `error[Eabcd]` lines became findings, so an unresolved import, often a
+  script's only error, was dropped and the run said "no diagnostics" about a
+  file that does not compile. An uncoded `error:` line is a finding now, at
+  the line its `-->` gives; an unresolved import names the directories the
+  compile searched and how to add one. A compile that fails with nothing
+  ae help can explain says the file does not compile, shows what the
+  compiler printed, and exits 1, and `--json` carries `"compiled"` (#3184).
+
+- **A relative `AETHER_CACHE_DIR` or `AETHER_LIB_DIR` keeps meaning a
+  directory where the command was typed.** Once `ae run`, `ae build` or
+  `ae check` entered a project to compile from its root (#3181), a
+  relative `AETHER_CACHE_DIR` became a cache inside the project, and a
+  relative `AETHER_LIB_DIR` searched the project's directories instead of
+  the ones named. Their relative entries are re-based onto the directory
+  the command was typed in when it enters the project, as `--lib`, `-o` and
+  `--extra` are.
+
+- **`spawn_sandboxed` finds its preload library from any program.**
+  `libaether_sandbox.so` was looked for only beside the running program
+  and in `../build/` from it. So a program `ae run` built (it lives in the
+  build cache) or one an installed toolchain built never found it, and
+  `spawn_sandboxed` printed "cannot find libaether_sandbox.so" and started
+  no child. No install shipped the library at all. The lookup is now one,
+  shared by `spawn_sandboxed` and the contrib process hosts:
+  `AETHER_SANDBOX_PRELOAD`, beside the program, then `lib/aether/`, `lib/`
+  and `build/` under `AETHER_HOME` (which `ae` sets for every program it
+  runs) and under the program's directory's parent. When none has it, the
+  message names every place looked at. `install.sh`, `make install` and
+  the release archives install the library. It has a make rule of its
+  own, so an edit to its source or a deleted library rebuilds it, and a
+  rebuild that fails leaves no library behind (the old one was kept and
+  reported built) with the compiler's output beside it (#3177).
+
+- **A child `spawn_sandboxed` starts may run threads, and `grant_fork()`
+  lets it start processes.** The kernel fence refused every `clone`, a
+  thread's too, so `pthread_create` failed in any child that starts a
+  thread: an Aether program with actors, Python with threads, a JVM. The
+  grant that lifts the fence, `fork`, was spelt nowhere in std.sandbox, so
+  only a hand-built list could hold it. Now a `clone` with `CLONE_THREAD`
+  passes the fence. `clone3`, whose flags a filter cannot read, gets
+  `ENOSYS`, so libc falls back to `clone`. A new process is still refused
+  without a grant, and `sandbox.grant_fork()` grants it. The preload's
+  `clone3` wrapper lets a thread through the same way (#3178).
+
+- **A message's strings cross to the receiving actor's thread safely.** A
+  field that shares a counted string with its sender (a tuple, a struct, an
+  optional or an array that owns strings) took it with a plain increment,
+  and nothing published it, so the receiver's release raced the sender's
+  next take on a non-atomic count and the sender's last release freed the
+  string twice (the ownership grid's `K6-P12D-T12`, a double free on
+  Windows). Such a field is published at the send, the ask and the reply
+  (#3192). On the C path without statement expressions (what MSVC
+  compiles), an ask's string fields are the message's own copies, as on
+  the GCC path: the receiver's release freed the sender's string (#3193).
+
+- **`actor_ref[8]` is an array of eight actor references.** The size was
+  read as actor_ref's type parameter, so `state members: actor_ref[8]`
+  and `actor_ref[MAX]` were parse errors at the size. A number, a `(` or
+  a `const` of the file after `actor_ref[` starts the array; any other
+  name is still the actor type (`actor_ref[Member][8]`) (#3189).
+
+- **A function's name alone as a statement is an error.** It calls
+  nothing: `serve { port(1) }`, a builder written without its `()`, read
+  as the name and then a bare block, compiled without a word, and the
+  builder never ran. The error is at the name, bare or qualified, and says
+  to write `serve() { ... }` (#3188).
+
+- **The std.http.middleware factories no longer leak their options.** Each
+  factory (`use_cors`, `use_basic_auth`, `use_bearer_auth`,
+  `use_session_auth`, `use_rate_limit`, `use_vhost`, `use_gzip`,
+  `use_static_files`, `use_rewrite`, `use_error_pages`, `use_real_ip`)
+  registered an options block that `http.server_free` never released: from
+  8 bytes (gzip) to about 2 KB (the rate limiter's table) per server. Each
+  now hands the block to the server with its own free, and response
+  transformers gained the release hook middleware got in #3171
+  (`http_server_use_response_transformer_owned`). The opts passed to
+  `use_rewrite` and `use_error_pages` belong to the server from then on
+  (#3191).
+
+- **A destructure stores into an element or a field.** `names[0], _ =
+  pair()` and `p.name, p.n = pair()` were "Expected statement in block".
+  A slot is a name, `_`, an element or a field; a place takes its value as
+  `place = value` stores it, ownership included (#3167).
+
+- **An ask made inside a handler gets its reply in time.** A handler that
+  asked an actor it had spawned waited for the reply until its own asker's
+  ask had timed out: the ask blocks the core's thread, the asked actor
+  started on that core, and since #3090 neither a steal nor gathering could
+  move it off a core that waits. The waiting thread steps such a target
+  itself, and an ask no longer gathers its target onto the core it blocks
+  (#3196, #3220). An actor on another core that asks one of the waiting
+  core's other actors in turn still waits: #3197.
+
+- **A program that cannot start never reads as exit 127 on POSIX.** exec
+  fails in the forked child, so every `std.os` spawner saw only an exit of
+  127 and no error, which a program that ran and exited 127 also gives.
+  The child now writes its errno to a close-on-exec pipe before it exits,
+  and each call reports the failure in its own shape, as Windows does:
+  `os.run` and `os.system` return -1, `os.run_capture`, `os.run_full`,
+  `os.spawn_proc`, `os.spawn_proc_to`, `os.run_pipe`,
+  `os.run_pipe_drain_and_wait` and `os.run_supervised` return -1 with the
+  reason (`"program not found"`, `"permission denied"`, `"not an
+  executable"`), `os.exec` returns `"command failed"` and the raw capture
+  null. `os.run_pipe` with an explicit env, which made the child exit 127
+  without running the program, is refused with `"explicit env
+  unsupported"` (#3170).
+
+- **std.sandbox's test suites fail when a case fails.** Both dropped
+  `spec.run_summary`'s verdict into a name nothing read, so
+  `test_sandbox.ae` exited 0 with five failing cases on Windows, where it
+  expected an fs grant's pattern as written and std.sandbox stores it
+  resolved as the checks resolve paths (`D:\r\*`). The suites return their
+  verdict, the test expects the stored form, and check-tests reports a
+  verdict bound to a name nothing reads, as it did a bare call (#3198).
+
+- **An HTTP/2 request carries its connection's peer, local address and TLS
+  state.** Each h2 stream's request was built without them, so
+  `http.request_remote_addr` read `""`, `http.request_is_tls` 0 and
+  `http.request_scheme` `"http"` even over TLS. The HTTP/1.1 dispatcher and
+  the h2 dispatch now copy them from the connection through one function
+  (#3175).
+
+- **A spawned child's stdio is wired right whatever the parent has closed
+  of 0, 1 and 2.** On POSIX the pipes and the file a spawn made could take
+  those slots, and the child's own wiring then overwrote or closed them:
+  `os.spawn_proc_to` lost all output when the parent's stdin was closed,
+  and `os.run_full` lost the child's stdout or stderr when the parent's was.
+  The child now moves every descriptor it installs off 0 to 3 before the
+  first install (#3199).
+
+- **A bare program name is looked up on this process's `PATH` whatever
+  `env` a spawn is given.** On POSIX the child looked the name up itself:
+  with an explicit env, `os.run`, `os.run_capture`, `os.run_full` and
+  `os.run_supervised` never found a bare name, and `os.spawn_proc` and
+  `os.spawn_proc_to` ran it with this process's environment instead of the
+  one given. The parent now resolves the program, as Windows does, and
+  every child execs it with `execve` and its env, calling nothing between
+  fork and exec that is not async-signal-safe; a child given no env reads
+  this process's environment after the fork, so a `setenv` on another
+  thread before it cannot leave it a stale array (#3201).
+
+- **`os.run_pipe`'s child gets its `AETHER_IPC_FD` without a `setenv`
+  between fork and exec.** The child set it there, and `setenv` mallocs and
+  takes the environment's lock, which a thread of the parent may have held
+  at the fork: the child could hang before it ran the program. The parent
+  now builds the child's env, this process's environment without an
+  `AETHER_IPC_FD` of its own plus `AETHER_IPC_FD=3` (#3200).
+
+- **`spawn_sandboxed`'s children call only async-signal-safe functions.**
+  The child set `LD_PRELOAD` and the grant source with `setenv`, ran the
+  program with `execlp` and printed with `perror` between fork and exec,
+  which a child of a threaded parent may not do. The parent now builds the
+  env, resolves the program on `PATH` and makes both argvs, the child
+  calls `execve`, and the parent prints why a child could not run its
+  program (#3200).
+
+- **`http.server_set_multi_accept` turns on multi-accept, and it starts after
+  `server_bind`.** In actor dispatch mode the server can open one
+  `SO_REUSEPORT` listener per core on its one port. Nothing could turn it
+  on, and forced on it failed after a `server_bind` ("cannot open
+  SO_REUSEPORT listener 0") and gave each listener a port 0 of its own
+  without one. A bound socket is now the first listener and gives the
+  others its port, and a port 0 is resolved once (#3194).
+
+- **contrib's process hosts prepare their child in the parent.**
+  `contrib.host.aether` and `contrib.host.go` set `LD_PRELOAD`, the grant
+  source and the map with `setenv` in the forked child, and the Go host
+  ran the program with `execvp` there, which a child of a threaded parent
+  may not do. The parent now builds the env (and for the Go host looks the
+  program up on `PATH`), and the child only calls `execve` (#3200).
+
+- **Middleware before std.http.proxy runs on every proxied request.** On
+  Linux and macOS a server that mounted a proxy handed its connections to
+  the proxy event loop, which ran the proxy exchange alone: basic auth, the
+  rate limiter, CORS and `use_real_ip` registered ahead of the proxy were
+  skipped for every request the proxy forwarded. The loop now serves a
+  connection only when the proxy is the chain's first middleware, and its
+  requests carry their connection's peer (the proxy's X-Forwarded-For had
+  named the hop "unknown") (#3203).
+
+- **`http.server_stop` no longer tears down what the server thread owns.**
+  In actor dispatch mode a stop destroyed the accept pollers and closed
+  multi-accept's listeners while the accept loops still ran, and the server
+  thread then did it again: on macOS a closed kqueue wakes its waiter at
+  once, so the server thread freed the arrays the stop was walking, and
+  each listener and poller was closed twice, the second time possibly
+  closing a descriptor opened since. The server thread now gives them back
+  alone, once its accept loops see the stop. Multi-accept is also refused
+  where the kernel does not spread connections across the listeners
+  (macOS, OpenBSD, NetBSD, as on Windows): it runs on Linux, DragonFly and
+  FreeBSD (`SO_REUSEPORT_LB`) (#3194).
+
+- **A stop closes the connections still waiting for their first bytes.** In
+  actor dispatch mode a connection accepted before its request arrived
+  waits in the accept poller, and when the server stopped it was left open
+  with no owner: a descriptor lost per connection, and a client that never
+  saw the server go. The accept loop now closes them as it ends (#3204).
+
+- **A handler answers its own ask whatever it does first.** The ask a
+  handler holds is its thread's step context, and a send to an idle actor of
+  the same core steps that actor inline, there and then: the inner step left
+  its own context in place, so a handler that sent before it replied
+  replied to no one, and its asker waited out the 5 s timeout. Every step
+  (on a core, inline, on an actor's own thread, on the cooperative
+  scheduler) now starts with no ask in hand and gives the enclosing step its
+  context back. An ask its handler leaves unanswered fails when the step
+  ends, as `"the handler returned without replying"`, instead of at the
+  timeout, and its slot is freed (#3205).
+
+- **A message's string field built from an ask's reply or an `or` leaves
+  nothing behind.** `sink ! Note { text: srv ? Name {} }` and
+  `sink ! Note { text: word(7) or "dflt" }` leaked the string the field was
+  copied from at every send: the field kept a list of its own of what counts
+  as a fresh string. It takes the one list now (#3206).
+
+- **A `match` or a `switch` on a fresh string frees it.** `match f() {
+  "a" -> ... }` kept f()'s string in the match's subject and nothing freed
+  it, whichever way the match ended. It is freed now on every exit: falling
+  through, a `return` from an arm, a `break` out of a case, a nested match
+  (#3207).
+
+- **A destructure into an element reads its index first.** `xs[i], i =
+  pair()` stored into the element the statement gave `i`, after the names
+  were bound and after the value. An element's index is now evaluated
+  first, left to right and before the value, as in Go: the element `i`
+  named before the statement takes the value (#3208).
+
+- **A spawned child keeps only the parent's own standard streams.** When
+  the parent had closed fd 1 or 2, the next descriptor it opened took that
+  number, another thread's spawn pipe among them, and the child cleared its
+  close-on-exec flag and kept it as its stdout or stderr: that spawn then
+  waited for this child to exit, or read its output as an errno. A child now
+  keeps a close-on-exec descriptor on 0 to 2 only when it is still the file
+  the stream was when the process started (#3209).
+
+- **Every spawner reports a program that cannot start as an error.**
+  `spawn_sandboxed` and contrib's Go and Aether process hosts returned 127
+  for a program that is not there or cannot be executed, which a program
+  that ran can return too; they return -1 now, learnt through a
+  close-on-exec error pipe as std.os does (#3170). The Aether host also
+  keeps a captured stdout when the parent had stdout closed: its pipe was
+  then already fd 1, and the close after a `dup2` onto itself closed it
+  (#3210).
+
+- **The access log and metrics see every response.** A response a
+  middleware answered (a proxied request, a 401 from basic auth, a 429 from
+  the rate limiter) went past the request hooks, on HTTP/1.1 and HTTP/2
+  alike, so a gateway's access log had no line for its proxied requests. The
+  hooks now observe every response; transformers stay the route handler's,
+  as documented. The proxy event loop serves a connection only when the
+  server has no hook either, as it ran none (#3213).
+
+- **A diagnostic names its file from where the command was typed.** When
+  `ae build`, `ae run` or `ae check` compile from a project root they
+  entered (a walk-up to aether.toml, or a project named on the command
+  line), every error, warning and `ae help` hint named the file from that
+  root: `sub/bad.ae` for the bad.ae typed in sub/, which no terminal or
+  editor could open from there (#3215).
+
+- **Windows: a program and `ae` leave the console as they found it.** Both
+  set the console's code pages to UTF-8, and a program turned on VT
+  processing, and left them so after exiting: the shell kept them for every
+  later program. They are given back at exit (#3216).
+
+- **`io.is_terminal` answers for a descriptor that is not open under
+  MSVC.** The CRT's invalid-parameter handler ended an MSVC-built program
+  from `_get_osfhandle`; the call now runs with a quiet handler and the
+  answer is false (#3217).
+
+- **A handler that sends to an actor and then asks it gets its reply.** The
+  send asked the actor's core to gather it onto the sender's (#3090), which
+  happened as the ask's message reached it, onto a core blocked in the ask:
+  the round waited out the timeout. No actor is moved onto a core while it
+  waits in an ask now, and an asked actor of that core is stepped by the
+  waiting thread, so a chain of asks among one core's actors answers too
+  (#3220). 100k send-then-ask rounds take 21 ms.
+
+- **A stop as the server starts closes its socket once.** Multi-accept takes
+  the socket `server_bind` made as its first listener, and a stop that came
+  between the read and the clear closed it, which the start's release then
+  closed again. Both now take it under the server's lock (#3194).
+
+### Security
+
+- **std.http.proxy names the request's peer in X-Forwarded-For, and trusts no
+  client's X-Real-IP.** The proxy appended `X-Forwarded-For: unknown` to
+  every request that came without an `X-Real-IP` header, and took a
+  client's own `X-Real-IP` as this hop's entry, so any client could write
+  itself into the chain the upstream trusts. The entry is now
+  `http.request_remote_addr`: the connection's peer, or, after
+  `middleware.use_real_ip`, the client it resolved. `use_real_ip` makes that
+  client the address the request reports (as nginx's realip does, the port
+  reading 0) and replaces an `X-Real-IP` the client sent, which it used to
+  keep (#3169).
+
+- **The rate limiter and the ip_hash balancer know a client by its peer, not
+  a header it sends.** `middleware.use_rate_limit` keyed its token bucket on
+  `X-Forwarded-For`, then `X-Real-IP`, so a client that sent a fresh
+  `X-Forwarded-For` on every request got a fresh bucket and was never
+  limited; the proxy's `ip_hash` balancer let a client pick its upstream the
+  same way. Both key on `http.request_remote_addr` now: the connection's
+  peer, or, behind `middleware.use_real_ip`, the client it resolved (#3173).
+
+- **`use_real_ip` names the client behind the proxies it trusts, and takes
+  them as an argument: `middleware.use_real_ip(server, header, trusted)`.**
+  It took the leftmost X-Forwarded-For entry from any peer, so a client that
+  connects directly named itself any address, and behind a proxy that
+  appends to the header (std.http.proxy, nginx by default, cloud load
+  balancers) the entry it wrote was still the leftmost: a fresh rate-limit
+  bucket per request, and any address to the handlers and the access log.
+  The header is now believed only from a peer `trusted` names (addresses
+  and networks, "127.0.0.1, 10.0.0.0/8, fd00::/8") and read from the right:
+  the first entry that is not a trusted proxy is the client, as nginx's
+  `set_real_ip_from` with `real_ip_recursive` has it. `"Forwarded"` reads
+  each element's `for=`. Calls with two arguments no longer compile; give
+  the proxies in front of the server (#3212).
+
 ## [0.849.0]
 
 ### Changed
