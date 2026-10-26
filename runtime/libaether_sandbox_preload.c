@@ -428,7 +428,10 @@ pid_t fork(void) {
 static long (*real_clone3)(struct clone_args*, size_t) = NULL;
 long clone3(struct clone_args* args, size_t size) {
     if (!real_clone3) real_clone3 = dlsym(RTLD_NEXT, "clone3");
-    if (sandbox_active && !check_grant("fork", "*")) {
+    /* A thread is no new process (#3178): it passes here, as it passes the
+     * kernel fence spawn_sandboxed installs. */
+    int thread = args && (args->flags & CLONE_THREAD);
+    if (sandbox_active && !thread && !check_grant("fork", "*")) {
         errno = EPERM;
         return -1;
     }

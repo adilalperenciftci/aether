@@ -77,9 +77,10 @@ main() {
                 grant_tcp_listen()
                 grant_udp("dns.local", 0)
                 grant_native("/opt/lib/*")
+                grant_fork()
                 grant_all()
             }
-            spec.assert_eq(list.size(g as ptr), 18, "nine grants, two entries each")
+            spec.assert_eq(list.size(g as ptr), 20, "ten grants, two entries each")
             spec.assert_true(has_grant(g as ptr, 0, "fs_read", stored("fs_read", "/r/*")), "grant_fs_read")
             spec.assert_true(has_grant(g as ptr, 1, "fs_write", stored("fs_write", "/w/*")), "grant_fs_write")
             spec.assert_true(has_grant(g as ptr, 2, "exec", "echo *"), "grant_exec")
@@ -88,7 +89,8 @@ main() {
             spec.assert_true(has_grant(g as ptr, 5, "tcp_listen", "*"), "grant_tcp_listen")
             spec.assert_true(has_grant(g as ptr, 6, "udp", "dns.local"), "grant_udp")
             spec.assert_true(has_grant(g as ptr, 7, "native", "/opt/lib/*"), "grant_native")
-            spec.assert_true(has_grant(g as ptr, 8, "*", "*"), "grant_all")
+            spec.assert_true(has_grant(g as ptr, 8, "fork", "*"), "grant_fork")
+            spec.assert_true(has_grant(g as ptr, 9, "*", "*"), "grant_all")
             sandbox.free(g)
         }
 

@@ -75,6 +75,7 @@ The grant list and the block that enforces it come from `std.sandbox`:
 | `grant_tcp_listen()` | `tcp_listen` | any listening socket |
 | `grant_udp(host)` | `udp` | host |
 | `grant_native(path)` | `native` | library being `dlopen`ed |
+| `grant_fork()` | `fork` | a new process in a child `spawn_sandboxed` starts (threads need no grant) |
 | `grant_all()` | `*` | everything |
 
 The same grant list is what `spawn_sandboxed(perms, prog, ...)` hands a
@@ -660,7 +661,7 @@ cat sandbox-config.ae
 | Raw `syscall()` | `syscall` interception |
 | Shellcode via `mmap(PROT_EXEC)` | `mmap`/`mmap64` interception |
 | Shellcode via `mprotect(PROT_EXEC)` | `mprotect` interception |
-| `fork()` / `vfork()` / `clone3()` | Blocked by default at the **kernel** level (seccomp-bpf in `spawn_sandboxed`, see below). Grant with `fork:*`. |
+| `fork()` / `vfork()` / a `clone()` or `clone3()` that is not a thread | Blocked by default at the **kernel** level (seccomp-bpf in `spawn_sandboxed`, see below). A thread passes. Grant new processes with `grant_fork()` (`fork:*`). |
 
 ### What's NOT blocked (requires kernel enforcement)
 
@@ -688,9 +689,15 @@ purely libc-symbol-level fence on `fork:*` was a paper tiger against
 real toolchains.
 
 `spawn_sandboxed` therefore installs a **seccomp-bpf filter** on the
-child side (post-fork, pre-exec) that traps `clone`, `clone3`, `fork`,
-and `vfork` with `EPERM` regardless of how they're invoked, when
-`fork:*` is not in the grant list. This is true kernel-level
+child side (post-fork, pre-exec) that refuses the child a new process
+however the call is made, when `fork:*` (`grant_fork()`) is not in the
+grant list: `fork` and `vfork` get `EPERM`, and so does a `clone` without
+`CLONE_THREAD`. A thread is no new process: it shares the address space,
+the filter and the preload, so a `clone` with `CLONE_THREAD` passes (#3178)
+and a child can run actors, threads in Python or a JVM. `clone3` keeps its
+flags in a struct in memory, which a filter cannot read, so it gets
+`ENOSYS`, the answer of a kernel without `clone3`, and libc falls back to
+`clone`, whose flags the filter reads. This is true kernel-level
 enforcement, immune to call-site obfuscation. Requires Linux ≥ 3.5
 (`PR_SET_NO_NEW_PRIVS` + `PR_SET_SECCOMP`). The filter covers x86_64,
 aarch64, riscv64 and loongarch64, and every ABI a process there can
@@ -700,9 +707,9 @@ Each is trapped with its own syscall numbers. Any other ABI kills the
 process, and on an architecture the filter does not cover
 `spawn_sandboxed` refuses to run the child (below) rather than fall back
 to the libc-level fence alone. The kernel fence
-is automatic and not configurable through the grant grammar: if
-`fork:*` is granted, the filter isn't installed at all; otherwise it
-fires unconditionally. If the kernel doesn't support seccomp, the
+is automatic, and the grant list says only whether it is there: if
+`fork:*` (`grant_fork()`) is granted, the filter isn't installed at all;
+otherwise it fires unconditionally. If the kernel doesn't support seccomp, the
 child aborts with `exit(126)` rather than silently running uncontained
 a `spawn_sandboxed` that asked for containment we can't deliver
 must not exec.

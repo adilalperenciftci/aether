@@ -23,6 +23,12 @@
 #
 # These are the two specific bypass paths called out in the issue. A
 # pass here proves the kernel-level fence is installed and effective.
+#
+# #3178 changed what the fence answers: a clone with CLONE_THREAD (a
+# thread, no new process) passes, and clone3, whose flags a filter cannot
+# read, gets ENOSYS so libc falls back to clone. Two cases after the vfork
+# ones check both: pthread_create works without a fork grant, and a raw
+# clone3 instruction gets ENOSYS.
 
 set -e
 
@@ -237,6 +243,67 @@ run_case  clone3_no_fork   "$GRANTS_NO_FORK"   "$TMPDIR/probe_clone3"  denied
 run_case  vfork_with_fork  "$GRANTS_WITH_FORK" "$TMPDIR/probe_vfork"   0
 
 echo "  [PASS] seccomp fence blocks raw clone3 + libc vfork when fork:* not granted (issue #668)"
+
+# A thread is no new process, and passes the fence (#3178). The fence used
+# to refuse every clone, so pthread_create failed in any child that starts
+# a thread: an Aether program with actors, Python with threads, a JVM.
+# glibc tries clone3 first; the fence answers it ENOSYS, as a kernel
+# without clone3 does, and glibc falls back to clone, whose CLONE_THREAD
+# flag the filter reads.
+cat > "$TMPDIR/probe_thread.c" <<'C'
+#include <pthread.h>
+#include <stdio.h>
+static void* work(void* p) { *(int*)p = 7; return NULL; }
+int main(void) {
+    pthread_t t;
+    int v = 0;
+    int rc = pthread_create(&t, NULL, work, &v);
+    if (rc != 0) { fprintf(stderr, "pthread_create: %d\n", rc); return 1; }
+    pthread_join(t, NULL);
+    if (v != 7) return 2;
+    printf("thread-ok\n");
+    return 0;
+}
+C
+cc -pthread -o "$TMPDIR/probe_thread" "$TMPDIR/probe_thread.c"
+run_case  thread_no_fork   "$GRANTS_NO_FORK"   "$TMPDIR/probe_thread"  0
+echo "  [PASS] a thread starts inside the fence (#3178)"
+
+# clone3 issued as a raw syscall instruction, past libc and the preload,
+# gets ENOSYS: the answer that makes libc fall back to clone. A child the
+# call might make exits at once with 0, which this reports as created.
+cat > "$TMPDIR/probe_clone3_raw.c" <<'C'
+#include <stdio.h>
+#include <string.h>
+#include <stdint.h>
+#include <unistd.h>
+#include <sys/wait.h>
+struct args3 { uint64_t flags, pidfd, child_tid, parent_tid, exit_signal, stack, stack_size, tls; };
+static long raw_clone3(struct args3* a, unsigned long size) {
+    long ret;
+    __asm__ volatile ("syscall" : "=a"(ret) : "a"(435L), "D"(a), "S"(size) : "rcx", "r11", "memory");
+    return ret;
+}
+int main(void) {
+    struct args3 a;
+    memset(&a, 0, sizeof(a));
+    a.exit_signal = 17;   /* SIGCHLD */
+    long r = raw_clone3(&a, sizeof(a));
+    if (r == 0) _exit(0);
+    if (r > 0) { int st; waitpid((pid_t)r, &st, 0); printf("clone3: created a process\n"); return 0; }
+    printf("clone3: errno %ld\n", -r);
+    return 1;
+}
+C
+cc -o "$TMPDIR/probe_clone3_raw" "$TMPDIR/probe_clone3_raw.c"
+run_case  clone3_raw_no_fork  "$GRANTS_NO_FORK"  "$TMPDIR/probe_clone3_raw"  denied
+if grep -q "^clone3: errno 38$" "$TMPDIR/clone3_raw_no_fork.out"; then
+    echo "  [PASS] a raw clone3 gets ENOSYS inside the fence (#3178)"
+else
+    echo "  [FAIL] a raw clone3 inside the fence: expected errno 38 (ENOSYS):"
+    cat "$TMPDIR/clone3_raw_no_fork.out"
+    exit 1
+fi
 
 # ---- Other ABIs and architectures (needs zig; skipped without it) ----
 #

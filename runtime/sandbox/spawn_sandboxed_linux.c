@@ -103,11 +103,21 @@ static int is_fork_granted(void* grant_list) {
     return 0;
 }
 
-// Install a seccomp-bpf filter that traps clone/clone3/fork/vfork with
-// EPERM. Must run AFTER prctl(PR_SET_NO_NEW_PRIVS, 1) (required for
-// unprivileged seccomp) and BEFORE execve. Returns 0 on success, -1 on
-// failure, and on an architecture this filter does not know (the caller
-// fail-closes: the child exits 126 rather than running unfenced).
+// Install a seccomp-bpf filter that refuses the child a new process: fork,
+// vfork and a clone that is not a thread get EPERM. Must run AFTER
+// prctl(PR_SET_NO_NEW_PRIVS, 1) (required for unprivileged seccomp) and
+// BEFORE execve. Returns 0 on success, -1 on failure, and on an
+// architecture this filter does not know (the caller fail-closes: the child
+// exits 126 rather than running unfenced).
+//
+// A thread is no new process (#3178): it shares the address space, the
+// filter and the preload, and cannot leave them. The fence used to refuse
+// every clone, so a child that starts a thread (an Aether program with
+// actors, Python with threads, a JVM) failed in pthread_create. Now a clone
+// with CLONE_THREAD in its flags (its first argument, on every ABI here)
+// passes. clone3 keeps its flags in a struct in memory, which a filter
+// cannot read, so it gets ENOSYS, the answer of a kernel without clone3,
+// and libc falls back to clone, whose flags the filter can read.
 //
 // A seccomp filter sees the syscall's ABI (seccomp_data.arch) and its number
 // in that ABI, and a process can enter the kernel through more than one ABI.
@@ -125,6 +135,7 @@ static int is_fork_granted(void* grant_list) {
 // build host's ABI, and the generic table (arm64, riscv64, loongarch64) has
 // no fork/vfork at all. tests/integration/sandbox_clone_fence checks every
 // literal below against the kernel headers zig ships for that architecture.
+// Each list is clone first, clone3 last, and the plain refusals between.
 //   x86_64:  clone 56, fork 57, vfork 58, clone3 435
 //   i386 and 32-bit ARM: clone 120, fork 2, vfork 190, clone3 435
 //   generic (aarch64, riscv64, loongarch64): clone 220, clone3 435
@@ -147,19 +158,57 @@ static int is_fork_granted(void* grant_list) {
 #define FENCE_MAX 48
 #define X32_SYSCALL_BIT 0x40000000u
 
-// One arch's block: load the number (masked when `mask`), deny on a match,
-// otherwise allow.
+#define FENCE_CLONE_THREAD 0x00010000u   /* CLONE_THREAD, the same on every ABI */
+
+/* The low 32 bits of a syscall's first argument, where CLONE_THREAD is. */
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#define FENCE_ARG0_LOW ((uint32_t)offsetof(struct seccomp_data, args) + 4u)
+#else
+#define FENCE_ARG0_LOW ((uint32_t)offsetof(struct seccomp_data, args))
+#endif
+
+static struct sock_filter fence_jeq(uint32_t k, int pc, int target) {
+    /* A jump is relative to the instruction after it. */
+    return (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, k,
+                                        (uint8_t)(target - (pc + 1)), 0);
+}
+
+// One arch's block, from `nums` (clone first, clone3 last, plain refusals
+// between): load the number (masked when `mask`); a clone goes on to the
+// CLONE_THREAD test, clone3 gets ENOSYS, a plain refusal EPERM, anything
+// else is allowed.
 static int fence_block(struct sock_filter* f, int n, const uint32_t* nums, int count,
                        uint32_t mask) {
+    int deny_count = count - 2;
     f[n++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
                                           (uint32_t)offsetof(struct seccomp_data, nr));
     if (mask) f[n++] = (struct sock_filter)BPF_STMT(BPF_ALU | BPF_AND | BPF_K, mask);
-    for (int i = 0; i < count; i++)
-        f[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, nums[i],
-                                              (uint8_t)(count - i), 0);
+    int p = n;                               /* the first comparison */
+    int allow = p + 2 + deny_count;          /* RET ALLOW */
+    int check = allow + 1;                   /* LD the clone's flags */
+    int jset = check + 1;                    /* JSET CLONE_THREAD */
+    int allow_thread = jset + 1;             /* RET ALLOW */
+    int deny = allow_thread + 1;             /* RET EPERM */
+    int enosys = deny + 1;                   /* RET ENOSYS */
+    f[n] = fence_jeq(nums[0], n, check);
+    n++;
+    f[n] = fence_jeq(nums[count - 1], n, enosys);
+    n++;
+    for (int i = 1; i <= deny_count; i++) {
+        f[n] = fence_jeq(nums[i], n, deny);
+        n++;
+    }
+    f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+    f[n++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, FENCE_ARG0_LOW);
+    f[n] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, FENCE_CLONE_THREAD,
+                                        (uint8_t)(allow_thread - (n + 1)),
+                                        (uint8_t)(deny - (n + 1)));
+    n++;
     f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
     f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K,
                                           SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA));
+    f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K,
+                                          SECCOMP_RET_ERRNO | (ENOSYS & SECCOMP_RET_DATA));
     return n;
 }
 
