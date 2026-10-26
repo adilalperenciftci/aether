@@ -1,5 +1,5 @@
 /*
- * TradingDemo — a Java host driving an Aether-built trading namespace.
+ * TradingDemo: a Java host driving an Aether-built trading namespace.
  *
  * Demonstrates the full v2 surface:
  *   - dlopen the namespace .so via the generated SDK class
@@ -23,7 +23,7 @@ import java.util.Map;
 
 public class TradingDemo {
 
-    /* Stand-in for a real TradeService — the host owns trade state and
+    /* Stand-in for a real TradeService: the host owns trade state and
      * decides what each event listener actually does. The Aether script
      * never sees this; it only emits notify(name, id). */
     private static final Map<Long, String> trades = new HashMap<>();
@@ -36,7 +36,7 @@ public class TradingDemo {
 
         try (Trading t = new Trading(args[0])) {
 
-            // 1. Discovery — confirm the loaded namespace is what we expected.
+            // 1. Discovery: confirm the loaded namespace is what we expected.
             Trading.Manifest m = t.describe();
             System.out.println("Loaded " + m + ", java=" + m.javaPackage + "." + m.javaClass);
 
@@ -67,11 +67,11 @@ public class TradingDemo {
             int ok = t.placeTrade(100L, 50_000, 1);
             System.out.println("returned " + ok);
 
-            System.out.println("--- placeTrade(101, 999_999_999, ticker_known=1) — over limit ---");
+            System.out.println("--- placeTrade(101, 999_999_999, ticker_known=1), over the limit ---");
             ok = t.placeTrade(101L, 999_999_999, 1);
             System.out.println("returned " + ok);
 
-            System.out.println("--- placeTrade(102, 1_000, ticker_known=0) — ticker unknown ---");
+            System.out.println("--- placeTrade(102, 1_000, ticker_known=0), unknown ticker ---");
             ok = t.placeTrade(102L, 1_000, 0);
             System.out.println("returned " + ok);
 

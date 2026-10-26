@@ -68,6 +68,25 @@ behind each step; every row below links the part it builds on.
 | [08-proxy-pool.ae](03-std/08-proxy-pool.ae) | a weighted pool configured as code | [Reverse proxy](../docs/http-reverse-proxy.md) |
 | [09-logging.ae](03-std/09-logging.ae) | std.log levels, a log file, the threshold | [stdlib reference](../docs/stdlib-reference.md) |
 
+## 4. C and other languages
+
+Aether compiles to C, so C is one declaration away in both directions.
+The host examples need that language installed; CI's contrib/host job
+builds and runs them.
+
+| Example | What it teaches | Reference |
+|---|---|---|
+| [01-libc.ae](04-interop/01-libc.ae) | `extern`, C's types, `@extern("c_name")` | [The extern keyword](../docs/c-interop.md#the-extern-keyword) |
+| [02-own-c/main.ae](04-interop/02-own-c/main.ae) | `@source`: a C file the program ships; strings, arrays and structs into C | [@source](../docs/c-interop.md#a-module-that-ships-its-c-source) |
+| [03-callbacks.ae](04-interop/03-callbacks.ae) | `@c_callback`: C's `qsort` calling an Aether comparison | [C callbacks](../docs/c-interop.md#exporting-an-aether-function-as-a-c-callback-c_callback) |
+| [04-embedding/greeter.ae](04-interop/04-embedding/greeter.ae) | `--emit=obj`: an Aether library in a C program, strings across | [--emit=obj](../docs/emit-lib.md#--emitobj-one-object-file-for-an-existing-c-build) |
+| [05-hosts/python.ae](04-interop/05-hosts/python.ae) | Python run inside the program, under the sandbox | [Host modules](../docs/containment-sandbox.md#language-host-modules) |
+| [05-hosts/lua.ae](04-interop/05-hosts/lua.ae) | Lua run inside the program, under the sandbox | [Host modules](../docs/containment-sandbox.md#language-host-modules) |
+| [05-hosts/tcl.ae](04-interop/05-hosts/tcl.ae) | Tcl run inside the program, under the sandbox | [Host modules](../docs/containment-sandbox.md#language-host-modules) |
+| [05-hosts/go.ae](04-interop/05-hosts/go.ae) | a Go program as a sandboxed child process | [Host modules](../docs/containment-sandbox.md#language-host-modules) |
+| [05-hosts/tinygo.ae](04-interop/05-hosts/tinygo.ae) | a Go c-shared library loaded and called in-process | [contrib/host/tinygo](../contrib/host/tinygo/README.md) |
+| [06-java-host/aether/manifest.ae](04-interop/06-java-host/aether/manifest.ae) | a namespace with a generated Java SDK, called from Java | [Embedded namespaces](../docs/embedded-namespaces-and-host-bindings.md) |
+
 ## Writing an example
 
 An example is one `.ae` file, or a directory when it needs more than one

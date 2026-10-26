@@ -3,7 +3,7 @@
 This example demonstrates the v2 embedded-namespaces flow end to end.
 
 ```
-trading/
+06-java-host/
   aether/
     manifest.ae         declares the namespace, inputs, events, bindings
     placeTrade.ae       script: place_trade(order_id, amount, ticker_known)
@@ -16,13 +16,15 @@ trading/
 
 ## Run it
 
+From the repository root:
+
 ```sh
-./build.sh
+sh examples/04-interop/06-java-host/build.sh
 ```
 
 You'll need:
 
-- The Aether toolchain (`ae`) on `PATH` — see the top-level `README.md`
+- The Aether toolchain (`ae`) on `PATH`: see the top-level `README.md`
 - JDK 22 or later (`javac --version`)
 
 ## What happens
@@ -35,7 +37,7 @@ You'll need:
    via `--emit=lib` to `aether/libtrading.so`.
 4. Embeds the manifest as a static struct, exports `aether_describe()`
    so the Java side can introspect at runtime.
-5. Generates `aether/com/example/trading/Trading.java` — a typed Java
+5. Generates `aether/com/example/trading/Trading.java`, a typed Java
    class that hides Panama Foreign Function API plumbing behind methods
    like `setMaxOrder`, `onOrderPlaced`, `placeTrade`, `getTicker`, and
    `describe`.
@@ -48,7 +50,7 @@ You'll need:
    `onOrderRejected`, `onTradeKilled`, `onUnknownTicker`).
 4. Calls each script function. Events fire back to Java synchronously
    following the EAI / Hohpe **claim-check** pattern: `notify(name, id)`
-   only — the host looks up details via its own `TradeService` (here
+   only: the host looks up details via its own `TradeService` (here
    stubbed as a `HashMap`) using the id.
 5. Prints the resulting trade book.
 
@@ -59,10 +61,10 @@ Loaded Manifest(namespace="trading", inputs=1, events=4), java=com.example.tradi
 --- placeTrade(100, 50_000, ticker_known=1) ---
 [event] OrderPlaced id=100 (Java now persists trade 100)
 returned 1
---- placeTrade(101, 999_999_999, ticker_known=1) — over limit ---
+--- placeTrade(101, 999_999_999, ticker_known=1), over the limit ---
 [event] OrderRejected id=101
 returned 0
---- placeTrade(102, 1_000, ticker_known=0) — ticker unknown ---
+--- placeTrade(102, 1_000, ticker_known=0), unknown ticker ---
 [event] UnknownTicker id=102
 returned 0
 --- killTrade(100) ---
@@ -74,7 +76,7 @@ Final trade book: {100=KILLED}
 
 The design doc sketched `setOrder(orderMap)` and `setCatalogHas(fn)` as
 host-supplied inputs the script can read back. v1 stores these on the
-SDK instance but doesn't yet surface them to the running script —
+SDK instance but does not surface them to the running script yet:
 that's the **host-call** layer (Shape B), not yet built. This example
 takes the same data via explicit function arguments instead, which is
 what works today.

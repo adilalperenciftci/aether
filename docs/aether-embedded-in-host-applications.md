@@ -207,7 +207,7 @@ events, methods named after each Aether function, and `AutoCloseable`
 so try-with-resources releases the `Arena`. The host developer writes
 no JNI, no `MethodHandle` lookups, no `MemorySegment` plumbing. See
 **[`embedded-namespaces-and-host-bindings.md`](embedded-namespaces-and-host-bindings.md)**
-for the design and `examples/embedded-java/trading/` for a worked example.
+for the design and `examples/04-interop/06-java-host/` for a worked example.
 
 For hosts that want raw FFI without the namespace SDK:
 

@@ -1,0 +1,44 @@
+// Calling C: declare a C function with `extern` and call it.
+//
+// Aether compiles to C, so a function of the C library, or of any library
+// the program links, is one `extern` away: the declaration gives its
+// parameter and result types, which the compiler trusts and C checks at
+// each call. A `string` argument reaches C as its characters (a `const
+// char*`), and a number type is the C type of that width: `int` is a C
+// int, `long` 64 bits, `float` a double. Write C's own width names where
+// C does (`size_t`, `uint32_t`): a C `long` is 32 bits on Windows, so
+// `long` is never the spelling of one. `@extern("c_name")` binds an Aether
+// name to a C symbol of another name.
+//
+// Run: ae run examples/04-interop/01-libc.ae
+// See: docs/c-interop.md
+
+extern abs(x: int) -> int
+extern strlen(s: string) -> size_t
+extern strtoll(s: string, end: ptr, base: int) -> long // C long long
+extern toupper(c: int) -> int
+extern sqrt(x: float) -> float
+extern strncmp(a: string, b: string, n: size_t) -> int
+
+@extern("strlen") byte_count(s: string) -> size_t
+
+main() {
+    println("abs(-42) = ${abs(-42)}")
+    println("strlen(\"interop\") = ${strlen("interop")}")
+    println("strtoll(\"ff\", 16) = ${strtoll("ff", null, 16)}")
+    println("strtoll(\"9000000000\", 10) = ${strtoll("9000000000", null, 10)}")
+    println("toupper('a') = ${toupper(97)}")
+    println("sqrt(2) = ${sqrt(2.0)}")
+    println("same prefix: ${strncmp("aether", "aeon", 2) == 0}")
+    println("byte_count(\"héllo\") = ${byte_count("héllo")}")
+}
+
+// Output:
+// abs(-42) = 42
+// strlen("interop") = 7
+// strtoll("ff", 16) = 255
+// strtoll("9000000000", 10) = 9000000000
+// toupper('a') = 65
+// sqrt(2) = 1.41421
+// same prefix: true
+// byte_count("héllo") = 6

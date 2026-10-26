@@ -1,3 +1,7 @@
+// Kills a trade: tells the host through the TradeKilled event.
+//
+// Part of: examples/04-interop/06-java-host/aether/manifest.ae
+
 import std.host
 
 kill_trade(trade_id: long) {

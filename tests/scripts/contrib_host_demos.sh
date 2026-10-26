@@ -147,7 +147,7 @@ probe_tinygo() {
 run_demo() {
     local lang="$1"
     local flag="$2"
-    local demo="$ROOT/examples/host-${lang}-demo.ae"
+    local demo="$ROOT/examples/04-interop/05-hosts/${lang}.ae"
 
     if [ ! -f "$demo" ]; then
         return 2  # no demo, not a failure

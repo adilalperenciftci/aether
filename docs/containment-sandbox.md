@@ -1637,7 +1637,7 @@ Active work listed in [`../contrib/host/TODO.md`](../contrib/host/TODO.md):
 
 ### Worked examples and tests
 
-- `examples/embedded-java/trading/` direction 1 (Aether as
+- `examples/04-interop/06-java-host/` direction 1 (Aether as
   guest, Java host).
 - `examples/sandbox-spawn.ae`, `examples/sandbox-demo.ae`,
   direction 2 (Aether as host).

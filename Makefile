@@ -1822,6 +1822,10 @@ benchmark: benchmark-results
 	@echo ""
 	@cd benchmarks/cross-language/visualize && ./server
 
+# Builds every example aetherc and the C compiler can build alone. A file
+# that is part of another example, one run by a script, and one that imports
+# a contrib bridge (built only with that bridge) are left to the checker,
+# tests/examples/check.ae.
 ifdef WINDOWS_NATIVE
 examples: compiler ae
 	@echo ===================================
@@ -1865,9 +1869,10 @@ examples: compiler ae stdlib
 	chmod +x "$$script"; \
 	root=$$(pwd); \
 	find examples -name '*.ae' \
-	    | grep -v '/lib/' | grep -v '/packages/' | grep -v '/embedded-java/' | grep -v '/host-.*-demo\.ae$$' \
+	    | grep -v '/lib/' | grep -v '/packages/' \
 	    | grep -v '/ae-help-demo/' \
 	    | sort \
+	    | xargs grep -L -e '^// Part of:' -e '^// Run: sh ' -e '^import contrib\.' \
 	    | xargs -P $(NPROC) -I{} "$$script" "{}" "$$tmpdir" "$$root"; \
 	pass=$$(ls "$$tmpdir"/PASS_* 2>/dev/null | wc -l | tr -d ' '); \
 	fail=$$(ls "$$tmpdir"/FAIL_* 2>/dev/null | wc -l | tr -d ' '); \
@@ -2254,10 +2259,8 @@ self-test: compiler
 	@echo "Running Compiler Self-Test"
 	@echo "==================================="
 	@echo "Testing compiler on complex syntax..."
-	@if [ -f examples/showcase/chat_server.ae ]; then \
-		./$(BUILD_DIR)/aetherc$(EXE_EXT) examples/showcase/chat_server.ae $(BUILD_DIR)/test_compile.c && \
-		echo "✓ Complex syntax compilation successful"; \
-	fi
+	@./$(BUILD_DIR)/aetherc$(EXE_EXT) examples/02-actors/11-sharded-map.ae $(BUILD_DIR)/test_compile.c && \
+		echo "✓ Complex syntax compilation successful"
 	@echo ""
 	@echo "Testing collections..."
 	@$(MAKE) --no-print-directory test > /dev/null && echo "✓ All tests passed"
@@ -2668,7 +2671,7 @@ install-contrib: contrib
 run: compiler
 ifndef FILE
 	@echo "Error: FILE not specified"
-	@echo "Usage: make run FILE=examples/basic/hello_world.ae"
+	@echo "Usage: make run FILE=examples/01-language/01-hello.ae"
 	@exit 1
 endif
 	@echo "Compiling $(FILE) to C..."
@@ -2688,7 +2691,7 @@ ifndef FILE
 	@echo ""
 	@echo "Example:"
 	@echo "  make compile FILE=examples/01-language/01-hello.ae"
-	@echo "  make compile FILE=examples/ae-help-demo/fixed_dsl.ae OUTPUT=fixed_dsl"
+	@echo "  make compile FILE=examples/02-actors/01-first-actor.ae OUTPUT=first_actor"
 	@echo ""
 	@echo "If you wanted to build the toolchain instead, run:"
 	@echo "  make ae         # just the CLI"
@@ -2887,7 +2890,7 @@ help:
 	@echo "  make help           - Show this help message"
 	@echo ""
 	@echo "Examples:"
-	@echo "  make run FILE=examples/basic/hello_world.ae"
+	@echo "  make run FILE=examples/01-language/01-hello.ae"
 	@echo "  make compile FILE=myapp.ae OUTPUT=myapp"
 	@echo "  make -j8 test       - Build and test with 8 parallel jobs"
 	@echo ""
@@ -2919,7 +2922,7 @@ ci-windows: clean compiler
 	@echo "[1/3] Generating C from all examples with native aetherc..."
 	@mkdir -p $(BUILD_DIR)/win
 	@pass=0; fail=0; \
-	for src in $$(find examples -name '*.ae' | grep -v '/lib/' | grep -v '/packages/' | grep -v '/embedded-java/' | grep -v '/host-.*-demo\.ae$$' | grep -v '/ae-help-demo/' | sort); do \
+	for src in $$(find examples -name '*.ae' | grep -v '/lib/' | grep -v '/packages/' | grep -v '/ae-help-demo/' | sort | xargs grep -L -e '^// Part of:' -e '^// Run: sh ' -e '^import contrib\.'); do \
 		name=$$(echo $$src | sed 's|examples/||;s|\.ae$$||'); \
 		printf "  %-30s " "$$name"; \
 		mkdir -p "$(BUILD_DIR)/win/examples/$$(dirname $$name)"; \
@@ -2959,7 +2962,7 @@ ci-windows: clean compiler
 	@echo ""
 	@echo "[3/3] Syntax-checking generated C with MinGW..."
 	@pass=0; fail=0; \
-	for src in $$(find examples -name '*.ae' | grep -v '/lib/' | grep -v '/packages/' | grep -v '/embedded-java/' | grep -v '/host-.*-demo\.ae$$' | grep -v '/ae-help-demo/' | sort); do \
+	for src in $$(find examples -name '*.ae' | grep -v '/lib/' | grep -v '/packages/' | grep -v '/ae-help-demo/' | sort | xargs grep -L -e '^// Part of:' -e '^// Run: sh ' -e '^import contrib\.'); do \
 		name=$$(echo $$src | sed 's|examples/||;s|\.ae$$||'); \
 		out_c="$(BUILD_DIR)/win/examples/$$name.c"; \
 		printf "  %-30s " "$$name"; \
@@ -3164,7 +3167,7 @@ check-raw-calls: compiler ae stdlib
 # cannot run unattended says what it needs; examples/README.md links every
 # example and each of its links resolves; every file there is source. The
 # checker is Aether (tests/examples/check.ae). Its self-test first: the
-# fixture holds exactly 13 problems, one of each kind.
+# fixture holds exactly 15 problems, one of each kind.
 # -----------------------------------------------------------------
 EXAMPLES_CHECKER := $(BUILD_DIR)/examples_check/check$(EXE_EXT)
 EXAMPLES_TIMEOUT ?= 60
@@ -3172,7 +3175,7 @@ EXAMPLES_TIMEOUT ?= 60
 check-examples: compiler ae stdlib
 	@mkdir -p $(BUILD_DIR)/examples_check
 	@./$(BUILD_DIR)/ae$(EXE_EXT) build tests/examples/check.ae -o $(BUILD_DIR)/examples_check/check
-	@./$(EXAMPLES_CHECKER) --ae ./$(BUILD_DIR)/ae$(EXE_EXT) --timeout 2 --expect 13 tests/examples/fixture \
+	@./$(EXAMPLES_CHECKER) --ae ./$(BUILD_DIR)/ae$(EXE_EXT) --timeout 2 --expect 15 tests/examples/fixture \
 	    > $(BUILD_DIR)/examples_check/self_test.log 2>&1 || \
 	    { cat $(BUILD_DIR)/examples_check/self_test.log; exit 1; }
 	@./$(EXAMPLES_CHECKER) --ae ./$(BUILD_DIR)/ae$(EXE_EXT) --timeout $(EXAMPLES_TIMEOUT) examples

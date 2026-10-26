@@ -19,13 +19,17 @@
 //     and line endings aside);
 //   - an entry with no Output block and no `// Needs:` line saying what it
 //     needs to run (a server, a terminal, a platform, a library), since CI
-//     only builds those.
+//     only builds those, and one that imports a contrib module with no
+//     Needs line.
 //
 // `ae run P [options] [-- args]` is built with `ae build P [options]` into
-// build/examples/ and the binary runs with the args. Any other `ae ...` and
-// `sh ...` command runs as written. The output compared is what the command
-// writes, stdout and stderr together: an example writes nothing to stderr
-// that its Output block does not show.
+// build/examples/ and the binary runs with the args; one that imports a
+// contrib module is type-checked with `ae check` instead, since make ci
+// builds no contrib archive (the contrib jobs build and run those). Any
+// other `ae ...` and `sh ...` command runs as written. An entry with a
+// Needs line is not run, Output block or not. The output compared is what
+// the command writes, stdout and stderr together: an example writes
+// nothing to stderr that its Output block does not show.
 //
 //     check [--ae PATH] [--timeout SECS] [--expect N] DIR
 //
@@ -236,6 +240,7 @@ struct Example {
     has_output: bool
     output: string
     problem: string
+    uses_contrib: bool
 }
 
 // The comment text of a `//` line, "" for a bare `//`, and null for a line
@@ -253,10 +258,15 @@ comment_text(line: string) -> string? {
 }
 
 read_example(p: string, text: string) -> Example {
-    ex = Example { path: p, run: "", run_line: 0, part_of: "", needs: "", has_output: false, output: "", problem: "" }
+    ex = Example { path: p, run: "", run_line: 0, part_of: "", needs: "", has_output: false, output: "", problem: "", uses_contrib: false }
     lines = split_lines(text)
     defer collections.string_list_free(lines)
     n = collections.string_list_size(lines)
+    for li in 0..n {
+        if string.starts_with(string.trim(collections.string_list_get(lines, li)), "import contrib.") == 1 {
+            ex.uses_contrib = true
+        }
+    }
 
     // The header: the comment lines the file starts with.
     i = 0
@@ -324,11 +334,15 @@ read_example(p: string, text: string) -> Example {
 }
 
 // A program's output as the lines an Output block holds: "\r\n" read as
-// "\n", trailing spaces off each line, and no final empty line.
+// "\n", trailing spaces off each line, and no empty lines at the end (a
+// suite's summary ends with one; a block's last line is text).
 as_block(raw: string) -> string {
     lines = split_lines(raw)
     defer collections.string_list_free(lines)
     n = collections.string_list_size(lines)
+    while n > 0 && rtrim(collections.string_list_get(lines, n - 1)) == "" {
+        n = n - 1
+    }
     out = ""
     i = 0
     while i < n {
@@ -403,12 +417,26 @@ run_bounded(prog: string, args: ptr, out_path: string, timeout: int) -> (string,
 
 // Does the Run command name the file, a directory holding it, or a file
 // beside it?
+// Whether a build's output holds a warning: a coded `warning[W...]` or
+// one with no code (`warning: ...` at the start of a line), which `ae
+// check` prints for some, such as a malloc size cast.
+prints_a_warning(log: string) -> bool {
+    if string.contains(log, "warning[") == 1 {
+        return true
+    }
+    return string.starts_with(log, "warning:") == 1 || string.contains(log, "\nwarning:") == 1
+}
+
 names_itself(ex: Example, words: ptr) -> int {
     n = collections.string_list_size(words)
     i = 1
     while i < n {
         w = normalize(collections.string_list_get(words, i))
-        if w == ex.path || string.starts_with(ex.path, "${w}/") == 1 || dir_of(w) == dir_of(ex.path) {
+        // The file itself, a directory it is in, or a script beside it or
+        // one directory up (an example's own build script, for a file in
+        // one of the example's directories).
+        if w == ex.path || string.starts_with(ex.path, "${w}/") == 1 || dir_of(w) == dir_of(ex.path) ||
+        dir_of(w) == dir_of(dir_of(ex.path)) {
             return 1
         }
         i = i + 1
@@ -449,6 +477,12 @@ main() {
     }
     out_dir = "build/examples"
     _m = fs.mkdir_p(out_dir)
+    // A build ae serves from its cache prints none of the warnings its first
+    // build did, so every build here uses a cache of the checker's own,
+    // emptied first: each example is compiled, and its warnings seen.
+    cache = "${out_dir}/cache"
+    _c = fs.remove_tree(cache)
+    _e = os.setenv("AETHER_CACHE_DIR", cache)
 
     files = collections.string_list_new()
     _n, werr = fs.walk(root) | path: string, kind: int, depth: int | {
@@ -514,6 +548,7 @@ main() {
     // what they print.
     ran = 0
     built = 0
+    checked = 0
     ne = collections.string_list_size(sources)
     i = 0
     while i < ne {
@@ -539,7 +574,10 @@ main() {
             say("${p}: not linked from ${root}/README.md, the path a reader follows")
             problems = problems + 1
         }
-        if ex.has_output == false && ex.needs == "" {
+        if ex.needs == "" && ex.uses_contrib {
+            say("${p}: imports a contrib module, whose archive make ci does not build: a `// Needs:` line says what it takes")
+            problems = problems + 1
+        } else if ex.has_output == false && ex.needs == "" {
             say("${p}: no Output block, and no `// Needs:` line saying why it does not run in CI")
             problems = problems + 1
         }
@@ -564,32 +602,45 @@ main() {
         args = list.new()
         failed = 0
         if tool == "ae" && collections.string_list_get(words, 1) == "run" {
+            // An example that imports a contrib module is type-checked:
+            // the bridge's archive comes from `make contrib`, which make ci
+            // does not build, and the contrib jobs build and run it.
+            verb = "build"
+            if ex.uses_contrib {
+                verb = "check"
+            }
             name = string.replace_all(string.substring(p, string.length(root) + 1, string.length(p) - 3), "/", "_")
             bin = "${out_dir}/${name}"
             bargs = list.new()
-            _b = list.add(bargs, "build")
+            _b = list.add(bargs, verb)
             k = 2
             while k < nw && collections.string_list_get(words, k) != "--" {
                 _w = list.add(bargs, collections.string_list_get(words, k))
                 k = k + 1
             }
-            _o1 = list.add(bargs, "-o")
-            _o2 = list.add(bargs, bin)
+            if verb == "build" {
+                _o1 = list.add(bargs, "-o")
+                _o2 = list.add(bargs, bin)
+            }
             bout, berr, bcode, bspawn = os.run_full(ae, bargs, null, "")
             list.free(bargs)
             log = "${bout}${berr}"
             if bspawn != "" || bcode != 0 {
-                say("${p}: the build failed (${ae} build, exit ${bcode}${bspawn}):")
+                say("${p}: ${ae} ${verb} failed (exit ${bcode}${bspawn}):")
                 say_indented(log)
                 problems = problems + 1
                 failed = 1
-            } else if string.contains(log, "warning[") == 1 {
-                say("${p}: the build prints a warning; an example builds clean:")
+            } else if prints_a_warning(log) {
+                say("${p}: ${ae} ${verb} prints a warning; an example builds clean:")
                 say_indented(log)
                 problems = problems + 1
                 failed = 1
             }
-            built = built + 1
+            if verb == "build" {
+                built = built + 1
+            } else {
+                checked = checked + 1
+            }
             prog = "${bin}${exe_ext}"
             k = k + 1
             while k < nw {
@@ -608,7 +659,9 @@ main() {
             }
         }
 
-        if failed == 0 && ex.has_output {
+        // A file that imports a contrib bridge is type-checked, not built,
+        // so there is nothing of it to run.
+        if failed == 0 && ex.has_output && ex.needs == "" && !ex.uses_contrib {
             out_file = "${out_dir}/run_${i}.out"
             text, status, timed_out, rerr2 = run_bounded(prog, args, out_file, timeout)
             got = as_block(text)
@@ -635,7 +688,7 @@ main() {
         i = i + 1
     }
 
-    say("examples: ${collections.string_list_size(entries)} examples (${built} built, ${ran} run and matched their output): ${problems} problem(s)")
+    say("examples: ${collections.string_list_size(entries)} examples (${built} built, ${checked} type-checked, ${ran} run and matched their output): ${problems} problem(s)")
     if expect >= 0 {
         if problems != expect {
             say("examples: the self-test expected ${expect}")

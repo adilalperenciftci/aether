@@ -5,6 +5,9 @@
 //
 // `[ae]` prefix on console output marks lines coming from this Aether
 // library (as opposed to lines from the Java TradingDemo host).
+//
+// Part of: examples/04-interop/06-java-host/aether/manifest.ae
+
 import std.host
 
 place_trade(order_id: long, amount: int, ticker_known: int) {

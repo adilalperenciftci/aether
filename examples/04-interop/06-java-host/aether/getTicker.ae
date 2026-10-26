@@ -1,0 +1,9 @@
+// A stub ticker lookup that hands the symbol back: the host ABI does not
+// return composite Aether values yet, so the round trip is the point.
+//
+// Part of: examples/04-interop/06-java-host/aether/manifest.ae
+
+get_ticker(symbol: string) {
+    println("[ae] get_ticker symbol=${symbol}")
+    return symbol
+}

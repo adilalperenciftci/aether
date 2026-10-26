@@ -1,0 +1,12 @@
+// Imports a contrib bridge and does not say what it needs.
+//
+// Run: ae run tests/examples/fixture/contrib_bare.ae
+
+import contrib.host.lua
+
+main() {
+    lua.run("print('hi')")
+}
+
+// Output:
+// hi

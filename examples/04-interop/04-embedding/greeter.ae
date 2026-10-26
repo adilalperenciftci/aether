@@ -1,0 +1,32 @@
+// Embedding: an Aether library called from a C program.
+//
+// Built with `ae build --emit=obj`, an Aether file becomes one object
+// file a C program links, and every top-level function is exported as
+// `aether_<name>` with a fixed C type: `int` is int32_t, `long` int64_t,
+// `float` double, a `string` parameter a `const char*` the call borrows.
+// A `string` result is a counted string the caller owns: it reads it with
+// `aether_string_data` and `aether_string_length`, and gives it back with
+// the library's release function, `aether_greeter_string_release`.
+// `ae cflags --libs` names the runtime to link. host.c is the C program
+// and run.sh builds and runs it; with a C toolchain on PATH that is all.
+// docs/emit-lib.md covers shared libraries, the catalog and other hosts.
+//
+// Run: sh examples/04-interop/04-embedding/run.sh
+// See: docs/emit-lib.md
+
+greet(name: string) -> string {
+    return "hello, ${name}, from Aether"
+}
+
+add(a: int, b: int) -> int {
+    return a + b
+}
+
+average(total: long, count: int) -> float {
+    return (total as float) / (count as float)
+}
+
+// Output:
+// add(2, 40) = 42
+// average(10, 4) = 2.5
+// hello, C, from Aether

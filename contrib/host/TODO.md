@@ -1,7 +1,7 @@
 # contrib/host TODO
 
 ## All host modules
-- [x] Bridges self-contained: each host maintains its own permission stack and registers its own checker via the public `_aether_sandbox_checker`. No longer pokes at the compiler-emitted preamble's `static` `_aether_ctx_stack`. Applies to python, lua, perl, ruby, js, tcl; the aether host is separate-process and unaffected. Demonstrated end-to-end in `examples/host-tcl-demo.ae` (compiles, links, runs).
+- [x] Bridges self-contained: each host maintains its own permission stack and registers its own checker via the public `_aether_sandbox_checker`. No longer pokes at the compiler-emitted preamble's `static` `_aether_ctx_stack`. Applies to python, lua, perl, ruby, js, tcl; the aether host is separate-process and unaffected. Demonstrated end-to-end in `examples/04-interop/05-hosts/tcl.ae` (compiles, links, runs).
 - [x] Import path drift fixed: all READMEs and module.ae headers now document the working form `import contrib.host.<lang>` (previously said `std.host.<lang>`, which the compiler's stdlib resolver doesn't handle since the modules live under `contrib/host/`, not `std/host/<lang>/`). `docs/containment-sandbox.md` already used the correct form.
 - [x] IPv6-mapped addresses normalized in `pattern_match`: a grant for `10.0.0.1` now matches a TCP resource reported as `::ffff:10.0.0.1` (and vice versa). Applied to all 6 in-process bridges, the LD_PRELOAD preload checker (`runtime/libaether_sandbox_preload.c`), and the Java-side `AetherGrantChecker`.
 - [x] CI + `make contrib-host-check` target added: syntax-checks every bridge in stub mode and runs per-language demos when the dev library is installed. Gracefully skips languages whose headers/libs aren't present. Wired into a Linux CI job (`ci-contrib-host`) that installs lua/python/ruby/perl/tcl/duktape/go dev packages.
@@ -12,8 +12,8 @@
   - `string:bytes` mode for shared map — binary data without base64
 
 ## Python
-- [x] Dedicated `examples/host-python-demo.ae` written against the current stdlib + sandbox API (the `lazy-evaluation` recovery path no longer exists, confirmed via pickaxe search across all refs).
-- [x] `os.environ` is cached at CPython startup — sandbox `getenv` interception only works via `ctypes.CDLL(None).getenv`, not `os.environ.get()`. Covered in `docs/containment-sandbox.md` → host module matrix (Env cache issue row) and the "Shared-interpreter behavior" section below it. The `examples/host-python-demo.ae` demonstrates the `ctypes` workaround inline.
+- [x] Dedicated `examples/04-interop/05-hosts/python.ae` written against the current stdlib + sandbox API (the `lazy-evaluation` recovery path no longer exists, confirmed via pickaxe search across all refs).
+- [x] `os.environ` is cached at CPython startup: sandbox `getenv` interception only works via `ctypes.CDLL(None).getenv`, not `os.environ.get()`. Covered in `docs/containment-sandbox.md` → host module matrix (Env cache issue row) and the "Shared-interpreter behavior" section below it. The `examples/04-interop/05-hosts/python.ae` demonstrates the `ctypes` workaround inline.
 
 ## Lua
 - [x] Tested and working well. Cleanest host module.
@@ -144,7 +144,7 @@ modelled on `host_lua_bidirectional/` (callback + typed result + global inject
 - [x] IPv6-mapped address normalization — applied in `AetherGrantChecker.patternMatch` (Java side) and `libaether_sandbox_preload.c` `pattern_match` (LD_PRELOAD C side). A grant for `10.0.0.1` matches `::ffff:10.0.0.1` and vice versa.
 
 ## Go
-- [x] Added as the eighth host. Separate subprocess under LD_PRELOAD sandbox interception (same pattern as `contrib/host/aether`). Two modes: `go.run_script_sandboxed(perms, path)` shells out to `go run`, `go.run_sandboxed(perms, binary)` runs a pre-built binary under tight grants. End-to-end demo: `examples/host-go-demo.ae`.
+- [x] Added as the eighth host. Separate subprocess under LD_PRELOAD sandbox interception (same pattern as `contrib/host/aether`). Two modes: `go.run_script_sandboxed(perms, path)` shells out to `go run`, `go.run_sandboxed(perms, binary)` runs a pre-built binary under tight grants. End-to-end demo: `examples/04-interop/05-hosts/go.ae`.
 
 ## Tcl
-- [x] Added as the seventh host, mirroring the lua template. `::env` caveat (shared interpreter, same as Perl/Ruby) covered in `docs/containment-sandbox.md` → "Shared-interpreter behavior". End-to-end verified: `examples/host-tcl-demo.ae` compiles, links, and runs on macOS with system Tcl 8.5.
+- [x] Added as the seventh host, mirroring the lua template. `::env` caveat (shared interpreter, same as Perl/Ruby) covered in `docs/containment-sandbox.md` → "Shared-interpreter behavior". End-to-end verified: `examples/04-interop/05-hosts/tcl.ae` compiles, links, and runs on macOS with system Tcl 8.5.

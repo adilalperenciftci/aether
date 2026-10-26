@@ -7,7 +7,7 @@ writes JNI, never writes SWIG `.i` files, never registers callback
 function pointers by hand.
 
 > **Status (2026-04-18):** **shipped.** Landed on `feature/embedded-namespaces`
->. Worked example at `examples/embedded-java/trading/`,
+>. Worked example at `examples/04-interop/06-java-host/`,
 > integration tests at `tests/integration/namespace_{python,ruby,java}/` and
 > `tests/integration/embedded_java_trading_e2e/`.
 >
@@ -70,12 +70,12 @@ function pointers by hand.
 ## The shape, in one example
 
 A **trading** namespace with three scripts that share a single manifest.
-This is the worked example that ships at `examples/embedded-java/trading/`.
+This is the worked example that ships at `examples/04-interop/06-java-host/`.
 
 ### Directory layout
 
 ```
-examples/embedded-java/trading/
+examples/04-interop/06-java-host/
     aether/
         manifest.ae          # the namespace definition (one per directory)
         placeTrade.ae        # contributes place_trade()
