@@ -1374,15 +1374,16 @@ static int ev_try_direct(EvDriver* d, EvConn* c) {
     if (aether_proxy_direct_take(&c->px, 0, c->x.buf, c->x.len,
                                  c->x.framing.header_bytes, &direct) != 0) return 0;
 
+    /* The response is recorded from here on (metrics, breaker, in-flight), so
+     * a head that cannot be written closes rather than falling back to the
+     * copying path, which would record it a second time (#3244). */
     size_t head_len = 0;
     if (aether_proxy_direct_head(&direct, c->x.buf, c->x.framing.header_bytes,
-                                 &c->out, &c->out_cap, &head_len) != 0) return 0;
+                                 &c->out, &c->out_cap, &head_len) != 0) return -1;
 
     /* The keep-alive decision and the lines stating it, which the copying
      * path's response carries after every other header (#3229): they go
-     * before the blank line that ends the head. The upstream's bookkeeping is
-     * done by now, so a failure here closes rather than falling back to the
-     * copying path, which would count the response twice. */
+     * before the blank line that ends the head, and fail the same way. */
     char lines[160];
     int keep = http_server_keep_alive_lines(d->loop->server, c->req, direct.status,
                                             c->requests_served, lines, sizeof(lines));

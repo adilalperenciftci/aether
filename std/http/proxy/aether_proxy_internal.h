@@ -376,7 +376,9 @@ int aether_proxy_direct_ok(const AetherProxyExchange* px);
 /* The success half of resume for a response the caller still holds as raw
  * bytes. Returns 0 when `out` is filled and the head should be written,
  * or -1 when this response is not one to pass through and the caller should
- * take the copying path instead. */
+ * take the copying path instead. After 0 the response is recorded: the caller
+ * must not take the copying path for it, which records it again, and closes
+ * the connection if it cannot write the head (#3244). */
 int aether_proxy_direct_take(AetherProxyExchange* px, int64_t elapsed_ms,
                              const char* raw, size_t raw_len,
                              size_t header_bytes, AetherProxyDirect* out);
