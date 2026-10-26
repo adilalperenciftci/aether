@@ -83,9 +83,9 @@ grep -q READY "$TMP/peer.log" 2>/dev/null || {
     fail "TLS peer never became READY"
 }
 
-if command -v timeout >/dev/null 2>&1; then TIMEOUT="timeout 60"
-elif command -v gtimeout >/dev/null 2>&1; then TIMEOUT="gtimeout 60"
-else TIMEOUT=""; fi
+# The sweep's own bound, never timeout(1): see test_ws_client_nonblocking.sh.
+. "$ROOT/tests/lib/sweep_timeout.sh"
+sweep_timeout_bound TIMEOUT "$ROOT" 60
 
 # The self-signed cert doubles as its own CA.
 OUT=$(SSL_CERT_FILE="$TMP/cert.pem" $TIMEOUT "$TMP/cli" "$PORT" 2>&1) || {

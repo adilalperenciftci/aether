@@ -175,7 +175,7 @@ main() {
         if status == jq.RESULT_HALT {
             // halt_error prints a string message as is, anything else as JSON
             if err != null {
-                if json.type(err) == 3 {
+                if json.type(err) == json.JSON_STRING {
                     io.stderr_write(json.get_string_raw(err))
                 } else {
                     io.stderr_write("${jq.to_json(err)}\n")
@@ -197,8 +197,8 @@ main() {
 // jq truth: everything but null and false.
 truthy(v: ptr) -> int {
     t = json.type(v)
-    if t == 0 { return 0 }
-    if t == 1 { return json.get_bool(v) }
+    if t == json.JSON_NULL { return 0 }
+    if t == json.JSON_BOOL { return json.get_bool(v) }
     return 1
 }
 

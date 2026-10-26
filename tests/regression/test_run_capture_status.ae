@@ -19,11 +19,12 @@
 //   1. shell "exit 0" — status reads 0, err is "".
 //   2. shell "exit 1" — status reads 1, err is "" (spawn ok, child exits
 //      non-zero).
-//   3. a missing binary. POSIX: execvp inside the forked child fails with
-//      _exit(127), so the parent sees a normal-exit status of 127 and err
-//      stays empty. Windows: there is no fork; std.os looks the program
-//      up in the parent (#2171), so it sees (-1, "program not found"). Both are the platform's
-//      documented contract and both are pinned here.
+//   3. a missing binary: (-1, "program not found") on every platform. POSIX
+//      used to give (127, ""), since exec fails in the forked child; the
+//      child now reports its errno to the parent on a close-on-exec pipe
+//      (#3170). Windows looks the program up in the parent (#2171).
+//   4. a program that runs and exits 127: (127, ""), so a caller can tell
+//      it from one that could not start.
 
 import std.os
 import std.list
@@ -71,31 +72,26 @@ main() {
     }
     println("  PASS: shell 'exit 1' → status 1, no err (clean exit-non-zero)")
 
-    // Case 3: missing binary — POSIX execvp reports failure inside the
-    // *child* process via _exit(127), so the parent sees a normal-exit
-    // status of 127. err stays empty (the fork itself succeeded).
-    // Callers that want to distinguish "binary exited 127" from "exec
-    // failed" need something stronger than os.run_capture today; this
-    // test just pins down the current contract.
+    // Case 3: missing binary, the same on every platform (#3170).
     av2 = list_new()
     out2, status2, err2 = os.run_capture("/no/such/binary", av2, null)
-    if windows {
-        if err2 != "program not found" || status2 != -1 {
-            println("  FAIL 3: missing-binary status=${status2} err='${err2}', expected -1 'program not found'")
-            exit(1)
-        }
-        println("  PASS: missing binary → (-1, \"program not found\") (looked up in the parent)")
-    } else {
-        if err2 != "" {
-            println("  FAIL 3: missing-binary err=${err2}, expected empty")
-            exit(1)
-        }
-        if status2 != 127 {
-            println("  FAIL 3: missing-binary status=${status2}, expected 127")
-            exit(1)
-        }
-        println("  PASS: missing binary → status 127 (POSIX exec-in-child convention)")
+    if err2 != "program not found" || status2 != -1 {
+        println("  FAIL 3: missing-binary status=${status2} err='${err2}', expected -1 'program not found'")
+        exit(1)
     }
+    println("  PASS: missing binary → (-1, \"program not found\")")
+
+    // Case 4: a program that ran and exited 127 is not one that could not
+    // start.
+    av3 = list_new()
+    list_add(av3, flag)
+    list_add(av3, "exit 127")
+    out3, status3, err3 = os.run_capture(shell, av3, null)
+    if err3 != "" || status3 != 127 {
+        println("  FAIL 4: shell 'exit 127' status=${status3} err='${err3}', expected 127 and no err")
+        exit(1)
+    }
+    println("  PASS: shell 'exit 127' → status 127, no err")
 
     println("=== All cases passed ===")
 }

@@ -1,0 +1,69 @@
+// HTTP/2 and TLS: the same server API, over h2 and HTTPS.
+//
+// `http.server_set_h2` turns HTTP/2 on beside HTTP/1.1 on the same port: a
+// client that starts with the h2 preface, or upgrades with h2c, gets
+// HTTP/2. `http.server_set_tls` takes a certificate and a key; with TLS,
+// ALPN offers h2 first and falls back to http/1.1. Both report "" or why
+// they are unavailable (a build without libnghttp2 or OpenSSL), and the
+// server goes on with what it has. The handlers do not change.
+//
+// Run: ae run examples/03-std/06-http2-tls.ae
+// Needs: a free port 8443, libnghttp2 for HTTP/2, and for TLS a
+// certificate in CERT_PATH and its key in KEY_PATH, for instance
+//   openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 1 -nodes -subj /CN=localhost
+// Without them it serves plain HTTP/2 (h2c). Try
+//   curl --http2-prior-knowledge http://127.0.0.1:8443/
+//   curl --insecure --http2 https://127.0.0.1:8443/   (with TLS)
+// See: docs/http-server.md
+
+import std.http
+import std.os
+
+const PORT = 8443
+
+handle_root(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "hello over ${http.request_http_version(req)}\n")
+}
+
+// The body as bytes, so a payload holding a NUL comes back whole.
+handle_echo(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "application/octet-stream")
+    http.response_set_body_bytes(res, http.request_body_bytes(req))
+}
+
+main() {
+    server = http.server_create(PORT)
+    defer http.server_free(server)
+    http.server_set_host(server, "127.0.0.1")
+
+    cert = os.getenv("CERT_PATH")
+    key = os.getenv("KEY_PATH")
+    scheme = "http"
+    if cert != "" && key != "" {
+        tls = http.server_set_tls(server, cert, key)
+        if tls != "" {
+            println("TLS unavailable: ${tls}")
+            exit(1)
+        }
+        scheme = "https"
+    }
+
+    h2 = http.server_set_h2(server, 0)
+    if h2 != "" {
+        println("HTTP/2 unavailable (${h2}); serving HTTP/1.1")
+    }
+    http.server_set_keepalive(server, 1, 0, 30000ms)
+
+    http.server_get(server, "/", handle_root, null)
+    http.server_post(server, "/echo", handle_echo, null)
+
+    println("listening on ${scheme}://127.0.0.1:${PORT}/")
+    err = http.server_start(server)
+    if err != "" {
+        println("server: ${err}")
+        exit(1)
+    }
+}

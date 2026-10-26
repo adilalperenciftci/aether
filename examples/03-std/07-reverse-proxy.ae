@@ -1,0 +1,72 @@
+// A reverse proxy: one server forwarding to another, in one program.
+//
+// std.http.proxy mounts a forwarding route on a server: a request under the
+// prefix goes to the upstream, and its response comes back to the client
+// as it was. On the way the proxy drops hop-by-hop headers, adds
+// X-Forwarded-For, X-Forwarded-Proto and X-Forwarded-Host, and gives the
+// upstream its own Host. Here the upstream is a second std.http server in
+// the same program that answers with the headers it saw, both serve on
+// 127.0.0.1 ports the system picks, and main is the client.
+// docs/http-reverse-proxy.md covers pools of upstreams, health checks,
+// caching and circuit breakers.
+//
+// Run: ae run examples/03-std/07-reverse-proxy.ae
+// See: docs/http-reverse-proxy.md
+
+import std.http
+import std.http.proxy
+
+// The upstream: says what reached it.
+inspect(req: ptr, res: ptr, ud: ptr) {
+    seen = "path=${http.request_path(req)}"
+    seen = "${seen} xff=${http.get_header(req, "X-Forwarded-For")}"
+    seen = "${seen} xfp=${http.get_header(req, "X-Forwarded-Proto")}"
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, seen)
+}
+
+// A server on 127.0.0.1 with a port the system picks, serving in the
+// background; null when it cannot.
+listen() -> ptr {
+    s = http.server_create(0)
+    if http.server_bind(s, "127.0.0.1", 0) != "" {
+        http.server_free(s)
+        return null
+    }
+    return s
+}
+
+main() {
+    upstream = listen()
+    gateway = listen()
+    if upstream == null || gateway == null {
+        println("cannot listen")
+        exit(1)
+    }
+    defer http.server_free(upstream)
+    defer http.server_free(gateway)
+
+    http.server_get(upstream, "/api/status", inspect, null)
+    target = "http://127.0.0.1:${http.server_port(upstream)}"
+    perr = proxy.mount_simple(gateway, "/", target, 5)
+    if perr != "" {
+        println("proxy: ${perr}")
+        exit(1)
+    }
+    http.server_start_background(upstream)
+    http.server_start_background(gateway)
+
+    front = "http://127.0.0.1:${http.server_port(gateway)}"
+    body, err = http.get("${front}/api/status")
+    println("through the proxy: ${body} [${err}]")
+    _, missing = http.get("${front}/api/none")
+    println("a path the upstream lacks: [${missing}]")
+
+    http.server_stop(gateway)
+    http.server_stop(upstream)
+}
+
+// Output:
+// through the proxy: path=/api/status xff=127.0.0.1 xfp=http []
+// a path the upstream lacks: [HTTP 404 Not Found]

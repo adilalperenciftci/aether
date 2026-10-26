@@ -10,7 +10,6 @@ import std.http.script_gateway
 import std.os
 import std.string
 
-extern http_server_start_raw(server: ptr) -> int
 extern exit(code: int)
 
 // Path: /static — used to prove the gateway middleware does NOT
@@ -55,5 +54,5 @@ main() {
     }
 
     println("READY")
-    http_server_start_raw(s)
+    _ = http.server_start(s)
 }

@@ -1,0 +1,10 @@
+// Is not linked from the README.
+//
+// Run: ae run tests/examples/fixture/unlinked.ae
+
+main() {
+    println("unlinked")
+}
+
+// Output:
+// unlinked

@@ -57,7 +57,11 @@ function (whose last parameter is a `quote.Tree`) reads it as a tree instead
 **Same-line rule** (line 100+): a trailing block is attached to a call only when `{`
 appears on the same line as the call's closing `)`. A `{` on the next line is an
 independent block. This is what stops `result = build()\n{ ... }` from greedily
-consuming the bare block as `build`'s closure.
+consuming the bare block as `build`'s closure. The `()` is never optional:
+`serve { port(1) }` is the name `serve` and then a bare block, and a
+function's name alone as a statement calls nothing, so it is an error at
+the name, bare or qualified (`my_lib.serve`), that says to write
+`serve() { ... }` (#3188).
 
 **Separate axis, fluent method chaining (UFCS):** the two axes above are the
 *block* DSL (a trailing block fills structure). The *value-chain* primitive is
@@ -85,11 +89,11 @@ Aether closures use pipe-delimited parameters with arrow or block bodies:
 
 ```aether,fragment
 // Arrow closure (single expression, returns value)
-doubler = |x: int| -> x * 2
+doubler = | x: int | -> x * 2
 
 // Arrow closure with a block: returns its last value, as a function's
 // `-> { ... }` body does
-scaled = |x: int| -> {
+scaled = | x: int | -> {
     y = x * 3
     y + 1
 }
@@ -102,7 +106,7 @@ count = 0
 bump = || -> { count = count + 1 }
 
 // Block closure (multiple statements; returns only what it `return`s)
-greeter = |name: string| {
+greeter = | name: string | {
     println("Hello ${name}")
 }
 
@@ -116,7 +120,7 @@ Closures capture variables from their enclosing scope:
 
 ```aether,fragment
 base = 100
-adder = |x: int| -> x + base    // captures 'base'
+adder = | x: int | -> x + base    // captures 'base'
 result = call(adder, 42)         // 142
 ```
 
@@ -125,7 +129,7 @@ result = call(adder, 42)         // 142
 Use the `call()` builtin:
 
 ```aether,fragment
-doubler = |x: int| -> x * 2
+doubler = | x: int | -> x * 2
 result = call(doubler, 21)    // 42
 ```
 
@@ -145,7 +149,7 @@ apply_twice(x: int, f: fn) {
 }
 
 main() {
-    doubler = |x: int| -> x * 2
+    doubler = | x: int | -> x * 2
     println(apply(21, doubler))         // 42
     println(apply_twice(3, doubler))    // 12
 }
@@ -285,10 +289,10 @@ Callback blocks also support explicit params and arrow bodies:
 
 ```aether,fragment
 // With params, invoked as call(adder, 3, 4)
-store(action) callback |a: int, b: int| { return a + b }
+store(action) callback | a: int, b: int | { return a + b }
 
 // Arrow body, shorthand for single-expression callbacks
-store(action) callback |x: int| -> x * 2
+store(action) callback | x: int | -> x * 2
 ```
 
 ## DSL Block Receiver Scoping
@@ -402,13 +406,13 @@ main() {
     list.add(nums, 4)
     list.add(nums, 5)
 
-    each(nums) |x: int| { print("${x} ") }
+    each(nums) | x: int | { print("${x} ") }
     // 1 2 3 4 5
 
-    doubled = map(nums) |x: int| -> x * 2
+    doubled = map(nums) | x: int | -> x * 2
     // [2, 4, 6, 8, 10]
 
-    big = filter(nums) |x: int| -> x > 2
+    big = filter(nums) | x: int | -> x > 2
     // [3, 4, 5]
 }
 ```
@@ -669,7 +673,7 @@ boundary:
 count = ref(0)           // heap-allocated mutable cell
 defer ref_free(count)
 
-inc = |r: ptr| { ref_set(r, ref_get(r) + 1) }
+inc = | r: ptr | { ref_set(r, ref_get(r) + 1) }
 
 call(inc, count)         // mutates shared state
 call(inc, count)
@@ -720,7 +724,7 @@ Closures are structs (not pointers), so they can't be stored directly in
 import std.list
 
 handlers = list.new()
-action = |x: ptr| { ref_set(x, ref_get(x) + 1) }
+action = | x: ptr | { ref_set(x, ref_get(x) + 1) }
 list.add(handlers, box_closure(action))
 
 // Later: retrieve and invoke
@@ -738,15 +742,15 @@ num  = ref(0)
 prev = ref(0)
 op   = ref(0)
 
-digit  = |n: ptr, d: int| { ref_set(n, ref_get(n) * 10 + d) }
-set_op = |n: ptr, p: ptr, o: ptr, v: int| {
+digit  = | n: ptr, d: int | { ref_set(n, ref_get(n) * 10 + d) }
+set_op = | n: ptr, p: ptr, o: ptr, v: int | {
     ref_set(p, ref_get(n)); ref_set(n, 0); ref_set(o, v)
 }
 
 g = grid() {
-    btn("7") |n: ptr, p: ptr, o: ptr| { call(digit, n, 7) }
-    btn("+") |n: ptr, p: ptr, o: ptr| { call(set_op, n, p, o, PLUS) }
-    btn("=") |n: ptr, p: ptr, o: ptr| {
+    btn("7") | n: ptr, p: ptr, o: ptr | { call(digit, n, 7) }
+    btn("+") | n: ptr, p: ptr, o: ptr | { call(set_op, n, p, o, PLUS) }
+    btn("=") | n: ptr, p: ptr, o: ptr | {
         v = ref_get(n); pv = ref_get(p); ov = ref_get(o)
         if ov == PLUS  { v = pv + v }
         if ov == MINUS { v = pv - v }

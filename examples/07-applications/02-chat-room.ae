@@ -1,0 +1,140 @@
+// A chat room: members join, talk and leave, and hear each other.
+//
+// The room is an actor. Its members are actors too, and the room keeps
+// their references (`actor_ref[Member]`, a reference to a Member) and
+// their names in state, in fixed-size arrays: a room of eight, and a
+// ninth is told it is full. What one member says, the room
+// sends to every other member; a join or a leave it announces to all.
+// Each member keeps what it heard, a line at a time. One sender's
+// messages reach a receiver in the order they were sent, so every member
+// hears the room in the room's order. When the talk is over, main asks
+// each member for what it heard and prints the transcripts one after
+// another: the output does not depend on how the actors' threads ran.
+//
+// Run: ae run examples/07-applications/02-chat-room.ae
+// See: docs/actor-concurrency.md
+
+message Join {
+    who: actor_ref
+    name: string
+}
+
+message Say {
+    name: string
+    text: string
+}
+
+message Leave {
+    name: string
+}
+
+message Line {
+    text: string
+}
+
+message Transcript {}
+
+const ROOM_SIZE = 8
+
+actor Member {
+    state heard = ""
+
+    receive {
+        Line(text) -> {
+            heard = "${heard}    ${text}\n"
+        }
+        Transcript -> {
+            reply heard
+        }
+    }
+}
+
+actor Room {
+    state members: actor_ref[Member][ROOM_SIZE]
+    state names: string[ROOM_SIZE]
+    state count = 0
+
+    receive {
+        Join(who, name) -> {
+            if count == ROOM_SIZE {
+                who ! Line { text: "the room is full" }
+            } else {
+                for i in 0..count {
+                    members[i] ! Line { text: "${name} joined" }
+                }
+                members[count] = who
+                names[count] = name
+                count = count + 1
+                who ! Line { text: "welcome, ${name}: ${count} here" }
+            }
+        }
+        Say(name, text) -> {
+            for i in 0..count {
+                if names[i] != name {
+                    members[i] ! Line { text: "${name}: ${text}" }
+                }
+            }
+        }
+        Leave(name) -> {
+            gone = -1
+            for i in 0..count {
+                if names[i] == name {
+                    gone = i
+                }
+            }
+            if gone >= 0 {
+                for i in gone..count - 1 {
+                    members[i] = members[i + 1]
+                    names[i] = names[i + 1]
+                }
+                count = count - 1
+                for i in 0..count {
+                    members[i] ! Line { text: "${name} left" }
+                }
+            }
+        }
+    }
+}
+
+main() {
+    room = spawn(Room())
+    ada = spawn(Member())
+    bo = spawn(Member())
+    cy = spawn(Member())
+
+    room ! Join { who: ada, name: "ada" }
+    room ! Join { who: bo, name: "bo" }
+    room ! Say { name: "ada", text: "hello, bo" }
+    room ! Say { name: "bo", text: "hi ada" }
+    room ! Join { who: cy, name: "cy" }
+    room ! Say { name: "cy", text: "what did I miss?" }
+    room ! Leave { name: "bo" }
+    room ! Say { name: "ada", text: "bo has gone" }
+    wait_for_idle()
+
+    names = ["ada", "bo", "cy"]
+    people = [ada, bo, cy]
+    for i in 0..people.len {
+        text = people[i] ? Transcript {}
+        println("${names[i]} heard:")
+        print(text)
+    }
+}
+
+// Output:
+// ada heard:
+//     welcome, ada: 1 here
+//     bo joined
+//     bo: hi ada
+//     cy joined
+//     cy: what did I miss?
+//     bo left
+// bo heard:
+//     welcome, bo: 2 here
+//     ada: hello, bo
+//     cy joined
+//     cy: what did I miss?
+// cy heard:
+//     welcome, cy: 3 here
+//     bo left
+//     ada: bo has gone

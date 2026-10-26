@@ -1,0 +1,77 @@
+// Functions: parameters, results, defaults, several results, clauses.
+//
+// A function is `name(params) -> Result { ... }`; with no `-> Result` it
+// returns nothing. Parameter and result types may be left to inference,
+// and code meant for others writes them. A parameter can have a default,
+// and a call can name its arguments. A function can return several values
+// at once, which the caller takes apart. A body that is one expression
+// can be written after `->`, and a function can be several clauses, each
+// for one shape of argument, tried in order: a literal to match, or a
+// guard after `when`.
+//
+// Run: ae run examples/01-language/05-functions.ae
+// See: docs/language-reference.md#functions
+
+area(width: int, height: int) -> int {
+    return width * height
+}
+
+greet(name: string, greeting: string = "Hello") -> string {
+    return "${greeting}, ${name}!"
+}
+
+// Two results: the quotient and the remainder.
+divide(a: int, b: int) -> (int, int) {
+    return a / b, a % b
+}
+
+// An arrow body: the expression is the result.
+square(x: int) -> x * x
+
+// Clauses: the first whose pattern and guard match runs.
+factorial(0) -> 1
+factorial(n) when n > 0 -> n * factorial(n - 1)
+
+grade(score) when score >= 90 -> "A"
+grade(score) when score >= 75 -> "B"
+grade(score) when score >= 50 -> "C"
+grade(score) -> "F"
+
+// Recursion: Euclid's greatest common divisor.
+gcd(a: int, b: int) -> int {
+    if b == 0 {
+        return a
+    }
+    return gcd(b, a % b)
+}
+
+log_line(text: string) {
+    println("log: ${text}")
+}
+
+main() {
+    println(area(3, 4))
+    println(greet("Ada"))
+    println(greet("Ada", "Welcome"))
+    println(greet(greeting: "Hi", name: "Grace"))
+
+    q, r = divide(17, 5)
+    println("17 = 5 * ${q} + ${r}")
+    _, rest = divide(9, 4) // `_` drops a result
+    println("9 % 4 = ${rest}")
+
+    println("${square(12)} ${factorial(10)} ${gcd(84, 36)}")
+    println("${grade(95)} ${grade(80)} ${grade(51)} ${grade(10)}")
+    log_line("done")
+}
+
+// Output:
+// 12
+// Hello, Ada!
+// Welcome, Ada!
+// Hi, Grace!
+// 17 = 5 * 3 + 2
+// 9 % 4 = 1
+// 144 3628800 12
+// A B C F
+// log: done

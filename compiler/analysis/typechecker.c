@@ -3008,6 +3008,48 @@ static void reject_pointer_argument(ASTNode* call, ASTNode* arg, Type* arg_type,
     type_error(emsg, arg->line, arg->column);
 }
 
+/* An optional is never unwrapped implicitly (is_type_compatible's #340
+ * rule): a binding or a `return` of a `T?` where a `T` goes is refused, and
+ * so is an argument. Lenient, argument checking passed a `string?` to a
+ * `string` parameter (`shout(maybe(1))`), and only the C compiler refused
+ * the `ae_opt_string` (#3153). */
+static void reject_optional_argument(SymbolTable* table, ASTNode* call, ASTNode* arg,
+                                     Type* arg_type, Type* param_type, int index,
+                                     const char* param_name) {
+    if (!arg_type || !param_type || arg_type->kind != TYPE_OPTIONAL ||
+        !arg_type->element_type || arg_type->element_type->kind == TYPE_UNKNOWN ||
+        param_type->kind == TYPE_UNKNOWN || param_type->kind == TYPE_OPTIONAL)
+        return;
+    char emsg[512];
+    snprintf(emsg, sizeof(emsg), "Argument %d '%s' of '%s': expected %s, got %s",
+             index, param_name ? param_name : "?", call->value ? call->value : "?",
+             type_spelled(param_type), type_spelled(arg_type));
+    /* A local first bound in a branch or loop body is one variable for the
+     * function: what makes it optional may be another body's binding,
+     * while the one in sight binds a plain value. Say so. */
+    int hoisted = 0;
+    for (SymbolTable* t = table; t && t->parent && !hoisted && arg->type == AST_IDENTIFIER &&
+                                 arg->value; t = t->parent) {
+        Symbol* s = lookup_symbol_local(t, arg->value);
+        hoisted = s && s->branch_hoisted;
+    }
+    if (hoisted) {
+        char hint[512];
+        snprintf(hint, sizeof(hint),
+                 "'%s' is one variable for the whole function, as a local first bound in a "
+                 "branch or loop body is, and a binding of it elsewhere makes it %s: give that "
+                 "value a name of its own, or unwrap this one with `%s ?? fallback`",
+                 arg->value, type_spelled(arg_type), arg->value);
+        type_error_hint(emsg, hint, arg->line, arg->column);
+    } else if (is_assignable(arg_type->element_type, param_type))
+        type_error_hint(emsg,
+                        "an optional may hold no value: give it one with `v ?? fallback`, "
+                        "or take it out with `v!` (which panics on none) or a `match`",
+                        arg->line, arg->column);
+    else
+        type_error(emsg, arg->line, arg->column);
+}
+
 /* #2516: a fixed-size array parameter (`xs: int[3]`) takes an array of
  * that element type and length: the callee copies that many elements and
  * its `xs.len` is the declared length. A longer or shorter array, a slice
@@ -5787,9 +5829,43 @@ static int enum_has_member(const char* ename, const char* member) {
 // Guards keep it non-breaking: only a bare AST_IDENTIFIER that is not already an
 // enum value and whose name does NOT resolve to a real binding is coerced, so an
 // actual variable of that name always wins.
+/* Does the `match` arm pattern `pat` bind `name`? */
+static int pattern_binds_name(ASTNode* pat, const char* name) {
+    if (!pat || !name) return 0;
+    if (pat->type == AST_PATTERN_VARIABLE && pat->value && !strcmp(pat->value, name)) return 1;
+    for (int i = 0; i < pat->child_count; i++)
+        if (pattern_binds_name(pat->children[i], name)) return 1;
+    return 0;
+}
+
 static int coerce_bare_enum_member(ASTNode* expr, Type* expected, SymbolTable* table) {
-    if (!expr || expr->type != AST_IDENTIFIER || !expr->value) return 0;
-    if (!expected || expected->kind != TYPE_ENUM || !expected->struct_name) return 0;
+    if (!expr || !expected || expected->kind != TYPE_ENUM || !expected->struct_name) return 0;
+    /* #3156: a `match` or an `if` that gives the value gives it arm by arm,
+     * each converted as a binding of it would be, so the enum reaches the
+     * value of every arm: `return match d { N -> E  E -> N }` and `return if
+     * c { N } else { E }` were "Undefined variable 'E'". An arm whose pattern
+     * binds the name keeps its binding. */
+    if (expr->type == AST_MATCH_STATEMENT || expr->type == AST_IF_EXPRESSION) {
+        int any = 0;
+        /* children[0] is the scrutinee or the condition. */
+        for (int i = 1; i < expr->child_count; i++) {
+            ASTNode* arm = expr->children[i];
+            if (!arm) continue;
+            ASTNode* body = arm;
+            if (expr->type == AST_MATCH_STATEMENT) {
+                if (arm->type != AST_MATCH_ARM || arm->child_count < 2) continue;
+                body = arm->children[1];
+            }
+            ASTNode* v = tc_arm_value(body);
+            if (!v) continue;
+            if (expr->type == AST_MATCH_STATEMENT && v->type == AST_IDENTIFIER &&
+                pattern_binds_name(arm->children[0], v->value))
+                continue;
+            any |= coerce_bare_enum_member(v, expected, table);
+        }
+        return any;
+    }
+    if (expr->type != AST_IDENTIFIER || !expr->value) return 0;
     if (expr->node_type && expr->node_type->kind == TYPE_ENUM) return 0;
     if (!enum_has_member(expected->struct_name, expr->value)) return 0;
     if (table && lookup_symbol(table, expr->value)) return 0;  // a real binding wins
@@ -7774,6 +7850,46 @@ static Type* lookup_message_field_type(SymbolTable* table, const char* message_n
     return NULL;
 }
 
+/* #3164: a receive arm binds a message's fields by name, `Connect(next)`, or
+ * `Connect(next: n)` to bind the field `next` as `n`. An arm naming a field
+ * the message does not have (`Connect(n)`, read as a positional binding)
+ * went on with the name untyped, and codegen's `_pattern->n` failed in C:
+ * "'Connect' has no member named 'n'". Say so at the arm, with the fields
+ * the message has and the rename form. A message this file does not define
+ * is left to the check that reports it. */
+static void report_missing_message_field(SymbolTable* table, ASTNode* pattern, ASTNode* field) {
+    if (!pattern || !pattern->value || !field || !field->value) return;
+    Symbol* msg_sym = lookup_symbol(table, pattern->value);
+    if (!msg_sym || !msg_sym->node || msg_sym->node->type != AST_MESSAGE_DEFINITION) return;
+    ASTNode* msg_def = msg_sym->node;
+    char fields[256] = "";
+    const char* first = NULL;
+    size_t used = 0;
+    for (int i = 0; i < msg_def->child_count; i++) {
+        ASTNode* f = msg_def->children[i];
+        if (!f || f->type != AST_MESSAGE_FIELD || !f->value) continue;
+        if (strcmp(f->value, field->value) == 0) return;   /* it has one */
+        if (!first) first = f->value;
+        int w = snprintf(fields + used, sizeof(fields) - used, "%s%s",
+                         used ? ", " : "", f->value);
+        if (w < 0 || (size_t)w >= sizeof(fields) - used) break;
+        used += (size_t)w;
+    }
+    char msg[512], hint[300];
+    if (first) {
+        snprintf(msg, sizeof(msg), "message '%s' has no field '%s'; its fields are %s",
+                 pattern->value, field->value, fields);
+        snprintf(hint, sizeof(hint),
+                 "an arm binds a field by its name: `%s(%s)`, or `%s(%s: %s)` to bind it as `%s`",
+                 pattern->value, first, pattern->value, first, field->value, field->value);
+    } else {
+        snprintf(msg, sizeof(msg), "message '%s' has no field '%s'; it has no fields",
+                 pattern->value, field->value);
+        snprintf(hint, sizeof(hint), "match it with no bindings: `%s -> { ... }`", pattern->value);
+    }
+    type_error_hint(msg, hint, field->line, field->column);
+}
+
 // Validate that message constructor field values match declared field types
 static void typecheck_message_constructor(ASTNode* constructor, SymbolTable* table) {
     if (!constructor || constructor->type != AST_MESSAGE_CONSTRUCTOR || !constructor->value) return;
@@ -7895,6 +8011,8 @@ static void reject_duplicate_receive_arms(ASTNode* actor) {
     }
 }
 
+static const char* ret_type_spell(Type* t, char* buf, size_t n);
+
 int typecheck_actor_definition(ASTNode* actor, SymbolTable* table) {
     if (!actor || actor->type != AST_ACTOR_DEFINITION) return 0;
 
@@ -7938,6 +8056,35 @@ int typecheck_actor_definition(ASTNode* actor, SymbolTable* table) {
                     if (it && it->kind != TYPE_UNKNOWN) set_node_type(child, it);
                     else if (it) free_type(it);
                 }
+            } else if (child->node_type && child->child_count > 0 && child->children[0]) {
+                /* #3163: a written type, `state n: int = v` or `state int n
+                 * = v`. The value is checked against it as a typed
+                 * binding's is (`let n: int = v`). Nothing checked it: a
+                 * string given to an int state reached C as "makes integer
+                 * from pointer". */
+                ASTNode* init = child->children[0];
+                typecheck_node(child, actor_table);
+                checked = 1;
+                Type* it = infer_type(init, actor_table);
+                /* `null` goes where a binding, a field or a result of the
+                 * type takes it (ast_type_takes_null): a string, a pointer,
+                 * a closure, a slice. A slice alone was let through here,
+                 * and `state string s = null`, which compiled before the
+                 * state's value was checked, was refused. */
+                int fits = !it || it->kind == TYPE_UNKNOWN ||
+                           is_assignable(it, child->node_type) ||
+                           (init->type == AST_NULL_LITERAL && ast_type_takes_null(child->node_type));
+                if (!fits) {
+                    char msg[512], want[200], have[200];
+                    snprintf(msg, sizeof(msg),
+                             "Type mismatch in state initialization: '%s' is %s, but this value is %s",
+                             child->value ? child->value : "?",
+                             ret_type_spell(child->node_type, want, sizeof(want)),
+                             ret_type_spell(it, have, sizeof(have)));
+                    type_error_hint(msg, "give the state a value of its written type, or change the type",
+                                    init->line, init->column);
+                }
+                if (it) free_type(it);
             }
             add_symbol(actor_table, child->value, clone_type(child->node_type), 0, 0, 1);
             if (checked) continue;
@@ -7969,6 +8116,7 @@ int typecheck_actor_definition(ASTNode* actor, SymbolTable* table) {
                                 // Look up actual field type from message definition
                                 Type* field_type = lookup_message_field_type(table, pattern->value, field->value);
                                 if (!field_type) {
+                                    report_missing_message_field(table, pattern, field);
                                     field_type = create_type(TYPE_UNKNOWN);
                                 }
                                 // Use pattern variable name if present (field: var), else field name
@@ -9439,15 +9587,6 @@ static Type* call_result_decl_type(ASTNode* program, ASTNode* call) {
 
 static int call_keeps_arg(ASTNode* program, ASTNode* call, int i) {
     return call_arg_mode(program, call, i) == FN_MODE_KEEP;
-}
-
-/* Does the `match` arm pattern `pat` bind `name`? */
-static int pattern_binds_name(ASTNode* pat, const char* name) {
-    if (!pat || !name) return 0;
-    if (pat->type == AST_PATTERN_VARIABLE && pat->value && !strcmp(pat->value, name)) return 1;
-    for (int i = 0; i < pat->child_count; i++)
-        if (pattern_binds_name(pat->children[i], name)) return 1;
-    return 0;
 }
 
 /* The borrowed parameters `e` is, is a view of, or holds (a struct, tuple
@@ -13208,6 +13347,44 @@ static int check_return_statement(ASTNode* ret, SymbolTable* table) {
     return ok;
 }
 
+/* #3188: a function's name alone as a statement calls nothing. `serve {
+ * port(1) }` read that way, the name and then a bare block, compiled
+ * without a word, and the builder never ran. The name, bare or qualified
+ * (`my_lib.serve`), is an error at it. */
+/* The expression a value match's block arm yields, while that block is
+ * checked: the arm's value, which a statement that is only a name may be. */
+static ASTNode* g_arm_yield = NULL;
+
+static int report_uncalled_function(ASTNode* e, SymbolTable* table) {
+    if (!e || e == g_arm_yield) return 0;
+    char shown[256];
+    Symbol* sym = NULL;
+    if (e->type == AST_IDENTIFIER && e->value) {
+        sym = lookup_symbol(table, e->value);
+        snprintf(shown, sizeof(shown), "%s", e->value);
+    } else if (e->type == AST_MEMBER_ACCESS && e->value && e->child_count > 0 &&
+               e->children[0] && e->children[0]->type == AST_IDENTIFIER &&
+               e->children[0]->value && !value_hides_namespace(table, e->children[0]->value) &&
+               is_visible_namespace(e->children[0]->value, table)) {
+        /* `ns.name` reaches the C name the merge gave it, as a call does. */
+        char cname[512];
+        qualified_c_name(e->children[0]->value, e->value, cname, sizeof(cname));
+        if (cname[0]) sym = lookup_symbol(table, cname);
+        snprintf(shown, sizeof(shown), "%s.%s", e->children[0]->value, e->value);
+    }
+    if (!sym || !sym->is_function) return 0;
+    char msg[1024], hint[600];
+    snprintf(msg, sizeof(msg),
+             "'%s' is a function, and its name alone calls nothing: call it as %s(), and a "
+             "trailing block goes after the parentheses, %s() { ... }",
+             shown, shown, shown);
+    snprintf(hint, sizeof(hint), "add the parentheses: %s()", shown);
+    /* Reported where the name starts: a qualified one's node is its dot. */
+    ASTNode* at = e->type == AST_MEMBER_ACCESS ? e->children[0] : e;
+    type_error_hint(msg, hint, at->line, at->column);
+    return 1;
+}
+
 int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
     if (!stmt) return 0;
 
@@ -13223,7 +13400,24 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
 
             // Typecheck the RHS
             typecheck_expression(rhs, table);
-            Type* rhs_type = infer_type(rhs, table);
+            Type* rhs_type = NULL;
+            if (rhs->type == AST_SEND_ASK && var_count == 2) {
+                /* `v, err = actor ? Msg {}` (#3151): the reply and why there
+                 * is none, "" when it came, in the result convention. The
+                 * ask node carries the pair, which tells codegen to build
+                 * it; a reply of no known type is an int, as codegen reads
+                 * one. */
+                Type* reply = infer_type(rhs, table);
+                if (!reply || reply->kind == TYPE_UNKNOWN) {
+                    if (reply) free_type(reply);
+                    reply = create_type(TYPE_INT);
+                }
+                rhs_type = create_tuple_type(2, reply, create_type(TYPE_STRING));
+                if (rhs->node_type) free_type(rhs->node_type);
+                rhs->node_type = clone_type(rhs_type);
+            } else {
+                rhs_type = infer_type(rhs, table);
+            }
 
             // Verify RHS is a tuple with matching element count
             if (!rhs_type || rhs_type->kind != TYPE_TUPLE) {
@@ -14598,6 +14792,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
         
         case AST_EXPRESSION_STATEMENT: {
             if (stmt->child_count > 0) {
+                if (report_uncalled_function(stmt->children[0], table)) return 0;
                 typecheck_expression(stmt->children[0], table);
                 /* Phase 2: a `T!` result dropped as a bare statement is
                  * an error — it must be consumed. Only fires on a raw
@@ -15179,7 +15374,13 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                                     ? match_arm_value(body) : NULL;
                     int nested = yields && yields->type == AST_MATCH_STATEMENT;
                     if (nested) tc_push_value_match(yields);
+                    /* The block's last expression is the arm's value, not a
+                     * statement: a function's name there gives the function
+                     * (#3037), and is no call left out (#3188). */
+                    ASTNode* yield_before = g_arm_yield;
+                    if (yields) g_arm_yield = yields;
                     typecheck_statement(body, arm_table);
+                    g_arm_yield = yield_before;
                     if (nested) tc_pop_value_match();
                 }
 
@@ -15913,6 +16114,17 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             // Field/type validity is the C compiler's job (offsetof on a
             // bad field is a hard C error), matching the trust-the-author
             // posture of the `as *Struct` cast.
+            /* #3174: an offsetof's type must be a struct; a type child that
+             * is not one (`offsetof(int, x)`) has no fields to measure. */
+            if (expr->type == AST_OFFSETOF && expr->child_count >= 2 &&
+                expr->children[0]->type == AST_TYPE_ANNOTATION &&
+                (!expr->children[0]->node_type ||
+                 expr->children[0]->node_type->kind != TYPE_STRUCT)) {
+                type_error_hint("offsetof takes a struct type: only a struct has fields to measure",
+                                "write offsetof(Point, x) for a struct Point",
+                                expr->children[0]->line, expr->children[0]->column);
+                return 0;
+            }
             set_node_type(expr, create_type(TYPE_INT));
             return 1;
 
@@ -16210,7 +16422,26 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 int fnptr_to_ptr = operand->kind == TYPE_FUNCTION && operand->is_fnptr &&
                                    expr->node_type->kind == TYPE_PTR &&
                                    !expr->node_type->element_type;
-                if (!same && !numeric && !bs_cast && !fnptr_to_ptr) {
+                /* #3157: an enum is a distinct type over int, so `as` takes it
+                 * to an integer scalar (`byte` included) and an integer to
+                 * it, the conversion a binding makes on its own. Two
+                 * different enums never convert: `same` (one kind) let
+                 * `Color.Red as Direction` through. */
+                TypeKind tk = expr->node_type->kind;
+                int enum_cast = (operand->kind == TYPE_ENUM &&
+                                 (is_integer_scalar(tk) || tk == TYPE_BYTE)) ||
+                                (tk == TYPE_ENUM &&
+                                 (is_integer_scalar(operand->kind) || operand->kind == TYPE_BYTE));
+                if (operand->kind == TYPE_ENUM && tk == TYPE_ENUM &&
+                    !types_equal(operand, expr->node_type)) {
+                    char msg[256];
+                    snprintf(msg, sizeof(msg),
+                        "cannot cast %s to %s with `as`: two different enums never convert; "
+                        "go through the integer on purpose, `(v as int) as %s`, if the "
+                        "values line up", type_spelled(operand), type_spelled(expr->node_type),
+                        type_spelled(expr->node_type));
+                    type_error(msg, expr->line, expr->column);
+                } else if (!same && !numeric && !bs_cast && !fnptr_to_ptr && !enum_cast) {
                     char msg[220];
                     snprintf(msg, sizeof(msg),
                         "cannot cast %s to %s with `as`: a value cast converts "
@@ -17296,6 +17527,34 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 typecheck_message_constructor(message, table);
             }
             set_node_type(expr, create_type(TYPE_VOID));
+            return 1;
+        }
+
+        case AST_SEND_ASK: {
+            /* `actor ? Request {}`: its operands are checked as a send's
+             * are, and it has its reply's type wherever it stands (#3165).
+             * Only a binding inferred that type, so an ask given straight to
+             * println or into an interpolation reached codegen untyped and
+             * a string reply printed as an int. */
+            if (expr->child_count >= 2) {
+                typecheck_expression(expr->children[0], table);
+                ASTNode* message = expr->children[1];
+                if (message && message->type == AST_MESSAGE_CONSTRUCTOR && message->value) {
+                    Symbol* msg_sym = lookup_symbol(table, message->value);
+                    if (!msg_sym || !msg_sym->type || msg_sym->type->kind != TYPE_MESSAGE) {
+                        char error_msg[256];
+                        snprintf(error_msg, sizeof(error_msg),
+                                 "Undefined message type '%s'", message->value);
+                        type_error(error_msg, message->line, message->column);
+                        return 0;
+                    }
+                    typecheck_message_constructor(message, table);
+                } else {
+                    typecheck_expression(message, table);
+                }
+            }
+            Type* reply = infer_type(expr, table);   /* stamps node_type from the reply */
+            if (reply) free_type(reply);
             return 1;
         }
 
@@ -20595,6 +20854,7 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
             }
 
             Type* param_type = param->node_type;
+            int errors_before = error_count;
             /* #480: a distinct-typed parameter (or a distinct argument to a
              * non-distinct parameter) requires an explicit `as` cast at the
              * call boundary — the capability-token use case (`GrantedFD =
@@ -20728,6 +20988,20 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
             if (param_type)
                 slice_coerce_slot(&call->children[arg_slot], param_type,
                                   symbol->node->type == AST_EXTERN_FUNCTION);
+
+            /* An optional is not unwrapped into the parameter (#3153), when
+             * no check above has spoken. An extern's arguments are checked
+             * against its types below. */
+            if (param_type && symbol->node->type != AST_EXTERN_FUNCTION &&
+                error_count == errors_before) {
+                ASTNode* garg = call->children[arg_slot];
+                Type* ga = garg ? infer_type(garg, table) : NULL;
+                if (ga) {
+                    reject_optional_argument(table, call, garg, ga, param_type, arg_slot + 1,
+                                             param->value);
+                    free_type(ga);
+                }
+            }
 
             if (!param_type || param_type->kind != TYPE_DURATION) continue;
 

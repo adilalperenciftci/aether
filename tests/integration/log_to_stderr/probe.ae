@@ -1,0 +1,35 @@
+// log.init("") and log.init("-") log to stderr, with no error and nothing
+// else printed (#3149); a later init to a file and back must not have
+// closed stderr on the way. The test script runs this in a scratch
+// directory, where app.log is the file target, and reads its stderr.
+
+import std.log
+
+extern exit(code: int)
+
+check(what: string, err: string) {
+    if err != "" {
+        println("FAIL: ${what}: ${err}")
+        exit(1)
+    }
+}
+
+main() {
+    check("init \"\"", log.init("", log.LOG_LEVEL_INFO))
+    log.set_timestamps(0)
+    log.set_colors(0)
+    log.write(log.LOG_LEVEL_DEBUG, "below the level")
+    log.write(log.LOG_LEVEL_WARN, "first to stderr")
+    // Text, not a format: this crashed when log.write passed it to printf.
+    log.write(log.LOG_LEVEL_WARN, "disk 100%s full %d")
+
+    check("init to a file", log.init("app.log", log.LOG_LEVEL_INFO))
+    log.write(log.LOG_LEVEL_INFO, "into the file")
+
+    // The file init closed the stderr target it replaced; this one must
+    // still have a stderr to write to.
+    check("init \"-\"", log.init("-", log.LOG_LEVEL_INFO))
+    log.write(log.LOG_LEVEL_ERROR, "second to stderr")
+    log.shutdown()
+    println("ok")
+}

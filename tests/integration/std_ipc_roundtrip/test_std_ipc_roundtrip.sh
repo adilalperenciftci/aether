@@ -3,8 +3,10 @@
 #
 # Exercises the parent ↔ child back-channel via the three spawn
 # variants (run_pipe_drain_and_wait, run_pipe + wait_pid, and
-# run_capture as a negative control). Probe.ae compiles the
-# child binary in the temp directory and runs all three cases.
+# run_capture as a negative control), then a program that cannot start,
+# one that exits 127 and an explicit env (#3170), and an AETHER_IPC_FD of
+# the parent's own (#3200). Probe.ae compiles the child binary in the temp
+# directory and runs all eight cases.
 #
 # Skips on Windows — std.ipc is POSIX-only in v1; Windows
 # parent_channel returns -1 unconditionally and the parent-side
@@ -16,10 +18,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AE="$ROOT/build/ae"
 
-if [ "$OS" = "Windows_NT" ]; then
-    echo "  [SKIP] std_ipc_roundtrip: std.ipc is POSIX-only in v1"
-    exit 0
-fi
+# The platform from uname, never from the environment's OS, which an MSYS2
+# login shell started from another shell does not carry (check_platform_env.py).
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+        echo "  [SKIP] std_ipc_roundtrip: std.ipc is POSIX-only in v1"
+        exit 0 ;;
+esac
 
 if [ ! -x "$AE" ]; then
     echo "  [SKIP] std_ipc_roundtrip: ae not built"
@@ -40,8 +45,8 @@ if ! AETHER_HOME="$ROOT" "$AE" run "$SCRIPT_DIR/probe.ae" >"$TMPDIR/out.log" 2>&
     exit 1
 fi
 
-if ! grep -q "std_ipc_roundtrip: 3 passing, 0 failing" "$TMPDIR/out.log"; then
-    echo "  [FAIL] std_ipc_roundtrip — not all 3 cases passed"
+if ! grep -q "std_ipc_roundtrip: 8 passing, 0 failing" "$TMPDIR/out.log"; then
+    echo "  [FAIL] std_ipc_roundtrip — not all 8 cases passed"
     tail -40 "$TMPDIR/out.log" | sed 's/^/    /'
     exit 1
 fi

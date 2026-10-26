@@ -34,13 +34,11 @@ cleanup() {
 trap cleanup EXIT
 fail() { echo "  [FAIL] ws_idle_server: $1"; exit 1; }
 
-if command -v timeout >/dev/null 2>&1; then
-    TIMEOUT="timeout 30"
-elif command -v gtimeout >/dev/null 2>&1; then
-    TIMEOUT="gtimeout 30"
-else
-    TIMEOUT=""
-fi
+# The client's bound is the sweep's own: never timeout(1) here, which ends the
+# client by signalling it, and on Windows a signal to a native program's MSYS2
+# stand-in reaches unrelated MSYS2 shells (#3154, tests/lib/sweep_timeout.sh).
+. "$ROOT/tests/lib/sweep_timeout.sh"
+sweep_timeout_bound TIMEOUT "$ROOT" 30
 
 "$AE" build "$SCRIPT_DIR/wsserver.ae" -o "$TMP/wssrv" >"$TMP/b1.log" 2>&1 \
     || { sed -n '1,10p' "$TMP/b1.log"; fail "server did not build"; }

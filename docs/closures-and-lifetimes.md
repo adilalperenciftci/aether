@@ -148,7 +148,8 @@ transparently while still stopping at real closures.
 `scope_declares_at_top_level` helper is used by
 `is_top_level_decl_in_function` to walk trailing blocks but NOT
 nested if/for/while blocks, preserving the "fresh body-local in
-nested block" Python-style rule that `calculator-tui` relies on.
+nested block" Python-style rule that the calculator example
+(`examples/07-applications/04-calculator.ae`) relies on.
 
 ## Code layout
 
@@ -442,7 +443,7 @@ A closure loses its signature at a bare `fn` parameter or return, at
 
 ```aether,fragment
 handlers = list.new()
-list.add(handlers, box_closure(|_| { return "hello" }))
+list.add(handlers, box_closure(| _ | { return "hello" }))
 h = unbox_closure(list.get_raw(handlers, 0))       // L1: from a list
 
 op = if user_wants_add { add_fn } else { mul_fn }  // L2: chosen at run time (#2055)
@@ -572,8 +573,8 @@ answers.
 ### L5. Closure-var reassignment leaked the previous env
 
 ```aether,fragment
-op = |x: int| { return x + 1 }
-op = |x: int| { return x * 2 }  // a capturing old env used to leak here
+op = | x: int | { return x + 1 }
+op = | x: int | { return x * 2 }  // a capturing old env used to leak here
 ```
 
 Fixed by the ownership model: a closure local owns a reference to its
@@ -596,7 +597,7 @@ Paired tests pin this:
 
 ## Why the UI calculator works
 
-`examples/calculator-tui.ae` uses ref cells for all mutable state and
+`examples/07-applications/04-calculator.ae` uses ref cells for all mutable state and
 builds handlers as anonymous inline closures passed to `box_closure(...)`.
 Ref cells sidestep bug 2 (the closure captures a pointer, read-only from
 its perspective), and anonymous box-wrapped closures sidestep bug 3 (no

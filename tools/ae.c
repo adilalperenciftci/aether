@@ -3666,24 +3666,152 @@ static int find_bin_path_by_name(const char* bin_name, char* out, size_t out_siz
  * `<root>/shim.c` ("No such file") and wrote `<root>/ex1`. */
 static char g_walkup_sub[1024] = "";
 
-/* `path` as typed before the walk-up, re-based onto the project root.
- * Returns `path` itself when no walk-up happened or the path is absolute;
- * otherwise a copy from a small ring of buffers (four live values at a
- * time, enough for one command's arguments). */
+/* #3181: the directory the command was typed in, absolute, once it has
+ * entered a project somewhere else (a walk-up, or `ae run|build <dir>`);
+ * "" while it is still there. `ae run` goes back to it before the program
+ * starts, and a path typed relative to it that cannot be spelt from the
+ * project root (the project was named, not walked up to) is re-based onto
+ * it. */
+static char g_entered_from[1024] = "";
+
+/* `path` as typed before entering the project, re-based onto the project
+ * root: through the subdirectory a walk-up left, or onto the directory the
+ * command was typed in. Returns `path` itself when the command did not move
+ * or the path is absolute; otherwise a copy from a small ring of buffers
+ * (four live values at a time, enough for one command's arguments). */
 static const char* walkup_rebase(const char* path) {
-    if (!path || !g_walkup_sub[0] || path_is_absolute_any(path)) return path;
+    if (!path || path_is_absolute_any(path)) return path;
+    const char* base = g_walkup_sub[0] ? g_walkup_sub : g_entered_from;
+    if (!base[0]) return path;
     static char ring[4][2048];
     static int slot = 0;
     char* out = ring[slot];
     slot = (slot + 1) % 4;
-    snprintf(out, sizeof(ring[0]), "%s/%s", g_walkup_sub, path);
+    snprintf(out, sizeof(ring[0]), "%s/%s", base, path);
     return out;
+}
+
+static void ae_set_env(const char* name, const char* value);
+static void ae_unset_env(const char* name);
+
+/* An environment variable holding a path, or a list of them, with each
+ * relative entry re-based onto where the command was typed: the user set
+ * it there. A relative AETHER_CACHE_DIR became a cache inside the project
+ * once the command entered it, and a relative AETHER_LIB_DIR searched the
+ * project's directories instead of the ones named. */
+static void rebase_env_paths(const char* var, int is_list) {
+    const char* v = getenv(var);
+    if (!v || !v[0] || !g_entered_from[0]) return;
+    char sep[2] = { AETHER_LIB_PATH_SEP_CHAR, '\0' };
+    char* out = ae_path_printf("%s", "");
+    int changed = 0;
+    const char* cur = v;
+    while (1) {
+        const char* next = is_list ? strchr(cur, AETHER_LIB_PATH_SEP_CHAR) : NULL;
+        size_t len = next ? (size_t)(next - cur) : strlen(cur);
+        char* entry = ae_path_printf("%.*s", (int)len, cur);
+        if (entry[0] && !path_is_absolute_any(entry)) {
+            ae_path_appendf(&out, "%s%s/%s", out[0] ? sep : "", g_entered_from, entry);
+            changed = 1;
+        } else if (entry[0]) {
+            ae_path_appendf(&out, "%s%s", out[0] ? sep : "", entry);
+        }
+        free(entry);
+        if (!next) break;
+        cur = next + 1;
+    }
+    if (changed) ae_set_env(var, out);
+    free(out);
+}
+
+/* Remember where the command was typed, before a chdir into a project, and
+ * keep the environment's relative paths meaning what they meant there. */
+static void remember_entered_from(void) {
+    if (g_entered_from[0]) return;
+    if (!getcwd(g_entered_from, sizeof(g_entered_from))) {
+        g_entered_from[0] = '\0';
+        return;
+    }
+    for (char* q = g_entered_from; *q; q++) if (*q == '\\') *q = '/';
+    rebase_env_paths("AETHER_CACHE_DIR", 0);
+    rebase_env_paths("AETHER_LIB_DIR", 1);
+    /* The compiler runs from the project root; its diagnostics name each
+     * file from where the command was typed (#3215: `sub/bad.ae` was no
+     * path the user could open from sub/). */
+    ae_set_env("AETHER_DISPLAY_FROM", g_entered_from);
+}
+
+/* #3181: enter the project directory named on the command line (`ae run
+ * <dir>`, `ae build <dir>`), so its imports, manifest and extra sources
+ * resolve exactly as when the command is typed there: a module in its lib/
+ * or src/, its [dependencies], its [build] defines. Only the source was
+ * pointed into the directory before, and the compile, still in the caller's
+ * directory, searched the caller's lib/ and src/ and never the project's.
+ * Returns 0 when it entered, -1 (having said why) when it could not. */
+static int enter_named_project(const char* dir) {
+    remember_entered_from();
+    if (chdir(dir) != 0) {
+        fprintf(stderr, "Error: cannot enter the project directory '%s': %s\n", dir, strerror(errno));
+        return -1;
+    }
+    /* From here the manifest, if the project has one, is in the cwd. */
+    g_manifest_located = 0;
+    g_walkup_sub[0] = '\0';
+    return 0;
+}
+
+/* The --lib directories typed relative to where the command was typed,
+ * re-based like the other typed paths once the command has entered a
+ * project, onto that directory itself: an absolute path stays right
+ * wherever a later step stands. Called right after entering and before
+ * [dependencies] add theirs, which are the manifest's own and already right
+ * from the project root. */
+static void rebase_typed_lib_dirs(void) {
+    if (!g_entered_from[0]) return;
+    for (int i = 0; i < tc.lib_dir_count; i++) {
+        if (path_is_absolute_any(tc.lib_dirs[i])) continue;
+        char* moved = ae_path_printf("%s/%s", g_entered_from, tc.lib_dirs[i]);
+        if (!moved) {
+            fprintf(stderr, "Error: out of memory re-basing the --lib directory '%s'\n", tc.lib_dirs[i]);
+            exit(1);
+        }
+        char* norm = aether_lib_path_normalize(moved);
+        free(moved);
+        if (!norm) {
+            fprintf(stderr, "Error: out of memory re-basing the --lib directory '%s'\n", tc.lib_dirs[i]);
+            exit(1);
+        }
+        free(tc.lib_dirs[i]);
+        tc.lib_dirs[i] = norm;
+    }
+}
+
+/* Back to the directory the command was typed in (#3181): `ae run` compiles
+ * from the project root and runs the program where the user stands, so a
+ * program reading ./data.txt reads the caller's (#2148). `path` (the binary
+ * about to run, `size` bytes of room) is made absolute first when it is
+ * relative to the project root, as a relative AETHER_CACHE_DIR makes it. */
+static void leave_project_keeping(char* path, size_t size) {
+    if (!g_entered_from[0]) return;
+    ae_unset_env("AETHER_DISPLAY_FROM");   /* the compiler's, not the program's */
+    if (path && path[0] && !path_is_absolute_any(path)) {
+        char root[1024];
+        if (getcwd(root, sizeof(root))) {
+            char* abs = ae_path_printf("%s/%s", root, path);
+            if (abs && strlen(abs) < size) snprintf(path, size, "%s", abs);
+            free(abs);
+        }
+    }
+    if (chdir(g_entered_from) != 0) {
+        fprintf(stderr, "warning: cannot return to '%s': %s\n", g_entered_from, strerror(errno));
+    }
 }
 
 static int find_and_chdir_to_aether_toml(const char** file_inout) {
     g_walkup_sub[0] = '\0';
     char dir[1024], sub[1024];
     if (!manifest_walk_up(dir, sizeof(dir), sub, sizeof(sub))) return 0;
+    remember_entered_from();
     if (chdir(dir) != 0) return 0;
     /* The cwd changed: whatever the no-chdir readers located is stale, and
      * from here the manifest is simply in the cwd. */
@@ -6898,7 +7026,10 @@ static int print_command_help(const char* cmd) {
         printf("  clear  Remove every cached build\n");
     } else if (strcmp(cmd, "examples") == 0) {
         printf("Usage: ae examples [dir]\n");
-        printf("  Build every .ae file under dir (default: examples) into build/examples/.\n");
+        printf("  Build every example program under dir (default: examples) into build/examples/:\n");
+        printf("  a file whose header runs it with `ae run <file>`, or one with no header. A\n");
+        printf("  module of another example, or one run another way, is skipped; `make\n");
+        printf("  check-examples` runs those.\n");
     } else if (strcmp(cmd, "repl") == 0) {
         printf("Usage: ae repl\n");
         printf("  Start the interactive REPL.\n");
@@ -6977,34 +7108,58 @@ static int cmd_run(int argc, char** argv) {
         }
     }
 
+    /* #3181: compile from the project root, as `ae build` does: a directory
+     * named on the command line is the project (its src/main.ae is the
+     * program), and otherwise an ancestor's aether.toml makes its directory
+     * the root. Imports then resolve against the project's lib/ and src/,
+     * and its manifest gives the dependencies, defines and extra sources,
+     * whichever directory the command was typed in. Entering is a chdir;
+     * the paths typed relative to where the user stands move with it, and
+     * leave_project() goes back before the program starts, so the program
+     * runs where the command was typed (#2148). Before this the compile ran
+     * in the caller's directory: `ae run app/` and `ae run` from app/src
+     * could not import a module from app/lib. */
+    if (file && dir_exists(file)) {
+        const char* named = file;
+        char* probe = ae_path_printf("%s/src/main.ae", named);
+        int has_main = path_exists(probe);
+        free(probe);
+        if (!has_main) {
+            char* toml_path = ae_path_printf("%s/aether.toml", named);
+            if (path_exists(toml_path))
+                fprintf(stderr, "Error: No src/main.ae found in %s\n", named);
+            else
+                fprintf(stderr, "Error: '%s' is not an Aether project directory\n", named);
+            free(toml_path);
+            return 1;
+        }
+        if (enter_named_project(named) < 0) return 1;
+        file = "src/main.ae";
+    } else {
+        find_and_chdir_to_aether_toml(&file);
+    }
+    if (g_entered_from[0]) {
+        if (extra_files[0]) {
+            char rebased[8192] = "";
+            const char* cursor = extra_files;
+            char tok[2048];
+            while (extras_next(&cursor, tok, sizeof(tok)))
+                extras_append(rebased, sizeof(rebased), walkup_rebase(tok));
+            snprintf(extra_files, sizeof(extra_files), "%s", rebased);
+        }
+        rebase_typed_lib_dirs();
+    }
+
     /* #1901: [dependencies] join the module search path, after the caller's
-     * own --lib flags so an explicit path still wins. */
+     * own --lib flags so an explicit path still wins. Read from the project
+     * root, entered above. */
     if (ae_resolve_dependencies() < 0) return 1;
     load_defines_from_toml();
 
-    // Resolve directory argument (e.g. "." or "myproject/") to src/main.ae
-    if (file && dir_exists(file)) {
-        static char resolved_run_file[512];
-        snprintf(resolved_run_file, sizeof(resolved_run_file), "%s/src/main.ae", file);
-        if (path_exists(resolved_run_file)) {
-            file = resolved_run_file;
-        } else {
-            char toml_path[512];
-            snprintf(toml_path, sizeof(toml_path), "%s/aether.toml", file);
-            if (path_exists(toml_path))
-                fprintf(stderr, "Error: No src/main.ae found in %s\n", file);
-            else
-                fprintf(stderr, "Error: '%s' is not an Aether project directory\n", file);
-            return 1;
-        }
-    }
-
-    // Project mode: no file argument, the manifest's src/main.ae (the
-    // manifest may be an ancestor's; the program still starts in this cwd)
-    static char project_main[1200];
-    if (!file && path_exists(ae_manifest_path())) {
-        if (path_exists(manifest_relative("src/main.ae", project_main, sizeof(project_main))))
-            file = manifest_relative("src/main.ae", project_main, sizeof(project_main));
+    // Project mode: no file argument, the project's src/main.ae
+    if (!file && path_exists("aether.toml")) {
+        if (path_exists("src/main.ae"))
+            file = "src/main.ae";
         else {
             fprintf(stderr, "Error: aether.toml found but src/main.ae is missing.\n");
             fprintf(stderr, "Create src/main.ae or specify a file: ae run <file.ae>\n");
@@ -7055,6 +7210,7 @@ static int cmd_run(int argc, char** argv) {
             if (tc.verbose) fprintf(stderr, "[cache] hit: %016llx\n", cache_key);
             cache_touch(cached_exe);   /* least-recently-USED, for the cap */
             cache_touch_depfile(file); /* and its depfile, for the 30-day sweep */
+            leave_project_keeping(cached_exe, sizeof(cached_exe));
             char** run_argv = build_run_argv(cached_exe, argc, argv, prog_args_start);
             if (!run_argv) {
                 fprintf(stderr, "Error: out of memory\n");
@@ -7203,6 +7359,7 @@ static int cmd_run(int argc, char** argv) {
     }
 
     // Step 3: run it, forwarding any post-`--` args (see build_run_argv).
+    leave_project_keeping(exe_file, sizeof(exe_file));
     char** run_argv = build_run_argv(exe_file, argc, argv, prog_args_start);
     if (!run_argv) {
         fprintf(stderr, "Error: out of memory\n");
@@ -7237,6 +7394,11 @@ static int cmd_check(int argc, char** argv) {
             file = argv[i];
         }
     }
+    /* #3181: checked from the project root, as `ae build` builds, so an
+     * import of the project's lib/ resolves from any of its directories.
+     * Nothing runs, so the check need not go back. */
+    find_and_chdir_to_aether_toml(&file);
+    rebase_typed_lib_dirs();
     load_defines_from_toml();
 
     // Project mode
@@ -9485,6 +9647,22 @@ static int cmd_build(int argc, char** argv) {
                     }
                 }
                 int rc_exe = cmd_build(argc, dup_exe);
+                /* The exe pass may have entered the project (a walk-up, or a
+                 * named directory, #3181); the library pass reads the same
+                 * arguments, typed where the user stands, so it starts there
+                 * too and enters the project itself. */
+                if (g_entered_from[0]) {
+                    if (chdir(g_entered_from) != 0) {
+                        fprintf(stderr, "Error: cannot return to '%s': %s\n",
+                                g_entered_from, strerror(errno));
+                        free(dup_exe); free(dup_lib);
+                        return 1;
+                    }
+                    g_entered_from[0] = '\0';
+                    g_walkup_sub[0] = '\0';
+                    g_manifest_located = 0;
+                    ae_unset_env("AETHER_DISPLAY_FROM");
+                }
                 int rc_lib = (rc_exe == 0) ? cmd_build(argc, dup_lib) : 0;
                 free(dup_exe); free(dup_lib);
                 if (rc_exe != 0) return rc_exe;
@@ -9548,12 +9726,36 @@ static int cmd_build(int argc, char** argv) {
     // chdir there so [[bin]] / extra_sources / cflags resolution
     // works the same as if the user had run `ae build` from the
     // project root. Closes #280 (2).
-    find_and_chdir_to_aether_toml(&file);
-    if (g_walkup_sub[0]) {
+    //
+    // #3181: a directory named on the command line is the project, and the
+    // build enters it the same way, so `ae build app/` resolves app/'s
+    // lib/ and src/ and reads app/aether.toml as `ae build` typed in app/
+    // does. It compiled from the caller's directory before, with only the
+    // source pointed into app/.
+    if (file && dir_exists(file)) {
+        const char* named = file;
+        char* probe = ae_path_printf("%s/src/main.ae", named);
+        int has_main = path_exists(probe);
+        free(probe);
+        if (!has_main) {
+            char* toml_path = ae_path_printf("%s/aether.toml", named);
+            if (path_exists(toml_path))
+                fprintf(stderr, "Error: No src/main.ae found in %s\n", named);
+            else
+                fprintf(stderr, "Error: '%s' is not an Aether project directory\n", named);
+            free(toml_path);
+            return 1;
+        }
+        if (enter_named_project(named) < 0) return 1;
+        file = "src/main.ae";
+    } else {
+        find_and_chdir_to_aether_toml(&file);
+    }
+    if (g_entered_from[0]) {
         /* The other paths the user typed relative to where they stood: the
-         * --extra files (each entry, quoted ones included) and the -o
-         * output. `cc -o` and `go build -o` name a path relative to the
-         * invocation directory, and so does this. */
+         * --extra files (each entry, quoted ones included), the -o output
+         * and the --lib directories. `cc -o` and `go build -o` name a path
+         * relative to the invocation directory, and so does this. */
         if (extra_files[0]) {
             char rebased[8192] = "";
             const char* cursor = extra_files;
@@ -9563,6 +9765,7 @@ static int cmd_build(int argc, char** argv) {
             snprintf(extra_files, sizeof(extra_files), "%s", rebased);
         }
         if (output_name) output_name = walkup_rebase(output_name);
+        rebase_typed_lib_dirs();
     }
 
     /* #1901: resolve [dependencies] AFTER the walk-up, not with the other
@@ -11584,6 +11787,103 @@ write_toml:
     return 0;
 }
 
+/* What an example's header says about building it (#3105). The examples
+ * say how each one runs (examples/README.md, "Writing an example"):
+ * `// Run: ae run <this file> [-- args]` is a program `ae examples` builds;
+ * `// Part of: <file>` is a module of another example; any other Run (`ae
+ * help`, `sh script`, a project directory, `--lib`) is run that way, by
+ * `make check-examples`. A file with no header at all, in a directory of
+ * plain programs, is built as it always was. `how` gets the Run line. */
+enum { AE_EXAMPLE_BUILD, AE_EXAMPLE_PART, AE_EXAMPLE_OTHER };
+
+static void ae_slashes_forward(char* p) {
+    for (; *p; p++) if (*p == '\\') *p = '/';
+}
+
+static int example_kind(const char* src, char* how, size_t how_size) {
+    how[0] = '\0';
+    FILE* f = fopen(src, "r");
+    if (!f) return AE_EXAMPLE_BUILD;   /* the build says why it cannot read it */
+    char line[1024];
+    char run[1024] = "";
+    int part = 0, in_header = 1, contrib = 0;
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (line[0] == '\0') continue;
+        if (in_header && strncmp(line, "//", 2) != 0) in_header = 0;   /* the header ends */
+        if (in_header) {
+            if (strncmp(line, "// Part of:", 11) == 0) part = 1;
+            if (strncmp(line, "// Run: ", 8) == 0 && !run[0]) snprintf(run, sizeof(run), "%s", line + 8);
+        } else if (strncmp(line, "import contrib.", 15) == 0) {
+            contrib = 1;
+        }
+    }
+    fclose(f);
+    if (part) return AE_EXAMPLE_PART;
+    /* A contrib bridge's archive comes from `make contrib`, and the bridge's
+     * own job builds the examples that import one. */
+    if (contrib) {
+        snprintf(how, how_size, "%s, with its contrib bridge built", run[0] ? run : "ae run");
+        return AE_EXAMPLE_OTHER;
+    }
+    if (!run[0]) return AE_EXAMPLE_BUILD;
+    snprintf(how, how_size, "%s", run);
+    if (strncmp(run, "ae run ", 7) != 0) return AE_EXAMPLE_OTHER;
+    /* The file run, and nothing after it but the program's own `--` args. */
+    char target[1024];
+    const char* t = run + 7;
+    size_t len = strcspn(t, " ");
+    if (len == 0 || len >= sizeof(target)) return AE_EXAMPLE_OTHER;
+    memcpy(target, t, len);
+    target[len] = '\0';
+    const char* rest = t + len;
+    while (*rest == ' ') rest++;
+    if (*rest && strncmp(rest, "--", 2) != 0) return AE_EXAMPLE_OTHER;
+    if (rest[0] == '-' && rest[1] == '-' && rest[2] != '\0' && rest[2] != ' ') return AE_EXAMPLE_OTHER;
+    char me[2048];
+    snprintf(me, sizeof(me), "%s", src);
+    ae_slashes_forward(me);
+    ae_slashes_forward(target);
+    size_t ml = strlen(me), tl = strlen(target);
+    int same = ml >= tl && strcmp(me + ml - tl, target) == 0 &&
+               (ml == tl || me[ml - tl - 1] == '/');
+    return same ? AE_EXAMPLE_BUILD : AE_EXAMPLE_OTHER;
+}
+
+/* The output name of an example: its path under the examples directory with
+ * the slashes as underscores, so examples/01-language/01-hello.ae and two
+ * main.ae files in different directories each get a name of their own (the
+ * file's base name alone made them overwrite each other). */
+static char* example_output_name(const char* src, const char* examples_dir) {
+    char* p = ae_path_printf("%s", src);
+    char* dir = ae_path_printf("%s", examples_dir);
+    ae_slashes_forward(p);
+    ae_slashes_forward(dir);
+    size_t dl = strlen(dir);
+    while (dl > 0 && dir[dl - 1] == '/') dir[--dl] = '\0';
+    const char* rel = p;
+    if (dl > 0 && strncmp(p, dir, dl) == 0 && p[dl] == '/') {
+        rel = p + dl + 1;
+    } else {
+        /* An absolute listing (Windows `dir /s`): after the directory's own
+         * name, the last time it appears. */
+        const char* base = strrchr(dir, '/');
+        base = base ? base + 1 : dir;
+        char* marker = ae_path_printf("/%s/", base);
+        const char* at = NULL;
+        for (const char* q = strstr(p, marker); q; q = strstr(q + 1, marker)) at = q;
+        if (at) rel = at + strlen(marker);
+        free(marker);
+    }
+    char* name = ae_path_printf("%s", rel);
+    for (char* q = name; *q; q++) if (*q == '/') *q = '_';
+    char* dot = strrchr(name, '.');
+    if (dot && strcmp(dot, ".ae") == 0) *dot = '\0';
+    free(p);
+    free(dir);
+    return name;
+}
+
 static int cmd_examples(int argc, char** argv) {
     const char* examples_dir = "examples";
     if (argc > 0 && argv[0][0] != '-') {
@@ -11645,12 +11945,22 @@ static int cmd_examples(int argc, char** argv) {
             continue;
         }
 
-        const char* slash = strrchr(src, '/');
-        if (!slash) slash = strrchr(src, '\\');
-        const char* name = slash ? slash + 1 : src;
-        char* base = ae_path_printf("%s", name);
-        char* dot = strrchr(base, '.');
-        if (dot) *dot = '\0';
+        /* #3105: what the example's header says. A module of another
+         * example is not built alone; one run another way is said so and
+         * left to `make check-examples`. */
+        char how[1024];
+        int kind = example_kind(src, how, sizeof(how));
+        if (kind == AE_EXAMPLE_PART) {
+            skipped++;
+            continue;
+        }
+        char* base = example_output_name(src, examples_dir);
+        if (kind == AE_EXAMPLE_OTHER) {
+            printf("  %-30s SKIP (run as: %s)\n", base, how);
+            free(base);
+            skipped++;
+            continue;
+        }
 
         printf("  %-30s ", base);
         fflush(stdout);
@@ -12634,13 +12944,29 @@ static int cmd_fmt(int argc, char** argv) {
     return (check_mode && n_changed > 0) ? 1 : 0;
 }
 
+#ifdef _WIN32
+/* The console's code pages as they were: it is the shell's, and ae gives
+ * them back at exit, as a program does (runtime/aether_runtime.c). */
+static UINT g_ae_console_out_cp, g_ae_console_in_cp;
+static void ae_console_restore(void) {
+    if (g_ae_console_out_cp) SetConsoleOutputCP(g_ae_console_out_cp);
+    if (g_ae_console_in_cp) SetConsoleCP(g_ae_console_in_cp);
+}
+#endif
+
 int main(int argc, char** argv) {
 #ifdef _WIN32
     // Set UTF-8 console codepage so Aether programs can print Unicode correctly
     // on Windows CMD and PowerShell (default CP1252/OEM is not UTF-8).
+    g_ae_console_out_cp = GetConsoleOutputCP();   // 0 with no console
+    g_ae_console_in_cp = GetConsoleCP();
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
+    atexit(ae_console_restore);
 #endif
+    /* Set only once this command enters a project to compile it; one an
+     * enclosing ae left in the environment names another directory. */
+    ae_unset_env("AETHER_DISPLAY_FROM");
 
     if (argc < 2) {
         print_usage();

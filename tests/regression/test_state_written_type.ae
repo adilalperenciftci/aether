@@ -1,0 +1,82 @@
+// Regression (#3163): actor state takes a written type, `state name: T`,
+// for every type a struct field takes.
+//
+// The bug: `state next: actor_ref = null` was three "Unexpected token in
+// actor body" errors (':', the type, '='), and the type-first form refused
+// `actor_ref` too, so an actor could hold a reference only as a bare
+// `state next = null`. An optional state's value reached C unwrapped (an
+// int assigned to an ae_opt_int), and nothing checked a value against a
+// written type. This file did not compile before the fix.
+//
+// What it exercises: the colon form with a value and without one (the
+// type's zero), for an actor_ref, the integer and float widths, a string,
+// a bool, a struct, an enum, a tuple, optionals (a value and `none`), a
+// fixed-size array and a closure, and the type-first `state actor_ref r`.
+// tests/integration/state_written_type checks that a value of another type
+// is one E0200 at the value.
+
+struct Point {
+    x: int
+    y: int
+}
+
+enum Mode { Idle, Busy }
+
+message Connect {
+    next: actor_ref
+}
+
+message Check {}
+
+actor Holder {
+    state next: actor_ref = null
+    state actor_ref other
+    state count: int = 3
+    state big: long = 3_000_000_000
+    state small: uint8 = 200
+    state ratio: float = 0.5
+    state name: string = "holder"
+    state on: bool
+    state origin: Point = Point { x: 1, y: 2 }
+    state mode: Mode = Mode.Busy
+    state pair: (int, string) = (7, "seven")
+    state maybe: int? = 4
+    state nothing: int? = none
+    state label: string? = "named"
+    state counts: int[3]
+    state step: fn = | x: int | -> x + 1
+    // A string takes `null`, as a binding or a field of one does: it reads
+    // as the empty text (#3129). `state string s = null` compiled before the
+    // value was checked, and the check refused it.
+    state string unset = null
+    state blank: string = null
+
+    receive {
+        Connect(next: n) -> {
+            next = n
+            other = n
+        }
+        Check -> {
+            a, b = pair
+            ok = next != null && other != null && count == 3 &&
+            big == 3000000000 && small == 200 && ratio == 0.5 &&
+            name == "holder" && !on && origin.x == 1 && origin.y == 2 &&
+            mode == Mode.Busy && a == 7 && b == "seven" && (maybe ?? 0) == 4 &&
+            nothing == none && (label ?? "") == "named" && counts[2] == 0 &&
+            step(1) == 2 && unset == "" && blank == "" && unset == null
+            if !ok {
+                println("FAIL: a state with a written type holds the wrong value")
+                exit(1)
+            }
+            println("state written types: ok")
+        }
+    }
+}
+
+main() {
+    h = spawn(Holder())
+    peer = spawn(Holder())
+    h ! Connect { next: peer }
+    h ! Check {}
+    wait_for_idle()
+}

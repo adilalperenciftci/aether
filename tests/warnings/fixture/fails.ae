@@ -1,0 +1,8 @@
+// A file that does not type-check: the gate reports it, since its errors
+// stop the check before any warning of its could be found. Self-test
+// input for tests/warnings/check.ae; it is never built.
+
+main() {
+    n: int = "not a number"
+    println("${n}")
+}

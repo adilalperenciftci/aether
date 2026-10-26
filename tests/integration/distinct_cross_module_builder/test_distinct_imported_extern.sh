@@ -57,6 +57,6 @@ if ! grep -q 'expected Token, got ptr' "$tmp/reject.log"; then
 fi
 # The original CI failures: type checking needs no installed host libraries.
 for lang in python tcl go; do
-    "$AE" check "$ROOT/examples/host-$lang-demo.ae"
+    "$AE" check "$ROOT/examples/04-interop/05-hosts/$lang.ae"
 done
 echo "  [PASS] imported distinct extern parameters and returns; raw pointers rejected; host demos checked"

@@ -61,7 +61,9 @@ main() {
             exit(1)
         }
         println("  PASS 5: a shell ended by SIGTERM returns 143")
-        // 6. A command that is not there: the shell's 127.
+        // 6. A command that is not there: the shell's 127. The shell ran;
+        // a shell that could not start would be -1, as on Windows (#3170),
+        // which no test here can make happen.
         rc_none = os.system("aether_no_such_command_3046")
         if rc_none != 127 {
             println("FAIL 6: a missing command = ${rc_none}, expected 127")

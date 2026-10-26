@@ -38,7 +38,7 @@ File* file_open_raw(const char* path, const char* mode);
  * included); release with string_release. NULL on failure. */
 struct AetherString* file_read_all_raw(File* file);
 int file_write_raw(File* file, const char* data, int length);
-int file_close(File* file);
+int file_close_raw(File* file);
 int file_exists(const char* path);
 /* Path-agnostic existence check: 1 if anything is at `path`
  * (regular file, directory, symlink, fifo, …), 0 otherwise.

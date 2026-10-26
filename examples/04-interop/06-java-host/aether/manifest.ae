@@ -1,0 +1,36 @@
+// The Java host: an Aether namespace called from a Java program.
+//
+// This directory is a namespace. manifest.ae declares its name, the
+// inputs the host gives it, the events it raises and the languages to
+// generate an SDK for; every other .ae file beside it adds functions.
+// `ae build --namespace aether/` compiles them into one library with a
+// typed Java class over it (the Panama FFI), and TradingDemo.java calls
+// the functions and handles the events. The README walks through it.
+//
+// Run: sh examples/04-interop/06-java-host/build.sh
+// Needs: a JDK 22 or later (javac and java on PATH); CI runs it end to end
+//   in tests/integration/embedded_java_trading_e2e.
+// See: docs/embedded-namespaces-and-host-bindings.md
+
+import std.host
+
+abi() {
+    describe("trading") {
+        // Inputs the host supplies before the script runs. v1 stores them
+        // on the SDK instance; a future host_call() will surface them as
+        // ambient values inside the script body.
+        input("max_order", "int")
+
+        // Events the script emits via notify(name, id). The host registers
+        // typed handlers via on<EventName>(handler).
+        event("OrderPlaced", "int64")
+        event("OrderRejected", "int64")
+        event("TradeKilled", "int64")
+        event("UnknownTicker", "int64")
+
+        // Per-language SDK targets.
+        bindings() {
+            java("com.example.trading", "Trading")
+        }
+    }
+}

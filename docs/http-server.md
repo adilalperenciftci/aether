@@ -269,7 +269,7 @@ HTTP/1.1 path) feed the same chain:
 | `middleware.use_vhost`        | ✓ |
 | `middleware.use_static_files` | ✓ |
 | `middleware.use_rewrite`      | ✓ |
-| `middleware.use_real_ip`      | ✓, X-Real-IP appended to the request, visible to handlers + downstream middleware on every h2 stream |
+| `middleware.use_real_ip`      | ✓, the resolved client becomes the request's reported peer and its X-Real-IP, for handlers + downstream middleware on every h2 stream |
 | `middleware.use_gzip` (response transformer) | ✓, `Content-Encoding: gzip` rides on the h2 HEADERS frame |
 | `middleware.use_error_pages`  | ✓ |
 | `http_server_set_health_probes` | ✓ |
@@ -534,41 +534,57 @@ middleware.use_gzip(server, 1024, 6)
 middleware.use_static_files(server, "/assets", "/var/www/static")
 
 // URL rewriting
-opts = aether_rewrite_opts_new()
+opts = middleware.rewrite_new()
 middleware.rewrite_add_rule(opts, "/old/", "/new/")
 middleware.use_rewrite(server, opts)
 
 // Custom error pages
-ep = aether_error_pages_opts_new()
+ep = middleware.error_pages_new()
 middleware.error_pages_register(ep, 404, "<h1>Not found</h1>", "text/html")
 middleware.error_pages_register(ep, 500, "<h1>Server error</h1>", "text/html")
 middleware.use_error_pages(server, ep)
 
-// Real-IP / X-Forwarded-For, extracts the original client IP
-// when the server is behind a load balancer / reverse proxy / CDN.
-// Reads the configured header (default "X-Forwarded-For"), takes
-// the leftmost IP, and adds X-Real-IP to the request so downstream
-// handlers / ratelimit / access logs see the real client identity.
-// Pass "" for the default header name; alternatives include
-// "Forwarded", "CF-Connecting-IP", "True-Client-IP".
-middleware.use_real_ip(server, "")
+// Real-IP: the client behind the proxies named in the last argument
+// (addresses and networks, comma-separated). The header ("" for
+// "X-Forwarded-For") is believed only from one of them, and read from
+// the right: the first entry that is not a trusted proxy is the client.
+// It becomes the peer the request reports (http.request_remote_addr) and
+// its X-Real-IP, so downstream handlers / ratelimit / access logs / the
+// proxy see the client. "Forwarded" reads each element's for=.
+middleware.use_real_ip(server, "", "10.0.0.0/8, fd00::/8")
 ```
 
 Middleware shape: each is a function-pointer chain entry. Pre-handler
 middleware (cors / basic_auth / rate_limit / vhost / static_files /
 rewrite / real_ip) run before route dispatch and can short-circuit;
 response transformers (gzip / error_pages) run after the route
-handler emits the response. Order is registration order.
+handler emits the response, and not on a response a middleware answered
+(a proxied one, a 401, a 429). The request hooks (the access log,
+metrics) observe every response, that one included (#3213). Order is
+registration order. The server
+owns what each factory registers, the opts handed to `use_rewrite` and
+`use_error_pages` included, and `http.server_free` frees them (#3191).
+A middleware a program registers itself with `http_server_use_middleware`
+leaves its user data to the program; `http_server_use_middleware_owned`
+and `http_server_use_response_transformer_owned` take a release the
+server runs on it.
 
-**Real-IP trust model.** `use_real_ip` does NOT validate that the
-request actually came through a trusted proxy. Operators must only
-run it behind trusted edge infrastructure that strips any
-client-supplied X-Forwarded-For, typical setups are a firewall-
-restricted port plus a load-balancer rule, or a CDN that overwrites
-X-Forwarded-For. Without that guarantee, callers can spoof their
-apparent client IP. The middleware is idempotent, running it
-twice (or running it after the edge already set X-Real-IP) doesn't
-double-tag the request.
+**Real-IP trust model.** A forwarding header is a list any client can
+start: `curl -H 'X-Forwarded-For: 1.2.3.4'` writes one. `use_real_ip`
+therefore believes it only from a peer among the proxies it is given,
+and reads it from the right, as nginx's `set_real_ip_from` with
+`real_ip_recursive on` does: each entry is the address the hop before it
+saw, and the first one that is not a trusted proxy is the client. What a
+client writes itself sits to the left of that and changes nothing, behind
+a proxy that appends to the header (std.http.proxy, nginx by default, cloud
+load balancers) as behind one that replaces it. From a peer that is not
+trusted the peer is the client (#3212). The middleware sets the address
+the way nginx's
+realip module does: `http.request_remote_addr` answers the client it
+resolved, not the edge's address, to every middleware and handler after
+it, and the port reads as 0. An `X-Real-IP` already on the request,
+which any client can send, is replaced with the same address, never kept
+(#3169). Running it twice sets the same values again.
 
 ---
 
@@ -745,7 +761,10 @@ JSON format example output:
 ```
 
 NCSA Combined Log Format is the Apache default. File is opened
-`"ab"` so process restarts append rather than truncate.
+`"ab"` so process restarts append rather than truncate. Every response
+the server sends is logged, one a middleware answered included: a
+proxied request, a 401 from basic auth, a 429 from the rate limiter
+(#3213).
 
 ---
 

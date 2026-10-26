@@ -24,6 +24,11 @@
     <li><a href="#get_stats">get_stats</a></li>
     <li><a href="#print_stats">print_stats</a></li>
     <li><a href="#init">init</a></li>
+    <li><a href="#LOG_LEVEL_DEBUG">LOG_LEVEL_DEBUG</a></li>
+    <li><a href="#LOG_LEVEL_INFO">LOG_LEVEL_INFO</a></li>
+    <li><a href="#LOG_LEVEL_WARN">LOG_LEVEL_WARN</a></li>
+    <li><a href="#LOG_LEVEL_ERROR">LOG_LEVEL_ERROR</a></li>
+    <li><a href="#LOG_LEVEL_FATAL">LOG_LEVEL_FATAL</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -121,7 +126,7 @@
 <main class="content">
   <div class="module-header">
     <h1>log</h1>
-    <p class="module-desc">std.log - Logging Module Import with: import std.log Log level constants LOG_LEVEL_DEBUG = 0, LOG_LEVEL_INFO = 1, LOG_LEVEL_WARN = 2 LOG_LEVEL_ERROR = 3, LOG_LEVEL_FATAL = 4</p>
+    <p class="module-desc">std.log - Logging Module Import with: import std.log err = log.init(&quot;app.log&quot;, log.LOG_LEVEL_INFO) // &quot;&quot; or &quot;-&quot;: stderr log.write(log.LOG_LEVEL_WARN, &quot;disk almost full&quot;) A message below the level init (or set_level) gave is dropped.</p>
     <p class="import-line"><code>import std.log</code></p>
   </div>
   <div class="functions" id="functions">
@@ -139,7 +144,7 @@
       <h3 class="function-name">write <span class="kind">extern</span></h3>
       <pre class="usage"><code>write(level, msg)</code></pre>
       <p class="signature"><span class="sig-params">level: int, msg: string</span></p>
-      <p class="doc">Core logging (variadic not fully supported, use with format string)</p>
+      <p class="doc">Write `msg` at `level`, as it is: a % in it is text, not a format.</p>
     </div>
     <div class="function" id="set_level" data-name="set_level">
       <h3 class="function-name">set_level <span class="kind">extern</span></h3>
@@ -170,7 +175,28 @@
       <h3 class="function-name">init <span class="kind">fn</span></h3>
       <pre class="usage"><code>init(filename, min_level) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">filename: string, min_level: int</span></p>
-      <p class="doc">Initialize logging. Returns &quot;&quot; on success, error string if the requested log file could not be opened (in which case logging still works via stderr as a fallback).</p>
+      <p class="doc">Initialize logging to `filename`, appending, or to stderr when it is &quot;&quot; or &quot;-&quot;. Returns &quot;&quot; on success, or an error naming a file that could not be opened (logging then goes to stderr, so nothing is lost).</p>
+    </div>
+    <div class="function" id="LOG_LEVEL_DEBUG" data-name="LOG_LEVEL_DEBUG">
+      <h3 class="function-name">LOG_LEVEL_DEBUG <span class="kind">const</span></h3>
+      <pre class="usage"><code>LOG_LEVEL_DEBUG = 0</code></pre>
+      <p class="doc">The levels, lowest first (aether_log.h's LogLevel).</p>
+    </div>
+    <div class="function" id="LOG_LEVEL_INFO" data-name="LOG_LEVEL_INFO">
+      <h3 class="function-name">LOG_LEVEL_INFO <span class="kind">const</span></h3>
+      <pre class="usage"><code>LOG_LEVEL_INFO = 1</code></pre>
+    </div>
+    <div class="function" id="LOG_LEVEL_WARN" data-name="LOG_LEVEL_WARN">
+      <h3 class="function-name">LOG_LEVEL_WARN <span class="kind">const</span></h3>
+      <pre class="usage"><code>LOG_LEVEL_WARN = 2</code></pre>
+    </div>
+    <div class="function" id="LOG_LEVEL_ERROR" data-name="LOG_LEVEL_ERROR">
+      <h3 class="function-name">LOG_LEVEL_ERROR <span class="kind">const</span></h3>
+      <pre class="usage"><code>LOG_LEVEL_ERROR = 3</code></pre>
+    </div>
+    <div class="function" id="LOG_LEVEL_FATAL" data-name="LOG_LEVEL_FATAL">
+      <h3 class="function-name">LOG_LEVEL_FATAL <span class="kind">const</span></h3>
+      <pre class="usage"><code>LOG_LEVEL_FATAL = 4</code></pre>
     </div>
   </div>
 </main>

@@ -277,7 +277,7 @@ symlink_target_escapes(entry: string, target: string) -> {
 
 // Index of the first '/' in `rel` that ends a component already present
 // under `dest_prefix` as a symbolic link (on Windows also a junction:
-// whatever fs.fs_is_symlink reports), or -1 when no parent is one. `rel` is
+// whatever fs.is_symlink reports), or -1 when no parent is one. `rel` is
 // the entry's name after fs.clean, and the path that is then written: with
 // no ".", ".." or empty segments left, its '/'-terminated prefixes are
 // exactly the directories the OS walks to reach the entry. (On the raw name
@@ -292,7 +292,7 @@ fn symlinked_parent(dest_prefix: string, rel: string) -> int {
         if string.char_at(rel, i) == 47 { // '/'
             part = string.substring(rel, 0, i)
             full = string.concat(dest_prefix, part)
-            is_link = fs.fs_is_symlink(full)
+            is_link = fs.is_symlink(full)
             string.free(full)
             string.free(part)
             if is_link == 1 { return i }
@@ -1162,7 +1162,7 @@ extract(archive_path: string, destination: string, options: ExtractOptions) -> s
 
         if kind == KIND_FILE {
             // Check overwrite policy
-            if fs.exists(target.path) == 1 || fs.fs_is_symlink(target.path) == 1 {
+            if fs.exists(target.path) == 1 || fs.is_symlink(target.path) == 1 {
                 if options.overwrite == 0 {
                     heap.free(target)
                     return "file '${name}' already exists and overwrite is disabled"
@@ -1222,7 +1222,7 @@ extract(archive_path: string, destination: string, options: ExtractOptions) -> s
             }
             heap.free(target)
         } else if kind == KIND_DIRECTORY {
-            if fs.fs_is_symlink(target.path) == 1 {
+            if fs.is_symlink(target.path) == 1 {
                 if options.overwrite == 0 {
                     heap.free(target)
                     return "directory destination '${name}' is a symlink"
@@ -1242,7 +1242,7 @@ extract(archive_path: string, destination: string, options: ExtractOptions) -> s
             // Queue directory metadata to be applied last
             list.add(dir_list, target as ptr)
         } else if kind == KIND_SYMLINK {
-            if fs.exists(target.path) == 1 || fs.fs_is_symlink(target.path) == 1 {
+            if fs.exists(target.path) == 1 || fs.is_symlink(target.path) == 1 {
                 if options.overwrite == 0 {
                     heap.free(target)
                     return "symlink destination '${name}' already exists"

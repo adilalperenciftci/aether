@@ -33,24 +33,24 @@ header comment is the authoritative description.
 | `std.dir` | Directory operations, re-exported from `std.fs`. | 11 | [guide](../std/dir/README.md) · [source](../std/dir/module.ae) |
 | `std.dl` | Dynamic library loader over dlopen and LoadLibrary. | 8 | [guide](../std/dl/README.md) · [source](../std/dl/module.ae) |
 | `std.encoding` | Hex, Base64, Base32 and CSV field codecs. | 11 | [guide](../std/encoding/README.md) · [source](../std/encoding/module.ae) |
-| `std.file` | File operations, re-exported from `std.fs`. | 14 | [guide](../std/file/README.md) · [source](../std/file/module.ae) |
+| `std.file` | File operations, re-exported from `std.fs`. | 16 | [guide](../std/file/README.md) · [source](../std/file/module.ae) |
 | `std.floatarr` | Fixed-size packed-double buffer. | 15 | [guide](../std/floatarr/README.md) · [source](../std/floatarr/module.ae) |
-| `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 148 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
+| `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 150 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
 | `std.hash` | Fast non-cryptographic hashes and checksums: FNV, MurmurHash3, SipHash, CRC-32. | 6 | [guide](../std/hash/README.md) · [source](../std/hash/module.ae) |
 | `std.host` | Primitives for Aether scripts embedded in a host application. | 14 | [guide](../std/host/README.md) · [source](../std/host/module.ae) |
-| `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 140 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
+| `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 143 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
 | `std.http1` | Pure-Aether HTTP/1.1 response reader (RFC 9112). | 14 | [guide](../std/http1/README.md) · [source](../std/http1/module.ae) |
 | `std.intarr` | Fixed-size packed-int buffer. | 15 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
 | `std.intmap` | Hash map from `long` keys to `long` values, for integer-keyed counting and lookup. | 12 | [guide](../std/intmap/README.md) · [source](../std/intmap/module.ae) |
-| `std.io` | Console output, whole-file reads and writes, file descriptors, environment variables. | 44 | [full section](#io-stdio) |
+| `std.io` | Console output, whole-file reads and writes, file descriptors, environment variables. | 46 | [full section](#io-stdio) |
 | `std.ipc` | Child-to-parent back-channel for processes started by `std.os`. | 4 | [guide](../std/ipc/README.md) · [source](../std/ipc/module.ae) |
-| `std.json` | JSON parsing, building and serialisation. | 45 | [full section](#json-stdjson) |
+| `std.json` | JSON parsing, building and serialisation. | 51 | [full section](#json-stdjson) |
 | `std.jsonpath` | RFC 9535 JSONPath queries over parsed JSON, with a reusable compiled path. | 10 | [guide](../std/jsonpath/README.md) · [source](../std/jsonpath/module.ae) |
 | `std.ksuid` | KSUID: 160-bit lexicographically sortable identifier. | 1 | [guide](../std/ksuid/README.md) · [source](../std/ksuid/module.ae) |
 | `std.language` | BCP 47 language tags and matching (RFC 5646, RFC 4647). | 11 | [guide](../std/language/README.md) · [source](../std/language/module.ae) |
 | `std.lanes` | SIMD lanes: four or eight floats, or two doubles, per vector, with masks and select. | 127 | [guide](../std/lanes/README.md) · [source](../std/lanes/module.ae) |
 | `std.list` | Dynamic array, re-exported from `std.collections`. | 14 | [guide](../std/list/README.md) · [source](../std/list/module.ae) |
-| `std.log` | Levelled logging with timestamps, colours and counters. | 9 | [full section](#logging-stdlog) |
+| `std.log` | Levelled logging with timestamps, colours and counters. | 14 | [full section](#logging-stdlog) |
 | `std.longarr` | Fixed-size packed-long buffer. | 15 | [guide](../std/longarr/README.md) · [source](../std/longarr/module.ae) |
 | `std.lzf` | One-shot LZF compression and decompression. | 9 | [guide](../std/lzf/README.md) · [source](../std/lzf/module.ae) |
 | `std.map` | Hash map, re-exported from `std.collections`, with readable key snapshots. | 20 | [guide](../std/map/README.md) · [source](../std/map/module.ae) |
@@ -71,7 +71,7 @@ header comment is the authoritative description.
 | `std.quote` | The tree a `quote` trailing block hands to a function: typed nodes, captures read through their cells, and a printer. | 66 | [guide](../std/quote/README.md) · [source](../std/quote/module.ae) |
 | `std.regex` | Perl-compatible regular expressions, backed by PCRE2. | 27 | [guide](../std/regex/README.md) · [source](../std/regex/module.ae) |
 | `std.resp` | RESP codec (Redis Serialization Protocol): RESP3-native, RESP2-compatible, resumable decoder. | 42 | [guide](../std/resp/README.md) · [source](../std/resp/module.ae) |
-| `std.sandbox` | Grant lists, and blocks that run with only those grants in force. | 14 | [guide](../std/sandbox/README.md) · [source](../std/sandbox/module.ae) |
+| `std.sandbox` | Grant lists, and blocks that run with only those grants in force. | 15 | [guide](../std/sandbox/README.md) · [source](../std/sandbox/module.ae) |
 | `std.schema` | Declarative typed validation and coercion. | 35 | [guide](../std/schema/README.md) · [source](../std/schema/module.ae) |
 | `std.set` | Unordered set of unique strings. | 14 | [guide](../std/set/README.md) · [source](../std/set/module.ae) |
 | `std.signal` | POSIX signal-number constants. | 11 | [guide](../std/signal/README.md) · [source](../std/signal/module.ae) |
@@ -100,7 +100,7 @@ header comment is the authoritative description.
 | `std.zlib` | One-shot zlib and gzip deflate and inflate. | 28 | [full section](#compression-stdzlib) |
 | `std.zstd` | Zstandard compression, streaming and one-shot, for archives and internal transports. | 19 | [guide](../std/zstd/README.md) · [source](../std/zstd/module.ae) |
 
-> **Note:** The standard library follows the canonical module pattern in [stdlib-module-pattern.md](stdlib-module-pattern.md), fallible operations expose a `_raw` extern plus a Go-style `(value, err)` Aether wrapper; pure/infallible operations stay raw without a suffix. See the [error handling example](../examples/basics/error-handling.ae) for how the pattern is used from user code, and [std/fs/module.ae](../std/fs/module.ae) for the reference implementation.
+> **Note:** The standard library follows the canonical module pattern in [stdlib-module-pattern.md](stdlib-module-pattern.md), fallible operations expose a `_raw` extern plus a Go-style `(value, err)` Aether wrapper; pure/infallible operations stay raw without a suffix. See the [error handling example](../examples/01-language/10-errors.ae) for how the pattern is used from user code, and [std/fs/module.ae](../std/fs/module.ae) for the reference implementation.
 
 ## Platform support
 
@@ -281,7 +281,7 @@ string_list_add(names, "Bob")
 
 string_list_sort_lex(names)                 // "Bob", "Charlie", "alice" (ASCII order)
 
-string_list_sort(names, |a: string, b: string| {
+string_list_sort(names, | a: string, b: string | {
     return string.length(a) - string.length(b)   // shortest first, stable
 })
 ```
@@ -1132,14 +1132,15 @@ main() {
 
 **Functions:**
 - `file.read(path)` → `(string, string)` - Read entire file (opens, reads, closes)
-- `file.write(path, content)` → `string` - Overwrite file, return error string
-- `file.open(path, mode)` → `(ptr, string)` - Low-level open (caller must `file.close`)
-- `file.close(handle)` - Close file
+- `file.write(path, content)` → `string` - Overwrite file; `""`, or the reason (including a write the closing flush could not make, such as to a full disk)
+- `file.open(path, mode)` → `(ptr, string)` - Open a handle (close it with `file.close`; `defer file.close(h)` after a successful open)
+- `file.close(handle)` → `string` - Close and free a handle; `""`, or the reason (a write the close flushes can fail, and the data is then not on disk)
+- `file.read_all(handle)` → `(string, string)` - Read the whole of an open handle from its start; the handle stays open
 - `file.size(path)` → `(int, string)` - Get size in bytes
 - `file.delete(path)` → `string` - Delete file
 - `file.exists(path)` - 1 if a **regular file** is at `path`, 0 otherwise. Returns 0 for directories, even if they exist, see `fs.exists` for the path-agnostic check.
 
-Raw externs: `file_open_raw`, `file_read_all_raw`, `file_write_raw`, `file_delete_raw`, `file_size_raw`.
+Raw externs: `file_open_raw`, `file_close_raw`, `file_read_all_raw`, `file_write_raw`, `file_delete_raw`, `file_size_raw`.
 
 ### Directories (`std.dir`)
 
@@ -1193,7 +1194,7 @@ The building blocks beyond one-level listing: visit a whole tree, and learn when
 import std.fs
 
 // Walk: the callback sees every entry with its kind and depth.
-n, err = fs.walk(root, |path: string, kind: int, depth: int| {
+n, err = fs.walk(root, | path: string, kind: int, depth: int | {
     // kind: 1 file / 2 dir / 3 symlink / 4 other / 5 socket / 6 fifo / 7 device
     // (same encoding as file_stat; see fs.STAT_KIND_*)
     if kind == 2 && string.ends_with(path, "/node_modules") == 1 {
@@ -1206,7 +1207,7 @@ n, err = fs.walk(root, |path: string, kind: int, depth: int| {
 // Collecting paths: `path` is borrowed for the callback, and the list
 // takes a string of its own, so it is stored as it is.
 found = list.new()
-n2, err2 = fs.walk(root, |path: string, kind: int, depth: int| {
+n2, err2 = fs.walk(root, | path: string, kind: int, depth: int | {
     if kind == 1 && string.ends_with(path, ".md") == 1 {
         list.add(found, path)
     }
@@ -1285,6 +1286,9 @@ main() {
 ```
 
 **Functions (beyond those re-exported from `std.file`/`std.dir`/`std.path`):**
+- `fs.open(path, mode)` → `(ptr, string)` - Open a handle for `fs.pread`, `fs.pwrite` and `fs.read_all`; close it with `fs.close` (`defer fs.close(h)` after a successful open).
+- `fs.close(handle)` → `string` - Close and free a handle; `""`, or the reason (a write the close flushes can fail, and the data is then not on disk).
+- `fs.read_all(handle)` → `(string, string)` - Read the whole of an open handle from its start; the handle stays open.
 - `fs.exists(path)` → `int` - **Path-agnostic** existence check: 1 if anything is at `path` (regular file, directory, symlink, fifo, ...), 0 otherwise. Distinct from `file.exists` (regular-file-only) and `dir.exists` (directory-only), those filter by type, this one doesn't. Uses `lstat(2)` so a dangling symlink counts as existing, matches POSIX `test -e`. Reach for this in tooling that probes whether a path is bound without caring what's there (build-system runtime-path discovery, "did the user pass a real path?" CLI validation).
 - `fs.write_atomic(path, data: byte[])` → `string` - Stage to `<path>.tmp.<pid>.<n>`, fsync, rename over destination. Binary-safe: the length travels with the slice (`string.bytes(s)` for a string, `bytes.view(buf)` for a `std.bytes` buffer). The tmp file is created with `O_CREAT|O_EXCL|O_NOFOLLOW` so an attacker who pre-plants a symlink at the predictable tmp path can't trick the write into following it; permissions track the process umask exactly as the previous `fopen("wb")` would have.
 - `fs.write_binary(path, data: byte[])` → `string` - Non-atomic `fopen("wb")` + `fwrite` + `fclose`. Binary-safe: the length travels with the slice. Cheaper than `write_atomic` when a partial file on crash is acceptable (scratch writes, caches).
@@ -1486,7 +1490,9 @@ main() {
     println("JSON: ${output}")
 
     // Type checking
-    type = json.type(json.num(3.0))  // 2 = JSON_NUMBER
+    if json.type(json.num(3.0)) == json.JSON_NUMBER {
+        println("a number")
+    }
 
     // Cleanup
     json.free(data)
@@ -1539,7 +1545,7 @@ main() {
 The `parse_strict` shape is the std.fs structured-error pilot extended to a second module, same tuple, same KIND_* convention.
 
 **Type Checking:**
-- `json.type(value)` - Get type constant (0-5)
+- `json.type(value)` - The kind of a value: `json.JSON_NULL`, `json.JSON_BOOL`, `json.JSON_NUMBER`, `json.JSON_STRING`, `json.JSON_ARRAY` or `json.JSON_OBJECT`. Compare against these names, not their numbers.
 - `json.is_null(value)` - Check if null (returns 1/0)
 - `json.is_integer(value)` - Check if a number was written as an integer within int64 (`42`, not `42.0` or `4e1`) (returns 1/0)
 
@@ -2181,7 +2187,9 @@ main() {
 - `http.put(url, body, content_type)` → `(string, string)` - HTTP PUT
 - `http.delete(url)` → `(string, string)` - HTTP DELETE
 
-All wrappers auto-free the underlying response and return an error string for transport failures or non-2xx status codes. Raw externs: `http_get_raw`, `http_get_with_timeout_raw`, `http_post_raw`, `http_put_raw`, `http_delete_raw`.
+- `http.status_text(code)` → `string` - The reason phrase registered for a status code (`"Not Found"` for 404), `""` for a code nobody registered. The server writes the same phrase on its status line.
+
+All wrappers auto-free the underlying response and return `("", err)` on failure: a transport failure names its cause, and a status other than 2xx names the status and its reason, `"HTTP 404 Not Found"` or `"HTTP 503 Service Unavailable"` (the number alone, `"HTTP 599"`, for a code nobody registered), so a missing page and a failing server read apart. For the body of such a response, or its headers, use `std.http.client`. Raw externs: `http_get_raw`, `http_get_with_timeout_raw`, `http_post_raw`, `http_put_raw`, `http_delete_raw`.
 
 **Connection reuse.** The client keeps a connection open after a response whose length was definite (`Content-Length` or chunked) and reuses it for the next request to the same origin, which is what HTTP/1.1 is for: a proxy or a polling client otherwise pays a TCP, and for HTTPS a TLS, handshake per request. It is on by default; a reverse proxy through `std.http.proxy` measured about 2x on the same box once it stopped dialling per request. Connections are keyed by origin, by the proxy actually dialled, by TLS, and by the verification the caller asked for, so a connection opened with a pinned CA or with verification off is never handed to a request that did not ask for that. A response with no definite length, or either side saying `Connection: close`, retires the connection instead of pooling it, and a streaming response (`stream()`) is never pooled because the caller may abandon it mid-body. A connection the peer closed while it sat idle looks live until it is used, so a pooled connection that returns nothing is redialled and the request sent once more, which is safe precisely because the server never saw it.
 
@@ -2226,6 +2234,7 @@ Raw externs: `http_server_bind_raw`, `http_server_start_raw`, and `http_server_e
 - `http.server_set_tls(server, cert_path, key_path)` → `string` - Enable HTTPS with PEM cert + key.
 - `http.server_set_keepalive(server, enable, max_requests, idle_timeout)` → `string` - HTTP/1.1 keep-alive with a `Duration` idle timeout (`max_requests=0` is unlimited per connection). Keep-alive is **on by default**, so this is for changing the limits or turning it off. A response with no definite body length is never kept open; everything else is, and a connection with no request in flight waits in a poller rather than on a worker, so the number a server can hold open is a descriptor count and not a thread count. Measured on an 8-core box (16 workers), 3000 requests per cell: 78,700 rps at 8 concurrent clients, 74,400 at 50 and 70,000 at 200, against 22,000 with a close per response. See [http-server.md](http-server.md#idle-connections-wait-in-a-poller-not-on-a-worker) for the handoff rule and the full table.
 - `http.server_set_h2(server, max_concurrent_streams)` → `string` - Enable HTTP/2 (h2 + h2c + ALPN). `max_concurrent_streams=0` uses libnghttp2's default (100). Returns error string when the build is missing libnghttp2.
+- `http.server_set_multi_accept(server, on)` → `string` - In actor dispatch mode, one listener per core (up to 16) on the server's one port, each with `SO_REUSEPORT` and an accept thread of its own, for connection rates where one `accept()` is the bottleneck. Off by default; thread-pool mode does not use it. Call it before starting, after `server_bind` or without it: a bound socket stays the first listener and gives the others its port, a port 0's included, and `server_port` reports the port they share. Returns an error where the kernel does not spread connections across the listeners: it does on Linux and DragonFly (`SO_REUSEPORT`) and FreeBSD (`SO_REUSEPORT_LB`), not on Windows, macOS, OpenBSD or NetBSD (#3194)
 - `http.server_set_h2_concurrent_dispatch(server, worker_count)` → `string` - Routes h2 stream handlers onto the shared `std.worker` thread pool, sized to `worker_count`. `worker_count > 0` lets streams across all h2 connections execute their handlers in parallel; `worker_count == 0` (default) keeps dispatch sequential on each connection thread. POSIX-only; on Windows the call is a silent no-op. See `docs/http-server.md` for the architecture rationale (pool threads vs actors, one shared pool vs per-connection).
 - `http.server_shutdown_graceful(server, timeout)` → `string` - Stop accepting new connections, drain in-flight requests for up to a `Duration`, exit. h2 sessions emit a `GOAWAY` frame so peers know not to start new streams while existing ones complete.
 - `http.server_set_health_probes(server, live_path, ready_path, ready_check, ud)` → `string` - Built-in `/healthz` (always 200) + `/readyz` (200 only when the readiness check returns 1).
@@ -2272,7 +2281,7 @@ main() {
     server = http.server_create(8080)
 
     // Order matters: real_ip first so downstream sees the client IP
-    middleware.use_real_ip(server, "")                // default X-Forwarded-For
+    middleware.use_real_ip(server, "", "10.0.0.0/8")  // X-Forwarded-For from the LB
 
     middleware.use_cors(server, "*", "GET, POST", "Content-Type", 0, 600)
 
@@ -2292,14 +2301,16 @@ main() {
 - `middleware.use_basic_auth(server, realm, verify_cb, ud)` → `string` - HTTP Basic auth (RFC 7617). Verifier receives decoded `(username, password)`.
 - `middleware.use_bearer_auth(server, realm, verify_cb, ud)` → `string` - Bearer token auth (RFC 6750). Verifier receives the raw token; on failure emits `WWW-Authenticate: Bearer realm="…"` with `error="invalid_token"` for malformed credentials.
 - `middleware.use_session_auth(server, cookie_name, redirect_url, verify_cb, ud)` → `string` - Session-cookie auth. Reads a named cookie, hands the value to the verifier; on failure either 401s (when `redirect_url` is empty) or 302s to the configured login URL.
-- `middleware.use_rate_limit(server, max_requests, window_ms)` → `string` - Token-bucket per-client-IP rate limit. Client IP comes from `X-Forwarded-For` → `X-Real-IP` → `"anonymous"` resolution chain.
+- `middleware.use_rate_limit(server, max_requests, window_ms)` → `string` - Token-bucket per-client-IP rate limit. The client is the peer the request reports (`http.request_remote_addr`: the connection's, or, after `use_real_ip`, the client it resolved), never a header the client sends (#3173); `"anonymous"` when there is no IP peer.
 - `middleware.use_vhost(server, hosts_csv)` → `string` - Host-header gate. Comma-separated allowed hosts; unknown hosts get 404.
-- `middleware.use_real_ip(server, header_name)` → `string` - Proxy-aware client IP detection. Reads the configured header (default `X-Forwarded-For`), takes the leftmost non-empty IP, adds `X-Real-IP` to the request. Idempotent. **Trust model: only safe behind a proxy that strips client-supplied X-Forwarded-For.**
+- `middleware.use_real_ip(server, header_name, trusted)` → `string` - The client behind the proxies `trusted` names (addresses and networks, comma-separated: `"127.0.0.1, 10.0.0.0/8, fd00::/8"`). The header (`""` for `X-Forwarded-For`; `"Forwarded"` reads each element's `for=`) is believed only from a trusted peer and read from the right: the first entry that is not a trusted proxy is the client, as nginx's `set_real_ip_from` with `real_ip_recursive` has it (#3212), so entries a client writes itself change nothing. It becomes the peer the request reports from then on (`http.request_remote_addr` answers it, the port reads 0) and its `X-Real-IP`, replacing any `X-Real-IP` the client sent (#3169). From a peer that is not trusted, the peer is the client. Idempotent. An empty or malformed `trusted` is an error.
 - `middleware.use_static_files(server, url_prefix, root)` → `string` - Mount a directory under a URL prefix; `..` traversal blocked.
+- `middleware.rewrite_new()` → `ptr` - The opts `use_rewrite` takes; null when allocation fails.
 - `middleware.use_rewrite(server, opts)` → `string` - Prefix-rewrite rules; build via `middleware.rewrite_add_rule(opts, from, to)`.
 
-**Response transformers (run after the route handler emits the response):**
+**Response transformers (run after the route handler emits the response, not on one a middleware answered: a proxied response, a 401, a 429):**
 - `middleware.use_gzip(server, min_size, level)` → `string` - Gzip the response body when the client sends `Accept-Encoding: gzip` and the body is at least `min_size` bytes; level 1 (fastest) to 9 (best), 0 = default 6.
+- `middleware.error_pages_new()` → `ptr` - The opts `use_error_pages` takes; null when allocation fails.
 - `middleware.use_error_pages(server, opts)` → `string` - Replace error-status response bodies with operator-supplied content; build via `middleware.error_pages_register(opts, status_code, body, content_type)`.
 
 ### HTTP Reverse Proxy (`std.http.proxy`)
@@ -2471,7 +2482,7 @@ main() {
 }
 ```
 
-Design choices: `method` is an arbitrary string, not a `{GET,POST,PUT,DELETE}` enum, so WebDAV / DeltaV / PATCH / project-specific verbs ride through without a stdlib release (the native client sends the method verbatim on the request line). A non-2xx status is not an error: `send_request` returns the response cleanly and the caller drives status interpretation, so 404/403/401 are distinguishable rather than collapsed to `"http error"`. The builder is named `send_request` rather than `send` because `send` is reserved for actor messaging. `tests/integration/test_http_client_v2.ae` is the runnable example for the buffered API; `tests/integration/http_client_stream/` and `http_client_stream_chunked/` cover streaming.
+Design choices: `method` is an arbitrary string, not a `{GET,POST,PUT,DELETE}` enum, so WebDAV / DeltaV / PATCH / project-specific verbs ride through without a stdlib release (the native client sends the method verbatim on the request line). A non-2xx status is not an error: `send_request` returns the response cleanly and the caller drives status interpretation, and the body and headers of a 404 or a 500 are there to read; the one-line `http.get` reports only `"HTTP 404 Not Found"`. The builder is named `send_request` rather than `send` because `send` is reserved for actor messaging. `tests/integration/test_http_client_v2.ae` is the runnable example for the buffered API; `tests/integration/http_client_stream/` and `http_client_stream_chunked/` cover streaming.
 
 ### HTTP record/replay (VCR), moved out of the stdlib
 
@@ -2806,32 +2817,27 @@ Structured logging with levels.
 import std.log
 
 main() {
-    err = log.init("app.log", 0)  // 0 = LOG_DEBUG
+    err = log.init("app.log", log.LOG_LEVEL_DEBUG)
     if err != "" {
-        println("log file unavailable, falling back to stderr: ${err}")
+        println("logging to stderr instead: ${err}")
     }
 
-    log.write(0, "Debug message")
-    log.write(1, "Info message")
-    log.write(2, "Warning message")
-    log.write(3, "Error message")
+    log.write(log.LOG_LEVEL_DEBUG, "Debug message")
+    log.write(log.LOG_LEVEL_INFO, "Info message")
+    log.write(log.LOG_LEVEL_WARN, "Disk 95% full")
+    log.write(log.LOG_LEVEL_ERROR, "Error message")
 
     log.print_stats()
     log.shutdown()
 }
 ```
 
-**Log Levels:**
-- `0` = DEBUG
-- `1` = INFO
-- `2` = WARN
-- `3` = ERROR
-- `4` = FATAL
+**Log Levels**, lowest first: `log.LOG_LEVEL_DEBUG`, `log.LOG_LEVEL_INFO`, `log.LOG_LEVEL_WARN`, `log.LOG_LEVEL_ERROR` and `log.LOG_LEVEL_FATAL` (which aborts the program after writing). A message below the current level is dropped.
 
 **Functions:**
-- `log.init(filename, level)` → `string` - Initialize logging, return error string if the log file could not be opened (logging still works via stderr as a fallback)
+- `log.init(filename, level)` → `string` - Initialize logging, appending to `filename`, or to stderr when it is `""` or `"-"`. Returns `""`, or an error naming a file that could not be opened (logging then goes to stderr, so nothing is lost)
 - `log.shutdown()` - Shutdown logging
-- `log.write(level, message)` - Write a log message at the given level
+- `log.write(level, message)` - Write `message` at `level`, as it is: a `%` in it is text, not a format
 - `log.set_level(level)` - Set minimum level
 - `log.set_colors(enabled)` - Enable/disable colored output (1/0)
 - `log.set_timestamps(enabled)` - Enable/disable timestamps (1/0)
@@ -2863,16 +2869,16 @@ main() {
 
     // Get environment variable
     home = os.getenv("HOME")
-    if home != 0 {
+    if home != "" {
         println("HOME = ${home}")
     }
 }
 ```
 
 **Functions:**
-- `os.system(cmd)` - Run shell command, returns exit code (0 = success, POSIX convention)
-- `os.exec(cmd)` → `(string, string)` - Run command and capture stdout, return `(output, err)`
-- `os.getenv(name)` - Get environment variable (returns string, or null if not set, infallible)
+- `os.system(cmd)` - Run shell command, returns exit code (0 = success, POSIX convention). A command the shell cannot find is the shell's 127; a shell that could not start is -1 (#3170)
+- `os.exec(cmd)` → `(string, string)` - Run command and capture stdout, return `(output, err)`. A shell that could not start is `("", "command failed")`
+- `os.getenv(name)` - Get environment variable (returns string, or null if not set, infallible). The null string reads as `""`, so `os.getenv("X") != ""` asks whether `X` is set to something; `os.getenv("X") == null` tells unset apart from set to the empty string (#3129).
 - `os.setenv(name, value)` → `string` - Set environment variable, returns "" on success or an error string. Same C-side function as `io.setenv` use `os.setenv` when you've already imported `std.os` for `os.getenv`.
 - `os.temp_dir()` → `string` - The directory for scratch files, with no trailing separator. Windows resolves it through `GetTempPathW` (which already does the documented `TMP` → `TEMP` → `USERPROFILE` → Windows-directory cascade); POSIX reads `TMPDIR` and falls back to `/tmp`. Always returns a non-empty path, so `"${os.temp_dir()}/name"` needs no check. **Prefer this to a hardcoded `/tmp`**, which works on POSIX and under an MSYS2 shell but fails on a native Windows build, a bug that passes every local check.
 - `os.unsetenv(name)` → `string` - Unset environment variable, returns "" on success or an error string. Same C-side function as `io.unsetenv`.
@@ -2926,7 +2932,11 @@ with spaces or an argument holding `$` or `;` arrives exactly as written.
   still sees the program itself as its `argv[0]`.
 - `env` is a list of `"KEY=VALUE"` strings, or `null` to inherit this
   process's environment.
-- A program named without a path separator is looked up on `PATH`. On
+- A program named without a path separator is looked up on this
+  process's `PATH`, before the child starts, whatever `env` it is given:
+  an `env` without `PATH` still finds it, and the child still sees exactly
+  that `env` (#3201). On POSIX the first entry where it is an executable
+  file is taken, and a name that is not found is `"program not found"`. On
   Windows the program's own directory and the system directories come
   first, as they always have there, and a name without an extension is
   tried with the extensions in `PATHEXT` that Windows can start
@@ -2948,10 +2958,11 @@ A child that ran and failed and a child that never started are told apart.
 `err` is non-empty only when the child could not be started; `grep` finding
 nothing or `diff` finding a difference comes back with `err == ""` and its
 exit status. A child killed by a signal reports 128 plus the signal number,
-the shell's convention. One platform difference: on POSIX a program that is
-not there fails inside the child after the fork, so it reads as status 127
-with no error, while on Windows it fails before any child exists and comes
-back as status -1 with `err` set to `program not found`.
+the shell's convention. A program that cannot start is status -1 (or token
+-1) with `err` set to the reason, `program not found` for one that is not
+there, on every platform: on POSIX exec fails in the child after the fork,
+and the child reports its errno to the parent before it exits, so an exit
+of 127 is always a program that ran (#3170).
 
 Process execution is native on Windows (`CreateProcessW` and Job Objects),
 with two differences. Windows cannot replace a running process, so
@@ -3012,18 +3023,18 @@ spawned child exited 5
 ```
 
 **Functions:**
-- `os.run_capture(prog, argv, env)` → `(string, int, string)` - Run to completion: stdout, exit status, error
-- `os.run_full(prog, argv, env, stdin_data)` → `(string, string, int, string)` - Feed `stdin_data` to the child's stdin (binary-safe) and capture stdout and stderr separately: stdout, stderr, exit status, error. No pipe can fill and deadlock, whatever the sizes. `""` gives the child an already-closed stdin. Safe to call from several threads at once: each child inherits only its own pipe ends, so a capture never waits for another thread's child (#2917)
+- `os.run_capture(prog, argv, env)` → `(string, int, string)` - Run to completion: stdout, exit status, error. A program that cannot start is status -1 with the reason (`"program not found"`, `"permission denied"`, `"not an executable"`) on every platform, so an exit of 127 is a program that ran (#3170)
+- `os.run_full(prog, argv, env, stdin_data)` → `(string, string, int, string)` - Feed `stdin_data` to the child's stdin (binary-safe) and capture stdout and stderr separately: stdout, stderr, exit status, error. A program that cannot start is exit status -1 with the reason, as for `run_capture` (#3170). No pipe can fill and deadlock, whatever the sizes. `""` gives the child an already-closed stdin. Safe to call from several threads at once: each child inherits only its own pipe ends, so a capture never waits for another thread's child (#2917)
 - `os_run(prog, argv, env)` → `int` - Run to completion with this process's stdio; the exit status, or -1 when it could not start
-- `os.spawn_proc(prog, argv, env)` → `(int, string)` - Start without waiting. The first value is a reap token: the pid on POSIX, a handle-table key on Windows, so pass it back to the calls below rather than treating it as a pid. On Windows a token is never a pid: once reaped, `os.kill` and `os.wait_pid_timeout` report it gone rather than reaching whatever process has that number
-- `os.spawn_proc_to(prog, argv, env, out_path)` → `(int, string)` - Start without waiting, the child's stdout and stderr written to the file `out_path` (created or truncated) and its stdin empty. The token works with every call below. The child runs in a Job Object of its own on Windows and leads a process group of its own on POSIX, so `os.kill(token, sig)` ends its whole tree, the compilers a build tool started included. The file is the only handle it inherits. What the child leaves running when it exits on its own is not ended. A child that crashes ends at once, with its exception code on Windows (its job keeps the error-reporting dialog, and the seconds Windows spends reporting, away whatever error mode the parent has) and 128 plus the signal on POSIX. With `os.wait_any_timeout` this is a parallel runner in one thread: start N, wait for the first, kill whichever passes its deadline, read each one's file
+- `os.spawn_proc(prog, argv, env)` → `(int, string)` - Start without waiting. The first value is a reap token: the pid on POSIX, a handle-table key on Windows, so pass it back to the calls below rather than treating it as a pid. On Windows a token is never a pid: once reaped, `os.kill` and `os.wait_pid_timeout` report it gone rather than reaching whatever process has that number. A program that cannot start fails the spawn: token -1 and the reason
+- `os.spawn_proc_to(prog, argv, env, out_path)` → `(int, string)` - Start without waiting, the child's stdout and stderr written to the file `out_path` (created or truncated) and its stdin empty. The token works with every call below. The child runs in a Job Object of its own on Windows and leads a process group of its own on POSIX, so `os.kill(token, sig)` ends its whole tree, the compilers a build tool started included. The file is the only handle it inherits. What the child leaves running when it exits on its own is not ended. A child that crashes ends at once, with its exception code on Windows (its job keeps the error-reporting dialog, and the seconds Windows spends reporting, away whatever error mode the parent has) and 128 plus the signal on POSIX. With `os.wait_any_timeout` this is a parallel runner in one thread: start N, wait for the first, kill whichever passes its deadline, read each one's file. A program that cannot start fails the spawn, as for `spawn_proc`
 - `os.wait(token)` → `(int, string)` - Wait for one child: exit status, error
 - `os.wait_any(tokens)` → `(int, int, string)` - Wait for whichever of a list finishes first: its token, exit status, error. Box each token into the list with `mem.long_to_ptr(token)`
 - `os.wait_any_timeout(tokens, secs)` → `(int, int, int, string)` - The same with a deadline: token, status, `timed_out`, error. On a timeout the children keep running; `secs <= 0` waits indefinitely
 - `os.kill(pid, sig)` → `int` - Send a signal (numbers from [`std.signal`](#signal-numbers-stdsignal)); 0 on success. A negative pid signals the whole process group, and `sig == 0` only checks that the process exists. Windows has no catchable signals: any non-zero `sig` terminates, and there is no group form
 - `os.wait_pid_timeout(pid, secs)` → `(int, int, string)` - Wait at most `secs` for one child: status, `timed_out`, error. A child that times out is left running
-- `os.run_supervised(prog, argv, env, new_process_group, forward_signals, timeout_secs, reap_group)` → `(int, string)` - The whole job-control pattern in one call: the child in its own process group, Ctrl-C forwarded to it, a deadline (exit status 124, as GNU `timeout` reports), and anything it leaked cleaned up afterwards. The flags are 1 or 0; returns the exit status and an outcome of `"exited"`, `"signalled"`, `"timeout"` or `"error"`
-- `os.run_pipe(prog, argv, env)` → `(int, int, string)`, `os.wait_pid(pid)` → `(int, string)`, `os.run_pipe_drain_and_wait(prog, argv, env)` → `(string, int, string)` - Spawn with the [`std.ipc`](#child-to-parent-reports-stdipc) back-channel (POSIX only)
+- `os.run_supervised(prog, argv, env, new_process_group, forward_signals, timeout_secs, reap_group)` → `(int, string)` - The whole job-control pattern in one call: the child in its own process group, Ctrl-C forwarded to it, a deadline (exit status 124, as GNU `timeout` reports), and anything it leaked cleaned up afterwards. The flags are 1 or 0; returns the exit status and an outcome of `"exited"`, `"signalled"`, `"timeout"` or `"error"`, or -1 and the reason when the child could not start
+- `os.run_pipe(prog, argv, env)` → `(int, int, string)`, `os.wait_pid(pid)` → `(int, string)`, `os.run_pipe_drain_and_wait(prog, argv, env)` → `(string, int, string)` - Spawn with the [`std.ipc`](#child-to-parent-reports-stdipc) back-channel (POSIX only). A program that cannot start is an `err` with no child to reap; an explicit `env` is the child's whole environment, with `AETHER_IPC_FD=3` in place of any it gives
 - `os_execv(prog, argv_list)` → `int` - Replace this process (on Windows: run it, then exit with its status); listed with the argv accessors above
 - `os.chdir(path)` → `string`, `os.getcwd()` → `string` - The working directory; `chdir` returns `""` or an error
 - `os_which(name)` → `string` - The first match for `name` on `PATH`, or `""`
@@ -3516,9 +3527,9 @@ main() {
     io.print_int(42)
     io.print_line("")
 
-    // getenv is infallible, returns the value or null if unset
+    // getenv is infallible: the value, or null if unset, which reads as ""
     home = io.getenv("HOME")
-    if home != 0 {
+    if home != "" {
         io.print_line(home)
     }
 
@@ -3541,6 +3552,7 @@ main() {
 **Unbuffered fd writes (crash-trace use case):**
 - `io.stderr_write(data)` → `int` - Write `data` to fd 2 directly (length computed internally with `string.length`), bypassing stdio buffering. Returns the byte count actually written, or -1 on error. Loops on partial writes; retries `EINTR` on POSIX. Reach for this when output must reach the terminal / pipe before the process aborts, `println` and `io.print` are line-buffered on tty and block-buffered when piped, so the last few lines reliably get lost during a crash.
 - `io.stdout_write(data)` → `int` - Same shape as `stderr_write` but writes to fd 1. Useful for shell-pipe-friendly tools that need each record flushed before the next stage reads.
+- `io.is_terminal(fd)` → `bool` - Whether `fd` is a terminal a person reads (a console on Windows), not a pipe, a file or the null device. `io.is_terminal(1)` before colouring stdout; honour `NO_COLOR` and `FORCE_COLOR` too, as std.spec does. False for a descriptor that is not open, and in a build without a filesystem.
 
 **File-descriptor lifecycle and bulk fd I/O:**
 - `io.fd_open_read(path)` → `(int, string)` - Open `path` for reading (POSIX `O_RDONLY` / Win `_O_RDONLY | _O_BINARY`). Returns `(fd, "")` on success, `(-1, error)` on failure.
@@ -3736,7 +3748,8 @@ main() {
         return
     }
     println("in capability mode: ${capsicum.in_mode()}")
-    fs.file_close(log)
+    cerr = fs.close(log)
+    if cerr != "" { println("close: ${cerr}") }
 }
 ```
 
@@ -3824,7 +3837,7 @@ cooperative builds, pool sizing) is documented at the top of
   count, for hosts driving their own loop.
 
 ```aether,fragment
-lengths = worker.map(paths, |p: ptr| { return measure(p) })
+lengths = worker.map(paths, | p: ptr | { return measure(p) })
 ```
 
   **When it pays.** Dispatching and joining a batch costs a flat ~100 us

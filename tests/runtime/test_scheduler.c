@@ -1320,12 +1320,14 @@ void test_scheduler_actor_thread_parks_when_idle(void) {
 // #3102: a receive timeout armed on an actor that receives nothing fires, on
 // its core and on its own thread. Only a message stepped an actor before, so
 // on the scheduler threads the timeout never fired.
-// The step tests the deadline as a generated one does, and counts a firing.
+// The step tests the deadline as a generated one does, and counts a firing:
+// the interval stays, the firing disarms the countdown, and only a message
+// would arm it again (#3162), so each fires once.
 static void timeout_step(void* self) {
     CounterActor* a = (CounterActor*)self;
     if (a->timeout_ns > 0 && a->last_activity_ns > 0 &&
+        atomic_load_explicit(&a->mailbox.count, memory_order_relaxed) == 0 &&
         aether_now_ns() - a->last_activity_ns >= a->timeout_ns) {
-        a->timeout_ns = 0;
         a->last_activity_ns = 0;
         atomic_fetch_add(&a->count, 1);
         return;

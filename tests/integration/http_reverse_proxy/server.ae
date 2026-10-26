@@ -19,11 +19,6 @@ import std.http
 import std.http.proxy
 import std.os
 
-// Use raw form: actor receive handlers can't cleanly discard the
-// wrapper's string return without an unused-result warning.
-extern http_server_start_raw(server: ptr) -> int
-extern http_server_bind_raw(server: ptr, host: string, port: int) -> int
-extern http_server_port(server: ptr) -> int
 extern exit(code: int)
 
 // Upstream handlers ---------------------------------------------
@@ -105,7 +100,7 @@ handle_upstream_slow(req: ptr, res: ptr, ud: ptr) {
 message StartSrv { raw: ptr }
 actor SrvActor {
     state s = 0
-    receive { StartSrv(raw) -> { s = raw; http_server_start_raw(raw) } }
+    receive { StartSrv(raw) -> { s = raw; _ = http.server_start(raw) } }
 }
 
 run_server(srv: @keep ptr) {
@@ -131,11 +126,11 @@ run_upstream() {
     http.server_get(up, "/longheader", handle_upstream_longheader, 0)
     http.server_get(up, "/bigbody", handle_upstream_bigbody, 0)
     http.server_get(up, "/slow", handle_upstream_slow, 0)
-    if http_server_bind_raw(up, "127.0.0.1", 0) < 0 {
+    if http.server_bind(up, "127.0.0.1", 0) != "" {
         println("FAIL: upstream bind")
         exit(1)
     }
-    println("READY ${http_server_port(up)}")
+    println("READY ${http.server_port(up)}")
     run_server(up)
 }
 
@@ -155,11 +150,11 @@ run_proxy_tls(cert_path: string, key_path: string, upstream_port: string) {
     if ka != "" { println("FAIL: keepalive: ${ka}"); exit(1) }
     err = proxy.mount_simple(p, "/", "http://localhost:${upstream_port}", 30)
     if err != "" { println("FAIL: mount_simple: ${err}"); exit(1) }
-    if http_server_bind_raw(p, "127.0.0.1", 0) < 0 {
+    if http.server_bind(p, "127.0.0.1", 0) != "" {
         println("FAIL: proxy bind")
         exit(1)
     }
-    println("READY ${http_server_port(p)}")
+    println("READY ${http.server_port(p)}")
     run_server(p)
 }
 
@@ -174,11 +169,11 @@ run_proxy(timeout_sec: int, upstream_port: string) {
     if ka != "" { println("FAIL: keepalive: ${ka}"); exit(1) }
     err = proxy.mount_simple(p, "/", "http://localhost:${upstream_port}", timeout_sec)
     if err != "" { println("FAIL: mount_simple: ${err}"); exit(1) }
-    if http_server_bind_raw(p, "127.0.0.1", 0) < 0 {
+    if http.server_bind(p, "127.0.0.1", 0) != "" {
         println("FAIL: proxy bind")
         exit(1)
     }
-    println("READY ${http_server_port(p)}")
+    println("READY ${http.server_port(p)}")
     run_server(p)
 }
 

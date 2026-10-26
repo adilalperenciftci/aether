@@ -8,11 +8,11 @@ subject (`>=` to `<`, `==` to `!=`, a string literal to empty), and rerunning
 the suite. A mutant the tests still pass is a **survivor**: a change to the
 code that nothing objected to, which is a gap in the tests.
 
-Driven through the runnable front-end in `examples/mutation-testing/`
+Driven through the runnable front-end in `examples/06-tooling/02-mutation/`
 rather than called directly. There is no `ae mutate` subcommand yet:
 
 ```
-ae run examples/mutation-testing/mutate.ae -- <sut.ae> <test.ae> [lib_dir]
+ae run examples/06-tooling/02-mutation/mutate.ae -- <sut.ae> <test.ae> [lib_dir]
 ```
 
 `lib_dir` is where the test's `import` of the subject resolves; it defaults

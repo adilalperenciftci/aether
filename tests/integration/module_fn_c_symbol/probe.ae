@@ -1,0 +1,8 @@
+import tally
+import tally_c
+
+main() {
+    println(tally.count(2))
+    println(tally.total(3))
+    println("raw ${tally_c.tally_total(4)}")
+}

@@ -7,7 +7,9 @@ Aether's own `std` modules test themselves with it (every `std/<mod>/test_*.ae`
 is a `std.spec` suite), so the framework is exercised by the same runs that
 exercise the library.
 
-```aether
+A suite, and what it prints, a tick per passing case and a summary:
+
+```aether,run
 import std.spec
 
 main() {
@@ -25,20 +27,18 @@ main() {
     return spec.run_summary(fw)
 }
 ```
-
-It prints a green tick per passing case and a summary:
-
-```
+```output
 arithmetic
-  ✓ adds
-  ✓ multiplies
+    ✓ adds
+    ✓ multiplies
 
   2 passing
 ```
 
-(The block above is compiled but not run in CI: `std.spec` colours its
-output with ANSI escapes, which do not belong in an asserted `output`
-block.)
+On a terminal the ticks are green, a cross red and a skip yellow. Into a
+pipe or a file the output is plain text, as above; `NO_COLOR` (set and not
+empty) turns the colour off on a terminal too, and `FORCE_COLOR` turns it on
+for a pipe that renders it, `NO_COLOR` winning when both are set.
 
 `run_summary` **returns** the verdict (`0` all-green, `1` if anything failed),
 and you should `return` it from `main()`. A bare `main()` takes no return

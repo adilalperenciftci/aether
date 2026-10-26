@@ -1,0 +1,5 @@
+// Says neither how to run it nor what it belongs to.
+
+main() {
+    println("orphan")
+}

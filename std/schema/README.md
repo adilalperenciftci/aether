@@ -194,7 +194,7 @@ common contains/prefix/suffix cases without one):
 
 ```aether,fragment
 schema.field("even", schema.INT) {
-    schema.refine(|v: string| {
+    schema.refine(| v: string | {
         n, _ = to_int(v)
         if n % 2 == 0 { return 1 }
         return 0

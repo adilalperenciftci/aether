@@ -3,7 +3,8 @@
  * allocated and a slot taken in its core's table. This drives a server in
  * that mode over loopback (fresh connections, keep-alive connections, peers
  * that close without sending, garbage requests) and reports how many actors
- * the scheduler holds during and after. */
+ * the scheduler holds during and after. It also checks that the stop closes
+ * a connection still waiting for its first bytes (#3204). */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,6 +25,7 @@ int http_actor_release_probe(void) {
 #else
 
 #include <arpa/inet.h>
+#include <errno.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -192,15 +194,33 @@ int http_actor_release_probe(void) {
         sleep_ms(10);
     }
 
+    /* A client that connects and sends nothing waits in the accept poller
+     * until its first bytes come. The stop closes it (#3204): it was left
+     * open with no owner, and the client read nothing until its own
+     * timeout. */
+    int silent = connect_loopback(port);
+    sleep_ms(200);   /* the accept loop takes it and parks it */
+
     http_server_stop(g_server);
     sleep_ms(100);
 
+    int silent_closed = 0;
+    if (silent >= 0) {
+        struct timeval tv = {3, 0};
+        setsockopt(silent, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        char b;
+        ssize_t n = recv(silent, &b, 1, 0);
+        silent_closed = n == 0 || (n < 0 && errno == ECONNRESET);
+        close(silent);
+    }
+
     printf("requests=%d answered=%d max_extra_actors=%d extra_registered_after=%d "
-           "extra_live_after=%d released_not_freed=%d\n",
+           "extra_live_after=%d released_not_freed=%d silent_closed_at_stop=%d\n",
            requests, answered, max_extra, registered_after - registered_before,
-           live_after - live_before, pending);
+           live_after - live_before, pending, silent_closed);
     if (answered == requests && max_extra <= 16 &&
-        registered_after == registered_before && live_after == live_before && pending == 0) {
+        registered_after == registered_before && live_after == live_before && pending == 0 &&
+        silent_closed) {
         printf("http_actor_mode_release passed\n");
     }
     return 0;

@@ -165,7 +165,7 @@ ae build src/main.ae --quick   # iteration-shape, -O0 -g
 
 `--quick` typically halves the gcc step on small programs, at the cost of unoptimised codegen. `ae run` already uses `-O0` regardless, since cache hits dominate over a single optimised compile.
 
-A program should behave the same at both levels. `make test-ae-opt-diff` checks that for the whole `.ae` test corpus: it builds every program `make test-ae` builds with `ae build` and with `ae build --quick`, runs both, and fails on any difference in stdout or exit code. See [differential-testing.md](differential-testing.md#optimisation-levels--o0-against--o2).
+A program should behave the same at both levels. `make test-ae-opt-diff` checks that for the whole `.ae` test corpus: it builds every program `make test-ae` builds with `ae build` and with `ae build --quick`, runs both, and fails on any difference in stdout or exit code. See [differential-testing.md](differential-testing.md#optimisation-levels--o0-against--o2). `make test-ubsan` runs the same corpus, and the C unit tests, with everything under UBSan ([differential-testing.md](differential-testing.md#undefined-behaviour-the-corpus-under-ubsan)).
 
 ### `--profile` for sampling profilers
 
@@ -252,7 +252,9 @@ When the positional argument doesn't exist as a file, `ae` checks `aether.toml`'
 
 If you run `ae build` from a subdirectory and there's no `aether.toml` in the current directory, `ae` walks up the directory tree looking for one. When it finds an ancestor `aether.toml`, it switches to that directory before resolving paths, so `cd src && ae build main.ae` works as if you had run `ae build src/main.ae` from the project root, and `extra_sources`, `[build] defines`, `cflags` and `link_flags` declared in the toml are still applied. The paths *you* typed keep meaning what they meant where you typed them: a relative `--extra shim.c` and a relative `-o app` resolve against the directory you ran the command from, as `cc -o` does. Walk-up only happens when there's no toml in the current directory; a project with a local `aether.toml` always wins, and the walk stops at a repository boundary (a `.git`), so a checkout with no manifest never adopts an unrelated ancestor's.
 
-`ae run`, `ae check`, `ae test` and `ae inspect` find the manifest the same way but do **not** change directory (#2148): under `ae run` the process cwd is also the cwd the program starts in, so a script reading `./data.txt` from `src/` keeps reading `src/data.txt`. They read the manifest where it is; a path the manifest states relative to itself (a `[[bin]] path`, an `extra_sources` entry, the project-mode `src/main.ae`) is resolved from the directory you ran the command in. `cflags` and `link_flags` are passed verbatim, so a relative `-I` in them is relative to wherever the compile runs (`ae build` runs it from the project root).
+`ae run` and `ae check` walk up the same way and compile from the project root too (#3181), so `import greet` finds the project's `lib/greet` from any of its directories. `ae run` goes back before the program starts: the process cwd is also the cwd the program starts in (#2148), so a script reading `./data.txt` from `src/` keeps reading `src/data.txt`. A relative `--lib` you typed is re-based like `--extra` and `-o`. `ae test` and `ae inspect` find the manifest the same way but do **not** change directory: they read it where it is, and a path the manifest states relative to itself (a `[[bin]] path`, an `extra_sources` entry, the project-mode `src/main.ae`) is resolved from the directory you ran the command in. `cflags` and `link_flags` are passed verbatim, so a relative `-I` in them is relative to wherever the compile runs (`ae build`, `ae run` and `ae check` run it from the project root).
+
+A project can also be named: `ae run app/` and `ae build app/` build `app/src/main.ae` from `app/`, exactly as the same command typed in `app/` does, its `lib/`, `src/` and `aether.toml` included, while the paths you typed (`-o`, `--extra`, `--lib`) and, for `ae run`, the program's working directory stay where you are.
 
 ---
 
@@ -586,8 +588,9 @@ straight through the wrapper.
 
 Layer an extra exclusion list onto a sweep with
 `make test-ae AE_SWEEP_EXTRA_PRUNE=<file>` (applies to both the `.ae` and
-`.sh` sweeps, and to `make test-ae-opt-diff`, which reads the same list of
-`.ae` programs from `tests/scripts/ae_sweep_list.sh`).
+`.sh` sweeps, to `make test-ae-opt-diff`, which reads the same list of
+`.ae` programs from `tests/scripts/ae_sweep_list.sh`, and to `make
+test-ubsan`, whose sweep is `test-ae` itself).
 
 The sweep ends with its timings, just above the `Aether Tests:` line: the
 build and run time summed over the `.ae` tests, the shell tests' time, and
@@ -595,6 +598,17 @@ the slowest of each (`AE_SWEEP_TIMING_TOP`, default 10). The sums add up
 wall time across the parallel jobs, so they measure work rather than the
 sweep's elapsed time, and a test or a toolchain step that got slower shows
 in the log of the run that made it slower (#2673).
+
+The sweep passes only on a complete tally. It writes the tally to
+`build/test-ae.verdict` with the number of tests it listed, and a last step
+of its own (`tests/scripts/sweep_verdict.sh`) passes it only with no failure
+and a report from every listed test. A listed test that left no PASS, FAIL
+or SKIP marker is named under `=== TESTS THAT NEVER REPORTED ===` and in
+`build/test-ae.unreported`, and fails the sweep. On a Windows machine that
+stopped starting processes mid-sweep, most of the shell tests never ran,
+the sweep's `xargs` still returned 0, and the sweep counted only what had
+reported; an earlier sweep stopped before its tally and `make` still
+exited 0 (#3111).
 
 **Wine and the Windows lanes.** `.github/workflows/windows.yml` has two
 shapes of Windows coverage from a Linux runner. `windows-cross` cross-builds

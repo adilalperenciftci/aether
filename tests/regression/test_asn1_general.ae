@@ -149,7 +149,7 @@ main() {
     bytes.set(oct_bytes, 1, 0xCD)
     oct_enc = asn1.encode_octet_string(oct_bytes)
     bytes.free(oct_bytes)
-    list_add_raw(elements, oct_enc)
+    _ = list.add(elements, oct_enc)
 
     // 2. BitString (tag 0x03)
     bit_bytes = bytes.new(2)
@@ -157,17 +157,17 @@ main() {
     bytes.set(bit_bytes, 1, 0x34)
     bit_enc = asn1.encode_bit_string(bit_bytes, 0)
     bytes.free(bit_bytes)
-    list_add_raw(elements, bit_enc)
+    _ = list.add(elements, bit_enc)
 
     // 3. Integer (tag 0x02)
     val = bignum.from_int(100)
     int_enc = asn1.encode_integer(val)
     bignum.free(val)
-    list_add_raw(elements, int_enc)
+    _ = list.add(elements, int_enc)
 
     // 4. Boolean (tag 0x01)
     bool_enc = asn1.encode_boolean(1)
-    list_add_raw(elements, bool_enc)
+    _ = list.add(elements, bool_enc)
 
     // Encode set
     set_enc = asn1.encode_set(elements)

@@ -35,7 +35,7 @@ main() {
         print("FAIL open: ${ferr}\n"); exit(1)
     }
     terr = fs.ftruncate(f, big)
-    file_close(f)
+    _ = fs.close(f)
     if terr != "" {
         // A filesystem that refuses a 2 GiB sparse extend (FAT32 tmp
         // dir, quota'd CI) is an environment limit, not a regression.

@@ -17,6 +17,7 @@
 #ifdef _WIN32
     #include <io.h>
     #include <windows.h>
+    #include <direct.h>    // _getcwd, for the unresolved-import message (#3181)
     #define access _access
     #define F_OK 0
 #else
@@ -303,6 +304,12 @@ void module_registry_init(void) {
         global_module_registry->module_count = 0;
         global_module_registry->module_capacity = 0;
         global_module_registry->source_dir = NULL;
+        /* #3181: the entry program's imports are resolved first, so this
+         * starts at 0. It was left as malloc gave it: where that was not
+         * zero, the entry program's imports looked beside it before the
+         * project's lib/ (the order #3103 keeps for a module's own), and a
+         * missing one was reported as "beside this module". */
+        global_module_registry->source_is_module = 0;
         global_module_registry->lib_dir_count = 0;
         const char* env_lib = getenv("AETHER_LIB_DIR");
         if (env_lib && env_lib[0]) {
@@ -1421,7 +1428,8 @@ static ASTNode* module_parse_source(const char* file_path, char* source) {
      * block" there instead. */
     Token* last = tokens[token_count - 1];
     if (last->type == TOKEN_ERROR) {
-        aether_error_with_code(last->value, last->line, last->column, AETHER_ERR_SYNTAX);
+        aether_error_full(last->value, last->line, last->column,
+                          lexer_error_help(last->value), NULL, AETHER_ERR_SYNTAX);
         aether_error_set_source(saved_err_filename, saved_err_source);
         free_tokens(tokens, token_count);
         lexer_restore(&saved);
@@ -1563,17 +1571,73 @@ static int import_is_compiler_builtin(const char* name) {
     return 0;
 }
 
+/* Append `text` to a message, cut at its end rather than overrunning it. */
+static void msg_append(char* msg, size_t size, const char* text) {
+    size_t used = strlen(msg);
+    if (!text || used + 1 >= size) return;
+    snprintf(msg + used, size - used, "%s", text);
+}
+
+/* Append a searched directory to the message, as an absolute path: `dir`
+ * itself when it is one, else `dir` under `here`, the directory the compile
+ * ran in. Then `note` (" (beside this module)", or ""), and a comma. */
+static void msg_append_dir(char* msg, size_t size, const char* here, const char* dir,
+                           const char* note) {
+    /* Without the trailing slash source_dir keeps. */
+    char bare[1024];
+    snprintf(bare, sizeof(bare), "%s", dir);
+    size_t n = strlen(bare);
+    while (n > 1 && (bare[n - 1] == '/' || bare[n - 1] == '\\')) bare[--n] = '\0';
+    int absolute = bare[0] == '/' || bare[0] == '\\' || (bare[0] && bare[1] == ':');
+    if (!absolute) {
+        msg_append(msg, size, here);
+        if (strcmp(bare, ".") != 0) {
+            msg_append(msg, size, "/");
+            msg_append(msg, size, bare);
+        }
+    } else {
+        msg_append(msg, size, bare);
+    }
+    msg_append(msg, size, note);
+    msg_append(msg, size, ", ");
+}
+
 static void report_unresolved_import(ASTNode* import_node) {
     const char* name = import_node && import_node->value ? import_node->value : "?";
     if (import_is_compiler_builtin(name)) return;
-    char msg[512];
-    const char* roots =
-        strncmp(name, "std.", 4) == 0     ? "the standard library" :
-        strncmp(name, "contrib.", 8) == 0 ? "contrib" :
-                                            "src/, the project root, and installed packages";
-    snprintf(msg, sizeof(msg),
-             "unresolved import '%s': no module of that name was found in %s",
-             name, roots);
+    char msg[2048];
+    if (strncmp(name, "std.", 4) == 0 || strncmp(name, "contrib.", 8) == 0) {
+        snprintf(msg, sizeof(msg),
+                 "unresolved import '%s': no module of that name was found in %s", name,
+                 name[0] == 's' ? "the standard library" : "contrib");
+    } else {
+        /* #3181: the directories module_resolve_local_path tried, in its
+         * order, each spelt in full. "src/, the project root" said nothing
+         * of where that root was, so a search made from the wrong directory
+         * (`ae run app/` from outside app/ compiled from the caller's) read
+         * as a module that does not exist. */
+        char here[1024];
+#ifdef _WIN32
+        if (!_getcwd(here, (int)sizeof(here))) snprintf(here, sizeof(here), ".");
+#else
+        if (!getcwd(here, sizeof(here))) snprintf(here, sizeof(here), ".");
+#endif
+        for (char* q = here; *q; q++) if (*q == '\\') *q = '/';
+        snprintf(msg, sizeof(msg),
+                 "unresolved import '%s': no module of that name was found in ", name);
+        const char* src_dir = global_module_registry ? global_module_registry->source_dir : NULL;
+        int has_src_dir = src_dir && src_dir[0];
+        int beside_first = global_module_registry && global_module_registry->source_is_module;
+        if (beside_first && has_src_dir)
+            msg_append_dir(msg, sizeof(msg), here, src_dir, " (beside this module)");
+        for (int i = 0; global_module_registry && i < global_module_registry->lib_dir_count; i++)
+            msg_append_dir(msg, sizeof(msg), here, global_module_registry->lib_dirs[i], "");
+        msg_append_dir(msg, sizeof(msg), here, "src", "");
+        msg_append_dir(msg, sizeof(msg), here, ".", " (where the compile ran)");
+        if (!beside_first && has_src_dir)
+            msg_append_dir(msg, sizeof(msg), here, src_dir, " (beside the importing file)");
+        msg_append(msg, sizeof(msg), "and the installed packages");
+    }
     aether_error_simple(msg, import_node ? import_node->line : 0,
                         import_node ? import_node->column : 0);
 }
@@ -2488,8 +2552,9 @@ static int module_has_extern_named(ASTNode* mod_ast, const char* name) {
 
 /* #2978: the C name the merge gives function (or builder) `name` of the
  * module `mod_ast`, whose namespace is `ns`: `<ns>_<name>`, the spelling C
- * uses for its own functions, unless the module declares a bare extern of
- * that name. Then it is `ae_<ns>_<name>`, a spelling no C symbol uses.
+ * uses for its own functions, unless the module declares an extern of that
+ * name, or an extern of the build binds that C symbol (c_symbol_bound_by_extern).
+ * Then it is `ae_<ns>_<name>`, a spelling no C symbol uses.
  *
  * A module like contrib.aether_ui has both
  *     extern aether_ui_app_create(...) -> int                 // the C name
@@ -2516,10 +2581,49 @@ static int module_defines_function(ASTNode* mod_ast, const char* name) {
     return 0;
 }
 
+/* Does `decl`, an extern, bind the C symbol `sym`? A bare extern binds its
+ * own name; `@extern("c_name") name(...)` binds c_name (its annotation,
+ * `c_symbol:c_name` with an optional `;varargs`). */
+static int extern_binds_c_symbol(const ASTNode* decl, const char* sym) {
+    if (!decl || decl->type != AST_EXTERN_FUNCTION || !decl->value) return 0;
+    if (decl->annotation && strncmp(decl->annotation, "c_symbol:", 9) == 0) {
+        const char* s = decl->annotation + 9;
+        const char* semi = strchr(s, ';');
+        size_t n = semi ? (size_t)(semi - s) : strlen(s);
+        return strlen(sym) == n && strncmp(s, sym, n) == 0;
+    }
+    return strcmp(decl->value, sym) == 0;
+}
+
+static int ast_binds_c_symbol(const ASTNode* mod_ast, const char* sym) {
+    if (!mod_ast) return 0;
+    for (int i = 0; i < mod_ast->child_count; i++) {
+        if (extern_binds_c_symbol(unwrap_export(mod_ast->children[i]), sym)) return 1;
+    }
+    return 0;
+}
+
+/* Is the C symbol `sym` one an extern of the build binds: the module's own
+ * (bare, or through `@extern("sym")`), or another loaded module's? Then a
+ * function of the module cannot have it as its C name. std.file's `close`
+ * as `file_close` beside std.fs's `extern file_close` was two conflicting
+ * declarations of one C function, a C compile error. */
+static int c_symbol_bound_by_extern(ASTNode* mod_ast, const char* sym) {
+    if (ast_binds_c_symbol(mod_ast, sym)) return 1;
+    ModuleRegistry* reg = global_module_registry;
+    if (!reg) return 0;
+    for (int i = 0; i < reg->module_count; i++) {
+        AetherModule* m = reg->modules[i];
+        if (m && m->ast != mod_ast && ast_binds_c_symbol(m->ast, sym)) return 1;
+    }
+    return 0;
+}
+
 static void merged_function_name(const char* ns, ASTNode* mod_ast, const char* name,
                                  char* buf, size_t cap) {
     snprintf(buf, cap, "%s_%s", ns, name);
-    if (module_has_extern_named(mod_ast, buf) && module_defines_function(mod_ast, name))
+    if (module_defines_function(mod_ast, name) &&
+        (module_has_extern_named(mod_ast, buf) || c_symbol_bound_by_extern(mod_ast, buf)))
         snprintf(buf, cap, "ae_%s_%s", ns, name);
 }
 

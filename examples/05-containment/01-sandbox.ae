@@ -1,0 +1,109 @@
+// The sandbox: run code under a list of grants.
+//
+// `sandbox.new(name) { ... }` builds a grant list in its trailing block,
+// one call per thing allowed: `grant_fs_read(pattern)`, `grant_fs_write`,
+// `grant_env`, `grant_exec`, `grant_tcp`, `grant_all`. A pattern is exact,
+// a prefix ("dir/*") or a suffix ("*.internal"), and a list with no grants
+// allows nothing. `sandbox.enforce(grants) callback { ... }` runs the
+// block with the grants in force: every file, environment, process and
+// network call std makes in it, and in everything it calls, is checked,
+// and a call they do not allow fails the way it fails anyway, as a file
+// that cannot be read or a variable that is not set. The contained code
+// below is plain std calls; it cannot tell a refusal from a missing file.
+// Release the list with `sandbox.free`.
+//
+// This layer checks std's own calls, on every platform. A child process
+// is held to grants at its libc calls on Linux (04-spawn-sandboxed.ae),
+// and FreeBSD's kernel can lock a process down (05-capsicum.ae).
+//
+// Run: ae run examples/05-containment/01-sandbox.ae
+// See: docs/containment-sandbox.md
+
+import std.fs
+import std.os
+import std.sandbox
+
+// The contained code: what it does, and whether it could.
+try_read(dir: string, name: string) {
+    text, err = fs.read(fs.join_clean(dir, name))
+    if err == "" {
+        println("  read ${name}: ${text}")
+    } else {
+        println("  read ${name}: refused")
+    }
+}
+
+try_write(dir: string, name: string) {
+    err = fs.write(fs.join_clean(dir, name), "done")
+    if err == "" {
+        println("  write ${name}: written")
+    } else {
+        println("  write ${name}: refused")
+    }
+}
+
+try_env(name: string) {
+    value = os.getenv(name)
+    if value != "" {
+        println("  env ${name}: ${value}")
+    } else {
+        println("  env ${name}: not set")
+    }
+}
+
+main() {
+    dir, err = fs.make_temp_dir("", "aether-sandbox-")
+    if err != "" {
+        println("no temp dir: ${err}")
+        exit(1)
+    }
+    defer fs.remove_tree(dir)
+    fs.write(fs.join_clean(dir, "config.txt"), "port=8080")
+    fs.write(fs.join_clean(dir, "secret.txt"), "hunter2")
+    fs.mkdir_p(fs.join_clean(dir, "out"))
+    os.setenv("APP_MODE", "production")
+    os.setenv("APP_TOKEN", "s3cr3t")
+
+    // A report worker: it reads its config, writes under out/, and knows
+    // which mode it runs in. Nothing else.
+    worker = sandbox.new("report-worker") {
+        grant_fs_read("${dir}/config.txt")
+        grant_fs_write("${dir}/out/*")
+        grant_env("APP_MODE")
+    }
+    defer sandbox.free(worker)
+
+    println("without a sandbox:")
+    try_read(dir, "secret.txt")
+    try_env("APP_TOKEN")
+
+    println("as report-worker:")
+    sandbox.enforce(worker) callback {
+        try_read(dir, "config.txt")
+        try_read(dir, "secret.txt")
+        try_write(dir, "out/report.txt")
+        try_write(dir, "config.txt")
+        try_env("APP_MODE")
+        try_env("APP_TOKEN")
+    }
+
+    // The grants end with the block.
+    println("after it:")
+    try_read(dir, "out/report.txt")
+    try_read(dir, "config.txt")
+}
+
+// Output:
+// without a sandbox:
+//   read secret.txt: hunter2
+//   env APP_TOKEN: s3cr3t
+// as report-worker:
+//   read config.txt: port=8080
+//   read secret.txt: refused
+//   write out/report.txt: written
+//   write config.txt: refused
+//   env APP_MODE: production
+//   env APP_TOKEN: not set
+// after it:
+//   read out/report.txt: done
+//   read config.txt: port=8080

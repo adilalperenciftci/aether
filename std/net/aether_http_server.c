@@ -35,6 +35,79 @@ static void handle_h2_connection(struct HttpServer* server, HttpConn* conn,
 static int conn_buffered_is_h2_preface(HttpConn* conn);
 #endif
 
+/* The reason phrase the IANA status code registry (RFC 9110 section 15)
+ * gives a code, or "" for a code it does not register. A status line may
+ * carry an empty phrase (RFC 9112 section 4), so the server and the proxy
+ * write that rather than a phrase nobody registered, and the client names a
+ * failed status with it. No sockets involved, so it is the same table with or
+ * without networking. */
+const char* http_status_text(int code) {
+    switch (code) {
+        case 100: return "Continue";
+        case 101: return "Switching Protocols";
+        case 102: return "Processing";
+        case 103: return "Early Hints";
+        case 200: return "OK";
+        case 201: return "Created";
+        case 202: return "Accepted";
+        case 203: return "Non-Authoritative Information";
+        case 204: return "No Content";
+        case 205: return "Reset Content";
+        case 206: return "Partial Content";
+        case 207: return "Multi-Status";
+        case 208: return "Already Reported";
+        case 226: return "IM Used";
+        case 300: return "Multiple Choices";
+        case 301: return "Moved Permanently";
+        case 302: return "Found";
+        case 303: return "See Other";
+        case 304: return "Not Modified";
+        case 305: return "Use Proxy";
+        case 307: return "Temporary Redirect";
+        case 308: return "Permanent Redirect";
+        case 400: return "Bad Request";
+        case 401: return "Unauthorized";
+        case 402: return "Payment Required";
+        case 403: return "Forbidden";
+        case 404: return "Not Found";
+        case 405: return "Method Not Allowed";
+        case 406: return "Not Acceptable";
+        case 407: return "Proxy Authentication Required";
+        case 408: return "Request Timeout";
+        case 409: return "Conflict";
+        case 410: return "Gone";
+        case 411: return "Length Required";
+        case 412: return "Precondition Failed";
+        case 413: return "Content Too Large";
+        case 414: return "URI Too Long";
+        case 415: return "Unsupported Media Type";
+        case 416: return "Range Not Satisfiable";
+        case 417: return "Expectation Failed";
+        case 421: return "Misdirected Request";
+        case 422: return "Unprocessable Content";
+        case 423: return "Locked";
+        case 424: return "Failed Dependency";
+        case 425: return "Too Early";
+        case 426: return "Upgrade Required";
+        case 428: return "Precondition Required";
+        case 429: return "Too Many Requests";
+        case 431: return "Request Header Fields Too Large";
+        case 451: return "Unavailable For Legal Reasons";
+        case 500: return "Internal Server Error";
+        case 501: return "Not Implemented";
+        case 502: return "Bad Gateway";
+        case 503: return "Service Unavailable";
+        case 504: return "Gateway Timeout";
+        case 505: return "HTTP Version Not Supported";
+        case 506: return "Variant Also Negotiates";
+        case 507: return "Insufficient Storage";
+        case 508: return "Loop Detected";
+        case 510: return "Not Extended";
+        case 511: return "Network Authentication Required";
+        default: return "";
+    }
+}
+
 #if !AETHER_HAS_NETWORKING
 // Stubs when networking is unavailable
 HttpServer* http_server_create(int p) { (void)p; return NULL; }
@@ -55,6 +128,9 @@ const char* http_server_set_tls_raw(HttpServer* s, const char* c, const char* k)
 }
 const char* http_server_set_h2_raw(HttpServer* s, int m) {
     (void)s; (void)m; return "HTTP/2 unavailable: networking not built in";
+}
+const char* http_server_set_multi_accept_raw(HttpServer* s, int on) {
+    (void)s; (void)on; return "multi-accept unavailable: networking not built in";
 }
 const char* http_server_set_h2_concurrent_dispatch_raw(HttpServer* s, int n) {
     (void)s; (void)n; return "HTTP/2 unavailable: networking not built in";
@@ -112,8 +188,15 @@ void http_server_post(HttpServer* s, const char* p, HttpHandler h, void* u) { (v
 void http_server_put(HttpServer* s, const char* p, HttpHandler h, void* u) { (void)s; (void)p; (void)h; (void)u; }
 void http_server_delete(HttpServer* s, const char* p, HttpHandler h, void* u) { (void)s; (void)p; (void)h; (void)u; }
 void http_server_use_middleware(HttpServer* s, HttpMiddleware m, void* u) { (void)s; (void)m; (void)u; }
+void http_server_use_middleware_owned(HttpServer* s, HttpMiddleware m, void* u, void (*r)(void*)) {
+    (void)s; (void)m; (void)u; (void)r;
+}
 void http_server_use_response_transformer(HttpServer* s, HttpResponseTransformer x, void* u) {
     (void)s; (void)x; (void)u;
+}
+void http_server_use_response_transformer_owned(HttpServer* s, HttpResponseTransformer x, void* u,
+                                                void (*r)(void*)) {
+    (void)s; (void)x; (void)u; (void)r;
 }
 HttpRequest* http_parse_request(const char* r) { (void)r; return NULL; }
 const char* http_get_header(HttpRequest* r, const char* k) { (void)r; (void)k; return NULL; }
@@ -133,7 +216,6 @@ void* http_response_accept_tunnel(HttpServerResponse* r) { (void)r; return NULL;
 char* http_response_serialize(HttpServerResponse* r) { (void)r; return NULL; }
 void http_server_response_free(HttpServerResponse* r) { (void)r; }
 int http_route_matches(const char* p, const char* u, HttpRequest* r) { (void)p; (void)u; (void)r; return 0; }
-const char* http_status_text(int c) { (void)c; return "Unknown"; }
 const char* http_mime_type(const char* p) { (void)p; return "application/octet-stream"; }
 void http_serve_file(HttpServerResponse* r, const char* f) { (void)r; (void)f; }
 void http_serve_static(HttpRequest* r, HttpServerResponse* s, void* d) { (void)r; (void)s; (void)d; }
@@ -216,6 +298,18 @@ const char* http_request_header_value(HttpRequest* r, int i) { (void)r; (void)i;
 #define AE_SEND_NOSIGNAL MSG_NOSIGNAL
 #else
 #define AE_SEND_NOSIGNAL 0
+#endif
+
+/* The socket option under which the kernel spreads incoming connections
+ * across the listeners bound to one port, which multi-accept is for
+ * (#3194): SO_REUSEPORT on Linux and DragonFly, SO_REUSEPORT_LB on FreeBSD,
+ * where nginx's reuseport works too. macOS, OpenBSD and NetBSD have
+ * SO_REUSEPORT without the spreading, so one listener would take every
+ * connection; multi-accept is refused there, as on Windows. */
+#if (defined(__linux__) || defined(__DragonFly__)) && defined(SO_REUSEPORT)
+#define AETHER_REUSEPORT_LB SO_REUSEPORT
+#elif defined(__FreeBSD__) && defined(SO_REUSEPORT_LB)
+#define AETHER_REUSEPORT_LB SO_REUSEPORT_LB
 #endif
 
 // -----------------------------------------------------------------------------
@@ -1003,6 +1097,21 @@ HttpServer* http_server_create(int port) {
     server->ws_routes = NULL;
 
     return server;
+}
+
+/* Multi-accept (#3194). It used to be a bare struct field nothing could set
+ * from Aether or the header. */
+const char* http_server_set_multi_accept_raw(HttpServer* server, int on) {
+    if (!server) return "server is null";
+#ifndef AETHER_REUSEPORT_LB
+    (void)on;
+    return "multi-accept needs a kernel that spreads connections across SO_REUSEPORT "
+           "listeners (Linux, DragonFly, or FreeBSD's SO_REUSEPORT_LB), which this platform "
+           "does not have";
+#else
+    server->multi_accept = on ? 1 : 0;
+    return "";
+#endif
 }
 
 const char* http_server_set_keepalive_raw(HttpServer* server,
@@ -2389,16 +2498,29 @@ int http_response_get_status(HttpServerResponse* res) {
  * than being told, so a server that does not proxy simply has none and the
  * driver is not used.
  */
-int http_server_has_response_transformer(HttpServer* server) {
-    return server && server->response_transformer_chain != NULL;
-}
-
 void* http_server_proxy_opts(HttpServer* server) {
     if (!server) return NULL;
     for (HttpMiddlewareNode* n = server->middleware_chain; n; n = n->next) {
         if (n->middleware == aether_middleware_reverse_proxy) return n->user_data;
     }
     return NULL;
+}
+
+/* May the proxy event loop serve this server's connections? It runs the
+ * proxy exchange alone, so only where that is all a proxied request gets
+ * on the worker path: the proxy is the chain's first middleware, and no
+ * request hook is registered. For a chain with use_real_ip, a rate limiter
+ * or basic auth ahead of the proxy the loop skipped them, and a proxied
+ * request went past the auth on Linux (#3203); the access log and metrics,
+ * which observe every response (run_request_hooks), were skipped the same
+ * way (#3213). Response transformers are the route handler's and do not
+ * touch a proxied response on either path. Middleware after the proxy sees
+ * only what the proxy passes on, which the loop hands back to the worker
+ * path. */
+int http_server_evloop_serves(HttpServer* server) {
+    return server && server->middleware_chain &&
+           server->middleware_chain->middleware == aether_middleware_reverse_proxy &&
+           !server->request_hook_chain;
 }
 
 void http_response_set_header(HttpServerResponse* res, const char* key, const char* value) {
@@ -2709,22 +2831,6 @@ void http_server_response_free(HttpServerResponse* res) {
     free(res);
 }
 
-const char* http_status_text(int code) {
-    switch (code) {
-        case 200: return "OK";
-        case 201: return "Created";
-        case 204: return "No Content";
-        case 400: return "Bad Request";
-        case 401: return "Unauthorized";
-        case 403: return "Forbidden";
-        case 404: return "Not Found";
-        case 500: return "Internal Server Error";
-        case 502: return "Bad Gateway";
-        case 503: return "Service Unavailable";
-        default: return "Unknown";
-    }
-}
-
 // Routing
 void http_server_add_route(HttpServer* server, const char* method, const char* path, HttpHandler handler, void* user_data) {
     HttpRoute* route = (HttpRoute*)malloc(sizeof(HttpRoute));
@@ -2762,11 +2868,21 @@ void http_server_delete(HttpServer* server, const char* path, HttpHandler handle
 }
 
 void http_server_use_middleware(HttpServer* server, HttpMiddleware middleware, void* user_data) {
+    http_server_use_middleware_owned(server, middleware, user_data, NULL);
+}
+
+void http_server_use_middleware_owned(HttpServer* server, HttpMiddleware middleware,
+                                      void* user_data, void (*release)(void*)) {
     HttpMiddlewareNode* node = (HttpMiddlewareNode*)malloc(sizeof(HttpMiddlewareNode));
-    if (!node) return;
+    if (!node) {
+        /* Not installed: what it would have owned goes now. */
+        if (release && user_data) release(user_data);
+        return;
+    }
     node->middleware = middleware;
     node->user_data = user_data;
     node->next = NULL;
+    node->release = release;
     /* Append to the end of the chain so registration order matches
      * execution order — what every HTTP framework does, what the
      * std.http.middleware factories assume, and what the
@@ -2791,6 +2907,7 @@ struct HttpResponseTransformerNode {
     HttpResponseTransformer xform;
     void* user_data;
     struct HttpResponseTransformerNode* next;
+    void (*release)(void*);   /* run on user_data by http_server_free (#3191) */
 };
 
 /* Per-request observation hook chain node (#260 Tier 3 F1/F2). */
@@ -4014,12 +4131,24 @@ void http_server_use_request_hook(HttpServer* server,
 void http_server_use_response_transformer(HttpServer* server,
                                           HttpResponseTransformer xform,
                                           void* user_data) {
-    if (!server || !xform) return;
-    struct HttpResponseTransformerNode* node =
-        (struct HttpResponseTransformerNode*)malloc(sizeof(*node));
+    http_server_use_response_transformer_owned(server, xform, user_data, NULL);
+}
+
+void http_server_use_response_transformer_owned(HttpServer* server,
+                                                HttpResponseTransformer xform,
+                                                void* user_data,
+                                                void (*release)(void*)) {
+    struct HttpResponseTransformerNode* node = (server && xform)
+        ? (struct HttpResponseTransformerNode*)malloc(sizeof(*node)) : NULL;
+    if (!node) {
+        /* Not installed: what it would have owned goes now. */
+        if (release && user_data) release(user_data);
+        return;
+    }
     node->xform = xform;
     node->user_data = user_data;
     node->next = NULL;
+    node->release = release;
     if (!server->response_transformer_chain) {
         server->response_transformer_chain = node;
     } else {
@@ -4342,51 +4471,100 @@ static int conn_recv_timed_out(void) {
  *
  * Not thread-safe by design: an HttpConn is owned by one worker at a
  * time. Parking hands it between workers, but never concurrently. */
+/* One end of socket `fd` as text and port: the peer (getpeername) when
+ * `peer`, else the local end (getsockname). "" and 0 when the lookup fails
+ * or the family is neither IPv4 nor IPv6 (a Unix-domain socket). */
+static void fd_end_text(int fd, int peer, char* buf, size_t cap, int* port) {
+    buf[0] = '\0';
+    *port = 0;
+    if (fd < 0) return;
+    struct sockaddr_storage ss;
+    socklen_t sslen = sizeof(ss);
+    int rc = peer ? getpeername(fd, (struct sockaddr*)&ss, &sslen)
+                  : getsockname(fd, (struct sockaddr*)&ss, &sslen);
+    if (rc != 0) return;
+    aether_addr_unmap(&ss);   /* an IPv4 client of a "::" listener */
+    const char* src = NULL;
+    if (ss.ss_family == AF_INET) {
+        struct sockaddr_in* sa = (struct sockaddr_in*)&ss;
+        src = inet_ntop(AF_INET, &sa->sin_addr, buf, cap);
+        *port = ntohs(sa->sin_port);
+    } else if (ss.ss_family == AF_INET6) {
+        struct sockaddr_in6* sa = (struct sockaddr_in6*)&ss;
+        src = inet_ntop(AF_INET6, &sa->sin6_addr, buf, cap);
+        *port = ntohs(sa->sin6_port);
+    }
+    if (!src) { buf[0] = '\0'; *port = 0; }
+}
+
 static void conn_resolve_addrs(HttpConn* c) {
     if (!c || c->addrs_resolved) return;
     c->addrs_resolved = 1;
-    c->remote_addr[0] = '\0';
-    c->local_addr[0] = '\0';
-    c->remote_port = 0;
-    c->local_port = 0;
-    if (c->fd < 0) return;
+    fd_end_text(c->fd, 1, c->remote_addr, sizeof(c->remote_addr), &c->remote_port);
+    fd_end_text(c->fd, 0, c->local_addr, sizeof(c->local_addr), &c->local_port);
+}
 
-    struct sockaddr_storage ss;
-    socklen_t sslen = sizeof(ss);
-    if (getpeername(c->fd, (struct sockaddr*)&ss, &sslen) == 0) {
-        aether_addr_unmap(&ss);   /* an IPv4 client of a "::" listener */
-        const char* src = NULL;
-        if (ss.ss_family == AF_INET) {
-            struct sockaddr_in* sa = (struct sockaddr_in*)&ss;
-            src = inet_ntop(AF_INET, &sa->sin_addr,
-                            c->remote_addr, sizeof(c->remote_addr));
-            c->remote_port = ntohs(sa->sin_port);
-        } else if (ss.ss_family == AF_INET6) {
-            struct sockaddr_in6* sa = (struct sockaddr_in6*)&ss;
-            src = inet_ntop(AF_INET6, &sa->sin6_addr,
-                            c->remote_addr, sizeof(c->remote_addr));
-            c->remote_port = ntohs(sa->sin6_port);
-        }
-        if (!src) { c->remote_addr[0] = '\0'; c->remote_port = 0; }
-    }
+/* The peer and the local address of the plain-HTTP connection on `fd`,
+ * copied into `req` as http_request_copy_conn_meta does for an HttpConn.
+ * The proxy event loop (aether_http_evloop.c) serves its connections
+ * without an HttpConn, and its requests read "" for both: the proxy's
+ * X-Forwarded-For named the hop "unknown" on Linux (#3169). The strings are
+ * the request's, freed by http_request_free; a parse does not reset them,
+ * so a connection's request takes them once. */
+void http_request_copy_fd_meta(HttpRequest* req, int fd) {
+    if (!req) return;
+    char text[INET6_ADDRSTRLEN];
+    int port = 0;
+    fd_end_text(fd, 1, text, sizeof(text), &port);
+    free(req->remote_addr);
+    req->remote_addr = text[0] ? strdup(text) : NULL;
+    req->remote_port = text[0] ? port : 0;
+    fd_end_text(fd, 0, text, sizeof(text), &port);
+    free(req->local_addr);
+    req->local_addr = text[0] ? strdup(text) : NULL;
+    req->local_port = text[0] ? port : 0;
+    req->is_tls = 0;
+}
 
-    sslen = sizeof(ss);
-    if (getsockname(c->fd, (struct sockaddr*)&ss, &sslen) == 0) {
-        aether_addr_unmap(&ss);
-        const char* src = NULL;
-        if (ss.ss_family == AF_INET) {
-            struct sockaddr_in* sa = (struct sockaddr_in*)&ss;
-            src = inet_ntop(AF_INET, &sa->sin_addr,
-                            c->local_addr, sizeof(c->local_addr));
-            c->local_port = ntohs(sa->sin_port);
-        } else if (ss.ss_family == AF_INET6) {
-            struct sockaddr_in6* sa = (struct sockaddr_in6*)&ss;
-            src = inet_ntop(AF_INET6, &sa->sin6_addr,
-                            c->local_addr, sizeof(c->local_addr));
-            c->local_port = ntohs(sa->sin6_port);
-        }
-        if (!src) { c->local_addr[0] = '\0'; c->local_port = 0; }
+/* Connection-level metadata that handlers learn from the kernel rather
+ * than from the request bytes, copied into a request. Every request a
+ * connection carries gets it: the HTTP/1.1 dispatcher calls this after the
+ * parse, the h2 dispatch after it builds each stream's request (#3175).
+ *
+ * Resolved ONCE per connection (#1719) — neither address can change
+ * while the socket is open, and fetching them per request cost 2
+ * syscalls, 2 inet_ntop calls and 2 strdups each time. nginx makes none
+ * of those calls at all.
+ *
+ * - remote_addr/remote_port (getpeername): the trusted peer. The
+ *   X-Forwarded-For header is client-supplied and a wrong basis for an
+ *   allow/deny decision on a direct listener; this is the kernel's view
+ *   of the socket, which is unspoofable.
+ * - local_addr/local_port (getsockname): which NIC this accepted fd is
+ *   bound to. Needed when the listener binds 0.0.0.0 and the handler
+ *   gates on the receiving interface (admin-on-loopback, multi-tenant
+ *   per-IP routing).
+ * - is_tls: the connection wrapper, not anything in the wire bytes.
+ *   Drives scheme/redirect/cookie-Secure decisions.
+ *
+ * The request keeps owning its copies — http_request_free frees both —
+ * so the strdups stay and only the syscalls go. A failed lookup leaves
+ * the cache empty and the accessors return ""/0, as before.
+ *
+ * IPv4 + IPv6 via sockaddr_storage. Runs on the thread that owns the
+ * connection (conn_resolve_addrs is not thread-safe). */
+void http_request_copy_conn_meta(HttpRequest* req, HttpConn* conn) {
+    if (!req || !conn) return;
+    conn_resolve_addrs(conn);
+    if (conn->remote_addr[0]) {
+        req->remote_addr = strdup(conn->remote_addr);
+        req->remote_port = conn->remote_port;
     }
+    if (conn->local_addr[0]) {
+        req->local_addr = strdup(conn->local_addr);
+        req->local_port = conn->local_port;
+    }
+    req->is_tls = (conn->ssl != NULL || conn->pure_tls != NULL) ? 1 : 0;
 }
 
 /* Is every header line in this block one this server will read the same way
@@ -4520,6 +4698,20 @@ static void conn_send_bad_request_line(HttpConn* conn) {
 }
 
 static void conn_set_recv_timeout(HttpConn* c, int ms);
+
+/* The request hooks (#260 Tier 3: the access log, metrics, a program's own)
+ * on the response about to be sent, `t_start` the request's start. Every
+ * response the server sends is observed, the one a middleware answered
+ * included (#3213): a proxied request, a 401 from basic auth, a 429 from
+ * the rate limiter went unlogged and uncounted. Hooks observe; they do not
+ * change the response. */
+static void run_request_hooks(HttpServer* server, HttpRequest* req,
+                              HttpServerResponse* res, int64_t t_start) {
+    if (!server->request_hook_chain) return;
+    int64_t duration_us = http_now_us() - t_start;
+    for (struct HttpRequestHookNode* h = server->request_hook_chain; h; h = h->next)
+        h->hook(req, res, duration_us, h->user_data);
+}
 
 static int handle_one_request(HttpServer* server, HttpConn* conn,
                               int requests_served, int max_requests) {
@@ -4818,42 +5010,8 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
     }
 
 
-    /* Connection-level metadata that handlers learn from the kernel rather
-     * than from the request bytes.
-     *
-     * Resolved ONCE per connection (#1719) — neither address can change
-     * while the socket is open, and fetching them per request cost 2
-     * syscalls, 2 inet_ntop calls and 2 strdups each time. nginx makes none
-     * of those calls at all.
-     *
-     * - remote_addr/remote_port (getpeername): the trusted peer. The
-     *   X-Forwarded-For header is client-supplied and a wrong basis for an
-     *   allow/deny decision on a direct listener; this is the kernel's view
-     *   of the socket, which is unspoofable.
-     * - local_addr/local_port (getsockname): which NIC this accepted fd is
-     *   bound to. Needed when the listener binds 0.0.0.0 and the handler
-     *   gates on the receiving interface (admin-on-loopback, multi-tenant
-     *   per-IP routing).
-     * - is_tls: the connection wrapper, not anything in the wire bytes.
-     *   Drives scheme/redirect/cookie-Secure decisions.
-     *
-     * The request keeps owning its copies — http_request_free frees both —
-     * so the strdups stay and only the syscalls go. A failed lookup leaves
-     * the cache empty and the accessors return ""/0, as before.
-     *
-     * IPv4 + IPv6 via sockaddr_storage. */
-    {
-        conn_resolve_addrs(conn);
-        if (conn->remote_addr[0]) {
-            req->remote_addr = strdup(conn->remote_addr);
-            req->remote_port = conn->remote_port;
-        }
-        if (conn->local_addr[0]) {
-            req->local_addr = strdup(conn->local_addr);
-            req->local_port = conn->local_port;
-        }
-        req->is_tls = (conn->ssl != NULL || conn->pure_tls != NULL) ? 1 : 0;
-    }
+    /* The peer, the local address and the TLS state, from the connection. */
+    http_request_copy_conn_meta(req, conn);
 
     // Create response
     HttpServerResponse* res = http_response_create();
@@ -4878,7 +5036,10 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
         /* Same finish as the route-handler path: a middleware that answers
          * (static_files staging a sendfile FD, the reverse proxy returning an
          * upstream response) produces an ordinary response, and the
-         * connection's fate is decided the same way. */
+         * connection's fate is decided the same way. Transformers are the
+         * route handler's (a proxied response is not gzipped here, as
+         * nginx's gzip_proxied is off); the hooks observe it. */
+        run_request_hooks(server, req, res, t_start);
         return finish_response(server, conn, req, res, requests_served, max_requests);
     }
 
@@ -5091,15 +5252,7 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
      * latency measurement includes everything except network
      * write — the hooks are about server-side cost, not client-
      * perceived round trip. Hooks may not mutate; they observe. */
-    if (server->request_hook_chain) {
-        int64_t t_end = http_now_us();
-        int64_t duration_us = t_end - t_start;
-        struct HttpRequestHookNode* h = server->request_hook_chain;
-        while (h) {
-            h->hook(req, res, duration_us, h->user_data);
-            h = h->next;
-        }
-    }
+    run_request_hooks(server, req, res, t_start);
 
     /* #626 — drain any unread streaming-body bytes. A handler that
      * streamed only part of the body (or ignored it entirely — e.g. a
@@ -5174,7 +5327,10 @@ void http_server_dispatch_for_h2(HttpServer* server,
         middleware = middleware->next;
     }
     if (!should_continue) {
-        return;  /* middleware blocked; res already populated */
+        /* middleware answered; res already populated, and observed as
+         * every response is (#3213) */
+        run_request_hooks(server, req, res, t_start);
+        return;
     }
 
     HttpRoute* matched_route = http_resolve_route(server, req);
@@ -5195,14 +5351,7 @@ void http_server_dispatch_for_h2(HttpServer* server,
     }
 
     /* Per-request observation hooks (#260 Tier 3). */
-    if (server->request_hook_chain) {
-        int64_t duration_us = http_now_us() - t_start;
-        struct HttpRequestHookNode* h = server->request_hook_chain;
-        while (h) {
-            h->hook(req, res, duration_us, h->user_data);
-            h = h->next;
-        }
-    }
+    run_request_hooks(server, req, res, t_start);
 }
 
 #ifdef AETHER_HAS_NGHTTP2
@@ -5629,7 +5778,9 @@ void http_server_drain_connection(HttpServer* server, int client_fd) {
      *
      * A refusal costs nothing, because the connection has not been touched
      * yet and the worker path is still right below. */
-    if (server->evloop && !server->h2_enabled) {
+    /* A server changed since the loop started may have middleware ahead of
+     * the proxy now, or a hook, which the loop would skip. */
+    if (server->evloop && !server->h2_enabled && http_server_evloop_serves(server)) {
         if (http_evloop_submit((HttpEvLoop*)server->evloop, client_fd) == 0) return;
     }
 
@@ -5710,9 +5861,9 @@ static int create_reuseport_socket(const char* host, int port, int backlog) {
     int fd = aether_addr_listen_socket(&addr);
     if (fd < 0) return -1;
 
-#ifdef SO_REUSEPORT
+#ifdef AETHER_REUSEPORT_LB
     int opt = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+    setsockopt(fd, SOL_SOCKET, AETHER_REUSEPORT_LB, &opt, sizeof(opt));
 #endif
 
     if (bind(fd, (struct sockaddr*)&addr, addr_len) < 0) {
@@ -5729,6 +5880,24 @@ static int create_reuseport_socket(const char* host, int port, int backlog) {
     if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 
     return fd;
+}
+
+/* Give back multi-accept's listeners, pollers and arrays: the first
+ * `pollers` pollers were initialised, and every listener that is not -1 is
+ * open. Listener 0 may be the socket server_bind made; it is this mode's
+ * once the mode starts. */
+static void multi_accept_release(HttpServer* server, int n, int pollers) {
+    for (int i = 0; i < pollers; i++) aether_io_poller_destroy(&server->accept_pollers[i]);
+    for (int i = 0; server->accept_listen_fds && i < n; i++) {
+        if (server->accept_listen_fds[i] >= 0) close(server->accept_listen_fds[i]);
+    }
+    free(server->accept_listen_fds);
+    free(server->accept_pollers);
+    free(server->accept_threads);
+    server->accept_listen_fds = NULL;
+    server->accept_pollers = NULL;
+    server->accept_threads = NULL;
+    server->accept_thread_count = 0;
 }
 
 // A worker spawned for one connection (#2509). It runs the server's step,
@@ -5791,12 +5960,51 @@ static inline void dispatch_to_worker(HttpServer* server, int fd) {
     }
 }
 
+/* The connections an accept loop took before their first bytes, which wait
+ * in its poller until those arrive, marked by descriptor. A poller cannot
+ * list what it holds, and the ones still waiting when the server stopped
+ * were left open with no owner: a descriptor lost per connection, and a
+ * client that never saw the server go. Only the loop's own thread uses it. */
+typedef struct {
+    unsigned char* fds;
+    int cap;
+} AcceptWaiting;
+
+static int accept_waiting_mark(AcceptWaiting* w, int fd) {
+    if (fd >= w->cap) {
+        int cap = w->cap ? w->cap : 64;
+        while (cap <= fd) cap *= 2;
+        unsigned char* grown = realloc(w->fds, (size_t)cap);
+        if (!grown) return -1;
+        memset(grown + w->cap, 0, (size_t)(cap - w->cap));
+        w->fds = grown;
+        w->cap = cap;
+    }
+    w->fds[fd] = 1;
+    return 0;
+}
+
+static void accept_waiting_clear(AcceptWaiting* w, int fd) {
+    if (fd >= 0 && fd < w->cap) w->fds[fd] = 0;
+}
+
+/* Closes the connections still waiting, and frees the marks. */
+static void accept_waiting_close(AcceptWaiting* w) {
+    for (int fd = 0; fd < w->cap; fd++) {
+        if (w->fds[fd]) close(fd);
+    }
+    free(w->fds);
+    w->fds = NULL;
+    w->cap = 0;
+}
+
 // Per-core accept + I/O poller loop with optimistic recv
 // Strategy: try MSG_PEEK on accept() — if data is already there (common for
 // short-lived HTTP), dispatch immediately without touching the poller (saves syscalls).
 // Only register with the poller if the client hasn't sent data yet.
 static void accept_poller_loop(HttpServer* server, int listen_fd, AetherIoPoller* poller) {
     AetherIoEvent events[256];
+    AcceptWaiting waiting = { NULL, 0 };
 
     while (server->is_running) {
         int n = aether_io_poller_poll(poller, events, 256, 100);
@@ -5831,16 +6039,21 @@ static void accept_poller_loop(HttpServer* server, int listen_fd, AetherIoPoller
                     int cflags = fcntl(client_fd, F_GETFL, 0);
                     if (cflags >= 0) fcntl(client_fd, F_SETFL, cflags | O_NONBLOCK);
 
-                    if (aether_io_poller_add(poller, client_fd, NULL, AETHER_IO_READ) != 0) {
+                    if (accept_waiting_mark(&waiting, client_fd) != 0 ||
+                        aether_io_poller_add(poller, client_fd, NULL, AETHER_IO_READ) != 0) {
+                        accept_waiting_clear(&waiting, client_fd);
                         close(client_fd);
                     }
                 }
             } else {
                 // Data ready (from poller, one-shot already removed) — dispatch
+                accept_waiting_clear(&waiting, fd);
                 dispatch_to_worker(server, fd);
             }
         }
     }
+
+    accept_waiting_close(&waiting);
 }
 
 static void* accept_thread_fn(void* arg) {
@@ -5899,28 +6112,90 @@ static int http_server_serve(HttpServer* server) {
         // Best for very high connection rates where accept() is the bottleneck.
         int n_threads = aether_cpu_available();
         if (n_threads > 16) n_threads = 16;
+        if (n_threads < 1) n_threads = 1;
 
         server->accept_listen_fds = calloc(n_threads, sizeof(int));
         server->accept_pollers = calloc(n_threads, sizeof(AetherIoPoller));
         server->accept_threads = calloc(n_threads, sizeof(pthread_t));
-        if (!server->accept_listen_fds || !server->accept_pollers || !server->accept_threads)
+        if (!server->accept_listen_fds || !server->accept_pollers || !server->accept_threads) {
+            multi_accept_release(server, 0, 0);
             return server_fail(server, "out of memory for the accept threads");
+        }
 
         for (int i = 0; i < n_threads; i++) {
             server->accept_listen_fds[i] = -1;
         }
 
-        for (int i = 0; i < n_threads; i++) {
-            server->accept_listen_fds[i] = create_reuseport_socket(
+        /* Listener 0 fixes the one port every listener binds (#3194).
+         *
+         * A socket the program bound first (server_bind, the usual way to
+         * learn a port 0's number before starting) is listener 0 as it is,
+         * and server->port is already its port. Closing it would reset any
+         * connection waiting in its backlog. It gets SO_REUSEPORT now, which
+         * lets the others bind beside it; Linux puts it in their group when
+         * the first of them listens. It used to be left open and unpolled,
+         * and every listener's bind failed on its port.
+         *
+         * Without one, listener 0 is opened here, and a port 0 is resolved
+         * from it once: each listener used to bind port 0 and get a port of
+         * its own, and http_server_port reported none of them. */
+        char where[300];
+        char why[128];
+        /* Taken under live_lock, as a stop takes it to close it: one of the
+         * two has it. A stop that came as the server started closed it
+         * between this read and the clear, and the release closed it a
+         * second time. */
+        pthread_mutex_lock(&server->live_lock);
+        int bound_fd = server->socket_fd;
+        server->socket_fd = -1;
+        pthread_mutex_unlock(&server->live_lock);
+        if (bound_fd >= 0) {
+#ifdef AETHER_REUSEPORT_LB
+            /* Where the kernel does not spread connections,
+             * http_server_set_multi_accept_raw refuses, so this mode never
+             * starts there, but the file still builds. */
+            int opt = 1;
+            if (setsockopt(bound_fd, SOL_SOCKET, AETHER_REUSEPORT_LB, &opt, sizeof opt) != 0) {
+                server_fail(server, "cannot set SO_REUSEPORT on the socket bound to %s: %s",
+                            aether_addr_authority(where, sizeof where, server->host, server->port),
+                            socket_error_text(why, sizeof why));
+                multi_accept_release(server, n_threads, 0);
+                server->socket_fd = bound_fd;   /* still the server's, as server_bind left it */
+                return -1;
+            }
+#endif
+            int fl = fcntl(bound_fd, F_GETFL, 0);
+            if (fl >= 0) fcntl(bound_fd, F_SETFL, fl | O_NONBLOCK);
+            server->accept_listen_fds[0] = bound_fd;   /* closed with the rest */
+        } else {
+            server->accept_listen_fds[0] = create_reuseport_socket(
                 server->host, server->port, server->max_connections);
+            if (server->accept_listen_fds[0] >= 0 && server->port == 0) {
+                struct sockaddr_storage bound;
+                socklen_t blen = sizeof bound;
+                if (getsockname(server->accept_listen_fds[0], (struct sockaddr*)&bound, &blen) == 0)
+                    server->port = aether_addr_port(&bound);
+            }
+        }
+
+        for (int i = 0; i < n_threads; i++) {
+            if (i > 0) {
+                server->accept_listen_fds[i] = create_reuseport_socket(
+                    server->host, server->port, server->max_connections);
+            }
             if (server->accept_listen_fds[i] < 0) {
-                char where[300];
-                return server_fail(server, "cannot open SO_REUSEPORT listener %d on %s", i,
-                                   aether_addr_authority(where, sizeof where, server->host, server->port));
+                server_fail(server, "cannot open SO_REUSEPORT listener %d on %s: %s", i,
+                            aether_addr_authority(where, sizeof where, server->host, server->port),
+                            socket_error_text(why, sizeof why));
+                multi_accept_release(server, n_threads, i);
+                return -1;
             }
 
-            if (aether_io_poller_init(&server->accept_pollers[i]) < 0)
-                return server_fail(server, "cannot start the I/O poller for accept thread %d", i);
+            if (aether_io_poller_init(&server->accept_pollers[i]) < 0) {
+                server_fail(server, "cannot start the I/O poller for accept thread %d", i);
+                multi_accept_release(server, n_threads, i);
+                return -1;
+            }
 
             aether_io_poller_add(&server->accept_pollers[i],
                                  server->accept_listen_fds[i], NULL, AETHER_IO_READ);
@@ -5953,17 +6228,7 @@ static int http_server_serve(HttpServer* server) {
             pthread_join(server->accept_threads[i], NULL);
         }
 
-        for (int i = 0; i < n_threads; i++) {
-            aether_io_poller_destroy(&server->accept_pollers[i]);
-            if (server->accept_listen_fds[i] >= 0) close(server->accept_listen_fds[i]);
-        }
-        free(server->accept_listen_fds);
-        free(server->accept_pollers);
-        free(server->accept_threads);
-        server->accept_listen_fds = NULL;
-        server->accept_pollers = NULL;
-        server->accept_threads = NULL;
-        server->accept_thread_count = 0;
+        multi_accept_release(server, n_threads, n_threads);
 
     } else if (use_actor_mode) {
         // Single-accept with I/O poller (default): one accept thread waits for data
@@ -6170,35 +6435,37 @@ void http_server_stop(HttpServer* server) {
     }
 #endif
 
-#if !defined(_WIN32)
-    // Destroy pollers to unblock poll/epoll_wait/kevent in accept threads
-    for (int i = 0; i < server->accept_thread_count; i++) {
-        if (server->accept_pollers) {
-            aether_io_poller_destroy(&server->accept_pollers[i]);
-        }
-        if (server->accept_listen_fds && server->accept_listen_fds[i] >= 0) {
-            close(server->accept_listen_fds[i]);
-            server->accept_listen_fds[i] = -1;
-        }
-    }
-
-    aether_io_poller_destroy(&server->accept_poller);
-#endif
+    /* The accept pollers of actor dispatch mode, and multi-accept's listeners
+     * and arrays, are the server thread's: it opens them, and it gives them
+     * back once every accept loop has seen is_running cleared, which each
+     * does within its 100 ms poll. A stop used to destroy and close them
+     * here while those loops still ran, and the server thread then did it
+     * again: on macOS a closed kqueue wakes its waiter at once, so the
+     * server thread freed the arrays this loop was walking, and each
+     * listener and poller was closed twice (the second close could take a
+     * descriptor something else had opened since); with the poll() backend
+     * a waiting loop's poller was freed under it. */
 
     /* Winsock stays up: http_server_init starts it once for the process,
      * and a client, another server or the background thread still use it.
      * A WSACleanup here ran under the server's own threads, which were still
-     * returning from accept or closing a connection. */
-    if (server->socket_fd >= 0) {
+     * returning from accept or closing a connection.
+     *
+     * The socket is taken under live_lock, as multi-accept takes it to make
+     * it a listener: one of the two closes it. */
+    pthread_mutex_lock(&server->live_lock);
+    int listen_fd = server->socket_fd;
+    server->socket_fd = -1;
+    pthread_mutex_unlock(&server->live_lock);
+    if (listen_fd >= 0) {
 #ifdef _WIN32
-        closesocket(server->socket_fd);
+        closesocket(listen_fd);
 #else
         /* Wakes a poll() on it at once where the platform does (Linux);
          * close() alone leaves the loop to its one-second timeout. */
-        shutdown(server->socket_fd, SHUT_RDWR);
-        close(server->socket_fd);
+        shutdown(listen_fd, SHUT_RDWR);
+        close(listen_fd);
 #endif
-        server->socket_fd = -1;
     }
 
     /* Wake every worker waiting for a client's next request: that read
@@ -6250,10 +6517,11 @@ void http_server_free(HttpServer* server) {
         route = next;
     }
     
-    // Free middleware
+    // Free middleware, and the user data each owns (#3171)
     HttpMiddlewareNode* middleware = server->middleware_chain;
     while (middleware) {
         HttpMiddlewareNode* next = middleware->next;
+        if (middleware->release) middleware->release(middleware->user_data);
         free(middleware);
         middleware = next;
     }
@@ -6263,6 +6531,7 @@ void http_server_free(HttpServer* server) {
         struct HttpResponseTransformerNode* xform = server->response_transformer_chain;
         while (xform) {
             struct HttpResponseTransformerNode* next = xform->next;
+            if (xform->release) xform->release(xform->user_data);   /* #3191 */
             free(xform);
             xform = next;
         }
@@ -6962,12 +7231,11 @@ const char* http_request_remote_addr(HttpRequest* req) {
      * socket) or when the kernel call failed (the empty string
      * keeps the FFI shape stable for Aether callers).
      *
-     * Intentionally separate from the X-Forwarded-For header path:
-     * the header is client-supplied (use the
-     * `std.http.middleware.use_real_ip` middleware behind a trusted
-     * proxy that overwrites it); this accessor is what the kernel
-     * actually sees on the socket, which is the only basis for a
-     * directly-exposed listener's source-IP allow/deny decision. */
+     * Never read from a header: X-Forwarded-For and X-Real-IP are
+     * client-supplied. This is what the kernel sees on the socket, the
+     * only basis for a directly-exposed listener's source-IP allow/deny
+     * decision, unless `std.http.middleware.use_real_ip` ran: behind a
+     * trusted proxy it puts the client it resolved here (#3169). */
     return (req && req->remote_addr) ? req->remote_addr : "";
 }
 

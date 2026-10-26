@@ -1,0 +1,115 @@
+// An ask that gets no reply says why, and an ask to a dead actor ends at once
+// (#3151).
+//
+// An ask to an actor that had died waited the whole timeout (5 s) and gave
+// the reply's zero value, which the caller could not tell from a reply of 0;
+// a timed-out ask gave the same zero and no reason either. `v, err = actor ?
+// Msg {}` now gives the reply and "", or the zero value and the reason; the
+// single-value form keeps the zero value, without the wait.
+
+message Get {}
+message Name {}
+message Boom {}
+message Never {}
+message Slow {}
+message Value { v: int }
+
+extern exit(code: int)
+
+actor Server {
+    state n = 42
+    state label = "primary"
+
+    receive {
+        Get() -> { reply Value { v: n } }
+        Name() -> { reply label }
+        Boom() -> {
+            panic("boom before the reply")
+        }
+        // Returns without a reply: none can come, and the asker learns
+        // that when the step ends (#3205).
+        Never() -> {
+            n = n + 0
+        }
+        // Replies after the asker's timeout.
+        Slow() -> {
+            sleep(5300)
+            reply Value { v: n }
+        }
+    }
+}
+
+check(label: string, ok: bool) -> int {
+    if !ok {
+        println("  FAIL ${label}")
+        return 1
+    }
+    println("  PASS ${label}")
+    return 0
+}
+
+// Whether `ms` is well under the 5 s timeout. The time is printed only when
+// it is not: a PASS line reads the same on every run and at every -O level.
+at_once(label: string, ms: int) -> int {
+    if ms >= 2000 {
+        println("  FAIL ${label}: took ${ms} ms")
+        return 1
+    }
+    println("  PASS ${label}")
+    return 0
+}
+
+main() {
+    println("=== an ask that gets no reply says why (#3151) ===")
+    fails = 0
+
+    live = spawn(Server())
+    v, err = live ? Get {}
+    fails = fails + check("a reply: (42, \"\"), got (${v}, \"${err}\")", v == 42 && err == "")
+    s, serr = live ? Name {}
+    fails = fails + check("a string reply: (\"primary\", \"\"), got (\"${s}\", \"${serr}\")",
+        s == "primary" && serr == "")
+
+    // Dies handling an ask, before its reply.
+    dying = spawn(Server())
+    t0 = clock_ns()
+    dv, derr = dying ? Boom {}
+    died_ms = (clock_ns() - t0) / 1000000
+    fails = fails + check("an actor that dies first: (0, \"the actor died before it replied\"), got (${dv}, \"${derr}\")",
+        dv == 0 && derr == "the actor died before it replied")
+    fails = fails + at_once("and the asker learns at once, not at the timeout", died_ms)
+
+    // Asked once it is dead.
+    t1 = clock_ns()
+    gv, gerr = dying ? Get {}
+    dead_ms = (clock_ns() - t1) / 1000000
+    fails = fails + check("a dead actor: (0, \"the actor is dead\"), got (${gv}, \"${gerr}\")",
+        gv == 0 && gerr == "the actor is dead")
+    fails = fails + at_once("at once", dead_ms)
+
+    // The single-value form: the zero value, still without the wait.
+    t2 = clock_ns()
+    int plain = dying ? Get {}
+    plain_ms = (clock_ns() - t2) / 1000000
+    fails = fails + check("a dead actor, single value: 0, got ${plain}", plain == 0)
+    fails = fails + at_once("at once", plain_ms)
+
+    // A handler that returns without replying: at once, with its reason.
+    t3 = clock_ns()
+    nv, nerr = live ? Never {}
+    never_ms = (clock_ns() - t3) / 1000000
+    fails = fails + check("no reply: (0, \"the handler returned without replying\"), got (${nv}, \"${nerr}\")",
+        nv == 0 && nerr == "the handler returned without replying")
+    fails = fails + at_once("at once", never_ms)
+
+    // A reply later than the timeout: the timeout, and its reason.
+    sv, serr = live ? Slow {}
+    fails = fails + check("too late: (0, \"ask timed out after 5000 ms\"), got (${sv}, \"${serr}\")",
+        sv == 0 && serr == "ask timed out after 5000 ms")
+
+    if fails > 0 {
+        println("FAIL: ${fails} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

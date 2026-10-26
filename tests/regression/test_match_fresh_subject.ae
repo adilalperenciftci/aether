@@ -1,0 +1,87 @@
+// A match or a switch on a fresh string frees it when it ends (#3207).
+//
+// `match f() { "a" -> ... }` held f()'s string in the match's subject, which
+// only the arms' tests read, and nothing freed it: every such match leaked
+// its subject, and a switch did the same. It is freed now whichever way
+// they end: falling through, a `return` from an arm, a `break` out of a
+// case, a nested match.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+word(k: int) -> string {
+    return string.concat("w", "${k}")
+}
+
+classify(k: int) -> int {
+    match word(k) {
+        "w1" -> { return 1 }
+        "w2" -> { return 2 }
+        _ -> {
+            match word(k + 10) {
+                "w13" -> { return 13 }
+                _ -> { return 0 }
+            }
+        }
+    }
+}
+
+label(k: int) -> int {
+    n = 0
+    match word(k) {
+        "w1" -> { n = 10 }
+        _ -> { n = 20 }
+    }
+    return n
+}
+
+by_switch(k: int) -> int {
+    n = 0
+    switch (word(k)) {
+        case "w1": n = 1
+        default: n = 2
+    }
+    return n
+}
+
+by_switch_break(k: int) -> int {
+    n = 5
+    switch (word(k)) {
+        case "w1": break
+        default: n = 2
+    }
+    return n
+}
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    check(classify(1) == 1 && classify(2) == 2 && classify(3) == 13 && classify(4) == 0,
+        "the arms are taken as before")
+    check(label(1) == 10 && label(5) == 20, "a match that falls through")
+    check(by_switch(1) == 1 && by_switch(7) == 2, "a switch on a fresh string")
+    check(by_switch_break(1) == 5 && by_switch_break(7) == 2, "a switch left by break")
+
+    if mem.heap_in_use_exact() {
+        returned = mem.steady_growth(|| {
+                _a = classify(1) + classify(3) + classify(4)
+            }, 4)
+        check(returned == 0, "a match left by return grew the heap by ${returned} bytes")
+        fell = mem.steady_growth(|| {
+                _b = label(1) + label(5)
+            }, 4)
+        check(fell == 0, "a match that falls through grew the heap by ${fell} bytes")
+        switched = mem.steady_growth(|| {
+                _c = by_switch(1) + by_switch(7) + by_switch_break(1) + by_switch_break(7)
+            }, 4)
+        check(switched == 0, "a switch grew the heap by ${switched} bytes")
+    }
+    println("PASS")
+}

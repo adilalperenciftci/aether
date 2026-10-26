@@ -403,6 +403,7 @@ main() {
         sti = zip.find(war, "d/s.txt")
         check_int("w s.txt method stored", zip.entry_method(war, sti), zip.METHOD_STORED)
         stb, _stl, sterr = zip.entry_read(war, sti)
+        check("w s.txt read", sterr, "")
         check("w s.txt content", stb, s_body)
 
         // the directory entry
@@ -476,6 +477,8 @@ main() {
     check_int("extracted a.txt exists", fs.exists("${xdest}/pkg/a.txt"), 1)
     check_int("extracted nested exists", fs.exists("${xdest}/pkg/sub/deep/c.txt"), 1)
     ra, rlen, rerr2 = fs.read_binary("${xdest}/pkg/a.txt")
+    check("extracted a.txt read", rerr2, "")
+    check_int("extracted a.txt length", rlen, 6)
     check("extracted a.txt content", ra, "alpha\n")
     string.free(ra)
     zip.writer_free(tw)

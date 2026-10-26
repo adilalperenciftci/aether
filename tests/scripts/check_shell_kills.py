@@ -17,14 +17,23 @@ on, in code with comments and quoted text set aside:
   * `kill` given a pid in a variable or a substitution: `kill "$SRV_PID"`,
     `kill -9 $!`, `kill $(cat pidfile)`, `kill -- -$PGID`, `for p in $PIDS;
     do kill $p`, and `xargs kill`;
+  * `kill` given a job (`kill %1`): on Windows the job's process is the same
+    stand-in, and the signal walks the same way, so server_jobs.sh itself
+    ends a job there with TerminateProcess;
   * `pkill` and `killall`, which pick processes by name (on Windows that
-    includes the stand-ins).
+    includes the stand-ins);
+  * timeout(1) or gtimeout run by a test, as a command or as the command
+    prefix a variable holds (`TIMEOUT="timeout 30"`): at its limit it ends
+    the command with SIGTERM, which on Windows goes to the stand-in (#3154).
+    A test bounds a command with sweep_timeout_bound from
+    tests/lib/sweep_timeout.sh, the sweep's own limit, which ends a command
+    on Windows with a job object and no signal.
 
 Allowed: signal 0 (`kill -0 "$pid"` sends nothing; it asks whether the pid
-is there), a job (`kill %1`), the script's own shell (`kill -TERM $$`), and
-a line marked `kill-ok: <why>`, on the line or on a comment line right
-above it, for a test whose subject is a signal to a process that is not a
-job of the script (POSIX-only).
+is there), the script's own shell (`kill -TERM $$`), and a line marked
+`kill-ok: <why>`, on the line or on a comment line right above it, for a
+test whose subject is a signal to a process that is not a job of the script
+(POSIX-only), or a script that never runs under MSYS2.
 
 Run from the repository root; exit 1 listing every offender.
 """
@@ -43,6 +52,13 @@ CMD_START = r'(?:^|[;&|(){}!`]|\b(?:then|do|else|elif|if|while|until|time|comman
 KILL = re.compile(CMD_START + r'(kill)(?=\s|$)')
 BY_NAME = re.compile(CMD_START + r'(pkill|killall)(?=\s|$)')
 XARGS_KILL = re.compile(r'\bxargs\b(?:\s+-\S+)*\s+kill(?=\s|$)')
+TIMEOUT_CMD = re.compile(CMD_START + r'(g?timeout)(?=\s|$)')
+# NAME= at the start of a word, then (in the raw line, quotes kept) a value
+# that is the timeout(1) command or begins with it and its duration, so a
+# variable holding words such as "timeout reached" is not one.
+ASSIGN = re.compile(r'(?:^|[\s;&|(){}])[A-Za-z_][A-Za-z0-9_]*=')
+TIMEOUT_VALUE = re.compile(
+    r'[\'"]?(g?timeout)(?:\s+-\S+(?:\s+\d\S*)?)*(?:\s+\d|\s*[\'"]|\s*$)')
 TRAP = re.compile(CMD_START + r'trap\s+')
 HEREDOC = re.compile(r'<<-?\s*([\'"]?)([A-Za-z_][A-Za-z0-9_]*)\1')
 # What ends the kill command's words.
@@ -129,7 +145,8 @@ def offending_operands(words):
     for op in operands:
         bare = op.strip('\'"')
         if bare.startswith('%'):
-            continue                      # a job: bash resolves it safely
+            bad.append(op)                # a job: on Windows its stand-in
+            continue
         if bare in ('$$', '${$}'):
             continue                      # the script's own shell
         if '$' in bare or '`' in bare or re.fullmatch(r'-?\d+', bare):
@@ -150,9 +167,18 @@ def line_offences(raw):
     for m in KILL.finditer(masked):
         bad = offending_operands(kill_words(raw, masked, m.end(1)))
         if bad:
-            found.append("kill of a remembered pid (%s): end it through "
+            found.append("kill of a remembered pid or job (%s): end it through "
                          "tests/lib/server_jobs.sh (kill_server / stop_server / "
                          "signal_server)" % " ".join(bad))
+    timeouts = [m.group(1) for m in TIMEOUT_CMD.finditer(masked)]
+    for m in ASSIGN.finditer(masked):
+        t = TIMEOUT_VALUE.match(raw, m.end())
+        if t:
+            timeouts.append(t.group(1))
+    for name in timeouts:
+        found.append("%s ends the command it bounds with a signal: bound it with "
+                     "sweep_timeout_bound (tests/lib/sweep_timeout.sh), the "
+                     "sweep's own limit (#3154)" % name)
     for m in BY_NAME.finditer(masked):
         found.append("%s picks processes by name: end what the test started "
                      "through tests/lib/server_jobs.sh" % m.group(1))

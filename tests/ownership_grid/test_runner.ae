@@ -33,7 +33,7 @@ hold(file_path: string, ready: string) -> int {
     }
     _w = fs.write(ready, "held")
     sleep(600000)
-    fs.file_close(h)
+    _ = fs.close(h)
     return 0
 }
 

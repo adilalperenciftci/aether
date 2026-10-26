@@ -466,22 +466,19 @@ int aether_middleware_rate_limit(HttpRequest* req, HttpServerResponse* res, void
     AetherRateLimitOpts* o = (AetherRateLimitOpts*)user_data;
     if (!o) return 1;
 
-    /* Best-effort client identifier: prefer X-Forwarded-For (proxy
-     * deployments), then X-Real-IP, then "anonymous". The HTTP
-     * server doesn't currently expose the peer's sockaddr through
-     * HttpRequest; this is an acceptable approximation for a
-     * front-by-default token bucket. */
-    const char* key = http_get_header(req, "X-Forwarded-For");
-    if (!key) key = http_get_header(req, "X-Real-IP");
-    if (!key) key = "anonymous";
-
-    /* Trim to the first comma (X-Forwarded-For can be a chain). */
+    /* The client is the peer the request reports (#3173): the
+     * connection's, or, after use_real_ip, the client it resolved from a
+     * trusted chain (#3169). Never a header: X-Forwarded-For and
+     * X-Real-IP are what the client sends, and keyed on them a client
+     * that sent a fresh value on every request got a fresh bucket and was
+     * never limited. A request with no IP peer (a Unix-domain socket)
+     * shares the "anonymous" bucket. */
+    const char* key = http_request_remote_addr(req);
+    if (!key || !*key) key = "anonymous";
     char keybuf[128];
-    size_t klen = 0;
-    while (*key && *key != ',' && klen + 1 < sizeof(keybuf)) {
-        if (*key != ' ' && *key != '\t') keybuf[klen++] = *key;
-        key++;
-    }
+    size_t klen = strlen(key);
+    if (klen >= sizeof(keybuf)) klen = sizeof(keybuf) - 1;
+    memcpy(keybuf, key, klen);
     keybuf[klen] = '\0';
 
     unsigned int slot = rate_hash(keybuf) % RATE_TABLE_SIZE;
@@ -986,22 +983,202 @@ void aether_xform_error_pages(HttpRequest* req, HttpServerResponse* res, void* u
 // -----------------------------------------------------------------
 // Real-IP / X-Forwarded-For
 // -----------------------------------------------------------------
+/* An address or a network of them (#3212): 16 bytes, an IPv4 address as
+ * ::ffff:a.b.c.d, and how many leading bits a match shares with it. */
+typedef struct {
+    unsigned char addr[16];
+    int bits;
+} RealIpNet;
+
 struct AetherRealIpOpts {
-    char* header_name;  /* e.g. "X-Forwarded-For" */
+    char* header_name;      /* e.g. "X-Forwarded-For" */
+    int forwarded;          /* RFC 7239 `Forwarded`: the for= of each element */
+    RealIpNet* trusted;     /* the proxies whose word is taken */
+    int trusted_count;
 };
 
-AetherRealIpOpts* aether_real_ip_opts_new(const char* header_name) {
+/* Addresses are read and written here, not with inet_pton and inet_ntop:
+ * this is text, and the socket headers those come with are not on every
+ * target std builds for (WASI has none). The rules are inet_pton's. */
+
+/* An IPv4 address, the `len` bytes at `s`: 1, its four bytes in `out`.
+ * Four decimal parts of 0 to 255, none with a leading zero. */
+static int real_ip_parse_v4(const char* s, size_t len, unsigned char out[4]) {
+    size_t i = 0;
+    for (int part = 0; part < 4; part++) {
+        if (part > 0) {
+            if (i >= len || s[i] != '.') return 0;
+            i++;
+        }
+        if (i >= len || !isdigit((unsigned char)s[i])) return 0;
+        int v = 0, digits = 0;
+        while (i < len && isdigit((unsigned char)s[i])) {
+            if (digits > 0 && v == 0) return 0;   /* a leading zero */
+            v = v * 10 + (s[i] - '0');
+            digits++;
+            i++;
+            if (v > 255) return 0;
+        }
+        out[part] = (unsigned char)v;
+    }
+    return i == len;
+}
+
+static int real_ip_hex(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* An IPv6 address: 1, its sixteen bytes. Groups of up to four hex digits,
+ * one `::` standing for one or more zero groups, and an IPv4 address in
+ * the last 32 bits. */
+static int real_ip_parse_v6(const char* s, size_t len, unsigned char out[16]) {
+    unsigned char buf[16] = { 0 };
+    int n = 0;      /* bytes read so far */
+    int gap = -1;   /* where the `::` stands, in bytes */
+    size_t i = 0;
+    if (len >= 1 && s[0] == ':') {
+        if (len < 2 || s[1] != ':') return 0;
+        gap = 0;
+        i = 2;
+    }
+    while (i < len) {
+        if (n >= 16) return 0;
+        size_t j = i;
+        int dotted = 0;
+        while (j < len && s[j] != ':') {
+            if (s[j] == '.') dotted = 1;
+            j++;
+        }
+        if (dotted) {
+            if (j != len || n > 12 || !real_ip_parse_v4(s + i, len - i, buf + n)) return 0;
+            n += 4;
+            break;
+        }
+        int v = 0, digits = 0;
+        while (i < len && real_ip_hex(s[i]) >= 0) {
+            if (++digits > 4) return 0;
+            v = v * 16 + real_ip_hex(s[i]);
+            i++;
+        }
+        if (digits == 0) return 0;
+        buf[n++] = (unsigned char)(v >> 8);
+        buf[n++] = (unsigned char)(v & 0xff);
+        if (i == len) break;
+        if (s[i] != ':') return 0;
+        i++;
+        if (i < len && s[i] == ':') {
+            if (gap >= 0) return 0;   /* a second `::` */
+            gap = n;
+            i++;
+        } else if (i == len) {
+            return 0;                 /* a trailing single `:` */
+        }
+    }
+    if (gap >= 0) {
+        if (n > 14) return 0;         /* `::` stands for at least one group */
+        memmove(buf + 16 - (n - gap), buf + gap, (size_t)(n - gap));
+        memset(buf + gap, 0, (size_t)(16 - n));
+    } else if (n != 16) {
+        return 0;
+    }
+    memcpy(out, buf, 16);
+    return 1;
+}
+
+/* The `len` bytes at `text` as an address: 1, with its 16 bytes in `out`
+ * (an IPv4 address mapped, ::ffff:a.b.c.d) and *is_v4 saying which it was
+ * written as; 0 when it is none. */
+static int real_ip_parse(const char* text, size_t len, unsigned char out[16], int* is_v4) {
+    if (len == 0) return 0;
+    if (real_ip_parse_v4(text, len, out + 12)) {
+        memset(out, 0, 10);
+        out[10] = 0xff;
+        out[11] = 0xff;
+        if (is_v4) *is_v4 = 1;
+        return 1;
+    }
+    if (real_ip_parse_v6(text, len, out)) {
+        if (is_v4) *is_v4 = 0;
+        return 1;
+    }
+    return 0;
+}
+
+static void real_ip_trim(const char** s, const char** e) {
+    while (*s < *e && (**s == ' ' || **s == '\t')) (*s)++;
+    while (*e > *s && ((*e)[-1] == ' ' || (*e)[-1] == '\t')) (*e)--;
+}
+
+/* `list` ("127.0.0.1, 10.0.0.0/8, ::1, fd00::/8") into o->trusted: 0, or
+ * -1 when an entry is no address or network. */
+static int real_ip_parse_trusted(AetherRealIpOpts* o, const char* list) {
+    int cap = 1;
+    for (const char* c = list; *c; c++) if (*c == ',') cap++;
+    o->trusted = (RealIpNet*)calloc((size_t)cap, sizeof(RealIpNet));
+    if (!o->trusted) return -1;
+    const char* p = list;
+    while (1) {
+        const char* end = strchr(p, ',');
+        if (!end) end = p + strlen(p);
+        const char* s = p;
+        const char* e = end;
+        real_ip_trim(&s, &e);
+        const char* slash = memchr(s, '/', (size_t)(e - s));
+        RealIpNet* net = &o->trusted[o->trusted_count];
+        int is_v4 = 0;
+        if (!real_ip_parse(s, (size_t)((slash ? slash : e) - s), net->addr, &is_v4)) return -1;
+        int width = is_v4 ? 32 : 128;
+        int prefix = width;
+        if (slash) {
+            const char* d = slash + 1;
+            if (d == e) return -1;
+            prefix = 0;
+            for (; d < e; d++) {
+                if (*d < '0' || *d > '9') return -1;
+                prefix = prefix * 10 + (*d - '0');
+                if (prefix > width) return -1;
+            }
+        }
+        net->bits = is_v4 ? 96 + prefix : prefix;
+        o->trusted_count++;
+        if (!*end) break;
+        p = end + 1;
+    }
+    return 0;
+}
+
+static int real_ip_is_trusted(const AetherRealIpOpts* o, const unsigned char a[16]) {
+    for (int i = 0; i < o->trusted_count; i++) {
+        const RealIpNet* n = &o->trusted[i];
+        int whole = n->bits / 8, rest = n->bits % 8;
+        if (memcmp(a, n->addr, (size_t)whole) != 0) continue;
+        if (rest && ((a[whole] ^ n->addr[whole]) & (unsigned char)(0xff << (8 - rest)))) continue;
+        return 1;
+    }
+    return 0;
+}
+
+AetherRealIpOpts* aether_real_ip_opts_new(const char* header_name, const char* trusted) {
+    if (!trusted || !*trusted) return NULL;
     AetherRealIpOpts* o = (AetherRealIpOpts*)calloc(1, sizeof(AetherRealIpOpts));
     if (!o) return NULL;
     if (!header_name || !*header_name) header_name = "X-Forwarded-For";
     o->header_name = strdup(header_name);
-    if (!o->header_name) { free(o); return NULL; }
+    o->forwarded = strcasecmp(header_name, "Forwarded") == 0;
+    if (!o->header_name || real_ip_parse_trusted(o, trusted) != 0) {
+        aether_real_ip_opts_free(o);
+        return NULL;
+    }
     return o;
 }
 
 void aether_real_ip_opts_free(AetherRealIpOpts* o) {
     if (!o) return;
     free(o->header_name);
+    free(o->trusted);
     free(o);
 }
 
@@ -1031,52 +1208,178 @@ static int request_append_header(HttpRequest* req,
     return 0;
 }
 
+/* One entry of the forwarding header as an address: trimmed, unquoted, the
+ * for= parameter of a `Forwarded` element, a [v6]:port or a v4:port
+ * reduced to its address. 0 when it is none ("unknown", an obfuscated
+ * name, garbage). */
+static int real_ip_entry(const AetherRealIpOpts* o, const char* s, const char* e,
+                         unsigned char out[16]) {
+    if (o->forwarded) {
+        /* for=...; proto=...; by=...: the for= value, up to its ';'. */
+        const char* v = NULL;
+        const char* p = s;
+        while (p < e) {
+            const char* q = memchr(p, ';', (size_t)(e - p));
+            if (!q) q = e;
+            const char* ps = p;
+            const char* pe = q;
+            real_ip_trim(&ps, &pe);
+            if (pe - ps > 4 && strncasecmp(ps, "for=", 4) == 0) {
+                v = ps + 4;
+                s = v;
+                e = pe;
+                break;
+            }
+            p = q + 1;
+        }
+        if (!v) return 0;
+    }
+    real_ip_trim(&s, &e);
+    if (e - s >= 2 && *s == '"' && e[-1] == '"') { s++; e--; }
+    if (s < e && *s == '[') {
+        const char* close = memchr(s, ']', (size_t)(e - s));
+        if (!close) return 0;
+        return real_ip_parse(s + 1, (size_t)(close - s - 1), out, NULL);
+    }
+    const char* colon = memchr(s, ':', (size_t)(e - s));
+    if (colon && !memchr(colon + 1, ':', (size_t)(e - colon - 1))) e = colon;   /* v4:port */
+    return real_ip_parse(s, (size_t)(e - s), out, NULL);
+}
+
+/* `a` as text: dotted for an IPv4 address, else IPv6 as RFC 5952 writes it
+ * (lowercase, no leading zeros, the longest run of two or more zero groups
+ * as `::`, the first of equal ones). */
+static void real_ip_text(const unsigned char a[16], char* buf, size_t cap) {
+    static const unsigned char mapped[12] = { 0,0,0,0,0,0,0,0,0,0,0xff,0xff };
+    if (memcmp(a, mapped, 12) == 0) {
+        snprintf(buf, cap, "%u.%u.%u.%u", a[12], a[13], a[14], a[15]);
+        return;
+    }
+    unsigned g[8];
+    for (int k = 0; k < 8; k++) g[k] = ((unsigned)a[2 * k] << 8) | a[2 * k + 1];
+    int best = -1, best_len = 0;
+    for (int k = 0; k < 8;) {
+        if (g[k] != 0) { k++; continue; }
+        int run = k;
+        while (run < 8 && g[run] == 0) run++;
+        if (run - k > best_len && run - k >= 2) { best = k; best_len = run - k; }
+        k = run;
+    }
+    size_t used = 0;
+    buf[0] = '\0';
+    for (int k = 0; k < 8 && used < cap; k++) {
+        if (k == best) {
+            used += (size_t)snprintf(buf + used, cap - used, "::");
+            k += best_len - 1;
+            continue;
+        }
+        int sep = k > 0 && k != best + best_len;
+        used += (size_t)snprintf(buf + used, cap - used, "%s%x", sep ? ":" : "", g[k]);
+    }
+}
+
+/* X-Real-IP is `ip`, the client resolved here, or gone when there is none:
+ * a client can send that header itself, so one on the request is never
+ * kept (#3169). */
+static void real_ip_set_header(HttpRequest* req, const char* ip) {
+    for (int i = 0; i < req->header_count; i++) {
+        if (!req->header_keys[i] || strcasecmp(req->header_keys[i], "X-Real-IP") != 0) continue;
+        if (ip) {
+            char* v = strdup(ip);
+            if (v) {
+                free(req->header_values[i]);
+                req->header_values[i] = v;
+            }
+            return;
+        }
+        free(req->header_keys[i]);
+        free(req->header_values[i]);
+        req->header_count--;
+        req->header_keys[i] = req->header_keys[req->header_count];
+        req->header_values[i] = req->header_values[req->header_count];
+        return;
+    }
+    if (ip) request_append_header(req, "X-Real-IP", ip);
+}
+
+/* The client a request came from, through the proxies `trusted` names
+ * (#3212): what nginx's set_real_ip_from with real_ip_recursive gives. A
+ * forwarding header is believed only from a trusted peer, since anything
+ * else that connects can send one. Its entries are read from the right,
+ * each the address the hop before it saw: the first that is not a trusted
+ * proxy is the client, and a client cannot get past it by writing entries
+ * of its own to the left. The leftmost entry used to be taken from any
+ * peer, so a client picked its own address, and with it its rate-limit
+ * bucket, behind every proxy that appends to the header (std.http.proxy,
+ * nginx's default, cloud load balancers). */
 int aether_middleware_real_ip(HttpRequest* req, HttpServerResponse* res, void* user_data) {
     (void)res;
     AetherRealIpOpts* o = (AetherRealIpOpts*)user_data;
     if (!o || !req) return 1;
 
-    /* Find the configured forward-list header (case-insensitive). */
+    unsigned char peer[16];
+    int peer_known = req->remote_addr &&
+                     real_ip_parse(req->remote_addr, strlen(req->remote_addr), peer, NULL);
+    if (!peer_known || !real_ip_is_trusted(o, peer)) {
+        real_ip_set_header(req, peer_known ? req->remote_addr : NULL);
+        return 1;
+    }
+
     const char* fwd = NULL;
     for (int i = 0; i < req->header_count; i++) {
-        if (req->header_keys[i] &&
-            strcasecmp(req->header_keys[i], o->header_name) == 0) {
+        if (req->header_keys[i] && strcasecmp(req->header_keys[i], o->header_name) == 0) {
             fwd = req->header_values[i];
             break;
         }
     }
-    if (!fwd || !*fwd) {
-        /* No forward chain — nothing to extract. Continue without
-         * mutating the request; downstream handlers fall back to
-         * whatever IP-source they already used. */
-        return 1;
+
+    /* The entries' spans, the last REAL_IP_MAX of them: the walk starts
+     * at the right. */
+    enum { REAL_IP_MAX = 64 };
+    const char* starts[REAL_IP_MAX];
+    const char* ends[REAL_IP_MAX];
+    int n = 0;
+    for (const char* p = fwd; p && *p;) {
+        const char* end = strchr(p, ',');
+        if (!end) end = p + strlen(p);
+        if (n == REAL_IP_MAX) {
+            memmove(starts, starts + 1, sizeof starts[0] * (REAL_IP_MAX - 1));
+            memmove(ends, ends + 1, sizeof ends[0] * (REAL_IP_MAX - 1));
+            n--;
+        }
+        starts[n] = p;
+        ends[n] = end;
+        n++;
+        p = *end ? end + 1 : end;
     }
 
-    /* Take the leftmost token, trimmed of surrounding whitespace.
-     * Per RFC 7239 / X-Forwarded-For convention, the leftmost
-     * IP is the original client; subsequent entries are
-     * intermediate proxies. */
-    const char* p = fwd;
-    while (*p == ' ' || *p == '\t') p++;
-    const char* end = p;
-    while (*end && *end != ',' && *end != ' ' && *end != '\t') end++;
-    if (end == p) return 1;  /* empty token — give up */
+    unsigned char client[16];
+    memcpy(client, peer, 16);
+    int moved = 0;
+    for (int i = n - 1; i >= 0; i--) {
+        unsigned char hop[16];
+        if (!real_ip_entry(o, starts[i], ends[i], hop)) break;   /* the chain is broken here */
+        memcpy(client, hop, 16);
+        moved = 1;
+        if (!real_ip_is_trusted(o, hop)) break;
+    }
 
-    char ip_buf[64];
-    size_t len = (size_t)(end - p);
-    if (len >= sizeof(ip_buf)) len = sizeof(ip_buf) - 1;
-    memcpy(ip_buf, p, len);
-    ip_buf[len] = '\0';
-
-    /* Idempotent: if X-Real-IP already set (we ran twice), don't
-     * append a duplicate that would mask the first. */
-    for (int i = 0; i < req->header_count; i++) {
-        if (req->header_keys[i] &&
-            strcasecmp(req->header_keys[i], "X-Real-IP") == 0) {
-            return 1;
+    char text[64];
+    real_ip_text(client, text, sizeof text);
+    if (moved && text[0]) {
+        /* The peer the request reports from here on (#3169):
+         * http_request_remote_addr answers it to every handler and
+         * middleware after this one, std.http.proxy's X-Forwarded-For
+         * entry among them. The proxy connection's port says nothing of
+         * the client, so the port reads as unavailable. */
+        char* resolved = strdup(text);
+        if (resolved) {
+            free(req->remote_addr);
+            req->remote_addr = resolved;
+            req->remote_port = 0;
         }
     }
-    request_append_header(req, "X-Real-IP", ip_buf);
+    real_ip_set_header(req, req->remote_addr);
     return 1;  /* always continue the chain — middleware is
                 * informational, never short-circuits */
 }

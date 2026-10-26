@@ -29,6 +29,7 @@
     <li><a href="#grant_tcp_listen">grant_tcp_listen</a></li>
     <li><a href="#grant_udp">grant_udp</a></li>
     <li><a href="#grant_native">grant_native</a></li>
+    <li><a href="#grant_fork">grant_fork</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -211,6 +212,12 @@
       <pre class="usage"><code>grant_native(_ctx, path)</code></pre>
       <p class="signature"><span class="sig-params">_ctx: Grants, path: string</span></p>
       <p class="doc">Loading native code (dlopen) from paths matching `path`.</p>
+    </div>
+    <div class="function" id="grant_fork" data-name="grant_fork">
+      <h3 class="function-name">grant_fork <span class="kind">fn</span></h3>
+      <pre class="usage"><code>grant_fork(_ctx)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: Grants</span></p>
+      <p class="doc">Starting new processes, in a child spawn_sandboxed starts: fork, vfork, and a clone or clone3 that is not a thread. Without it the child can start threads but no process; the kernel fence refuses the rest.</p>
     </div>
   </div>
 </main>

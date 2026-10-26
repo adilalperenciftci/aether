@@ -1,0 +1,92 @@
+// An HTTP server that keeps running: routes, middleware, health and metrics.
+//
+// The shape of a service in production: keep-alive connections, the real
+// client address when a proxy sits in front, CORS, gzip for large bodies,
+// `/healthz` and `/readyz` probes, an access log and Prometheus metrics,
+// all set on the server before `http.server_start`, which serves until
+// the process is stopped. It listens on 127.0.0.1 only; give
+// `server_set_host` "0.0.0.0" to serve the network. 04-http.ae shows the
+// same API with the client in the same program.
+//
+// Run: ae run examples/03-std/05-http-server.ae
+// Needs: a free port 8080, and a client: it serves until stopped. Try
+//   curl http://127.0.0.1:8080/
+//   curl "http://127.0.0.1:8080/greet?name=Ada"
+//   curl -X POST -d ping http://127.0.0.1:8080/echo
+//   curl http://127.0.0.1:8080/healthz
+//   curl -H "X-Forwarded-For: 1.2.3.4" http://127.0.0.1:8080/whoami
+// See: docs/http-server.md
+
+import std.http
+import std.http.middleware
+
+const PORT = 8080
+
+text(res: ptr, status: int, body: string) {
+    http.response_set_status(res, status)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, body)
+}
+
+handle_root(req: ptr, res: ptr, ud: ptr) {
+    text(res, 200, "hello from std.http\n")
+}
+
+handle_greet(req: ptr, res: ptr, ud: ptr) {
+    name = http.get_query_param(req, "name")
+    if name == "" {
+        name = "stranger"
+    }
+    text(res, 200, "hello, ${name}\n")
+}
+
+handle_echo(req: ptr, res: ptr, ud: ptr) {
+    text(res, 200, http.request_body(req))
+}
+
+// X-Real-IP is set by the real-IP middleware when a proxy sent
+// X-Forwarded-For; a direct client has none.
+handle_whoami(req: ptr, res: ptr, ud: ptr) {
+    ip = http.get_header(req, "X-Real-IP")
+    if ip == "" {
+        ip = "(direct)"
+    }
+    text(res, 200, "client=${ip}\n")
+}
+
+main() {
+    server = http.server_create(PORT)
+    defer http.server_free(server)
+    http.server_set_host(server, "127.0.0.1")
+
+    ka = http.server_set_keepalive(server, 1, 0, 30000ms)
+    if ka != "" {
+        println("keep-alive: ${ka}")
+        exit(1)
+    }
+
+    // Order matters: the client address first, so everything after it
+    // sees the client rather than the proxy; CORS before the routes, so a
+    // preflight OPTIONS is answered there.
+    // X-Forwarded-For ("") is believed from a proxy on this machine only:
+    // anything else that connects could write one of its own.
+    middleware.use_real_ip(server, "", "127.0.0.1, ::1")
+    middleware.use_cors(server, "*", "GET, POST, OPTIONS", "Content-Type", 0, 600)
+    middleware.use_gzip(server, 256, 6) // bodies of 256 bytes or more
+
+    http.server_set_health_probes(server, "/healthz", "/readyz", null, null)
+    http.server_set_access_log(server, "combined", "-") // to stderr
+    http.server_set_metrics(server, "/metrics")
+
+    http.server_get(server, "/", handle_root, null)
+    http.server_get(server, "/greet", handle_greet, null)
+    http.server_post(server, "/echo", handle_echo, null)
+    http.server_get(server, "/whoami", handle_whoami, null)
+
+    println("listening on http://127.0.0.1:${PORT}/")
+    err = http.server_start(server)
+    if err != "" {
+        println("server: ${err}")
+        exit(1)
+    }
+}

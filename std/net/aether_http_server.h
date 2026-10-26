@@ -145,6 +145,10 @@ typedef struct HttpMiddlewareNode {
     HttpMiddleware middleware;
     void* user_data;
     struct HttpMiddlewareNode* next;
+    /* Run on user_data by http_server_free when non-NULL: a middleware
+     * registered with http_server_use_middleware_owned owns its user data
+     * and gives it back with the server (#3171). */
+    void (*release)(void*);
 } HttpMiddlewareNode;
 
 // Forward declare these so the HttpServer struct can hold them as
@@ -456,6 +460,19 @@ const char* http_server_set_tls_raw(HttpServer* server,
 const char* http_server_set_h2_raw(HttpServer* server,
                                    int max_concurrent_streams);
 
+// Multi-accept (#3194): in actor dispatch mode, one listener per core (up
+// to 16) on the server's one port, each with SO_REUSEPORT and an accept
+// thread and poller of its own; the kernel spreads the connections across
+// them. For connection rates where one accept() is the bottleneck. Off by
+// default; thread-pool mode does not use it. A socket server_bind made
+// first is kept as listener 0 and gives the others its port, a port 0's
+// included; without one, a port 0 is resolved once and every listener
+// binds that. "" on success; an error where the kernel does not spread
+// connections across the listeners (Linux and DragonFly do with
+// SO_REUSEPORT, FreeBSD with SO_REUSEPORT_LB; Windows, macOS, OpenBSD and
+// NetBSD do not).
+const char* http_server_set_multi_accept_raw(HttpServer* server, int on);
+
 // Per-stream concurrent dispatch for HTTP/2. When `worker_count` > 0,
 // each h2 connection spawns this many worker threads. Stream
 // handlers run on those workers in parallel; the connection thread
@@ -482,6 +499,11 @@ void http_server_delete(HttpServer* server, const char* path, HttpHandler handle
 
 // Middleware
 void http_server_use_middleware(HttpServer* server, HttpMiddleware middleware, void* user_data);
+/* As http_server_use_middleware, for user data the middleware owns:
+ * http_server_free runs `release` on it (#3171). A middleware registered
+ * the plain way leaves its user data to whoever made it. */
+void http_server_use_middleware_owned(HttpServer* server, HttpMiddleware middleware,
+                                      void* user_data, void (*release)(void*));
 
 // Response-transformer chain (#260 Tier 1). Registered transformers
 // run AFTER the route handler emits a response and BEFORE the
@@ -495,6 +517,13 @@ typedef void (*HttpResponseTransformer)(HttpRequest* req,
 void http_server_use_response_transformer(HttpServer* server,
                                           HttpResponseTransformer xform,
                                           void* user_data);
+/* As above, for user data the transformer owns: http_server_free runs
+ * `release` on it (#3191), as http_server_use_middleware_owned does for a
+ * middleware's. */
+void http_server_use_response_transformer_owned(HttpServer* server,
+                                                HttpResponseTransformer xform,
+                                                void* user_data,
+                                                void (*release)(void*));
 
 // Request parsing
 HttpRequest* http_parse_request(const char* raw_request);
@@ -509,6 +538,12 @@ const char* http_get_header(HttpRequest* req, const char* key);
 const char* http_get_query_param(HttpRequest* req, const char* key);
 const char* http_get_path_param(HttpRequest* req, const char* key);
 void http_request_free(HttpRequest* req);
+// Copy a connection's peer and local address and its TLS state into a
+// request it carries; every request, HTTP/1.1 or h2, gets them (#3175).
+void http_request_copy_conn_meta(HttpRequest* req, struct HttpConn* conn);
+// The same for a plain-HTTP connection held by its fd alone: the proxy
+// event loop's, which has no HttpConn (#3169).
+void http_request_copy_fd_meta(HttpRequest* req, int fd);
 
 // Response building
 HttpServerResponse* http_response_create(void);
@@ -549,6 +584,7 @@ void http_server_response_free(HttpServerResponse* res);
 
 // Helpers
 int http_route_matches(const char* pattern, const char* path, HttpRequest* req);
+// The registered reason phrase for a status code, "" for an unregistered one.
 const char* http_status_text(int code);
 
 // MIME type detection
@@ -884,9 +920,10 @@ const char* http_request_query(HttpRequest* req);
 // reality. Returns the dotted-quad form for IPv4 ("203.0.113.7") and
 // the `inet_ntop` AF_INET6 form for IPv6 ("2001:db8::1") — no
 // brackets, no scope id. Returns "" when unavailable (Unix-domain
-// socket, getpeername failed, or req is NULL). The companion
-// X-Forwarded-For middleware remains the right tool when this server
-// sits behind a trusted reverse proxy.
+// socket, getpeername failed, or req is NULL). Behind a trusted
+// reverse proxy, the companion middleware `use_real_ip` resolves the
+// client from X-Forwarded-For and makes it the address this returns to
+// every middleware and handler after it (#3169).
 const char* http_request_remote_addr(HttpRequest* req);
 // Companion port for `http_request_remote_addr`. Returns 0 when
 // unavailable (same conditions as the address).
@@ -934,11 +971,10 @@ void http_format_clf_time(char* out, size_t out_size, const struct tm* tmv);
 /* The reverse proxy's options when one is mounted on this server, else NULL.
  * The event driver runs the proxy exchange itself and needs them. */
 void* http_server_proxy_opts(HttpServer* server);
-
-/* Whether any response transformer is registered. A driver that answers a
- * proxied request from the upstream's own bytes must not do so when one is,
- * because a transformer rewrites the response object it would not build. */
-int http_server_has_response_transformer(HttpServer* server);
+// 1 when the proxy event loop may serve the connection alone: the reverse
+// proxy is the chain's first middleware, and no request hook (the access
+// log, metrics) is registered, either of which the loop would skip.
+int http_server_evloop_serves(HttpServer* server);
 
 
 /* Take a connection the event driver does not own, with the bytes it has

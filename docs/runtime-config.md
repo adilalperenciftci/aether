@@ -302,7 +302,7 @@ On platforms without pthreads (WASM, embedded), or when threading is explicitly 
 ```bash
 # Force cooperative mode on native (for testing):
 make stdlib EXTRA_CFLAGS="-DAETHER_NO_THREADING"
-ae run examples/actors/counter.ae
+ae run examples/02-actors/02-state.ae
 
 # Build for WebAssembly:
 make stdlib PLATFORM=wasm

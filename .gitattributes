@@ -28,3 +28,7 @@ tests/**/*.txt text eol=lf
 # byte for byte with a fresh run by `make check-api-docs`; a CRLF checkout
 # would fail that check on Windows.
 docs/api/** text eol=lf
+
+# A text an example reads and counts the bytes of: the same bytes on every
+# checkout, so the output it prints is the one its Output block holds.
+examples/07-applications/01-word-count/sample.md text eol=lf

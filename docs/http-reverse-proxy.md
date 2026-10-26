@@ -40,7 +40,12 @@ main() {
 builds a single-upstream pool with round-robin (no other upstream
 to balance against), default opts, and the given timeout. Mounts
 the middleware on `path_prefix`. `"/"` forwards everything;
-`"/api"` forwards just the `/api` subtree.
+`"/api"` forwards just the `/api` subtree. The server owns that
+pool and those opts, and `http.server_free` frees them (#3171).
+`proxy.mount`, `mount_methods` and `mount_match` take opts the
+caller made: the server uses them while it runs, and the caller
+frees them (`opts_free`, then `upstream_pool_free`) after
+`http.server_free`.
 
 ## Pool form, load balancing + health + cache + breaker
 
@@ -88,6 +93,19 @@ execution order; a mount whose method or path pattern does not match
 passes through to the next middleware, so narrower carve-outs should
 be registered first.
 
+Middleware registered before a proxy (a rate limiter, basic auth,
+`use_real_ip`) runs on every request the proxy forwards, and the request
+hooks (the access log, metrics) see every response, a proxied one and one
+a middleware refused included. Response transformers (`use_gzip`,
+`use_error_pages`) are the route handler's: a proxied response passes on
+as the upstream sent it, as with nginx's `gzip_proxied off`. On Linux and
+macOS a server whose proxied requests get the proxy exchange and nothing
+else (the proxy is its first middleware, and it has no request hook)
+serves its plain-HTTP connections from an event loop, without a thread
+per connection. Anything more keeps the ordinary per-connection path, so
+nothing is skipped (#3203, #3213). Running that work on the event loop
+too is tracked in #3214.
+
 ```aether,fragment
 proxy.mount_match(server, "/repos/:repo/info", primary_pool, primary_opts, "GET,HEAD")
 proxy.mount_methods(server, "/repos", primary_pool, write_opts, "POST,PUT,DELETE")
@@ -105,7 +123,7 @@ to a primary while other reads fan out to replicas.
 |---|---|---|
 | `round_robin` | atomic counter mod N (skips ineligible upstreams via retry) | default, even distribution, no per-request decision cost |
 | `least_conn` | iterate eligible upstreams; pick smallest in-flight count | upstream response times vary; long-running requests should avoid stacking on one upstream |
-| `ip_hash` | FNV-1a over X-Forwarded-For (or X-Real-IP, or "anonymous") mod N | sticky sessions for clients without explicit cookies; soft sticky, falls back to RR if the natural pick is ineligible |
+| `ip_hash` | FNV-1a over the peer the request reports (`http.request_remote_addr`; after `middleware.use_real_ip`, the client it resolved; "anonymous" with no IP peer) mod N, never a client-sent header (#3173) | sticky sessions for clients without explicit cookies; soft sticky, falls back to RR if the natural pick is ineligible |
 | `weighted_rr` | smooth weighted RR (the algorithm nginx uses) | mixed-capacity backends; produces interleaved sequences (3:1 → A,A,A,B,A,A,A,B) instead of batched |
 | `cookie_hash` | FNV-1a over the value of a configured cookie name (set via `proxy.pool_set_cookie_name`) mod N; falls back to RR if the cookie is absent | application-layer sticky sessions where the client carries a session cookie and the upstream pool has per-instance state |
 
@@ -372,10 +390,15 @@ Plus any header listed in the request's `Connection:` value.
 | `Via` | `1.1 aether-proxy` (appended to existing) | always on |
 | `Host` | rewritten to upstream's `host:port` | `proxy.opts_set_preserve_host(opts, 1)` to forward client Host: instead |
 
-Client IP is resolved via the same chain `middleware.use_real_ip`
-uses: `X-Forwarded-For` (leftmost) → `X-Real-IP` → `"unknown"`.
-Mount `middleware.use_real_ip` before the proxy if you want
-clients behind a trusted edge to be visible via XFF.
+The entry the proxy appends is the peer the request reports
+(`http.request_remote_addr`): the connection's peer address, or, when
+`middleware.use_real_ip` ran before the proxy, the client it resolved from
+the trusted chain. A request that reaches the proxy over a Unix-domain
+socket has no IP peer and adds `unknown`. The proxy never reads
+`X-Real-IP`: any client can send that header, and taking it let a client
+write its own entry into the chain the upstream trusts (#3169). Mount
+`middleware.use_real_ip` before the proxy when clients reach it through a
+trusted edge, so the entry names the client rather than the edge.
 
 ## Error responses
 
@@ -475,8 +498,9 @@ non-empty is an error message.
 - [`docs/http-server.md`](http-server.md), the inbound side
   (routes, middleware, TLS, h2, WS, SSE, health probes,
   metrics, graceful shutdown).
-- [`examples/stdlib/http-reverse-proxy.ae`](../examples/stdlib/http-reverse-proxy.ae)
-  minimal single-upstream demo.
-- [`examples/stdlib/http-reverse-proxy-pool.ae`](../examples/stdlib/http-reverse-proxy-pool.ae)
-  full enterprise stack: pool, health, breaker, cache, retry,
-  rate limit, drain, trace-context, Prometheus metrics.
+- [`examples/03-std/07-reverse-proxy.ae`](../examples/03-std/07-reverse-proxy.ae)
+  one upstream behind `proxy.mount_simple`, upstream and client in the
+  same program.
+- [`examples/03-std/08-proxy-pool.ae`](../examples/03-std/08-proxy-pool.ae)
+  a weighted pool of three upstreams configured with the `proxy.pool`
+  block, mounted with `proxy.mount`.

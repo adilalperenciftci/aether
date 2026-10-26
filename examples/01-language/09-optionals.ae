@@ -1,0 +1,72 @@
+// Optionals: a value that may be absent.
+//
+// `T?` holds a `T` or `none`. A function that may find nothing returns
+// one; a plain value given where a `T?` goes is wrapped by itself.
+// `opt ?? fallback` reads the value or the fallback, `opt?.field` reads a
+// field through an optional (and is `none` when it is), `match` takes
+// `none` and `some(v)` apart, and after `if opt != none` a local optional is
+// its value inside the branch. `opt!` unwraps and panics on `none`: use it
+// only where absence is a bug. An optional says "maybe a value"; when an
+// operation fails and the reason matters, return an error instead
+// (10-errors.ae).
+//
+// Run: ae run examples/01-language/09-optionals.ae
+// See: docs/language-reference.md#optionals
+
+struct User {
+    name: string
+    email: string?
+}
+
+find_index(names: string[], wanted: string) -> int? {
+    for i in 0..names.len {
+        if names[i] == wanted {
+            return i
+        }
+    }
+    return none
+}
+
+describe(port: int?) -> string {
+    return match port {
+        none -> "no port"
+        some(p) -> "port ${p}"
+    }
+}
+
+contact(u: User) -> string {
+    email = u.email
+    if email != none {
+        return "${u.name} <${email}>" // narrowed: a string in this branch
+    }
+    return "${u.name} (no email)"
+}
+
+main() {
+    names = ["ada", "grace", "linus"]
+    found = find_index(names, "grace")
+    missing = find_index(names, "ken")
+    println("${found ?? -1} ${missing ?? -1}")
+
+    println(describe(8080))
+    println(describe(none))
+
+    ada = User { name: "Ada", email: "ada@example.org" }
+    ken = User { name: "Ken", email: none }
+    println(contact(ada))
+    println(contact(ken))
+
+    let maybe_user: User? = ada
+    let nobody: User? = none
+    println("${maybe_user?.name ?? "?"} ${nobody?.name ?? "nobody"}")
+    println("${found!} is certainly there")
+}
+
+// Output:
+// 1 -1
+// port 8080
+// no port
+// Ada <ada@example.org>
+// Ken (no email)
+// Ada nobody
+// 1 is certainly there

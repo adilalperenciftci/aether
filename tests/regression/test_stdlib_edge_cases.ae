@@ -135,7 +135,7 @@ main() {
 
     print("\nTest 11: json.parse simple values\n")
     jn, _ = json.parse("42")
-    if json.type(jn) == 2 {
+    if json.type(jn) == json.JSON_NUMBER {
         print("  PASS: json.parse('42') is number\n")
     } else {
         print("  FAIL\n")
@@ -155,7 +155,7 @@ main() {
 
     print("\nTest 13: json.parse nested object\n")
     nested, _ = json.parse("{\"a\":{\"b\":{\"c\":1}}}")
-    if json.type(nested) == 5 {
+    if json.type(nested) == json.JSON_OBJECT {
         a, _ = json.object_get(nested, "a")
         b, _ = json.object_get(a, "b")
         c, _ = json.object_get(b, "c")
@@ -278,7 +278,7 @@ main() {
 
     print("\nTest 23: json empty object\n")
     eobj, _ = json.parse("{}")
-    if json.type(eobj) == 5 {
+    if json.type(eobj) == json.JSON_OBJECT {
         print("  PASS: empty object is type 5\n")
     } else {
         print("  FAIL\n")

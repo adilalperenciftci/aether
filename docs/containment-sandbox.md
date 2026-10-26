@@ -75,6 +75,7 @@ The grant list and the block that enforces it come from `std.sandbox`:
 | `grant_tcp_listen()` | `tcp_listen` | any listening socket |
 | `grant_udp(host)` | `udp` | host |
 | `grant_native(path)` | `native` | library being `dlopen`ed |
+| `grant_fork()` | `fork` | a new process in a child `spawn_sandboxed` starts (threads need no grant) |
 | `grant_all()` | `*` | everything |
 
 The same grant list is what `spawn_sandboxed(perms, prog, ...)` hands a
@@ -500,7 +501,7 @@ audit.clear()                            // scope the next query
 
 This is the programmatic face of the audit trail: counting denials,
 asserting an expected access pattern in a test, building a "why was
-this blocked" report. Worked example: `examples/audit-demo.ae`.
+this blocked" report. Worked example: `examples/05-containment/03-audit.ae`.
 
 ## Platform support
 
@@ -511,13 +512,33 @@ interception model requires.
 
 | Platform | Runtime sandbox | Notes |
 |----------|----------------|-------|
-| **Linux** | LD_PRELOAD (`libaether_sandbox.so`) | Preload locates itself via `/proc/self/exe`. Intercepts the glibc large-file (`open64`/`fopen64`/`mmap64`) and `clone3` entry points in addition to the common surface. |
-| **FreeBSD** | LD_PRELOAD + **Capsicum self-sandbox** + **Casper** | LD_PRELOAD works as on Linux (preload locates itself via `sysctl(KERN_PROC_PATHNAME)` no `/proc`; no `*64`/`clone3`). An Aether process launched with `AETHER_CAPSICUM=1` enters FreeBSD capability mode at startup, kernel-enforced, unbypassable containment; `spawn_sandboxed` sets that for Aether children automatically. `std.casper` lets a capability-mode process still resolve DNS / read passwd / read sysctl by delegating to the Casper daemon. See [`aether_compared_to_capsicum.md`](aether_compared_to_capsicum.md). |
+| **Linux** | LD_PRELOAD (`libaether_sandbox.so`) | `spawn_sandboxed` finds the library as described below, the program's own path from `/proc/self/exe`. Intercepts the glibc large-file (`open64`/`fopen64`/`mmap64`) and `clone3` entry points in addition to the common surface. |
+| **FreeBSD** | LD_PRELOAD + **Capsicum self-sandbox** + **Casper** | LD_PRELOAD works as on Linux (the program's own path comes from `sysctl(KERN_PROC_PATHNAME)`, no `/proc`; no `*64`/`clone3`). An Aether process launched with `AETHER_CAPSICUM=1` enters FreeBSD capability mode at startup, kernel-enforced, unbypassable containment; `spawn_sandboxed` sets that for Aether children automatically. `std.casper` lets a capability-mode process still resolve DNS / read passwd / read sysctl by delegating to the Casper daemon. See [`aether_compared_to_capsicum.md`](aether_compared_to_capsicum.md). |
 | **macOS** | Not supported | `DYLD_INSERT_LIBRARIES` exists but the hardened runtime ignores it for system binaries. `spawn_sandboxed` is a stub that fails loudly. |
 | **Windows** | Not supported | No `LD_PRELOAD` equivalent. `spawn_sandboxed` is a stub. |
 
 The in-process layer (module boundary, scope boundary, and the stdlib
 grant checks) is pure C and works on every platform regardless.
+
+### Where `spawn_sandboxed` finds the preload library
+
+The child starts with `libaether_sandbox.so` in `LD_PRELOAD`, so the
+parent has to find it wherever the parent program runs: in `ae run`'s
+build cache, in a directory `ae build -o` wrote to, or installed beside
+other programs (#3177). `spawn_sandboxed` and the contrib process hosts
+(`contrib/host/aether`, `contrib/host/go`) look in this order:
+
+1. `AETHER_SANDBOX_PRELOAD`, the library's own path, when it is set;
+2. beside the running program, where a deployment can ship it;
+3. under `AETHER_HOME`, which `ae` sets for every program it runs:
+   `lib/aether/` (what `install.sh` and `make install` install),
+   `lib/` (a release archive's layout), then `build/` (a source tree,
+   where `make` builds it);
+4. the same three under the program's directory's parent: a program
+   installed in `<prefix>/bin`, or one in a source tree's directory.
+
+When none has it, the call says where it looked and returns -1 without
+starting the child.
 
 **Windows is out by construction, not by backlog.** The interception model
 *is* `LD_PRELOAD` + `dlsym(RTLD_NEXT, ...)`; Windows has no equivalent, so
@@ -640,7 +661,7 @@ cat sandbox-config.ae
 | Raw `syscall()` | `syscall` interception |
 | Shellcode via `mmap(PROT_EXEC)` | `mmap`/`mmap64` interception |
 | Shellcode via `mprotect(PROT_EXEC)` | `mprotect` interception |
-| `fork()` / `vfork()` / `clone3()` | Blocked by default at the **kernel** level (seccomp-bpf in `spawn_sandboxed`, see below). Grant with `fork:*`. |
+| `fork()` / `vfork()` / a `clone()` or `clone3()` that is not a thread | Blocked by default at the **kernel** level (seccomp-bpf in `spawn_sandboxed`, see below). A thread passes. Grant new processes with `grant_fork()` (`fork:*`). |
 
 ### What's NOT blocked (requires kernel enforcement)
 
@@ -668,9 +689,15 @@ purely libc-symbol-level fence on `fork:*` was a paper tiger against
 real toolchains.
 
 `spawn_sandboxed` therefore installs a **seccomp-bpf filter** on the
-child side (post-fork, pre-exec) that traps `clone`, `clone3`, `fork`,
-and `vfork` with `EPERM` regardless of how they're invoked, when
-`fork:*` is not in the grant list. This is true kernel-level
+child side (post-fork, pre-exec) that refuses the child a new process
+however the call is made, when `fork:*` (`grant_fork()`) is not in the
+grant list: `fork` and `vfork` get `EPERM`, and so does a `clone` without
+`CLONE_THREAD`. A thread is no new process: it shares the address space,
+the filter and the preload, so a `clone` with `CLONE_THREAD` passes (#3178)
+and a child can run actors, threads in Python or a JVM. `clone3` keeps its
+flags in a struct in memory, which a filter cannot read, so it gets
+`ENOSYS`, the answer of a kernel without `clone3`, and libc falls back to
+`clone`, whose flags the filter reads. This is true kernel-level
 enforcement, immune to call-site obfuscation. Requires Linux ≥ 3.5
 (`PR_SET_NO_NEW_PRIVS` + `PR_SET_SECCOMP`). The filter covers x86_64,
 aarch64, riscv64 and loongarch64, and every ABI a process there can
@@ -680,9 +707,9 @@ Each is trapped with its own syscall numbers. Any other ABI kills the
 process, and on an architecture the filter does not cover
 `spawn_sandboxed` refuses to run the child (below) rather than fall back
 to the libc-level fence alone. The kernel fence
-is automatic and not configurable through the grant grammar: if
-`fork:*` is granted, the filter isn't installed at all; otherwise it
-fires unconditionally. If the kernel doesn't support seccomp, the
+is automatic, and the grant list says only whether it is there: if
+`fork:*` (`grant_fork()`) is granted, the filter isn't installed at all;
+otherwise it fires unconditionally. If the kernel doesn't support seccomp, the
 child aborts with `exit(126)` rather than silently running uncontained
 a `spawn_sandboxed` that asked for containment we can't deliver
 must not exec.
@@ -1637,9 +1664,9 @@ Active work listed in [`../contrib/host/TODO.md`](../contrib/host/TODO.md):
 
 ### Worked examples and tests
 
-- `examples/embedded-java/trading/` direction 1 (Aether as
+- `examples/04-interop/06-java-host/` direction 1 (Aether as
   guest, Java host).
-- `examples/sandbox-spawn.ae`, `examples/sandbox-demo.ae`,
+- `examples/05-containment/04-spawn-sandboxed.ae`, `examples/05-containment/01-sandbox.ae`,
   direction 2 (Aether as host).
 - `tests/integration/namespace_{python,ruby,java}/`,
   `tests/integration/embedded_java_trading_e2e/` per-SDK

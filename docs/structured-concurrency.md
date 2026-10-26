@@ -209,7 +209,7 @@ crypto-miner actor because it cannot name one.
 5. **Compiler, capability-scoped spawn/send/ask.** Extend existing
    `hide`/`seal except` denial to concurrency sites.
 6. **Docs and worked example.** Update `docs/actor-concurrency.md` with
-   the supervision section. One worked example in `examples/actors/`
+   the supervision section. One worked example in `examples/02-actors/`
    showing a supervised, sealed subtree.
 
 Phase 1 can ship without Phase 2. Phase 2 can ship independently once

@@ -39,6 +39,22 @@ MAIN_RETURN = re.compile(r'\breturn\s+[1-9]')
 # `spec.run_summary(fw)` (or a bare `run_summary(fw)` from a selective
 # import) as a whole statement: its verdict goes nowhere.
 DROPPED_SUMMARY = re.compile(r'^\s*(?:spec\.)?run_summary\([^()]*\)\s*$', re.M)
+# The verdict bound to a name, `_rc = spec.run_summary(fw)`: dropped too when
+# nothing reads the name again. std.sandbox's two suites exited 0 that way
+# with five failing cases on Windows.
+BOUND_SUMMARY = re.compile(r'^\s*([A-Za-z_]\w*)\s*=\s*(?:spec\.)?run_summary\([^()]*\)\s*$', re.M)
+
+
+def drops_verdict(src):
+    """Does `src` (comments stripped) drop run_summary's verdict: call it as
+    a bare statement, or bind it to a name nothing reads?"""
+    if DROPPED_SUMMARY.search(src):
+        return True
+    for m in BOUND_SUMMARY.finditer(src):
+        name = re.escape(m.group(1))
+        if len(re.findall(r'(?<![\w.])' + name + r'(?!\w)', src)) < 2:
+            return True
+    return False
 
 
 def prune_patterns():
@@ -133,7 +149,7 @@ def main():
         with open(p, encoding='utf-8', errors='replace') as f:
             src = strip_comments(f.read())
         rel = os.path.relpath(p, ROOT).replace(os.sep, '/')
-        if DROPPED_SUMMARY.search(src):
+        if drops_verdict(src):
             dropped.append(rel)
         if p not in swept or not MARKER.search(src):
             continue

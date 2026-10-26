@@ -33,11 +33,6 @@ import std.http
 import std.http.proxy
 import std.os
 
-// Use raw form: actor receive handlers can't cleanly discard the
-// wrapper's string return without an unused-result warning.
-extern http_server_start_raw(server: ptr) -> int
-extern http_server_bind_raw(server: ptr, host: string, port: int) -> int
-extern http_server_port(server: ptr) -> int
 extern exit(code: int)
 
 // shim.c — per-process counters + admin state.
@@ -55,11 +50,11 @@ extern proxy_test_atoi(s: ptr) -> int
 // server's start reuses the socket bound here, so READY is printed once the
 // port listens.
 bind_and_report(s: ptr, role: string) {
-    if http_server_bind_raw(s, "127.0.0.1", 0) < 0 {
+    if http.server_bind(s, "127.0.0.1", 0) != "" {
         println("FAIL: ${role} bind")
         exit(1)
     }
-    println("READY ${http_server_port(s)}")
+    println("READY ${http.server_port(s)}")
 }
 
 // An upstream's URL, as the driver set it from that upstream's READY line.
@@ -180,7 +175,7 @@ handle_echo_cacheable_ttl(req: ptr, res: ptr, ud: ptr) {
 message StartSrv { raw: ptr }
 actor SrvActor {
     state s = 0
-    receive { StartSrv(raw) -> { s = raw; http_server_start_raw(raw) } }
+    receive { StartSrv(raw) -> { s = raw; _ = http.server_start(raw) } }
 }
 
 run_server(srv: @keep ptr) {

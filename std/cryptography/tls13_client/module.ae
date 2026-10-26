@@ -2028,31 +2028,23 @@ fn split_ec_point(spki_key: byte[]) -> (ptr, ptr, int, string) {
 //      all, only one-certificate-per-file directories, which is why the
 //      directory probe exists.
 fn load_trust_anchors(cafile: string) -> (ptr, string) {
-    if cafile != null {
-        if string.length(cafile) > 0 {
-            return tls13_cert.trust_store_load(cafile)
-        }
+    if cafile != "" {
+        return tls13_cert.trust_store_load(cafile)
     }
 
-    // os_getenv returns a NULL pointer for an unset variable, and comparing
-    // that against "" does not catch it -- the value interpolates as the
-    // literal text "(null)", which was once returned AS THE PATH and made
-    // every fallback unreachable. The null check has to come first, exactly
-    // as std/cas/module.ae does it.
+    // An unset variable is the null string, which reads as "" (#3129). It
+    // used to interpolate as the text "(null)", which was once returned as
+    // the path and made every fallback unreachable.
     env_file = os.getenv("SSL_CERT_FILE")
     env_dir = os.getenv("SSL_CERT_DIR")
-    have_file = 0
-    if env_file != null { if string.length(env_file) > 0 { have_file = 1 } }
-    have_dir = 0
-    if env_dir != null { if string.length(env_dir) > 0 { have_dir = 1 } }
-    if have_file == 1 || have_dir == 1 {
+    if env_file != "" || env_dir != "" {
         anchors = list_new()
         first_err = ""
-        if have_file == 1 {
+        if env_file != "" {
             _n, ferr = tls13_cert.trust_store_add(anchors, env_file)
             if string.equals(ferr, "") != 1 { first_err = "SSL_CERT_FILE: ${ferr}" }
         }
-        if have_dir == 1 {
+        if env_dir != "" {
             derr = add_cert_dir_list(anchors, env_dir)
             if string.equals(derr, "") != 1 {
                 if string.equals(first_err, "") == 1 { first_err = "SSL_CERT_DIR: ${derr}" }

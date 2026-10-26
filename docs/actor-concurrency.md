@@ -168,6 +168,19 @@ void _aether_step_ActorName(ActorName* self) {
 }
 ```
 
+### Asking
+
+An ask (`actor ? Msg {}`) sends its message with a reply slot (`Message._reply_slot`) and blocks on the slot until the handler's `reply` fills it or the timeout passes. When no reply can come, the slot says why and the asker returns at once, not at the timeout (#3151):
+
+- an ask to an actor that is already dead (panicked or released) is not sent;
+- an ask whose message is dropped undelivered (its target died or was released on the way, or the mailbox it waited in was drained at the death) fails as dead;
+- an ask whose handler panics with it in hand fails from the step's panic barrier as "died before it replied";
+- an ask whose handler returns without replying fails when its step ends, as "returned without replying".
+
+The ask a handler holds is part of its thread's step context, with the actor stepping. A step can run inside another (a send steps an idle actor of the same core inline, and a cooperative ask polls until its reply), so each step starts with no ask of its own and gives the enclosing step its context back when it ends: a handler that sends, or asks, before it replies still answers its own asker.
+
+`v, err = actor ? Msg {}` reads the reason (the language reference's Ask Pattern lists them); `v = actor ? Msg {}` gives the reply type's zero value for any of them, as it does at a timeout.
+
 ## Actor Timeouts
 
 The `after` clause on a `receive` block fires a handler if no message arrives within a given number of milliseconds:
@@ -182,7 +195,9 @@ actor Monitor {
 }
 ```
 
-The timeout is one-shot: it is cancelled when any message is received. The countdown starts when the actor's mailbox becomes empty. Internally, the generated step function checks `_aether_clock_ns()` against a deadline before each `mailbox_receive()` call. With no message to step it for, the actor's core (or its own thread) steps it once the deadline passes, so the timeout fires within a park's timed wait of it (32 ms at most), and `wait_for_idle()` waits for every armed timeout to fire (#3102).
+The countdown starts when the actor waits on an empty mailbox: at spawn, and again each time it has handled a message. A message that arrives within the interval stops it, and the next wait starts it from the beginning, as Erlang's `receive ... after` does: the Monitor warns every time 5 seconds pass without a heartbeat. The timeout fires once per countdown. When its handler has run, only a message starts the next one, so a handler that sends the actor a message (`self ! Tick {}` below) keeps a cycle going, and one that sends nothing leaves the actor idle (#3162).
+
+Internally, `timeout_ns` in the actor's base holds the interval, set at spawn and kept, and `last_activity_ns` when the countdown was armed (0 while it is not). The generated `spawn_<Actor>` arms it. The generated step function arms it again at the end of each message's handling, disarms it when it takes a message, and before each `mailbox_receive()` fires the `after` arm (disarming it first) when it is armed, the interval has passed by `_aether_clock_ns()`, and no message is waiting. With no message to step it for, the actor's core (or its own thread) steps it once the deadline passes, so the timeout fires within a park's timed wait of it (32 ms at most). `wait_for_idle()` waits for every armed countdown of a live actor to end (#3102), so a poller that never stops keeps it waiting. So does the end of `main`, which waits for the actors as `wait_for_idle()` does: an actor with `after 60000` that handled a message moments before `main` returned holds the exit for that minute, and then runs its timeout. There is no way yet to let `main` end without it (#3219).
 
 The timeout expression can reference actor state fields, not just integer literals, useful when the interval is configurable per-actor or computed:
 

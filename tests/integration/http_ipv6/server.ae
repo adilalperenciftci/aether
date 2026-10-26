@@ -11,9 +11,6 @@ import std.os
 import std.cryptography.tls13_server
 
 extern exit(code: int)
-extern http_server_start_raw(server: ptr) -> int
-extern http_server_bind_raw(server: ptr, host: string, port: int) -> int
-extern http_server_port(server: ptr) -> int
 
 handle_root(req: ptr, res: ptr, ud: ptr) {
     http.response_set_status(res, 200)
@@ -25,7 +22,7 @@ message StartSrv { raw: ptr }
 
 actor SrvActor {
     state s = 0
-    receive { StartSrv(raw) -> { s = raw; http_server_start_raw(raw) } }
+    receive { StartSrv(raw) -> { s = raw; _ = http.server_start(raw) } }
 }
 
 main() {
@@ -36,41 +33,41 @@ main() {
         exit(1)
     }
     cert = os.getenv("CERT_PATH")
-    if cert != null {
+    if cert != "" {
         tls_err = http.server_set_tls(raw, cert, os.getenv("KEY_PATH"))
         if tls_err != "" {
             println("FAIL: server_set_tls: ${tls_err}")
             exit(1)
         }
     }
-    rc = -1
+    berr = ""
     match host {
         "::1" -> {
             http.server_set_host(raw, "::1")
-            rc = http_server_bind_raw(raw, "::1", 0)
+            berr = http.server_bind(raw, "::1", 0)
         }
         "localhost" -> {
             // loopback-ok: "localhost" is the case under test (it must still bind 127.0.0.1 only)
             http.server_set_host(raw, "localhost")
             // loopback-ok: as above
-            rc = http_server_bind_raw(raw, "localhost", 0)
+            berr = http.server_bind(raw, "localhost", 0)
         }
         "::" -> {
             // loopback-ok: dual-stack needs the wildcard; the runner skips this case on Windows
             http.server_set_host(raw, "::")
             // loopback-ok: as above
-            rc = http_server_bind_raw(raw, "::", 0)
+            berr = http.server_bind(raw, "::", 0)
         }
         _ -> {
             http.server_set_host(raw, "127.0.0.1")
-            rc = http_server_bind_raw(raw, "127.0.0.1", 0)
+            berr = http.server_bind(raw, "127.0.0.1", 0)
         }
     }
-    if rc < 0 {
+    if berr != "" {
         println("BIND FAILED")
         exit(3)
     }
-    println("READY ${http_server_port(raw)}")
+    println("READY ${http.server_port(raw)}")
     http.server_get(raw, "/", handle_root, 0)
     a = spawn(SrvActor())
     a ! StartSrv { raw: raw }

@@ -252,7 +252,7 @@ extern sqlite_errmsg_raw(db: ptr) -> string
 // Length-aware AetherString constructor — re-used from std.string.
 // Lets `column_blob` return a binary-safe AetherString rather than
 // a strlen-truncated copy.
-extern string_new_with_length(data: ptr, length: long) -> string @heap
+extern string_new_with_length(data: ptr, length: size_t) -> string @heap
 
 // ---- Go-style wrappers ----
 

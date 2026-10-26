@@ -256,10 +256,11 @@ TEST_CATEGORY(interp_format_by_length, TEST_CATEGORY_STDLIB) {
     ASSERT_EQ(5, (int)n);
     ASSERT_TRUE(memcmp(out, "[x\0y]", 6) == 0);
 
-    /* A plain char* to its NUL; NULL as (null); %%; a %c of 0. */
+    /* A plain char* to its NUL; NULL as the empty text (#3129); %%; a %c
+     * of 0. */
     n = interp(out, sizeof(out), "%s|%s|100%%|%c.", "plain", (const char*)NULL, 0);
-    ASSERT_EQ(20, (int)n);
-    ASSERT_TRUE(memcmp(out, "plain|(null)|100%|\0.", 21) == 0);
+    ASSERT_EQ(14, (int)n);
+    ASSERT_TRUE(memcmp(out, "plain||100%|\0.", 15) == 0);
 
     /* A conversion longer than the formatter's stack buffer is whole. */
     n = interp(out, sizeof(out), "%f", 1e300);

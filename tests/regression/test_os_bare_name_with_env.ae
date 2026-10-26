@@ -1,0 +1,102 @@
+// A bare program name with an explicit env (#3201). The program is looked
+// up on this process's PATH whatever env the child is given, and the child
+// sees that env. The env here carries no PATH at all.
+//
+// On POSIX the child used to look the name up itself: with an explicit env
+// it called execve, which does no lookup, so os.run, os.run_capture and
+// os.run_full never found a bare name ((-1, "program not found")), and
+// os.spawn_proc fell back to execvp, which ran it with this process's
+// environment, so the child never saw the env it was given. Windows looks
+// the name up in the parent and always had it right; the same cases run
+// there through cmd.
+//
+// Cases, through os.run_capture, os.run_full, os.run and os.spawn_proc:
+//   - the shell named bare, with env A=from-env and CODE=7: the child
+//     prints A=from-env, and `exit $CODE` exits 7;
+//   - a bare name that is on no PATH entry: (-1, "program not found").
+
+import std.os
+import std.list
+import std.string
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("  FAIL: ${msg}")
+    exit(1)
+}
+
+main() {
+    println("=== a bare program name with an explicit env ===")
+    shell = "sh"
+    flag = "-c"
+    echo_cmd = "echo A=$A"
+    exit_cmd = "exit $CODE"
+    if os.platform() == "windows" {
+        shell = "cmd"
+        flag = "/c"
+        echo_cmd = "echo A=%A%"
+        exit_cmd = "exit %CODE%"
+    }
+    env = list.new()
+    list.add(env, "A=from-env")
+    list.add(env, "CODE=7")
+
+    echo_av = list.new()
+    list.add(echo_av, flag)
+    list.add(echo_av, echo_cmd)
+    exit_av = list.new()
+    list.add(exit_av, flag)
+    list.add(exit_av, exit_cmd)
+
+    out1, status1, err1 = os.run_capture(shell, echo_av, env)
+    if err1 != "" || status1 != 0 || string.starts_with(out1, "A=from-env") == 0 {
+        fail("run_capture(${shell}): status=${status1} err='${err1}' out='${out1}', expected A=from-env")
+    }
+    println("  PASS: run_capture finds ${shell} and the child sees the env")
+
+    out2, _stderr2, code2, err2 = os.run_full(shell, echo_av, env, "")
+    if err2 != "" || code2 != 0 || string.starts_with(out2, "A=from-env") == 0 {
+        fail("run_full(${shell}): exit=${code2} err='${err2}' out='${out2}', expected A=from-env")
+    }
+    println("  PASS: run_full finds ${shell} and the child sees the env")
+
+    code3 = os.run(shell, exit_av, env)
+    if code3 != 7 {
+        fail("os.run(${shell}, exit CODE): ${code3}, expected 7")
+    }
+    println("  PASS: os.run finds ${shell} and the child exits with the env's CODE")
+
+    token4, err4 = os.spawn_proc(shell, exit_av, env)
+    if err4 != "" {
+        fail("spawn_proc(${shell}): err='${err4}'")
+    }
+    code4, werr4 = os.wait(token4)
+    if code4 != 7 || werr4 != "" {
+        fail("spawn_proc(${shell}, exit CODE): exit=${code4} err='${werr4}', expected 7")
+    }
+    println("  PASS: spawn_proc finds ${shell} and the child exits with the env's CODE")
+
+    missing = "aether_no_such_program_3201"
+    _o5, status5, err5 = os.run_capture(missing, echo_av, env)
+    if status5 != -1 || err5 != "program not found" {
+        fail("run_capture(${missing}): status=${status5} err='${err5}', expected -1 'program not found'")
+    }
+    _o6, _e6, code6, err6 = os.run_full(missing, echo_av, env, "")
+    if code6 != -1 || err6 != "program not found" {
+        fail("run_full(${missing}): exit=${code6} err='${err6}', expected -1 'program not found'")
+    }
+    if os.run(missing, exit_av, env) != -1 {
+        fail("os.run(${missing}) should be -1")
+    }
+    token7, err7 = os.spawn_proc(missing, exit_av, env)
+    if token7 != -1 || err7 != "program not found" {
+        fail("spawn_proc(${missing}): token=${token7} err='${err7}', expected -1 'program not found'")
+    }
+    println("  PASS: a bare name on no PATH entry is (-1, program not found) through all four")
+
+    list.free(env)
+    list.free(echo_av)
+    list.free(exit_av)
+    println("=== All cases passed ===")
+}

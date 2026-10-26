@@ -1,0 +1,66 @@
+// An ask made inside a handler gets its reply, and the handler's own reply
+// reaches its asker (#3196). The ask blocks its thread, a core's scheduler
+// thread, until the reply, and the actor the handler asks, spawned by it,
+// starts on the same core. Since #3090 a steal is made by the victim core's
+// own loop, which waits in the ask, and a send gathered its target onto
+// the sender's core: the inner ask answered only after the outer one had
+// timed out, which read 0 and "ask timed out after 5000 ms". The waiting
+// thread steps such a target itself, and no actor is moved onto a core
+// while it waits in an ask (#3220).
+
+import std.time
+
+extern exit(code: int)
+
+message Count {}
+
+message Total {
+    n: int
+}
+
+message Go {}
+
+actor Leaf {
+    receive {
+        Count() -> {
+            reply Total { n: 42 }
+        }
+    }
+}
+
+// Asks the actor it spawned, then answers with what it got.
+actor Middle {
+    state leaf = null
+    receive {
+        Go() -> {
+            leaf = spawn(Leaf())
+        }
+        Count() -> {
+            int v = leaf ? Count {}
+            reply Total { n: v + 1 }
+        }
+    }
+}
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    mid = spawn(Middle())
+    mid ! Go {}
+    wait_for_idle()
+    round = 0
+    while round < 20 {
+        started = time.now_ms()
+        n, why = mid ? Count {}
+        took = time.now_ms() - started
+        check(why == "" && n == 43, "round ${round}: (${n}, \"${why}\")")
+        check(took < 2000, "round ${round} took ${took} ms")
+        round = round + 1
+    }
+    println("PASS")
+}

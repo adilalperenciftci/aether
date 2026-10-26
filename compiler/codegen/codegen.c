@@ -8689,7 +8689,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#include <stdlib.h>");
     print_line(gen, "#include <stddef.h>");
     print_line(gen, "extern void* aether_caps_malloc(size_t bytes);");
-    print_line(gen, "extern const char* string_new_with_length(void* data, int64_t length);");
+    print_line(gen, "extern const char* string_new_with_length(void* data, size_t length);");
     print_line(gen, "extern void string_retain(const char*);");
     print_line(gen, "extern void aether_string_publish(const void*);");
     /* The header of a counted string, as the runtime lays it out. A string
@@ -8714,7 +8714,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                (unsigned)AETHER_STRING_SHARED_BIT);
     print_line(gen, "        return s;");
     print_line(gen, "    }");
-    print_line(gen, "    return string_new_with_length((void*)s, (int64_t)strlen(s));");
+    print_line(gen, "    return string_new_with_length((void*)s, strlen(s));");
     print_line(gen, "}");
     /* A string handed out as a `ptr` result: a pinned string (a literal, a
      * fault's name) is its C characters, as a literal used as a `ptr` is
@@ -9053,9 +9053,22 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * the duplicates are tolerated by C: no conflicting-types error.
      * string_new_with_length is declared as the std modules' extern is
      * (a `ptr` buffer, `-> string @heap`: `const char*` from `void*`, #3018,
-     * #3030) for the same reason, with a `long` length: the runtime takes a
-     * size_t, which an `int` filled only half of (#3097). */
-    print_line(gen, "extern const char* string_new_with_length(void* data, int64_t length);");
+     * #3030) for the same reason, with the runtime's size_t length: an
+     * `int` filled only half of it (#3097), and an int64_t is not its type
+     * where size_t is 32 bits (wasm32, ESP32), whose linker then traps the
+     * call. */
+    print_line(gen, "extern const char* string_new_with_length(void* data, size_t length);");
+    /* A message's own copy of a string field, which the receiver releases
+     * (#466): nothing the sender holds, so no other thread counts it. An
+     * `owned` value is the sender's temporary, freed once copied. An
+     * expression, so the ask that C without statement expressions builds as
+     * one takes it the same way. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED const char* _aether_msg_str(const char* s, int owned) {");
+    print_line(gen, "    if (!s) return s;");
+    print_line(gen, "    const char* c = string_new_with_length((void*)aether_string_data(s), aether_string_length(s));");
+    print_line(gen, "    if (owned) aether_heap_str_free(s);");
+    print_line(gen, "    return c;");
+    print_line(gen, "}");
     /* Issue #467: list / map heap-string-value owning-add helpers.
      * Prototypes emitted here so codegen can route `list.add(l,
      * heap_str)` / `map.put(m, k, heap_str)` calls to these symbols
@@ -9113,8 +9126,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "static inline const char* _aether_map_put_closure(void* map, const char* key, void* box) {");
     print_line(gen, "    return map_put_closure_owned(map, key, box) ? \"\" : \"map.put failed\";");
     print_line(gen, "}");
+    /* #3129: a null string is the empty text wherever it is read as text. */
     print_line(gen, "static inline const char* _aether_safe_str(const void* s) {");
-    print_line(gen, "    if (!s) return \"(null)\";");
+    print_line(gen, "    if (!s) return \"\";");
     print_line(gen, "    return aether_string_data(s);");
     print_line(gen, "}");
     /* Owned-print helpers: a heap-producing CALL in bare print/println
@@ -9123,8 +9137,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * expression. Bare identifiers never route here, their scope-exit
      * defer owns the free. */
     /* #2521: a string value is written by its length, so one holding a NUL
-     * prints whole; printf's %s stopped at the NUL. NULL prints as
-     * `(null)`, as _aether_safe_str reads it. */
+     * prints whole; printf's %s stopped at the NUL. A null string prints
+     * nothing, as _aether_safe_str reads it (#3129). */
     print_line(gen, "extern size_t aether_print_string(FILE* f, const void* s, int newline);");
     print_line(gen, "static inline int _aether_print_str(const void* s) {");
     print_line(gen, "    return (int)aether_print_string(stdout, s, 0);");
@@ -9219,6 +9233,12 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     /* #2921: the journal's drop of a closure place a panic leaves. */
     print_line(gen, "static AETHER_MAYBE_UNUSED void _aether_closure_drop_unwind(const void* p) { _AeClosure* c = (_AeClosure*)p; _aether_closure_env_release(c->env); c->env = (void*)0; }");
     print_line(gen, "static AETHER_MAYBE_UNUSED void _aether_seq_drop_unwind(const void* p) { StringSeq** s = (StringSeq**)p; string_seq_free(*s); *s = (StringSeq*)0; }");
+    /* #3159: the drop of a string place by its address, as own_emit_part
+     * drops one (a `make` buffer's elements, freed with the buffer). */
+    print_line(gen, "static AETHER_MAYBE_UNUSED void _aether_string_drop_unwind(const void* p) { const char** s = (const char**)p; aether_heap_str_free(*s); *s = (const char*)0; }");
+    /* #3172: the target of a send or an ask, which panics with `why` (a
+     * literal naming the operation and the place) on a null reference. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void* _aether_send_target(void* t, const char* why) { if (!t) aether_panic(why); return t; }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED void _aether_seq_free_place(StringSeq** p) { string_seq_free(*p); *p = (StringSeq*)0; }");
     /* #2755: a closure cell (a `fn` variable a closure writes) holds a
      * reference of its own to the closure in it, as a string cell owns its
@@ -9516,8 +9536,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
          * field's type), and `out` is returned so the call site reads it
          * as that type: a closure reply (16 bytes) round-trips as on the
          * GCC path; a missing reply leaves the zero. */
-        print_line(gen, "static void* _aether_ask_helper(ActorBase* target, void* msg, size_t msg_size, int timeout_ms, size_t field_offset, size_t field_size, void (*release)(void*), void* out) {");
-        print_line(gen, "    void* reply = scheduler_ask_message(target, msg, msg_size, timeout_ms);");
+        /* `status`, NULL or the AETHER_ASK_* why no reply came (#3151). */
+        print_line(gen, "static void* _aether_ask_helper(ActorBase* target, void* msg, size_t msg_size, int timeout_ms, size_t field_offset, size_t field_size, void (*release)(void*), void* out, int* status) {");
+        print_line(gen, "    void* reply = scheduler_ask_message_status(target, msg, msg_size, timeout_ms, status);");
         print_line(gen, "    if (!reply) return out;");
         print_line(gen, "    memcpy(out, (char*)reply + field_offset, field_size);");
         print_line(gen, "    if (release) { memset((char*)reply + field_offset, 0, field_size); release(reply); }");

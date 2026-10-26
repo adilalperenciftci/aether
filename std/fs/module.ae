@@ -29,7 +29,7 @@
 import std.strbuilder
 
 exports(
-    file_open_raw, file_close, file_read_all_raw, file_write_raw,
+    file_open_raw, file_close_raw, file_read_all_raw, file_write_raw,
     file_exists, file_delete_raw, file_size_raw, file_mtime,
     dir_exists, dir_create_raw, dir_delete_raw, dir_list_raw,
     fs_mkdir_p_raw,
@@ -60,7 +60,7 @@ exports(
     file_fd_raw, fd,
     fs_glob_raw, fs_glob_multi_raw,
     fs_walk_raw, fs_watch_open_raw,
-    open, read, write, delete, size, mtime, exists,
+    open, close, read_all, read, write, delete, size, mtime, exists,
     create_dir, create_dir_with_mode, delete_dir, mkdir_p,
     symlink, hard_link, readlink, unlink,
     list_dir, glob, glob_multi,
@@ -106,7 +106,7 @@ const KIND_UNAVAILABLE = 99 // platform feature compiled out (reserved for follo
 
 // File operations - raw externs
 extern file_open_raw(path: string, mode: string) -> ptr
-extern file_close(file: ptr) -> int
+extern file_close_raw(file: ptr) -> int
 extern file_read_all_raw(file: ptr) -> string @heap
 extern file_write_raw(file: ptr, data: string, length: int) -> int
 extern file_exists(path: string) -> int
@@ -413,7 +413,7 @@ extern string_substring(str: string, start: int, end: int) -> string @heap
 // so binary payloads with embedded NULs survive the copy. Returns a
 // ref-counted AetherString with the exact byte content — consumers
 // reading up to `length` see the full file.
-extern string_new_with_length(data: ptr, length: long) -> string @heap
+extern string_new_with_length(data: ptr, length: size_t) -> string @heap
 
 // ---- Go-style wrappers ----
 
@@ -431,6 +431,33 @@ open(path: string, mode: string) -> {
     return handle, ""
 }
 
+// Close a handle `open` gave, and free it. Returns "" on success, or the
+// reason: a write the close flushes can fail (a full disk, a lost network
+// mount), and the data is then not on disk. `defer fs.close(h)` after a
+// successful open is the usual shape (#3179).
+close(handle: ptr) -> string {
+    if handle == null {
+        return "null handle"
+    }
+    if file_close_raw(handle) < 0 {
+        return "close failed: buffered data was not written"
+    }
+    return ""
+}
+
+// Read the whole of an open handle, from its start. Returns (text, "") on
+// success, ("", error) on failure; the handle stays open (#3179).
+read_all(handle: ptr) -> {
+    if handle == null {
+        return "", "null handle"
+    }
+    text = file_read_all_raw(handle)
+    if text == null {
+        return "", "read failed"
+    }
+    return text, ""
+}
+
 // Read the entire contents of a file at `path`. Opens, reads, closes.
 // Returns (content, "") on success, ("", error) on failure.
 //
@@ -441,7 +468,8 @@ open(path: string, mode: string) -> {
 // LIFETIME: the error string is BORROWED from thread-local storage and is only
 // valid until this thread's next failed read. Print it, or copy it with
 // `string.concat(err, "")`, before issuing another read — do NOT hold it across
-// one. Do not free it. (The success value IS owned and must be freed.)
+// one. Do not free it. The text read is the caller's string, released like any
+// other when its place lets it go (#3168).
 read(path: string) -> {
     // "rb", not "r": Windows text mode collapses "\r\n" back to "\n" and stops
     // at the first Ctrl-Z (0x1A) byte, neither of which fs.read should do — it
@@ -456,11 +484,11 @@ read(path: string) -> {
     }
     content = file_read_all_raw(handle)
     if content == 0 {
-        file_close(handle)
+        file_close_raw(handle)
         return "", fs_error_message(path, "cannot read file")
     }
     content_copy = string_concat(content, "")
-    file_close(handle)
+    file_close_raw(handle)
     return content_copy, ""
 }
 
@@ -477,9 +505,14 @@ write(path: string, content: string) -> {
     }
     length = string_length(content)
     ok = file_write_raw(handle, content, length)
-    file_close(handle)
+    // The bytes can sit in the handle's buffer until the close flushes
+    // them, so a full disk shows only there (#3179).
+    closed = file_close_raw(handle)
     if ok == 0 {
         return "write failed"
+    }
+    if closed < 0 {
+        return "close failed: buffered data was not written"
     }
     return ""
 }
@@ -943,7 +976,7 @@ block_info(dev: string) -> {
 // LIFETIME: the error string is BORROWED from thread-local storage, valid only
 // until this thread's next failed read. Print it, or copy it with
 // `string.concat(err, "")`, before issuing another read. Do not free it. The
-// bytes value IS owned and must be freed.
+// bytes are the caller's, released like any other string (#3168).
 read_binary(path: string) -> {
     // Single tuple-returning extern (#271 + #273). The four-extern
     // split-accessor pattern (fs_try_read_binary + fs_get_read_binary
@@ -1204,7 +1237,7 @@ fsync(file: ptr) -> string {
 // the stdlib, then narrow the descriptor with
 // capsicum.rights_limit(fs.fd(handle), ...) before capsicum.enter().
 // The fd is owned by the handle — do not close it directly; it is
-// released by file_close, which also frees the handle itself, so
+// released by close, which also frees the handle itself, so
 // never call fd() on a handle that has been closed.
 fd(file: ptr) -> int {
     return file_fd_raw(file)

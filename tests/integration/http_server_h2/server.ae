@@ -7,6 +7,7 @@
 //   - GET, POST with body, HEAD methods
 //   - Multiplexed parallel streams
 //   - Large body round-trip
+//   - The connection's metadata on an h2 request (#3175)
 //
 // (h2 over TLS is in tests/integration/http_server_h2_tls/.)
 //
@@ -16,11 +17,6 @@ import std.http
 import std.os
 
 extern exit(code: int)
-// Use raw form: actor receive handlers can't cleanly discard the
-// wrapper's string return without an unused-result warning.
-extern http_server_start_raw(server: ptr) -> int
-extern http_server_bind_raw(server: ptr, host: string, port: int) -> int
-extern http_server_port(server: ptr) -> int
 
 handle_root(req: ptr, res: ptr, ud: ptr) {
     http.response_set_status(res, 200)
@@ -78,11 +74,24 @@ handle_n(req: ptr, res: ptr, ud: ptr) {
     http.response_set_body(res, "q=${q}")
 }
 
+// The connection's metadata, which every request carries, an h2 stream's
+// too (#3175): the peer the kernel reports, whether it has a port, the
+// local address, the TLS state and the scheme.
+handle_peer(req: ptr, res: ptr, ud: ptr) {
+    port_set = 0
+    if http.request_remote_port(req) > 0 {
+        port_set = 1
+    }
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "peer=${http.request_remote_addr(req)} port_set=${port_set} local=${http.request_local_addr(req)} tls=${http.request_is_tls(req)} scheme=${http.request_scheme(req)}")
+}
+
 message StartSrv { raw: ptr }
 
 actor SrvActor {
     state s = 0
-    receive { StartSrv(raw) -> { s = raw; http_server_start_raw(raw) } }
+    receive { StartSrv(raw) -> { s = raw; _ = http.server_start(raw) } }
 }
 
 main() {
@@ -109,11 +118,11 @@ main() {
         // server_start reuses a socket the caller already bound, so this also
         // means READY is printed AFTER the listen socket exists rather than
         // before it, which is what the fixed sleep in the runner was covering.
-        if http_server_bind_raw(raw, "127.0.0.1", 0) < 0 {
+        if http.server_bind(raw, "127.0.0.1", 0) != "" {
             println("FAIL: bind")
             exit(1)
         }
-        println("READY ${http_server_port(raw)}")
+        println("READY ${http.server_port(raw)}")
     }
 
     http.server_get(raw, "/", handle_root, 0)
@@ -121,6 +130,7 @@ main() {
     http.server_get(raw, "/head", handle_head, 0)
     http.server_get(raw, "/big", handle_big, 0)
     http.server_get(raw, "/n", handle_n, 0)
+    http.server_get(raw, "/peer", handle_peer, 0)
 
     a = spawn(SrvActor())
     a ! StartSrv { raw: raw }

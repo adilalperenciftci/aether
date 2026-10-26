@@ -1,0 +1,20 @@
+// Builds with a warning that has no code.
+//
+// Run: ae run tests/examples/fixture/warn_uncoded.ae
+
+extern malloc(n: int) -> ptr
+extern free(p: ptr)
+
+struct Point {
+    x: int
+    y: int
+}
+
+main() {
+    p = malloc(8) as *Point
+    free(p)
+    println("ok")
+}
+
+// Output:
+// ok

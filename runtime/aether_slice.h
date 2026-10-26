@@ -58,6 +58,12 @@ typedef struct AetherSlice {
  * holds a buffer it owns, and is not marked. */
 #define AETHER_SLICE_BORROWED 2u
 
+/* #3159: the buffer `make([]T, n)` handed out. Its elements are places: a
+ * store into one takes the value (#2921), so `free` gives back what each
+ * holds before the buffer goes. A view of a raw pointer is not marked: its
+ * elements are C's, and a store there takes nothing. */
+#define AETHER_SLICE_MADE 4u
+
 /* `const void*`: a view is made over an array of strings too, `const char*
  * xs[N]`. Taken as `void*`, cl.exe read the elements' `const` as the array's
  * and refused the call (C4090, an error under the MSVC check, #2799); the
@@ -105,7 +111,9 @@ static inline AetherSlice aether_slice_alloc(int64_t count, size_t elem_size) {
     }
     void* p = calloc(count > 0 ? (size_t)count : 1, elem_size);
     if (!p) aether_panic("make([]T, n): out of memory");
-    return aether_slice_make(p, (uint64_t)count);
+    AetherSlice s = aether_slice_make(p, (uint64_t)count);
+    s.flags = AETHER_SLICE_MADE;
+    return s;
 }
 
 /* `.len` — -1 for an unbounded view. */
@@ -251,6 +259,25 @@ static inline void aether_slice_free(AetherSlice s, const char* file, int line) 
     if (s.flags & AETHER_SLICE_BORROWED)
         aether_slice_panicf("%s:%d: free of a view of elements another slice or an array "
                             "holds, which owns nothing", file, line);
+    free(s.ptr);
+}
+
+/* #3159: `free(s)` of a slice whose element type owns something (a string,
+ * a closure, a struct or composite that holds one): a `make` buffer's
+ * elements each give back what they hold (`drop`, the place's own release,
+ * which empties it), then the buffer goes, as a struct's destroy releases
+ * its fields. Before, every string stored into the buffer leaked. A view is
+ * refused before anything is released: its elements are another's. */
+static inline void aether_slice_free_elems(AetherSlice s, size_t elem_size,
+                                           void (*drop)(const void*),
+                                           const char* file, int line) {
+    if (s.flags & (AETHER_SLICE_READONLY | AETHER_SLICE_BORROWED)) {
+        aether_slice_free(s, file, line);
+        return;
+    }
+    if ((s.flags & AETHER_SLICE_MADE) && s.len != AETHER_SLICE_UNBOUNDED) {
+        for (uint64_t i = 0; i < s.len; i++) drop((const char*)s.ptr + i * elem_size);
+    }
     free(s.ptr);
 }
 

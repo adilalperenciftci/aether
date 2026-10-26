@@ -5554,15 +5554,15 @@ value_identity(ctx: ptr, v: string) -> string {
 json_to_value(ctx: ptr, jv: ptr, depth: int) -> (string, string) {
     if depth > 256 { return value_nil(), "nested deeper than 256 levels" }
     t = json.type(jv)
-    if t == 1 { return value_bool(json.get_bool(jv)), "" }
-    if t == 2 {
+    if t == json.JSON_BOOL { return value_bool(json.get_bool(jv)), "" }
+    if t == json.JSON_NUMBER {
         if json.is_integer(jv) == 1 {
             return string.concat("i:", string.from_long(json.get_long(jv))), ""
         }
         return value_float(json.get_number(jv)), ""
     }
-    if t == 3 { return string.concat("s:", json.get_string_raw(jv)), "" }
-    if t == 4 {
+    if t == json.JSON_STRING { return string.concat("s:", json.get_string_raw(jv)), "" }
+    if t == json.JSON_ARRAY {
         av, an = node_new(ctx, LV_ARR)
         n = json.array_size(jv)
         i = 0
@@ -5574,7 +5574,7 @@ json_to_value(ctx: ptr, jv: ptr, depth: int) -> (string, string) {
         }
         return av, ""
     }
-    if t == 5 {
+    if t == json.JSON_OBJECT {
         ov, on = node_new(ctx, LV_OBJ)
         n = json.object_size_raw(jv)
         i = 0

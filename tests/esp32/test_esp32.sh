@@ -35,8 +35,8 @@ ok() { echo "  [PASS] esp32: $1"; pass=$((pass + 1)); }
 bad() { echo "  [FAIL] esp32: $1"; fail=$((fail + 1)); }
 
 # program  source  line it must print
-PROGRAMS="hello:examples/basics/hello.ae:Hello, Aether!
-counter:examples/actors/counter.ae:Current value: 18
+PROGRAMS="hello:examples/01-language/01-hello.ae:Hello, Aether!
+counter:examples/02-actors/02-state.ae:Current value: 18
 test_coop_chain:tests/syntax/test_coop_chain.ae:Chain test passed!
 test_platform_caps:tests/syntax/test_platform_caps.ae:All platform caps tests passed!"
 
@@ -81,6 +81,11 @@ while IFS='|' read -r name want; do
          printf '%s\n' "$out" | grep -q 'Returned from app_main'; then
         size="$(grep -o 'aether_esp32.bin binary size 0x[0-9a-f]*' "$tmp/out/$name.build.log" | awk '{print $4}')"
         ok "$name runs on the emulated ESP32 ($(printf '%d' "$size" 2>/dev/null) bytes of firmware): $want"
+    elif [ -z "$out" ]; then
+        # It never reached app_main: what the boot printed says why (a
+        # stack overflow, a Guru Meditation, a failed assert).
+        bad "$name did not reach app_main"
+        tr -d '\r' < "$log" 2>/dev/null | tail -25 | sed 's/^/        |/'
     else
         bad "$name did not print \"$want\" and return from app_main"
         printf '%s\n' "$out" | tail -15 | sed 's/^/        |/'

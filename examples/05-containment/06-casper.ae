@@ -1,0 +1,69 @@
+// Casper: DNS and sysctl from inside Capsicum, through a daemon.
+//
+// A process in capability mode (05-capsicum.ae) cannot reach the global
+// namespaces: no DNS, no password database, no sysctl. FreeBSD's Casper
+// daemon does those lookups for it, over channels the process opened
+// before it entered. The order is the whole design, and it is not
+// optional:
+//
+//   1. still unconfined, open the channels: `casper.init()`, then
+//      `casper.service(c, "system.net")` for each service;
+//   2. `capsicum.enter()`;
+//   3. use the channels: `casper.dns_resolve(net, host)`,
+//      `casper.sysctl(ch, name)`, `casper.pwd_home(ch, user)`.
+//
+// A channel opened after enter fails. Each lookup returns its value and
+// an error, `""` when it worked; `casper.close` releases a channel. Off
+// FreeBSD `casper.available()` is 0.
+//
+// Run: ae run examples/05-containment/06-casper.ae
+// Needs: FreeBSD with the casper daemon; elsewhere it says Casper is not
+//   available. CI builds it.
+// See: docs/aether_compared_to_capsicum.md
+
+import std.capsicum
+import std.casper
+
+main() {
+    if casper.available() == 0 {
+        println("Casper is not available here: it is a FreeBSD service.")
+        return
+    }
+
+    // 1. Open the channels while the process can.
+    c = casper.init()
+    if c == null {
+        println("casper.init() failed")
+        exit(1)
+    }
+    net = casper.service(c, "system.net")
+    sysctl_ch = casper.service(c, "system.sysctl")
+    casper.close(c)
+    if net == null || sysctl_ch == null {
+        println("cannot open the system.net and system.sysctl services")
+        exit(1)
+    }
+    defer casper.close(net)
+    defer casper.close(sysctl_ch)
+
+    // 2. Lock the process down.
+    if capsicum.enter() != capsicum.CAP_OK {
+        println("capsicum.enter() failed")
+        exit(1)
+    }
+    println("in capability mode: ${capsicum.in_mode() == 1}")
+
+    // 3. The lookups go through the daemon.
+    ip, derr = casper.dns_resolve(net, "freebsd.org")
+    if derr == "" {
+        println("freebsd.org resolves to ${ip}")
+    } else {
+        println("dns_resolve failed: ${derr}")
+    }
+    host, serr = casper.sysctl(sysctl_ch, "kern.hostname")
+    if serr == "" {
+        println("kern.hostname is ${host}")
+    } else {
+        println("sysctl failed: ${serr}")
+    }
+}

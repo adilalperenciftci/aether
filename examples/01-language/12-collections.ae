@@ -1,0 +1,78 @@
+// Collections: lists, maps and sets that grow.
+//
+// std.list is a growable list, std.map a hash map from string keys, and
+// std.set a set of strings. Each is a handle, a `ptr` the module made, so
+// the program frees it, and `defer` puts the free next to the `new`
+// (16-defer.ae). A string stored in one is the container's own reference:
+// it stays valid after the variable it came from is reused. An element
+// comes back as an untyped pointer, so a string is read with the typed
+// getter, `list.get_string` or `map.get_string`, which says when the
+// element is not a string. A map's keys come in no particular order: sort
+// them for a stable one.
+//
+// Run: ae run examples/01-language/12-collections.ae
+// See: docs/memory-management.md#handles-and-defer
+
+import std.list
+import std.map
+import std.set
+import std.sort
+
+main() {
+    // A list keeps its order.
+    tasks = list.new()
+    defer list.free(tasks)
+    list.add(tasks, "write")
+    list.add(tasks, "test")
+    list.add(tasks, "ship")
+    list.remove(tasks, 1)
+    for i in 0..list.size(tasks) {
+        t, _ = list.get_string(tasks, i)
+        println("task ${i}: ${t}")
+    }
+
+    // A map from names to values.
+    capitals = map.new()
+    defer map.free(capitals)
+    map.put(capitals, "France", "Paris")
+    map.put(capitals, "Japan", "Tokyo")
+    map.put(capitals, "Peru", "Lima")
+    city, _ = map.get_string(capitals, "Japan")
+    println("Japan: ${city}, has Chile: ${map.has(capitals, "Chile")}, size ${map.size(capitals)}")
+
+    keys, _ = map.keys(capitals)
+    countries = make([]string, map.keys_size(keys))
+    defer free(countries)
+    for i in 0..countries.len {
+        countries[i] = map.keys_get(keys, i)
+    }
+    map.keys_free(keys)
+    sort.strings(countries)
+    for i in 0..countries.len {
+        c, _ = map.get_string(capitals, countries[i])
+        println("${countries[i]} -> ${c}")
+    }
+
+    // A set answers "seen it before?".
+    seen = set.new()
+    defer set.free(seen)
+    visits = ["/home", "/about", "/home", "/docs", "/about"]
+    for i in 0..visits.len {
+        if set.add(seen, visits[i]) {
+            println("first visit to ${visits[i]}")
+        }
+    }
+    println("${set.size(seen)} distinct pages")
+}
+
+// Output:
+// task 0: write
+// task 1: ship
+// Japan: Tokyo, has Chile: 0, size 3
+// France -> Paris
+// Japan -> Tokyo
+// Peru -> Lima
+// first visit to /home
+// first visit to /about
+// first visit to /docs
+// 3 distinct pages

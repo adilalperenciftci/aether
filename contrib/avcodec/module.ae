@@ -74,7 +74,7 @@ extern avc_audio_get_pcm_length() -> int
 extern avc_audio_sample_rate() -> int
 extern avc_audio_channels() -> int
 extern avc_audio_release()
-extern string_new_with_length(data: ptr, length: long) -> string @heap
+extern string_new_with_length(data: ptr, length: size_t) -> string @heap
 
 // Open a media source. `want_w`/`want_h` <= 0 means "source size"; anything
 // else scales during the RGBA conversion, so resizing costs no extra pass.

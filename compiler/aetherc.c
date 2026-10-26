@@ -20,6 +20,7 @@
 #include <unistd.h>
 #endif
 #include "parser/tokens.h"
+#include "parser/lexer.h"
 #include "ast.h"
 #include "parser/parser.h"
 #include "analysis/typechecker.h"
@@ -366,11 +367,12 @@ static void report_compilation_failure(const char* input_path) {
     fprintf(stderr, "aborting: %d error(s) found\n", n);
     if (getenv("AETHER_NO_HELP_HINT")) return;
     if (input_path && input_path[0]) {
+        char shown[4096];
         fprintf(stderr,
                 "hint: run `ae help %s` for actionable suggestions "
                 "(Levenshtein matches, YAML/HCL→call-form, missing imports). "
                 "Suppress with AETHER_NO_HELP_HINT=1.\n",
-                input_path);
+                aether_display_path(input_path, shown, sizeof shown));
     }
 }
 
@@ -1407,8 +1409,8 @@ int compile_source(const char* input_path, const char* output_path) {
     }
     Token* last = tokens[token_count - 1];
     if (last->type == TOKEN_ERROR) {
-        aether_error_with_code(last->value, last->line, last->column,
-                               AETHER_ERR_SYNTAX);
+        aether_error_full(last->value, last->line, last->column,
+                          lexer_error_help(last->value), NULL, AETHER_ERR_SYNTAX);
         free_tokens(tokens, token_count);
         free(source);
         return 0;
@@ -2700,6 +2702,33 @@ int main(int argc, char *argv[]) {
             if (rc != 0) return rc;
         }
         return 0;
+    }
+
+    /* #3182: the input, and then the output, are the last arguments; options
+     * come before them. An argument after them was dropped without a word,
+     * so `aetherc in.ae out.c --lib vendor` compiled without vendor and its
+     * caller never knew (`ae help` passed every --lib that way, #3183). It
+     * is refused, with the command as it should be. A mode that writes no
+     * output still takes one in that place (callers pass the null device);
+     * `aetherc in.ae -o out.c` keeps its own message below. */
+    {
+        int input_only = dump_ast_mode || diagnose_ownership_mode || emit_c_mode ||
+                         check_only_mode || emit_ast_mode || emit_inspect_mode ||
+                         emit_short_names_mode;
+        int dash_output = arg_offset + 1 < argc && argv[arg_offset + 1][0] == '-' &&
+                          argv[arg_offset + 1][1] != '\0';
+        for (int i = arg_offset + 1; i < argc && !(dash_output && !input_only); i++) {
+            int is_flag = argv[i][0] == '-' && argv[i][1] != '\0';
+            if (i == arg_offset + 1 && !is_flag) continue;          /* the output */
+            fprintf(stderr, "Error: unexpected argument '%s' after the %s; options go before the input:\n",
+                    argv[i], i == arg_offset + 1 ? "input" : "output");
+            fprintf(stderr, "    %s", argv[0]);
+            for (int j = 1; j < arg_offset; j++) fprintf(stderr, " %s", argv[j]);
+            for (int j = i; j < argc; j++) fprintf(stderr, " %s", argv[j]);
+            for (int j = arg_offset; j < i; j++) fprintf(stderr, " %s", argv[j]);
+            fprintf(stderr, "\n");
+            return 1;
+        }
     }
 
     // --dump-ast only needs the input file

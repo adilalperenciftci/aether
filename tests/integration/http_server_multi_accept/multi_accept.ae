@@ -1,0 +1,132 @@
+// Multi-accept (#3194): in actor dispatch mode, one SO_REUSEPORT listener
+// per core on the server's one port.
+//
+// It could not be turned on from Aether (there was no setter), and forced on
+// it failed in the common case: after server_bind the bound socket held the
+// port without SO_REUSEPORT, so every listener's bind failed ("cannot open
+// SO_REUSEPORT listener 0"), and without a bind each listener took a port 0
+// of its own. Now:
+//   1. after server_bind on port 0, http.server_set_multi_accept(s, 1)
+//      starts: the listening event and server_port give the bound port, and
+//      requests on it are served;
+//   2. without a bind, on port 0, the port is resolved once: the listening
+//      event and server_port agree on it, and requests on it are served.
+//
+// Multi-accept exists where the kernel spreads connections across the
+// listeners: Linux and DragonFly (SO_REUSEPORT) and FreeBSD
+// (SO_REUSEPORT_LB). Elsewhere the setter must say it cannot, and that is
+// all this test checks: Windows has no SO_REUSEPORT, and on macOS, OpenBSD
+// and NetBSD one listener takes every connection.
+//
+// actor_shim.c switches the server to actor dispatch mode, which has no
+// Aether surface; the driving shell test builds the two together.
+
+import std.http
+import std.http.client
+import std.os
+
+extern multi_accept_actor_mode(server: ptr) -> int
+extern sleep(ms: int)
+extern exit(code: int)
+
+handle(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_body(res, "served")
+}
+
+// GET /x on `port` `n` times, each on a connection of its own; the number
+// that came back 200 "served".
+served(port: int, n: int) -> int {
+    ok = 0
+    i = 0
+    while i < n {
+        req = client.request("GET", "http://127.0.0.1:${port}/x")
+        client.set_header(req, "Connection", "close")
+        resp, err = client.send_request(req)
+        client.request_free(req)
+        if err == "" {
+            if client.response_status(resp) == 200 && client.response_body(resp) == "served" {
+                ok = ok + 1
+            }
+            client.response_free(resp)
+        }
+        i = i + 1
+    }
+    return ok
+}
+
+// Start `s` in the background with multi-accept on, after a server_bind on
+// port 0 when `prebind` is 1; check the port it reports and serve on it.
+run_case(label: string, prebind: int) {
+    heard_port = ref(0)
+    defer ref_free(heard_port)
+    s = http.server_create(0)
+    http.server_set_host(s, "127.0.0.1")
+    http.monitor(s) {
+        listening() | host: string, port: int | { ref_set(heard_port, port) }
+    }
+    if multi_accept_actor_mode(s) != 0 {
+        println("FAIL ${label}: no actor dispatch mode")
+        exit(1)
+    }
+    http.server_get(s, "/x", handle, 0)
+    bound = 0
+    if prebind == 1 {
+        berr = http.server_bind(s, "127.0.0.1", 0)
+        if berr != "" {
+            println("FAIL ${label}: bind: ${berr}")
+            exit(1)
+        }
+        bound = http.server_port(s)
+    }
+    merr = http.server_set_multi_accept(s, 1)
+    if merr != "" {
+        println("FAIL ${label}: server_set_multi_accept: ${merr}")
+        exit(1)
+    }
+    serr = http.server_start_background(s)
+    if serr != "" {
+        println("FAIL ${label}: start: ${serr}")
+        exit(1)
+    }
+    waited = 0
+    while ref_get(heard_port) == 0 && waited < 250 {
+        sleep(20)
+        waited = waited + 1
+    }
+    port = http.server_port(s)
+    if ref_get(heard_port) == 0 || ref_get(heard_port) != port {
+        println("FAIL ${label}: listening reported port ${ref_get(heard_port)}, server_port ${port}")
+        exit(1)
+    }
+    if prebind == 1 && port != bound {
+        println("FAIL ${label}: server_port ${port} after the start, the bind gave ${bound}")
+        exit(1)
+    }
+    got = served(port, 40)
+    http.server_stop(s)
+    http.server_free(s)
+    if got != 40 {
+        println("FAIL ${label}: ${got} of 40 requests on port ${port} were served")
+        exit(1)
+    }
+}
+
+main() {
+    platform = os.platform()
+    if platform != "linux" && platform != "freebsd" && platform != "dragonfly" {
+        s = http.server_create(0)
+        http.server_set_host(s, "127.0.0.1")
+        merr = http.server_set_multi_accept(s, 1)
+        http.server_free(s)
+        if merr == "" {
+            println("FAIL server_set_multi_accept said yes on ${platform}, whose kernel does not spread connections")
+            exit(1)
+        }
+        println("MULTI-ACCEPT-OK")
+        return
+    }
+    run_case("after server_bind on port 0", 1)
+    run_case("port 0 without a bind", 0)
+    println("MULTI-ACCEPT-OK")
+}

@@ -6,8 +6,17 @@
 
 #if !defined(_WIN32) && !defined(__wasi__)
 
+#include <errno.h>
 #include <fcntl.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <crt_externs.h> /* _NSGetEnviron: environ is not visible to a dylib */
+#else
+extern char** environ;
+#endif
 
 #if defined(__linux__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) || \
     defined(__DragonFly__)
@@ -22,6 +31,78 @@ int pipe2(int pipefd[2], int flags);
  * it exclusively, so no fork sees a pipe that is not yet close-on-exec. */
 static pthread_rwlock_t aether_fork_lock = PTHREAD_RWLOCK_INITIALIZER;
 #endif
+
+/* Can this process execute `path`, by its effective ids as execve judges? */
+static int aether_spawn_can_exec(const char* path) {
+#ifdef AT_EACCESS
+    return faccessat(AT_FDCWD, path, X_OK, AT_EACCESS) == 0;
+#else
+    return access(path, X_OK) == 0;
+#endif
+}
+
+/* Moved here from std/os (#3201) for spawn_sandboxed (#3200). */
+char* aether_spawn_resolve(const char* prog) {
+    if (!prog || !*prog) { errno = ENOENT; return NULL; }
+    if (strchr(prog, '/')) return strdup(prog);
+    const char* path = getenv("PATH");
+    if (!path || !*path) path = "/usr/local/bin:/usr/bin:/bin";
+    size_t plen = strlen(prog);
+    const char* p = path;
+    for (;;) {
+        const char* end = strchr(p, ':');
+        size_t dlen = end ? (size_t)(end - p) : strlen(p);
+        const char* dir = dlen ? p : ".";
+        if (!dlen) dlen = 1;
+        char* cand = (char*)malloc(dlen + 1 + plen + 1);
+        if (!cand) return NULL;
+        memcpy(cand, dir, dlen);
+        cand[dlen] = '/';
+        memcpy(cand + dlen + 1, prog, plen + 1);
+        struct stat st;
+        if (stat(cand, &st) == 0 && S_ISREG(st.st_mode) && aether_spawn_can_exec(cand)) return cand;
+        free(cand);
+        if (!end) break;
+        p = end + 1;
+    }
+    errno = ENOENT;
+    return NULL;
+}
+
+char** aether_spawn_environ(void) {
+#ifdef __APPLE__
+    return *_NSGetEnviron();
+#else
+    return environ;
+#endif
+}
+
+/* Is `entry` ("KEY=..." from an env) one of the keys `set` gives? The whole
+ * name before the `=` on both sides, so `PATH` is not `PATHEXT`. */
+static int aether_spawn_env_has(const char* entry, const char* const* set, int nset) {
+    const char* eeq = strchr(entry, '=');
+    size_t elen = eeq ? (size_t)(eeq - entry) : strlen(entry);
+    for (int i = 0; i < nset; i++) {
+        const char* eq = strchr(set[i], '=');
+        size_t klen = eq ? (size_t)(eq - set[i]) : strlen(set[i]);
+        if (klen == elen && strncmp(entry, set[i], klen) == 0) return 1;
+    }
+    return 0;
+}
+
+char** aether_spawn_env(char** base, const char* const* set, int nset) {
+    size_t n = 0;
+    while (base && base[n]) n++;
+    char** out = (char**)malloc((n + (size_t)nset + 1) * sizeof(char*));
+    if (!out) return NULL;
+    size_t k = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (!aether_spawn_env_has(base[i], set, nset)) out[k++] = base[i];
+    }
+    for (int i = 0; i < nset; i++) out[k++] = (char*)set[i];
+    out[k] = NULL;
+    return out;
+}
 
 int aether_pipe_cloexec(int fds[2]) {
 #ifdef AETHER_HAVE_PIPE2

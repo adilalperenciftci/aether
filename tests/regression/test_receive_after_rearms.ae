@@ -1,0 +1,79 @@
+// A receive timeout counts down again after every message (#3162).
+//
+// It fired only for an actor that never received anything: the first message
+// zeroed the interval for good. The language reference's Monitor never warned
+// once a heartbeat had come, and its poller, whose timeout sends itself a Tick,
+// ticked once.
+//
+// The two shapes, with two actors, so the scheduler's cores run them
+// (test_receive_after_rearms_alone.ae runs one actor by itself):
+//   - Monitor: each silence after a heartbeat warns exactly once, and the
+//     warning, which sends nothing, leaves the actor idle, so wait_for_idle()
+//     returns (#3102).
+//   - Poller: each timeout sends Tick to self, and the cycle goes on until
+//     the timeout stops sending, at the fifth tick.
+
+message Heartbeat {}
+message Tick {}
+
+extern exit(code: int)
+
+actor Monitor {
+    state beats = 0
+    state alarms = 0
+    state quiet_alarms = 0
+
+    receive {
+        Heartbeat -> {
+            beats = beats + 1
+            quiet_alarms = 0
+        }
+    } after 100 -> {
+        alarms = alarms + 1
+        quiet_alarms = quiet_alarms + 1
+    }
+}
+
+actor Poller {
+    state ticks = 0
+
+    receive {
+        Tick -> { ticks = ticks + 1 }
+    } after 20 -> {
+        if ticks < 5 {
+            self ! Tick {}
+        }
+    }
+}
+
+main() {
+    println("=== a receive timeout counts down again after every message (#3162) ===")
+    m = spawn(Monitor())
+    p = spawn(Poller())
+
+    // The countdown that spawn armed may fire before the first beat lands;
+    // whatever it did, the silence after the beat warns exactly once.
+    m ! Heartbeat {}
+    wait_for_idle()
+    first = m.alarms
+    if m.beats != 1 || m.quiet_alarms != 1 {
+        println("FAIL: after one heartbeat and silence: ${m.beats} beat(s), ${m.quiet_alarms} warning(s) since it, expected 1 and 1")
+        exit(1)
+    }
+    println("  PASS: the silence after a heartbeat warned once")
+
+    m ! Heartbeat {}
+    wait_for_idle()
+    if m.beats != 2 || m.quiet_alarms != 1 || m.alarms != first + 1 {
+        println("FAIL: after a second heartbeat: ${m.beats} beats, ${m.quiet_alarms} warning(s) since it, ${m.alarms} in all (expected 2, 1, ${first + 1})")
+        exit(1)
+    }
+    println("  PASS: the silence after the next heartbeat warned once more")
+
+    if p.ticks != 5 {
+        println("FAIL: the poller ticked ${p.ticks} time(s), expected 5")
+        exit(1)
+    }
+    println("  PASS: the poller's timeout ticked it five times, then left it idle")
+    println("All PASS")
+}

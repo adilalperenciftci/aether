@@ -1,0 +1,75 @@
+// proxy.mount_simple's options and pool are freed with the server (#3171).
+//
+// mount_simple built a pool and an options block holding the pool's last
+// reference, and handed the block to the server as its middleware's user
+// data. http_server_free freed each middleware node but never its user data,
+// so every mount_simple leaked both. The middleware now owns that block, and
+// the server frees it.
+//
+// proxy.mount takes options the caller made: the caller frees them, and the
+// pool, after the server. That holds with health checks on: the pool's probe
+// thread ends with the pool's last reference.
+//
+// Each round builds, mounts and frees in place; nothing listens. Where
+// mem.heap_in_use() is exact (Windows), a round must leave it as it found it.
+
+import std.http
+import std.http.proxy
+import std.mem
+
+extern exit(code: int)
+extern http_server_free(server: ptr)
+
+simple_round() {
+    s = http.server_create(0)
+    err = proxy.mount_simple(s, "/", "http://127.0.0.1:9", 5)
+    if err != "" {
+        println("FAIL: mount_simple: ${err}")
+        exit(1)
+    }
+    http_server_free(s)
+}
+
+checked_round() {
+    s = http.server_create(0)
+    pool = proxy.upstream_pool_new("round_robin", 5, 1000, 0)
+    if pool == null {
+        println("FAIL: upstream_pool_new")
+        exit(1)
+    }
+    aerr = proxy.upstream_add(pool, "http://127.0.0.1:9", 1)
+    herr = proxy.health_checks_enable(pool, "/health", 200, 60000, 100, 1, 1)
+    opts = proxy.opts_new()
+    merr = proxy.mount(s, "/", pool, opts)
+    if aerr != "" || herr != "" || merr != "" {
+        println("FAIL: pool setup: '${aerr}' '${herr}' '${merr}'")
+        exit(1)
+    }
+    http_server_free(s)
+    proxy.opts_free(opts)
+    proxy.upstream_pool_free(pool)
+}
+
+main() {
+    println("=== a proxy mount's options and pool go with the server (#3171) ===")
+    simple_round()
+    checked_round()
+    if !mem.heap_in_use_exact() {
+        println("  (heap_in_use is not exact here: the rounds ran, a leak tool checks them)")
+        println("All PASS")
+        return
+    }
+    simple = mem.steady_growth(|| { simple_round() }, 6)
+    if simple != 0 {
+        println("FAIL: each mount_simple and server_free left ${simple} bytes held")
+        exit(1)
+    }
+    println("  PASS mount_simple: the server frees the options and the pool it made")
+    checked = mem.steady_growth(|| { checked_round() }, 6)
+    if checked != 0 {
+        println("FAIL: a mount with health checks, freed by its caller, left ${checked} bytes held")
+        exit(1)
+    }
+    println("  PASS mount with health checks: freed by the caller after the server, nothing held")
+    println("All PASS")
+}

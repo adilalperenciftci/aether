@@ -89,6 +89,7 @@ main() {
     list_free(a3)
     if res3 != clapae.RESULT_HELP { fail("expected HELP for -h") }
     if m3 != null { fail("matches should be null on help") }
+    if err3 != "" { fail("help is no error: '${err3}'") }
     println("ok   -h returns RESULT_HELP (no exit inside the library)")
     free_command(cmd3)
 
@@ -129,6 +130,7 @@ main() {
     res6, m6, err6 = parse_list(cmd6, a6)
     list_free(a6)
     if res6 != clapae.RESULT_ERROR { fail("expected ERROR for missing required positional") }
+    if m6 != null { fail("matches should be null on an error") }
     string_free(err6)
     println("ok   required positional enforced")
     free_command(cmd6)
@@ -141,6 +143,7 @@ main() {
     res7, m7, err7 = parse_list(cmd7, a7)
     list_free(a7)
     if res7 != clapae.RESULT_ERROR { fail("expected ERROR for unknown option") }
+    if m7 != null { fail("matches should be null on an error") }
     string_free(err7)
     println("ok   unknown option rejected")
     free_command(cmd7)
@@ -205,6 +208,7 @@ main() {
     res11, m11, err11 = parse_list(cmd11, a11)
     list_free(a11)
     if res11 != clapae.RESULT_ERROR { fail("kind(KIND_INT) should validate: expected ERROR for 'notint'") }
+    if m11 != null { fail("matches should be null on an error") }
     string_free(err11)
     println("ok   kind() explicit setter validates as int")
     free_command(cmd11)
@@ -218,6 +222,7 @@ main() {
     res12, m12, err12 = parse_list(cmd12, a12)
     list_free(a12)
     if res12 != clapae.RESULT_ERROR { fail("expected ERROR: --out requires a value") }
+    if m12 != null { fail("matches should be null on an error") }
     string_free(err12)
     println("ok   'option requires value' error path")
     free_command(cmd12)
@@ -252,6 +257,7 @@ main() {
     res15, m15, err15 = parse_list(cmd15, a15)
     list_free(a15)
     if res15 != clapae.RESULT_ERROR { fail("expected ERROR: unexpected positional") }
+    if m15 != null { fail("matches should be null on an error") }
     string_free(err15)
     println("ok   extra positional rejected")
     free_command(cmd15)
@@ -265,6 +271,7 @@ main() {
     res16, m16, err16 = parse_list(cmd16, a16)
     list_free(a16)
     if res16 != clapae.RESULT_ERROR { fail("expected ERROR: --num=notint") }
+    if m16 != null { fail("matches should be null on an error") }
     string_free(err16)
     println("ok   int validation via --opt=value form")
     free_command(cmd16)
@@ -287,6 +294,7 @@ main() {
     r17b, m17b, e17b = parse_list(cmd17, a17bad)
     list_free(a17bad)
     if r17b != clapae.RESULT_ERROR { fail("expected ERROR: -nX") }
+    if m17b != null { fail("matches should be null on an error") }
     string_free(e17b)
     println("ok   int validation via short inline (-n99 / -nX)")
     free_command(cmd17)
@@ -304,6 +312,7 @@ main() {
     res18, m18, err18 = parse_list(cmd18, a18)
     list_free(a18)
     if res18 != clapae.RESULT_ERROR { fail("subcommand error should propagate to parent") }
+    if m18 != null { fail("matches should be null on an error") }
     string_free(err18)
     println("ok   subcommand parse error propagates")
     free_command(cmd18)

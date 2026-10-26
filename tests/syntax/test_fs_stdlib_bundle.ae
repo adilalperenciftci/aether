@@ -1,135 +1,131 @@
-// Test: filesystem stdlib bundle — fs_mkdir_p, fs_symlink, fs_readlink,
-// fs_is_symlink, fs_unlink. Builds a small fixture tree at runtime under
-// build/test_fs_bundle/ and exercises each function, then cleans up.
+// Test: the filesystem bundle, fs.mkdir_p, fs.symlink, fs.readlink,
+// fs.is_symlink and fs.unlink, through std.fs's public functions (#3166).
+// Builds a small fixture tree at runtime under build/test_fs_bundle/,
+// exercises each function, then cleans up.
 //
-// Windows note: fs_symlink_raw / fs_readlink_raw / fs_is_symlink are
-// stubbed on Windows pending CreateSymbolicLinkW + junction fallback.
-// The test detects Windows via $OS and skips the symlink sub-cases
-// there, still exercising mkdir_p and unlink which DO work on Windows
-// via _mkdir / _unlink.
+// Windows note: creating a symlink there needs a privilege a CI runner may
+// lack, so the symlink sub-cases are skipped on Windows; mkdir_p and unlink
+// are checked everywhere.
 
 import std.fs
 import std.os
 
-extern println(s: string)
-extern string_concat(a: string, b: string) -> string @heap
-extern os_system(cmd: string) -> int
 extern exit(code: int)
 
 fail(msg: string) {
-    println(string_concat("FAIL: ", msg))
+    println("FAIL: ${msg}")
     exit(1)
 }
 
 main() {
-    // Detect Windows — the stdlib stubs symlink ops there.
-    is_windows = 0
-    if os.platform() == "windows" {
-        is_windows = 1
-    }
+    is_windows = os.platform() == "windows"
 
     // Clean slate (MSYS2 on Windows provides rm)
-    os_system("rm -rf build/test_fs_bundle")
+    _rm = os.system("rm -rf build/test_fs_bundle")
 
-    // 1. fs_mkdir_p — nested directories created in one call
-    if fs_mkdir_p_raw("build/test_fs_bundle/a/b/c") != 1 {
-        fail("fs_mkdir_p should create nested dirs")
+    // 1. fs.mkdir_p: nested directories created in one call
+    err = fs.mkdir_p("build/test_fs_bundle/a/b/c")
+    if err != "" {
+        fail("fs.mkdir_p should create nested dirs: ${err}")
     }
-    if dir_exists("build/test_fs_bundle/a/b/c") != 1 {
+    if fs.dir_exists("build/test_fs_bundle/a/b/c") != 1 {
         fail("nested dir not actually created")
     }
 
-    // 2. fs_mkdir_p — idempotent: re-creating an existing tree succeeds
-    if fs_mkdir_p_raw("build/test_fs_bundle/a/b/c") != 1 {
-        fail("fs_mkdir_p should be idempotent")
+    // 2. fs.mkdir_p: idempotent, re-creating an existing tree succeeds
+    err = fs.mkdir_p("build/test_fs_bundle/a/b/c")
+    if err != "" {
+        fail("fs.mkdir_p should be idempotent: ${err}")
     }
 
-    // 3. fs_mkdir_p — also works for a single new dir
-    if fs_mkdir_p_raw("build/test_fs_bundle/single") != 1 {
-        fail("fs_mkdir_p should create a single dir")
+    // 3. fs.mkdir_p: also works for a single new dir
+    err = fs.mkdir_p("build/test_fs_bundle/single")
+    if err != "" {
+        fail("fs.mkdir_p should create a single dir: ${err}")
     }
-    if dir_exists("build/test_fs_bundle/single") != 1 {
+    if fs.dir_exists("build/test_fs_bundle/single") != 1 {
         fail("single dir not created")
     }
 
-    // Create a real file we'll later unlink (and symlink to, on POSIX)
-    os_system("echo target-content > build/test_fs_bundle/a/target.txt")
+    // A real file to unlink later (and to symlink to, on POSIX)
+    _echo = os.system("echo target-content > build/test_fs_bundle/a/target.txt")
 
-    if is_windows == 0 {
-        // ---- POSIX-only symlink sub-cases (4 through 11) ----
-        // 5. fs_symlink — create a symlink pointing at the file
-        if fs_symlink_raw("../a/target.txt", "build/test_fs_bundle/single/link.txt") != 1 {
-            fail("fs_symlink should succeed")
-        }
-
-        // 6. fs_is_symlink — the link is itself a symlink
-        if fs_is_symlink("build/test_fs_bundle/single/link.txt") != 1 {
-            fail("fs_is_symlink should return 1 for a real symlink")
+    if !is_windows {
+        // ---- POSIX-only symlink sub-cases (4 through 10) ----
+        // 4. fs.symlink: create a symlink pointing at the file
+        err = fs.symlink("../a/target.txt", "build/test_fs_bundle/single/link.txt")
+        if err != "" {
+            fail("fs.symlink should succeed: ${err}")
         }
 
-        // 7. fs_is_symlink — the target file is NOT a symlink
-        if fs_is_symlink("build/test_fs_bundle/a/target.txt") != 0 {
-            fail("fs_is_symlink should return 0 for a regular file")
+        // 5. fs.is_symlink: the link is itself a symlink
+        if fs.is_symlink("build/test_fs_bundle/single/link.txt") != 1 {
+            fail("fs.is_symlink should return 1 for a real symlink")
         }
 
-        // 8. fs_is_symlink — non-existent path is also 0
-        if fs_is_symlink("build/test_fs_bundle/does/not/exist") != 0 {
-            fail("fs_is_symlink should return 0 for a missing path")
+        // 6. fs.is_symlink: the target file is not a symlink
+        if fs.is_symlink("build/test_fs_bundle/a/target.txt") != 0 {
+            fail("fs.is_symlink should return 0 for a regular file")
         }
 
-        // 9. fs_readlink — round-trip the target string we passed to fs_symlink
-        target = fs_readlink_raw("build/test_fs_bundle/single/link.txt")
-        if target != "../a/target.txt" {
-            fail("fs_readlink target mismatch")
+        // 7. fs.is_symlink: a missing path is not one either
+        if fs.is_symlink("build/test_fs_bundle/does/not/exist") != 0 {
+            fail("fs.is_symlink should return 0 for a missing path")
         }
 
-        // 10. fs_readlink on a non-symlink returns "" (NULL → empty string)
-        not_a_link = fs_readlink_raw("build/test_fs_bundle/a/target.txt")
-        if not_a_link != "" {
-            if not_a_link != null {
-                fail("fs_readlink on a regular file should return empty/null")
-            }
+        // 8. fs.readlink: round-trip the target given to fs.symlink
+        target, rerr = fs.readlink("build/test_fs_bundle/single/link.txt")
+        if rerr != "" || target != "../a/target.txt" {
+            fail("fs.readlink target mismatch: '${target}' (${rerr})")
         }
 
-        // 11. fs_unlink — remove the symlink (target file should still exist)
-        if fs_unlink_raw("build/test_fs_bundle/single/link.txt") != 1 {
-            fail("fs_unlink should remove the symlink")
+        // 9. fs.readlink on a regular file is an error
+        _not_link, nerr = fs.readlink("build/test_fs_bundle/a/target.txt")
+        if nerr == "" {
+            fail("fs.readlink on a regular file should be an error")
         }
-        if fs_is_symlink("build/test_fs_bundle/single/link.txt") != 0 {
-            fail("symlink should be gone after fs_unlink")
+
+        // 10. fs.unlink: remove the symlink (the target file stays)
+        err = fs.unlink("build/test_fs_bundle/single/link.txt")
+        if err != "" {
+            fail("fs.unlink should remove the symlink: ${err}")
         }
-        if file_exists("build/test_fs_bundle/a/target.txt") != 1 {
-            fail("fs_unlink on the symlink should NOT have removed the target")
+        if fs.is_symlink("build/test_fs_bundle/single/link.txt") != 0 {
+            fail("symlink should be gone after fs.unlink")
+        }
+        if fs.file_exists("build/test_fs_bundle/a/target.txt") != 1 {
+            fail("fs.unlink on the symlink should NOT have removed the target")
         }
     } else {
-        println("SKIP: symlink sub-cases (Windows — fs_symlink/readlink/is_symlink stubbed)")
+        println("SKIP: symlink sub-cases (Windows: creating a symlink needs a privilege)")
     }
 
-    // ---- Non-symlink sub-cases (12 through 14) — run on all platforms ----
+    // ---- Non-symlink sub-cases (11 through 13), on every platform ----
 
-    // 12. fs_unlink — remove a regular file
-    if fs_unlink_raw("build/test_fs_bundle/a/target.txt") != 1 {
-        fail("fs_unlink should remove a regular file")
+    // 11. fs.unlink: remove a regular file
+    err = fs.unlink("build/test_fs_bundle/a/target.txt")
+    if err != "" {
+        fail("fs.unlink should remove a regular file: ${err}")
     }
-    if file_exists("build/test_fs_bundle/a/target.txt") != 0 {
-        fail("file should be gone after fs_unlink")
-    }
-
-    // 13. fs_unlink — refusing to remove a directory returns 0
-    if fs_unlink_raw("build/test_fs_bundle/a") != 0 {
-        fail("fs_unlink should refuse to remove a directory")
-    }
-    if dir_exists("build/test_fs_bundle/a") != 1 {
-        fail("directory should still exist after fs_unlink refused")
+    if fs.file_exists("build/test_fs_bundle/a/target.txt") != 0 {
+        fail("file should be gone after fs.unlink")
     }
 
-    // 14. fs_unlink — non-existent path returns 0
-    if fs_unlink_raw("build/test_fs_bundle/never/existed") != 0 {
-        fail("fs_unlink on missing path should return 0")
+    // 12. fs.unlink refuses to remove a directory
+    if fs.unlink("build/test_fs_bundle/a") == "" {
+        fail("fs.unlink should refuse to remove a directory")
+    }
+    if fs.dir_exists("build/test_fs_bundle/a") != 1 {
+        fail("directory should still exist after fs.unlink refused")
+    }
+
+    // 13. fs.unlink of a missing path is an error
+    if fs.unlink("build/test_fs_bundle/never/existed") == "" {
+        fail("fs.unlink on a missing path should be an error")
     }
 
     // Cleanup
-    os_system("rm -rf build/test_fs_bundle")
+    _clean = os.system("rm -rf build/test_fs_bundle")
 
     println("PASS fs stdlib bundle")
 }

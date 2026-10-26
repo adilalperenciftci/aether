@@ -1,0 +1,101 @@
+// A sharded map: one actor per slice of the keys, instead of one lock.
+//
+// One actor that owns a hot map serialises every request through one
+// mailbox, as a single mutex would. Splitting the keys over N owner actors
+// (shards), each the only one to touch its own std.map, gives N mailboxes:
+// requests for keys on different shards run in parallel, and no shard
+// needs a lock because only it reads and writes its map. A key always
+// goes to the shard its hash picks (FNV-1a here), so every request for it
+// meets the same map. docs/design/sharded-actor-map.md has the rationale
+// and how many shards to use.
+//
+// Run: ae run examples/02-actors/11-sharded-map.ae
+// See: docs/design/sharded-actor-map.md
+
+import std.map
+import std.string
+
+const SHARDS = 4
+
+message Put {
+    key: string
+    value: string
+}
+
+message Get {
+    key: string
+}
+
+message Remove {
+    key: string
+}
+
+message Found {
+    value: string
+}
+
+message Close {}
+
+actor Shard {
+    state entries = map.new()
+
+    receive {
+        Put(key, value) -> {
+            map.put(entries, key, value)
+        }
+        Remove(key) -> {
+            map.remove(entries, key)
+        }
+        Get(key) -> {
+            v, _ = map.get_string(entries, key)
+            reply Found { value: v }
+        }
+        Close -> {
+            map.free(entries)
+        }
+    }
+}
+
+// FNV-1a over the key's bytes, kept to 31 bits so `%` gives a shard index.
+shard_of(key: string) -> int {
+    long h = 2166136261
+    n = string.length(key)
+    for i in 0..n {
+        h = (h ^ string.char_at(key, i)) * 16777619
+        h = h & 0x7FFFFFFF
+    }
+    return (h % SHARDS) as int
+}
+
+main() {
+    shards = [spawn(Shard()), spawn(Shard()), spawn(Shard()), spawn(Shard())]
+
+    keys = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"]
+    for i in 0..keys.len {
+        shards[shard_of(keys[i])] ! Put { key: keys[i], value: "v${i}" }
+    }
+
+    // Each key is read back from the shard its hash names.
+    for i in 0..keys.len {
+        s = shard_of(keys[i])
+        println("${keys[i]} -> shard ${s}: ${shards[s] ? Get { key: keys[i] }}")
+    }
+
+    gone = "gamma"
+    shards[shard_of(gone)] ! Remove { key: gone }
+    println("${gone} after remove: [${shards[shard_of(gone)] ? Get { key: gone }}]")
+
+    for i in 0..shards.len {
+        shards[i] ! Close {}
+    }
+    wait_for_idle()
+}
+
+// Output:
+// alpha -> shard 3: v0
+// beta -> shard 3: v1
+// gamma -> shard 2: v2
+// delta -> shard 1: v3
+// epsilon -> shard 1: v4
+// zeta -> shard 3: v5
+// gamma after remove: []

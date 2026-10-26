@@ -165,6 +165,8 @@ static int coop_send_to_dead_actor(ActorBase* actor, Message* msg) {
     if (!dead) return 0;
     if (msg->payload_ptr) aether_free_message(msg->payload_ptr);
     if (msg->zerocopy.owned && msg->zerocopy.data) free(msg->zerocopy.data);
+    /* An ask to it gets no reply: its asker learns so at once (#3151). */
+    if (msg->_reply_slot) ((ActorReplySlot*)msg->_reply_slot)->failed = AETHER_ASK_DEAD;
     if (dead & AETHER_ACTOR_RELEASED) {
         g_coop_released_sends++;
         if (!g_coop_released_send_reported) {
@@ -506,7 +508,9 @@ void scheduler_wait(void) {
             int count = atomic_load_explicit(&sched->actor_count, memory_order_relaxed);
             for (int i = 0; i < count; i++) {
                 ActorBase* a = atomic_load_explicit(&table->slots[i], memory_order_relaxed);
-                if (a && a->timeout_ns > 0) {
+                /* Armed, not merely configured (#3162), and not dead. */
+                if (a && a->timeout_ns > 0 && a->last_activity_ns > 0 &&
+                    atomic_load_explicit(&a->dead, memory_order_relaxed) == 0) {
                     has_pending_timeout = 1;
                     break;
                 }
@@ -532,6 +536,22 @@ void scheduler_wait(void) {
 // Poll — process pending messages for all actors (cooperative dispatch)
 // ============================================================================
 
+/* One step with a step context of its own (multicore_scheduler.h). An ask
+ * polls until its reply comes, so a step runs inside the asking one, as on a
+ * core's inline path: it starts with no ask in hand, fails one its handler
+ * left unanswered, and gives the enclosing step its context back. */
+void scheduler_step_actor(ActorBase* actor) {
+    if (!actor || !actor->step) return;
+    void* outer_slot = g_current_reply_slot;
+    void* outer_actor = g_current_step_actor;
+    g_current_reply_slot = NULL;
+    actor->step(actor);
+    ActorReplySlot* held = (ActorReplySlot*)g_current_reply_slot;
+    if (held && !held->reply_ready && !held->failed) held->failed = AETHER_ASK_NO_REPLY;
+    g_current_reply_slot = outer_slot;
+    g_current_step_actor = outer_actor;
+}
+
 int aether_scheduler_poll(int max_per_actor) {
     int total = 0;
     int limit = (max_per_actor <= 0) ? 1024 : max_per_actor;
@@ -552,12 +572,12 @@ int aether_scheduler_poll(int max_per_actor) {
             while (processed < limit) {
                 coop_refill(actor);
                 if (atomic_load_explicit(&actor->mailbox.count, memory_order_acquire) == 0) break;
-                actor->step(actor);
+                scheduler_step_actor(actor);
                 processed++;
             }
         } else if (has_timeout) {
             // No messages but timeout is ticking — call step to check timeout
-            actor->step(actor);
+            scheduler_step_actor(actor);
             processed++;
         }
         total += processed;
@@ -571,8 +591,15 @@ int aether_scheduler_poll(int max_per_actor) {
 // Ask/Reply — simplified synchronous version
 // ============================================================================
 
-void* scheduler_ask_message(ActorBase* target, void* msg_data, size_t msg_size, int timeout_ms) {
+void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg_size,
+                                   int timeout_ms, int* status) {
     (void)timeout_ms;
+    int why_dummy;
+    if (!status) status = &why_dummy;
+    *status = AETHER_ASK_DEAD;
+    if (!target || !msg_data) return NULL;
+    /* A dead actor answers nothing: no message, no wait (#3151). */
+    if (atomic_load_explicit(&target->dead, memory_order_relaxed)) return NULL;
 
     // Allocate reply slot on stack (single-threaded, no race)
     ActorReplySlot slot = {0};
@@ -587,7 +614,7 @@ void* scheduler_ask_message(ActorBase* target, void* msg_data, size_t msg_size, 
 
     // Queued as any send is, and processed by the polls below
     void* msg_copy = malloc(msg_size);
-    if (!msg_copy) return NULL;
+    if (!msg_copy) { g_pending_reply_slot = NULL; *status = AETHER_ASK_NO_MEMORY; return NULL; }
     memcpy(msg_copy, msg_data, msg_size);
 
     Message msg;
@@ -603,19 +630,28 @@ void* scheduler_ask_message(ActorBase* target, void* msg_data, size_t msg_size, 
     coop_deliver(target, msg);
     g_pending_reply_slot = NULL;
 
-    // Process messages until reply is ready
+    // Process messages until reply is ready, or none can come
     int max_rounds = 100000;
-    while (!slot.reply_ready && max_rounds-- > 0) {
+    while (!slot.reply_ready && !slot.failed && max_rounds-- > 0) {
         aether_scheduler_poll(1);
     }
 
+    if (slot.reply_ready) *status = AETHER_ASK_REPLIED;
+    else if (slot.failed) *status = slot.failed;
+    else if (atomic_load_explicit(&target->dead, memory_order_relaxed)) *status = AETHER_ASK_DIED;
+    else *status = AETHER_ASK_TIMED_OUT;
     return slot.reply_data;
+}
+
+void* scheduler_ask_message(ActorBase* target, void* msg_data, size_t msg_size, int timeout_ms) {
+    return scheduler_ask_message_status(target, msg_data, msg_size, timeout_ms, NULL);
 }
 
 void scheduler_reply_owned(ActorBase* self, void* data, size_t data_size,
                            void (*release)(void*)) {
     (void)self;
     ActorReplySlot* slot = (ActorReplySlot*)g_current_reply_slot;
+    g_current_reply_slot = NULL;   /* answered: the step's end has nothing to fail */
     int delivered = 0;
     if (slot && !slot->timed_out) {
         slot->reply_data = malloc(data_size);

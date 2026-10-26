@@ -1,0 +1,78 @@
+// Structs: records of named fields, held by value.
+//
+// A struct is plain data: there are no methods, so behaviour is a function
+// that takes the struct. A struct literal names every field it sets, and
+// the others start at zero. A struct is a value: assigning it or passing
+// it copies it, so a function that should change the caller's struct
+// takes its address, `&p`, a `*Point`. A function can match a struct by
+// its fields. `@derive(eq)` writes the field-by-field equality, and
+// `using` embeds one struct in another so its fields read as the outer
+// struct's own.
+//
+// Run: ae run examples/01-language/06-structs.ae
+// See: docs/language-reference.md#structs
+
+@derive(eq)
+struct Point {
+    x: int
+    y: int
+}
+
+struct Size {
+    w: int
+    h: int
+}
+
+struct Window {
+    title: string
+    using origin: Point // win.x reads win.origin.x
+    size: Size
+    visible: bool
+}
+
+moved(p: Point, dx: int, dy: int) -> Point {
+    return Point { x: p.x + dx, y: p.y + dy }
+}
+
+// A pointer lets the function change the caller's value.
+move_in_place(p: *Point, dx: int, dy: int) {
+    p.x = p.x + dx
+    p.y = p.y + dy
+}
+
+// Struct patterns: the first clause whose fields match.
+quadrant(Point { x: 0, y: 0 }) -> string {
+    return "origin"
+}
+
+quadrant(Point { x: a, y: b }) -> string {
+    if a >= 0 && b >= 0 {
+        return "upper right"
+    }
+    return "elsewhere"
+}
+
+main() {
+    a = Point { x: 1, y: 2 }
+    b = a // a copy
+    b.x = 10
+    println("a=(${a.x}, ${a.y}) b=(${b.x}, ${b.y})")
+
+    c = moved(a, 5, 5)
+    move_in_place(&a, 1, 1)
+    println("c=(${c.x}, ${c.y}) a=(${a.x}, ${a.y})")
+
+    println("${quadrant(Point { x: 0, y: 0 })}, ${quadrant(c)}")
+    println("equal: ${Point_eq(c, Point { x: 6, y: 7 })}")
+
+    win = Window { title: "editor", origin: Point { x: 40, y: 20 }, size: Size { w: 800, h: 600 } }
+    win.x = win.x + 10
+    println("${win.title} at ${win.x},${win.y} size ${win.size.w}x${win.size.h} visible=${win.visible}")
+}
+
+// Output:
+// a=(1, 2) b=(10, 2)
+// c=(6, 7) a=(2, 3)
+// origin, upper right
+// equal: 1
+// editor at 50,20 size 800x600 visible=false

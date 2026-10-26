@@ -1,0 +1,64 @@
+// Closures: functions as values.
+//
+// `|x| -> x * 2` is a function value; `|a, b| { ... }` has a block body
+// and returns what it `return`s. A closure sees the variables around it,
+// and one it assigns is shared, so the closure and its maker see the same
+// value. A parameter typed `fn` takes a closure, and the receiver calls
+// it like any function. A function can return a closure that keeps what
+// it captured. A call followed by a block on the same line passes the
+// block as its last argument, the trailing-block form most of std's
+// builders use.
+//
+// Run: ae run examples/01-language/13-closures.ae
+// See: docs/closures-and-builder-dsl.md
+
+apply_twice(f: fn, x: int) -> int {
+    return f(f(x))
+}
+
+// Returns a closure that remembers `step`.
+counter_by(step: int) -> fn {
+    count = 0
+    return || -> {
+        count = count + step
+        count
+    }
+}
+
+// Calls `body` once per number, the trailing block below.
+repeat(times: int, body: fn) {
+    for i in 0..times {
+        body(i)
+    }
+}
+
+main() {
+    double = | x: int | -> x * 2
+    println("${double(21)} ${apply_twice(double, 5)}")
+    println(apply_twice(| n: int | -> n + 10, 1))
+
+    // A closure that assigns a captured variable shares it.
+    total = 0
+    add = | n: int | { total = total + n }
+    add(5)
+    add(7)
+    println("total ${total}")
+
+    by_three = counter_by(3)
+    by_three()
+    by_three()
+    println("counter at ${by_three()}")
+
+    line = ""
+    repeat(4) | i: int | {
+        line = "${line}<${i}>"
+    }
+    println(line)
+}
+
+// Output:
+// 42 20
+// 21
+// total 12
+// counter at 9
+// <0><1><2><3>

@@ -1,39 +1,157 @@
 # Aether examples
 
-Working `.ae` programs grouped by area. Every file here builds and
-runs; `make examples` exercises all of them as part of CI.
+A path through Aether, from the first program to actors, servers, C, the
+sandbox, the tools and whole programs. Read them in order: each file
+teaches one idea, starts by saying what it teaches and how to run it,
+and ends with the exact output it prints. CI runs every example that can
+run and fails when one stops printing what it says (`make
+check-examples`).
 
-## Layout
+Run them from the repository root:
 
-| Directory | What's there |
-|-----------|---------------|
-| [`basics/`](basics/) | Hello-world / variables / arrays / strings / control flow / I/O. Start here when learning Aether. |
-| [`actors/`](actors/) | Actor patterns: ping-pong, pipelines, fan-out, message-with-arrays, supervision. |
-| [`stdlib/`](stdlib/) | Stdlib feature demos: HTTP client + server, file I/O, JSON, processes, OS environment. The HTTP server demos cover plain HTTP/1.1, HTTP/2 (h2 + h2c via libnghttp2), TLS, and concurrent dispatch. |
-| [`c-interop/`](c-interop/) | `extern` + `@c_callback` patterns — calling libc, calling user C, exporting Aether functions to C. |
-| [`embedded-java/`](embedded-java/) | Hosting a JVM in-process via `contrib.host.java`. |
-| [`packages/`](packages/) | `ae add host/user/repo` package consumption demos AND PATH-style `--lib` layering ([`lib-path-layering/`](packages/lib-path-layering/)). |
-| [`ae-help-demo/`](ae-help-demo/) | `ae help <script>` offline diagnostics — a deliberately-broken closure-DSL paired with its `--fix`-corrected version. Demonstrates Levenshtein, YAML/HCL pattern detection, and the `--fix` / `--json` modes. |
-| [`applications/`](applications/) | Larger end-to-end programs that combine several stdlib areas. |
-
-## Running an example
-
-```
-ae run examples/basics/hello-world.ae
-ae build examples/stdlib/http-server.ae -o /tmp/srv && /tmp/srv
+```sh
+ae run examples/01-language/01-hello.ae
 ```
 
-The Makefile target `make examples` builds every file under this
-tree; CI fails if any example stops building.
+With a toolchain built from this tree, that is `./build/ae run ...`. The
+[language reference](../docs/language-reference.md) is the full story
+behind each step; every row below links the part it builds on.
 
-## Adding a new example
+## 1. The language
 
-- Place it under the directory that matches its area. If none fits,
-  open a new directory and update this README's table.
-- Self-contained. An example should be runnable as a single
-  `ae run` (or `ae build && execute`), with no external test
-  fixtures — those belong under `tests/integration/`.
-- Keep comments focused on what the example demonstrates and how
-  to interact with it (curl commands, expected output).
-- No person names in comments. Describe the use case, not the
-  contributor.
+| Example | What it teaches | Reference |
+|---|---|---|
+| [01-hello.ae](01-language/01-hello.ae) | `main`, `println`, interpolation | [Functions](../docs/language-reference.md#functions) |
+| [02-values-and-types.ae](01-language/02-values-and-types.ae) | numbers, bools, strings, written types, `const`, module `var`, `as` | [Types](../docs/language-reference.md#types) |
+| [03-strings.ae](01-language/03-strings.ae) | escapes, comparison by content, std.string, parsing numbers | [String literals](../docs/language-reference.md#string-literals) |
+| [04-control-flow.ae](01-language/04-control-flow.ae) | `if` as a statement and a value, `while`, `for`, `break`, labels | [Control flow](../docs/language-reference.md#control-flow) |
+| [05-functions.ae](01-language/05-functions.ae) | typed parameters, defaults, named arguments, several results, clauses with guards | [Functions](../docs/language-reference.md#functions) |
+| [06-structs.ae](01-language/06-structs.ae) | struct values, `&p` pointers, struct patterns, `@derive(eq)`, `using` | [Structs](../docs/language-reference.md#structs) |
+| [07-enums-and-sums.ae](01-language/07-enums-and-sums.ae) | `enum`, sum types, exhaustive `match` | [Sum types](../docs/language-reference.md#sum--variant-types) |
+| [08-match.ae](01-language/08-match.ae) | literals, ranges, strings, list and struct patterns | [Match expressions](../docs/language-reference.md#match-expressions) |
+| [09-optionals.ae](01-language/09-optionals.ae) | `T?`, `none`, `??`, `?.`, narrowing | [Optionals](../docs/language-reference.md#optionals) |
+| [10-errors.ae](01-language/10-errors.ae) | `(value, err)`, `T!`, `or`, `!`, `panic` and `try` | [Result types](../docs/language-reference.md#the-t-result-type-and-or--sugar) |
+| [11-arrays-and-slices.ae](01-language/11-arrays-and-slices.ae) | fixed arrays, slices, `.len`, checked indexes, `make` | [Slices](../docs/language-reference.md#slices-t) |
+| [12-collections.ae](01-language/12-collections.ae) | std.list, std.map, std.set, sorting | [Handles](../docs/memory-management.md#handles-and-defer) |
+| [13-closures.ae](01-language/13-closures.ae) | closures, captured variables, `fn` parameters, trailing blocks | [Closures](../docs/closures-and-builder-dsl.md) |
+| [14-modules/main.ae](01-language/14-modules/main.ae) | a module of your own, `exports`, `import ... as` | [Modules](../docs/language-reference.md#modules-and-imports) |
+| [15-contracts.ae](01-language/15-contracts.ae) | `requires`, `ensures`, `where` | [Contracts](../docs/language-reference.md#function-contracts-requires--ensures) |
+| [16-defer.ae](01-language/16-defer.ae) | `defer`, `defer try`, `defer catch` | [Defer](../docs/language-reference.md#defer-statement) |
+| [17-ownership.ae](01-language/17-ownership.ae) | what the compiler frees, what the program frees | [Memory management](../docs/memory-management.md) |
+
+## 2. Actors
+
+| Example | What it teaches | Reference |
+|---|---|---|
+| [01-first-actor.ae](02-actors/01-first-actor.ae) | `message`, `actor`, `receive`, `spawn`, `!`, `wait_for_idle` | [Actors](../docs/language-reference.md#actors) |
+| [02-state.ae](02-actors/02-state.ae) | state an actor keeps between messages | [State variables](../docs/language-reference.md#state-variables) |
+| [03-ask-reply.ae](02-actors/03-ask-reply.ae) | `?` and `reply`, a handle in state | [Ask pattern](../docs/language-reference.md#ask-pattern-request-reply) |
+| [04-actor-refs.ae](02-actors/04-actor-refs.ae) | `actor_ref` in messages, `self`, message order | [Sending messages](../docs/language-reference.md#sending-messages-fire-and-forget) |
+| [05-messages.ae](02-actors/05-messages.ae) | strings, arrays, sequences and handles in messages | [Messages](../docs/memory-management.md#containers-module-variables-actor-state-messages) |
+| [06-pipeline.ae](02-actors/06-pipeline.ae) | stages connected by references, items in order | [Actor runtime](../docs/actor-concurrency.md) |
+| [07-worker-pool.ae](02-actors/07-worker-pool.ae) | fan-out to workers, fan-in to a collector | [Actor runtime](../docs/actor-concurrency.md) |
+| [08-state-machine.ae](02-actors/08-state-machine.ae) | an enum as state, a transition table | [Enums](../docs/language-reference.md#enums) |
+| [09-timeouts.ae](02-actors/09-timeouts.ae) | `receive ... after`, a watchdog | [Actor timeouts](../docs/actor-concurrency.md#actor-timeouts) |
+| [10-crash-isolation.ae](02-actors/10-crash-isolation.ae) | a panic stays in its actor; supervision today | [Panics](../docs/actor-concurrency.md#panic-and-stack-traces) |
+| [11-sharded-map.ae](02-actors/11-sharded-map.ae) | keys split over owner actors instead of a lock | [Sharded actor map](../docs/design/sharded-actor-map.md) |
+
+## 3. The standard library
+
+| Example | What it teaches | Reference |
+|---|---|---|
+| [01-files.ae](03-std/01-files.ae) | std.fs: a temp directory, write, read, walk, remove | [stdlib reference](../docs/stdlib-reference.md) |
+| [02-json.ae](03-std/02-json.ae) | parse, read by kind, build, encode, errors with a position | [stdlib reference](../docs/stdlib-reference.md) |
+| [03-processes.ae](03-std/03-processes.ae) | run a program with arguments, input, environment; read its output and status | [stdlib reference](../docs/stdlib-reference.md) |
+| [04-http.ae](03-std/04-http.ae) | an HTTP server and client in one program | [HTTP server](../docs/http-server.md) |
+| [05-http-server.ae](03-std/05-http-server.ae) | a long-running server: middleware, health probes, metrics | [HTTP server](../docs/http-server.md) |
+| [06-http2-tls.ae](03-std/06-http2-tls.ae) | HTTP/2 and TLS on the same server API | [HTTP server](../docs/http-server.md) |
+| [07-reverse-proxy.ae](03-std/07-reverse-proxy.ae) | forwarding to an upstream with std.http.proxy | [Reverse proxy](../docs/http-reverse-proxy.md) |
+| [08-proxy-pool.ae](03-std/08-proxy-pool.ae) | a weighted pool configured as code | [Reverse proxy](../docs/http-reverse-proxy.md) |
+| [09-logging.ae](03-std/09-logging.ae) | std.log levels, a log file, the threshold | [stdlib reference](../docs/stdlib-reference.md) |
+
+## 4. C and other languages
+
+Aether compiles to C, so C is one declaration away in both directions.
+The host examples need that language installed; CI's contrib/host job
+builds and runs them.
+
+| Example | What it teaches | Reference |
+|---|---|---|
+| [01-libc.ae](04-interop/01-libc.ae) | `extern`, C's types, `@extern("c_name")` | [The extern keyword](../docs/c-interop.md#the-extern-keyword) |
+| [02-own-c/main.ae](04-interop/02-own-c/main.ae) | `@source`: a C file the program ships; strings, arrays and structs into C | [@source](../docs/c-interop.md#a-module-that-ships-its-c-source) |
+| [03-callbacks.ae](04-interop/03-callbacks.ae) | `@c_callback`: C's `qsort` calling an Aether comparison | [C callbacks](../docs/c-interop.md#exporting-an-aether-function-as-a-c-callback-c_callback) |
+| [04-embedding/greeter.ae](04-interop/04-embedding/greeter.ae) | `--emit=obj`: an Aether library in a C program, strings across | [--emit=obj](../docs/emit-lib.md#--emitobj-one-object-file-for-an-existing-c-build) |
+| [05-hosts/python.ae](04-interop/05-hosts/python.ae) | Python run inside the program, under the sandbox | [Host modules](../docs/containment-sandbox.md#language-host-modules) |
+| [05-hosts/lua.ae](04-interop/05-hosts/lua.ae) | Lua run inside the program, under the sandbox | [Host modules](../docs/containment-sandbox.md#language-host-modules) |
+| [05-hosts/tcl.ae](04-interop/05-hosts/tcl.ae) | Tcl run inside the program, under the sandbox | [Host modules](../docs/containment-sandbox.md#language-host-modules) |
+| [05-hosts/go.ae](04-interop/05-hosts/go.ae) | a Go program as a sandboxed child process | [Host modules](../docs/containment-sandbox.md#language-host-modules) |
+| [05-hosts/tinygo.ae](04-interop/05-hosts/tinygo.ae) | a Go c-shared library loaded and called in-process | [contrib/host/tinygo](../contrib/host/tinygo/README.md) |
+| [06-java-host/aether/manifest.ae](04-interop/06-java-host/aether/manifest.ae) | a namespace with a generated Java SDK, called from Java | [Embedded namespaces](../docs/embedded-namespaces-and-host-bindings.md) |
+
+## 5. Containing code
+
+Code you run does not have to be code you trust. The first three work
+on every platform; the others need the operating system they name.
+
+| Example | What it teaches | Reference |
+|---|---|---|
+| [01-sandbox.ae](05-containment/01-sandbox.ae) | grant lists, `sandbox.enforce`, what a refusal looks like | [Containment sandbox](../docs/containment-sandbox.md) |
+| [02-trusted-calls.ae](05-containment/02-trusted-calls.ae) | a function the sandboxed block may call with your authority | [Containment sandbox](../docs/containment-sandbox.md) |
+| [03-audit.ae](05-containment/03-audit.ae) | std.audit: every check, allowed or refused, read back | [Audit trail](../docs/containment-sandbox.md#audit-trail) |
+| [04-spawn-sandboxed.ae](05-containment/04-spawn-sandboxed.ae) | a child process held to grants at its libc calls (Linux) | [Platform support](../docs/containment-sandbox.md#platform-support) |
+| [05-capsicum.ae](05-containment/05-capsicum.ae) | FreeBSD Capsicum: open first, `enter`, then only what is held | [Capsicum](../docs/aether_compared_to_capsicum.md) |
+| [06-casper.ae](05-containment/06-casper.ae) | Casper: DNS and sysctl from capability mode (FreeBSD) | [Capsicum](../docs/aether_compared_to_capsicum.md) |
+
+## 6. Tools
+
+What comes with `ae` besides `run` and `build`.
+
+| Example | What it teaches | Reference |
+|---|---|---|
+| [01-testing/discount_test.ae](06-tooling/01-testing/discount_test.ae) | std.spec: `describe`, `it`, assertions; `ae test` | [Testing](../docs/testing.md) |
+| [02-mutation/mutate.ae](06-tooling/02-mutation/mutate.ae) | std.mutation: are the tests checking the code? | [Mutation testing](../docs/mutation-testing.md) |
+| [03-project/src/main.ae](06-tooling/03-project/src/main.ae) | a project: aether.toml, src/, lib/, `ae run <dir>` | [Build system](../docs/build-system.md) |
+| [04-lib-path/main.ae](06-tooling/04-lib-path/main.ae) | `--lib`: the module search path and its order | [Module search path](../docs/module-system-design.md) |
+| [05-ae-help/broken.ae](06-tooling/05-ae-help/broken.ae) | `ae help`: what a configuration script got wrong, and the fix | [ae help](../docs/cic-help.md) |
+| [05-ae-help/fixed.ae](06-tooling/05-ae-help/fixed.ae) | the same script with the fixes applied | [Builder DSL](../docs/closures-and-builder-dsl.md) |
+
+## 7. Programs
+
+Whole programs, each putting several of the ideas above to work.
+
+| Example | What it teaches | Reference |
+|---|---|---|
+| [01-word-count/main.ae](07-applications/01-word-count/main.ae) | a file read, split, sorted and counted | [stdlib reference](../docs/stdlib-reference.md) |
+| [02-chat-room.ae](07-applications/02-chat-room.ae) | actors that keep each other in state and broadcast | [Actor runtime](../docs/actor-concurrency.md) |
+| [03-build-supervisor.ae](07-applications/03-build-supervisor.ae) | `os.run_supervised`: a deadline, a process group, nothing left behind | [stdlib reference](../docs/stdlib-reference.md) |
+| [04-calculator.ae](07-applications/04-calculator.ae) | a terminal UI: a button grid as a DSL, closures over ref cells | [Closures and lifetimes](../docs/closures-and-lifetimes.md) |
+
+## Writing an example
+
+An example is one `.ae` file, or a directory when it needs more than one
+(a module, a C file). Its header comment says what it teaches and holds:
+
+- `// Run: <command>`, the command a reader types from the repository
+  root: `ae run <file or project> [--lib dir] [-- args]`, another `ae`
+  command, or `sh <script>`.
+- `// Needs: <what>`, when it cannot run unattended: a server that waits
+  for requests, a terminal, a platform, a library. CI builds it, or
+  type-checks it when it imports a contrib bridge, which only that
+  bridge's job builds.
+- `// See: <doc>`, the part of the documentation it builds on.
+
+A file that belongs to another example (a module it imports) says
+`// Part of: <that example's file>` instead of `Run:`. An example that
+runs unattended ends with its output, exactly:
+
+```aether,fragment
+// Output:
+// Hello, Aether!
+```
+
+`make check-examples` builds every example run with `ae run` (a warning
+fails it), runs the ones with an `Output:` block and compares, with the
+tree's own `ae` first on PATH, and checks that this README links every
+example and nothing else, and that the directory holds only source. Add
+the new example's row here, in the place a reader should meet it. The
+checker is [tests/examples/check.ae](../tests/examples/check.ae).

@@ -13,11 +13,87 @@
 
 #ifdef _WIN32
 #include <io.h>
+#include <direct.h>   // _getcwd: aether_display_path
 #define isatty _isatty
 #define fileno _fileno
 #else
 #include <unistd.h>
 #endif
+
+/* The components of `path` (already '/'-separated, absolute) into `parts`,
+ * "." dropped and ".." taking the one before it. `path` is cut in place.
+ * Returns how many; the drive or root is the first ("D:" or ""). */
+static int display_split(char* path, char** parts, int cap) {
+    int n = 0;
+    char* p = path;
+    while (n < cap) {
+        char* slash = strchr(p, '/');
+        if (slash) *slash = '\0';
+        if (n > 0 && (p[0] == '\0' || strcmp(p, ".") == 0)) {
+            /* an empty or "." component names the same directory */
+        } else if (n > 1 && strcmp(p, "..") == 0) {
+            n--;
+        } else {
+            parts[n++] = p;
+        }
+        if (!slash) break;
+        p = slash + 1;
+    }
+    return n;
+}
+
+static int display_same(const char* a, const char* b) {
+#ifdef _WIN32
+    return _stricmp(a, b) == 0;   /* D: and d:, as Windows reads them */
+#else
+    return strcmp(a, b) == 0;
+#endif
+}
+
+/* `path` as the user should see it (#3215): relative to the directory the
+ * command was typed in, which `ae` puts in AETHER_DISPLAY_FROM when it has
+ * entered a project elsewhere to compile it (a walk-up to aether.toml, or a
+ * project directory named on the command line). The compiler runs from the
+ * project root and named every file from there: `sub/bad.ae` for the bad.ae
+ * typed in sub/, which neither a terminal nor an editor could open. An
+ * absolute path, or no variable, is left as it is. Returns `path` or `buf`. */
+const char* aether_display_path(const char* path, char* buf, size_t cap) {
+    const char* from = getenv("AETHER_DISPLAY_FROM");
+    if (!path || !path[0] || !from || !from[0] || !buf || cap == 0) return path;
+    if (path[0] == '/' || path[0] == '\\' || (isalpha((unsigned char)path[0]) && path[1] == ':'))
+        return path;
+    char cwd[4096];
+#ifdef _WIN32
+    if (!_getcwd(cwd, (int)sizeof cwd)) return path;
+#else
+    if (!getcwd(cwd, sizeof cwd)) return path;
+#endif
+    char here[8192], base[4096];
+    snprintf(here, sizeof here, "%s/%s", cwd, path);
+    snprintf(base, sizeof base, "%s", from);
+    for (char* q = here; *q; q++) if (*q == '\\') *q = '/';
+    for (char* q = base; *q; q++) if (*q == '\\') *q = '/';
+    char* hp[256];
+    char* bp[256];
+    int hn = display_split(here, hp, 256);
+    int bn = display_split(base, bp, 256);
+    if (hn == 0 || bn == 0 || !display_same(hp[0], bp[0])) return path;   /* another drive */
+    int common = 0;
+    while (common < hn - 1 && common < bn && display_same(hp[common], bp[common])) common++;
+    size_t used = 0;
+    buf[0] = '\0';
+    for (int i = common; i < bn; i++) {
+        int w = snprintf(buf + used, cap - used, "../");
+        if (w < 0 || (size_t)w >= cap - used) return path;
+        used += (size_t)w;
+    }
+    for (int i = common; i < hn; i++) {
+        int w = snprintf(buf + used, cap - used, "%s%s", hp[i], i + 1 < hn ? "/" : "");
+        if (w < 0 || (size_t)w >= cap - used) return path;
+        used += (size_t)w;
+    }
+    return buf;
+}
 
 // Color support: respect NO_COLOR (https://no-color.org/) and non-tty stderr
 static int colors_enabled = -1;  // -1 = not yet checked
@@ -215,10 +291,11 @@ void aether_error_report(AetherError* error) {
     
     // Print location
     if (e_file) {
+        char shown[4096];
         fprintf(stderr, "  %s-->%s %s:%d:%d\n",
                 AETHER_COLOR_BLUE,
                 AETHER_COLOR_RESET,
-                e_file,
+                aether_display_path(e_file, shown, sizeof shown),
                 error->line,
                 error->column);
     }
@@ -327,10 +404,11 @@ void aether_warning_report(AetherError* warning) {
     
     // Print location
     if (w_file) {
+        char shown[4096];
         fprintf(stderr, "  %s-->%s %s:%d:%d\n",
                 AETHER_COLOR_BLUE,
                 AETHER_COLOR_RESET,
-                w_file,
+                aether_display_path(w_file, shown, sizeof shown),
                 warning->line,
                 warning->column);
     }

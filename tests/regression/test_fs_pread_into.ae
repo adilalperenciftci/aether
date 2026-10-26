@@ -103,7 +103,7 @@ main() {
     cursor.free(sc)
     print("PASS cursor read_le_u16 / read_le_u32\n")
 
-    fs.file_close(f)
+    _ = fs.close(f)
     fs.delete(path)
     bytes.free(blk)
     bytes.free(recipe)

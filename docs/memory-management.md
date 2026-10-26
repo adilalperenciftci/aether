@@ -502,7 +502,6 @@ that recorded them, and the implementation record is in
 
 ## Examples
 
-- [examples/basics/string-ownership.ae](../examples/basics/string-ownership.ae): strings released by the compiler, with no `free`
-- [examples/basics/memory_defer.ae](../examples/basics/memory_defer.ae): handles freed with `defer`
-- [examples/basics/memory_manual.ae](../examples/basics/memory_manual.ae): the same pattern with one list
-- [examples/basics/memory_escape.ae](../examples/basics/memory_escape.ae): a handle returned to the caller
+- [examples/01-language/17-ownership.ae](../examples/01-language/17-ownership.ae): what the compiler releases (strings, closures, the structs that hold them) and what the program frees (lists, `heap.new` boxes, `make` buffers), `@keep`, and `string.keep` for a slot that holds a bare pointer
+- [examples/01-language/16-defer.ae](../examples/01-language/16-defer.ae): handles freed with `defer` on every way out of a scope
+- [examples/01-language/12-collections.ae](../examples/01-language/12-collections.ae): lists, maps and sets, each freed by the program that made it

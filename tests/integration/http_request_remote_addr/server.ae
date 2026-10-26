@@ -11,9 +11,6 @@ import std.http
 import std.os
 
 extern exit(code: int)
-extern http_server_start_raw(server: ptr) -> int
-extern http_server_bind_raw(server: ptr, host: string, port: int) -> int
-extern http_server_port(server: ptr) -> int
 
 handle_whoami(req: ptr, res: ptr, ud: ptr) {
     http.response_set_status(res, 200)
@@ -30,7 +27,7 @@ message StartSrv { raw: ptr }
 
 actor SrvActor {
     state s = 0
-    receive { StartSrv(raw) -> { s = raw; http_server_start_raw(raw) } }
+    receive { StartSrv(raw) -> { s = raw; _ = http.server_start(raw) } }
 }
 
 main() {
@@ -44,11 +41,11 @@ main() {
     // server_start reuses a socket the caller already bound, so this also
     // means READY is printed AFTER the listen socket exists rather than
     // before it, which is what the fixed sleep in the runner was covering.
-    if http_server_bind_raw(raw, "127.0.0.1", 0) < 0 {
+    if http.server_bind(raw, "127.0.0.1", 0) != "" {
         println("FAIL: bind")
         exit(1)
     }
-    println("READY ${http_server_port(raw)}")
+    println("READY ${http.server_port(raw)}")
 
     http.server_get(raw, "/whoami", handle_whoami, 0)
 

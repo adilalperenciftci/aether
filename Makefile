@@ -1,4 +1,4 @@
-.PHONY: all clean test compiler examples examples-run ci ci-sweep
+.PHONY: all clean test compiler examples ci ci-sweep
 
 # Pin the default goal to `all` regardless of rule order. Without this, the
 # first FILE-target rule defined becomes the default goal — and the generated
@@ -955,6 +955,7 @@ TEST_SRC = tests/runtime/test_harness.c \
            tests/runtime/test_io_poller.c \
            tests/runtime/test_runtime_observe.c \
            tests/runtime/test_runtime_process_mem.c \
+           tests/runtime/test_spawn_env.c \
            tests/runtime/test_runtime_schema.c \
            tests/runtime/test_runtime_intmap.c \
            tests/runtime/test_tools_sha256.c tools/ae_sha256.c \
@@ -1418,7 +1419,7 @@ test-ae: compiler ae stdlib
 	@# A bad AE_SWEEP_SHARD (#2757) must fail here: inside the pipelines below
 	@# it would leave the sweep with nothing to run, and nothing reads as a pass.
 	@sh tests/scripts/sweep_shard.sh < /dev/null
-	@rm -f $(BUILD_DIR)/test-ae.verdict
+	@rm -f $(BUILD_DIR)/test-ae.verdict $(BUILD_DIR)/test-ae.unreported
 	@tmpdir=$$(mktemp -d); \
 	root=$$(pwd); \
 	script="$$root/tests/scripts/run_ae_test.sh"; \
@@ -1426,8 +1427,9 @@ test-ae: compiler ae stdlib
 	if [ -n "$(AE_SWEEP_EXTRA_PRUNE)" ]; then \
 	  echo "  Extra prune list: $(AE_SWEEP_EXTRA_PRUNE) ($$(sed '/^#/d;/^$$/d' "$(AE_SWEEP_EXTRA_PRUNE)" | wc -l | tr -d ' ') patterns)"; \
 	fi; \
-	sh tests/scripts/ae_sweep_list.sh "$(AE_SWEEP_EXTRA_PRUNE)" | sh tests/scripts/sweep_shard.sh | \
-	xargs -P $(NPROC) -I{} sh "$$script" "{}" "$$tmpdir" "$$root"; \
+	sh tests/scripts/ae_sweep_list.sh "$(AE_SWEEP_EXTRA_PRUNE)" | sh tests/scripts/sweep_shard.sh \
+	    > "$$tmpdir/units_ae.txt"; \
+	xargs -P $(NPROC) -I{} sh "$$script" "{}" "$$tmpdir" "$$root" < "$$tmpdir/units_ae.txt"; \
 	sh_script="$$root/tests/scripts/run_ae_sh_dir.sh"; \
 	sh_nproc=$${SH_NPROC:-$(NPROC)}; \
 	if [ -n "$(AE_SWEEP_EXTRA_PRUNE)" ]; then \
@@ -1445,12 +1447,15 @@ test-ae: compiler ae stdlib
 	  done; \
 	  for d in $$(cat "$$tmpdir/shdirs.txt"); do \
 	    [ -f "$$d/DRIVERS_INDEPENDENT" ] || echo "$$d"; \
-	  done; } | sh tests/scripts/sweep_shard.sh \
-	    | xargs -P $$sh_nproc -I{} sh "$$sh_script" "{}" "$$tmpdir" "$$root"; \
+	  done; } | sh tests/scripts/sweep_shard.sh > "$$tmpdir/units_sh.txt"; \
+	xargs -P $$sh_nproc -I{} sh "$$sh_script" "{}" "$$tmpdir" "$$root" < "$$tmpdir/units_sh.txt"; \
 	passed=$$(ls "$$tmpdir"/PASS_* 2>/dev/null | wc -l | tr -d ' '); \
 	failed=$$(ls "$$tmpdir"/FAIL_* 2>/dev/null | wc -l | tr -d ' '); \
 	skipped=$$(ls "$$tmpdir"/SKIP_* 2>/dev/null | wc -l | tr -d ' '); \
 	total=$$((passed + failed + skipped)); \
+	unrep="$$root/$(BUILD_DIR)/test-ae.unreported"; \
+	expected=$$(sh "$$root/tests/scripts/sweep_unreported.sh" "$$tmpdir" "$$unrep"); \
+	unreported=$$(wc -l < "$$unrep" | tr -d ' '); \
 	echo ""; \
 	if [ "$$failed" -gt 0 ]; then \
 		echo "=== FAILURE DETAILS ==="; \
@@ -1482,14 +1487,21 @@ test-ae: compiler ae stdlib
 			echo ""; \
 		done; \
 	fi; \
+	if [ "$$unreported" -gt 0 ]; then \
+		echo "=== TESTS THAT NEVER REPORTED ($$unreported of the $$expected listed) ==="; \
+		sed 's/^/  /' "$$unrep"; \
+		echo ""; \
+	fi; \
 	sh "$$root/tests/scripts/sweep_timings.sh" "$$tmpdir"; \
 	echo "Aether Tests: $$passed passed, $$failed failed, $$skipped skipped, $$total total"; \
-	printf '%s %s %s %s\n' "$$passed" "$$failed" "$$skipped" "$$total" > "$$root/$(BUILD_DIR)/test-ae.verdict"; \
+	printf '%s %s %s %s %s\n' "$$passed" "$$failed" "$$skipped" "$$total" "$$expected" > "$$root/$(BUILD_DIR)/test-ae.verdict"; \
 	rm -rf "$$tmpdir"; \
-	if [ "$$failed" -gt 0 ]; then exit 1; fi
+	if [ "$$failed" -gt 0 ] || [ "$$unreported" -gt 0 ]; then exit 1; fi
 	@# A shell that stopped before its tally can still leave make with status
-	@# 0: only a written tally with no failure is a pass.
-	@sh tests/scripts/sweep_verdict.sh $(BUILD_DIR)/test-ae.verdict
+	@# 0, and an xargs that ran part of its list can return 0 (#3111): only a
+	@# written tally with no failure, and a report from every listed test, is
+	@# a pass.
+	@sh tests/scripts/sweep_verdict.sh $(BUILD_DIR)/test-ae.verdict $(BUILD_DIR)/test-ae.unreported
 endif
 
 # Install smoke test: installs to a temp dir, runs ae init + ae run, cleans up
@@ -1811,74 +1823,19 @@ benchmark: benchmark-results
 	@echo ""
 	@cd benchmarks/cross-language/visualize && ./server
 
+# `make examples` is the checker (check-examples below): every example built,
+# run and compared with the output it says it prints. It used to build each
+# file with aetherc and the C compiler alone, which an example run as a
+# project, with --lib, by a script or through a contrib bridge cannot be.
+# The checker's recipe is POSIX shell; under cmd.exe (WINDOWS_NATIVE)
+# `make examples` builds every example with `ae examples`, as it always has.
 ifdef WINDOWS_NATIVE
-examples: compiler ae
-	@echo ===================================
-	@echo   Building Aether Examples
-	@echo ===================================
-	@.\build\ae.exe examples
-else
 examples: compiler ae stdlib
-	@echo "==================================="
-	@echo "  Building Aether Examples"
-	@echo "  Parallel: $(NPROC) jobs"
-	@echo "==================================="
-	@$(MKDIR) $(BUILD_DIR)/examples $(BUILD_DIR)/examples/basics $(BUILD_DIR)/examples/actors $(BUILD_DIR)/examples/applications $(BUILD_DIR)/examples/c-interop $(BUILD_DIR)/examples/stdlib
-	@tmpdir=$$(mktemp -d); \
-	script="$$tmpdir/build_one.sh"; \
-	printf '#!/bin/sh\n'                                                                            > "$$script"; \
-	printf 'src="$$1"; tmpdir="$$2"; root="$$3"\n'                                                  >> "$$script"; \
-	printf 'name=$$(echo "$$src" | sed "s|examples/||;s|\\.ae$$||")\n'                              >> "$$script"; \
-	printf 'key=$$(echo "$$name" | sed "s|/|_|g")\n'                                                >> "$$script"; \
-	printf 'dir=$$(dirname "$$src")\n'                                                              >> "$$script"; \
-	printf 'extra_c=""\n'                                                                           >> "$$script"; \
-	printf 'if [ -d "$$dir" ]; then\n'                                                              >> "$$script"; \
-	printf '  extra_c=$$(find "$$dir" -maxdepth 1 -name "*.c" 2>/dev/null | tr "\\n" " ")\n'        >> "$$script"; \
-	printf 'fi\n'                                                                                   >> "$$script"; \
-	printf 'out_c="$$root/$(BUILD_DIR)/examples/$$name.c"\n'                                        >> "$$script"; \
-	printf 'mkdir -p "$$(dirname "$$out_c")"\n'                                                     >> "$$script"; \
-	printf 'if ! "$$root/build/aetherc$(EXE_EXT)" "$$src" "$$out_c" 2>"$$tmpdir/$$key.aetherc.err"; then\n' >> "$$script"; \
-	printf '  printf "  %%-30s %%s\\n" "$$name" "FAIL (aetherc)"\n'                                 >> "$$script"; \
-	printf '  head -5 "$$tmpdir/$$key.aetherc.err"\n'                                               >> "$$script"; \
-	printf '  touch "$$tmpdir/FAIL_$$key"\n'                                                        >> "$$script"; \
-	printf '  exit 1\n'                                                                             >> "$$script"; \
-	printf 'fi\n'                                                                                   >> "$$script"; \
-	printf 'if ! $(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) "$$out_c" $$extra_c "$$root/$(BUILD_DIR)/libaether.a" -o "$$root/$(BUILD_DIR)/examples/$$name$(EXE_EXT)" $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) 2>"$$tmpdir/$$key.gcc.err"; then\n' >> "$$script"; \
-	printf '  printf "  %%-30s %%s\\n" "$$name" "FAIL (gcc)"\n'                                     >> "$$script"; \
-	printf '  head -20 "$$tmpdir/$$key.gcc.err"\n'                                                  >> "$$script"; \
-	printf '  touch "$$tmpdir/FAIL_$$key"\n'                                                        >> "$$script"; \
-	printf '  exit 1\n'                                                                             >> "$$script"; \
-	printf 'fi\n'                                                                                   >> "$$script"; \
-	printf 'printf "  %%-30s %%s\\n" "$$name" "OK"\n'                                               >> "$$script"; \
-	printf 'touch "$$tmpdir/PASS_$$key"\n'                                                          >> "$$script"; \
-	chmod +x "$$script"; \
-	root=$$(pwd); \
-	find examples -name '*.ae' \
-	    | grep -v '/lib/' | grep -v '/packages/' | grep -v '/embedded-java/' | grep -v '/host-.*-demo\.ae$$' \
-	    | grep -v '/ae-help-demo/' \
-	    | sort \
-	    | xargs -P $(NPROC) -I{} "$$script" "{}" "$$tmpdir" "$$root"; \
-	pass=$$(ls "$$tmpdir"/PASS_* 2>/dev/null | wc -l | tr -d ' '); \
-	fail=$$(ls "$$tmpdir"/FAIL_* 2>/dev/null | wc -l | tr -d ' '); \
-	echo ""; \
-	echo "  $$pass passed, $$fail failed"; \
-	echo "  Binaries in $(BUILD_DIR)/examples/"; \
-	rm -rf "$$tmpdir"; \
-	if [ "$$fail" -gt 0 ]; then exit 1; fi
+	@.\$(BUILD_DIR)\ae.exe examples
+else
+examples: check-examples
 endif
 
-examples-run: examples
-	@echo "==================================="
-	@echo "  Running Aether Examples"
-	@echo "==================================="
-	@. tests/lib/sweep_timeout.sh; sweep_timeout_bound TO "$$(pwd)" 5; \
-	for bin in $$(find $(BUILD_DIR)/examples -type f ! -name '*.c' ! -name '*.o' | sort); do \
-		test -x "$$bin" || continue; \
-		name=$$(echo $$bin | sed "s|$(BUILD_DIR)/examples/||"); \
-		echo "--- $$name ---"; \
-		$$TO $$bin 2>&1 || true; \
-		echo ""; \
-	done
 
 # Standalone aether-lsp binary — kept as a transitional alias for editor
 # integrations that hardcode the binary name. The same code is also embedded
@@ -2012,8 +1969,42 @@ endif
 endif
 endif
 
+# Sandbox preload library (libaether_sandbox.so): the LD_PRELOAD
+# interception layer spawn_sandboxed starts a child with, for cross-process
+# containment. Built on Linux and FreeBSD; both have an rtld that honours
+# LD_PRELOAD + dlsym(RTLD_NEXT, ...). Link flags differ: glibc needs -ldl
+# -lrt; FreeBSD folds dlopen/shm_open into libc. Other platforms (macOS
+# hardened runtime, Windows) have no preload path: spawn_sandboxed there is
+# a stub. Its own rule (#3177), with its source and the two headers that
+# source includes as prerequisites, so an edit to any of them or a deleted
+# library rebuilds it. It was built inside the MANIFEST recipe, so only a
+# change to the Makefile did, and a stale preload was tested and installed.
+SANDBOX_PRELOAD :=
+SANDBOX_PRELOAD_LIBS :=
+ifeq ($(shell uname -s),Linux)
+SANDBOX_PRELOAD := $(BUILD_DIR)/libaether_sandbox.so
+SANDBOX_PRELOAD_LIBS := -ldl -lrt
+else ifeq ($(shell uname -s),FreeBSD)
+SANDBOX_PRELOAD := $(BUILD_DIR)/libaether_sandbox.so
+endif
+ifneq ($(SANDBOX_PRELOAD),)
+$(SANDBOX_PRELOAD): runtime/libaether_sandbox_preload.c runtime/aether_sandbox_path.h runtime/aether_sandbox_match.h
+	@echo "Building sandbox preload library..."
+	@mkdir -p $(dir $@)
+	@# The old library goes first: a rebuild that failed left it in place and
+	@# reported it built, and install shipped a library its source no longer
+	@# made. A failure is not fatal (spawn_sandboxed is then unavailable),
+	@# and the compiler's output is kept beside it to say why.
+	@rm -f $@
+	@if $(CC) -shared -fPIC -o $@ runtime/libaether_sandbox_preload.c $(SANDBOX_PRELOAD_LIBS) > $@.log 2>&1; then \
+	    rm -f $@.log; echo "✓ Sandbox preload: $@"; \
+	else \
+	    rm -f $@; echo "⚠ Sandbox preload: build failed, see $@.log (spawn_sandboxed will be unavailable)"; \
+	fi
+endif
+
 # Precompiled stdlib archive — runtime + std for user programs.
-stdlib: $(BUILD_DIR)/libaether.a $(MANIFEST_OBJ) $(LIB_MAIN_ARCHIVE) $(BUILD_TARGET_STAMP) $(SHARED_RT)
+stdlib: $(BUILD_DIR)/libaether.a $(MANIFEST_OBJ) $(LIB_MAIN_ARCHIVE) $(BUILD_TARGET_STAMP) $(SHARED_RT) $(SANDBOX_PRELOAD)
 
 ifneq ($(SHARED_RT),)
 $(SHARED_RT): $(BUILD_DIR)/libaether.a
@@ -2096,22 +2087,6 @@ $(BUILD_DIR)/MANIFEST: Makefile | $(BUILD_DIR)
 	  for f in $(STD_REACTOR_SRC); do echo "$$f"; done; \
 	) > $(BUILD_DIR)/MANIFEST
 	@echo "✓ MANIFEST: $$(grep -c -v -E '^(#|$$)' $(BUILD_DIR)/MANIFEST) link-suitable files"
-# Sandbox preload library (libaether_sandbox.so) — the LD_PRELOAD
-# interception layer used by spawn_sandboxed for cross-process
-# containment. Built on Linux and FreeBSD; both have an rtld that
-# honours LD_PRELOAD + dlsym(RTLD_NEXT, ...). Link flags differ:
-# glibc needs -ldl -lrt; FreeBSD folds dlopen/shm_open into libc.
-# Other platforms (macOS hardened runtime, Windows) have no preload
-# path — spawn_sandboxed there is a stub.
-ifeq ($(shell uname -s),Linux)
-	@echo "Building sandbox preload library..."
-	@$(CC) -shared -fPIC -o $(BUILD_DIR)/libaether_sandbox.so runtime/libaether_sandbox_preload.c -ldl -lrt 2>/dev/null || true
-	@test -f $(BUILD_DIR)/libaether_sandbox.so && echo "✓ Sandbox preload: $(BUILD_DIR)/libaether_sandbox.so" || echo "⚠ Sandbox preload: build failed (spawn_sandboxed will be unavailable)"
-else ifeq ($(shell uname -s),FreeBSD)
-	@echo "Building sandbox preload library..."
-	@$(CC) -shared -fPIC -o $(BUILD_DIR)/libaether_sandbox.so runtime/libaether_sandbox_preload.c 2>/dev/null || true
-	@test -f $(BUILD_DIR)/libaether_sandbox.so && echo "✓ Sandbox preload: $(BUILD_DIR)/libaether_sandbox.so" || echo "⚠ Sandbox preload: build failed (spawn_sandboxed will be unavailable)"
-endif
 
 # Compiler-as-library archive — COMPILER_LIB_SRC without aetherc.c's main().
 # Consumed by the LSP server and the sanitizer test runners. Kept separate
@@ -2243,10 +2218,8 @@ self-test: compiler
 	@echo "Running Compiler Self-Test"
 	@echo "==================================="
 	@echo "Testing compiler on complex syntax..."
-	@if [ -f examples/showcase/chat_server.ae ]; then \
-		./$(BUILD_DIR)/aetherc$(EXE_EXT) examples/showcase/chat_server.ae $(BUILD_DIR)/test_compile.c && \
-		echo "✓ Complex syntax compilation successful"; \
-	fi
+	@./$(BUILD_DIR)/aetherc$(EXE_EXT) examples/02-actors/11-sharded-map.ae $(BUILD_DIR)/test_compile.c && \
+		echo "✓ Complex syntax compilation successful"
 	@echo ""
 	@echo "Testing collections..."
 	@$(MAKE) --no-print-directory test > /dev/null && echo "✓ All tests passed"
@@ -2372,6 +2345,11 @@ install: $(VERSION_HEADER) release-build ae stdlib
 	@if [ -d $(BUILD_DIR)/shared ]; then \
 		install -d $(PREFIX)/lib/aether/shared && \
 		cp $(BUILD_DIR)/shared/* $(PREFIX)/lib/aether/shared/; \
+	fi
+	@# Linux and FreeBSD: the sandbox's preload library, which spawn_sandboxed
+	@# starts a child with; it looks for it here, under AETHER_HOME (#3177).
+	@if [ -f $(BUILD_DIR)/libaether_sandbox.so ]; then \
+		install -m 755 $(BUILD_DIR)/libaether_sandbox.so $(PREFIX)/lib/aether/; \
 	fi
 	@# Version stamp next to libaether.a. `ae build` reads this and
 	@# compares it to the compiler's own version; a mismatch (the
@@ -2657,7 +2635,7 @@ install-contrib: contrib
 run: compiler
 ifndef FILE
 	@echo "Error: FILE not specified"
-	@echo "Usage: make run FILE=examples/basic/hello_world.ae"
+	@echo "Usage: make run FILE=examples/01-language/01-hello.ae"
 	@exit 1
 endif
 	@echo "Compiling $(FILE) to C..."
@@ -2676,8 +2654,8 @@ ifndef FILE
 	@echo "  make compile FILE=path/to/script.ae [OUTPUT=name]"
 	@echo ""
 	@echo "Example:"
-	@echo "  make compile FILE=examples/basics/hello.ae"
-	@echo "  make compile FILE=examples/ae-help-demo/fixed_dsl.ae OUTPUT=fixed_dsl"
+	@echo "  make compile FILE=examples/01-language/01-hello.ae"
+	@echo "  make compile FILE=examples/02-actors/01-first-actor.ae OUTPUT=first_actor"
 	@echo ""
 	@echo "If you wanted to build the toolchain instead, run:"
 	@echo "  make ae         # just the CLI"
@@ -2831,8 +2809,10 @@ help:
 	@echo "  make check-standalone - Compile every standalone C main (benches, demos)"
 	@echo "  make check-docs       - Compile the documentation's complete examples"
 	@echo "  make check-tests      - The test suite can fail: verdicts reach the exit code, prune list is consistent, every std module has tests, listeners bind loopback, shell tests end background programs through server_jobs.sh and compare files with same_bytes, test programs write temp files under names of their own and ask the build for the platform"
-	@echo "  make check-extern-widths - Every extern bound to C in this tree agrees with the C definition on each width; no plain C long in a bound signature"
-	@echo "  make check-raw-calls     - No std or contrib file calls a raw C binding another module declares"
+	@echo "  make check-extern-widths - Every extern bound to C in this tree agrees with the C definition on each width; no plain C long in a bound signature; no shared C function defined twice"
+	@echo "  make check-raw-calls     - No file calls or re-declares a raw C binding another module declares"
+	@echo "  make check-warnings      - Every .ae file under std and contrib type-checks without a warning"
+	@echo "  make check-examples      - Every example builds clean and prints the output it says it prints"
 	@echo "  make check-contrib-modules - Type-check every non-host contrib module"
 	@echo "  make check-changelog  - Validate changelog fragments, catch a release-fold"
 	@echo "  make add-changelog    - Write a new_changelogs/ fragment (SECTION=, SLUG=)"
@@ -2841,6 +2821,7 @@ help:
 	@echo "  make test-install   - Install smoke test (init + run)"
 	@echo "  make test-valgrind  - Run tests with Valgrind"
 	@echo "  make test-asan      - Run tests with AddressSanitizer"
+	@echo "  make test-ubsan     - C unit tests + .ae corpus with everything under UBSan; fails on any report (Linux, macOS)"
 	@echo "  make self-test      - Test compiler on complex examples"
 	@echo ""
 	@echo "CI/CD Targets:"
@@ -2865,7 +2846,7 @@ help:
 	@echo ""
 	@echo "Other Targets:"
 	@echo "  make benchmark-results - Run the cross-language benchmarks, no dashboard"
-	@echo "  make examples       - Compile example programs"
+	@echo "  make examples       - Build and run every example (make check-examples)"
 	@echo "  make install        - Install to $(PREFIX)"
 	@echo "  make stats          - Show build statistics"
 	@echo ""
@@ -2873,7 +2854,7 @@ help:
 	@echo "  make help           - Show this help message"
 	@echo ""
 	@echo "Examples:"
-	@echo "  make run FILE=examples/basic/hello_world.ae"
+	@echo "  make run FILE=examples/01-language/01-hello.ae"
 	@echo "  make compile FILE=myapp.ae OUTPUT=myapp"
 	@echo "  make -j8 test       - Build and test with 8 parallel jobs"
 	@echo ""
@@ -2905,7 +2886,7 @@ ci-windows: clean compiler
 	@echo "[1/3] Generating C from all examples with native aetherc..."
 	@mkdir -p $(BUILD_DIR)/win
 	@pass=0; fail=0; \
-	for src in $$(find examples -name '*.ae' | grep -v '/lib/' | grep -v '/packages/' | grep -v '/embedded-java/' | grep -v '/host-.*-demo\.ae$$' | grep -v '/ae-help-demo/' | sort); do \
+	for src in $$(find examples -name '*.ae' | grep -v '/lib/' | grep -v '/packages/' | sort | xargs grep -L -e '^// Part of:' -e '^// Run: sh ' -e '^// Run: ae [^r]' -e '^// Run: ae run [^ ]*[^e] *$$' -e '^// Run: ae run .* --lib ' -e '^import contrib\.'); do \
 		name=$$(echo $$src | sed 's|examples/||;s|\.ae$$||'); \
 		printf "  %-30s " "$$name"; \
 		mkdir -p "$(BUILD_DIR)/win/examples/$$(dirname $$name)"; \
@@ -2945,7 +2926,7 @@ ci-windows: clean compiler
 	@echo ""
 	@echo "[3/3] Syntax-checking generated C with MinGW..."
 	@pass=0; fail=0; \
-	for src in $$(find examples -name '*.ae' | grep -v '/lib/' | grep -v '/packages/' | grep -v '/embedded-java/' | grep -v '/host-.*-demo\.ae$$' | grep -v '/ae-help-demo/' | sort); do \
+	for src in $$(find examples -name '*.ae' | grep -v '/lib/' | grep -v '/packages/' | sort | xargs grep -L -e '^// Part of:' -e '^// Run: sh ' -e '^// Run: ae [^r]' -e '^// Run: ae run [^ ]*[^e] *$$' -e '^// Run: ae run .* --lib ' -e '^import contrib\.'); do \
 		name=$$(echo $$src | sed 's|examples/||;s|\.ae$$||'); \
 		out_c="$(BUILD_DIR)/win/examples/$$name.c"; \
 		printf "  %-30s " "$$name"; \
@@ -3025,18 +3006,19 @@ ci: clean
 	@$(CI_STAGE) 900 check-tests $(MAKE) check-tests
 	@$(CI_STAGE) 900 check-extern-widths $(MAKE) check-extern-widths
 	@$(CI_STAGE) 600 check-raw-calls $(MAKE) check-raw-calls
+	@$(CI_STAGE) 900 check-warnings $(MAKE) check-warnings
 	@echo ""
 	@echo "[5/11] Running .ae integration tests..."
 	@$(MAKE) test-ae
 	@echo ""
-	@echo "[6/11] Building examples..."
-	@$(CI_STAGE) 900 examples $(MAKE) examples
+	@echo "[6/11] Checking examples..."
+	@$(CI_STAGE) 900 check-examples $(MAKE) check-examples
 	@echo ""
 	@echo "[7/11] Install smoke test..."
 	@$(CI_STAGE) 900 test-install $(MAKE) test-install
 	@echo ""
 	@echo "[8/11] ae test smoke check..."
-	@out=$$(AETHER_HOME="" $(CI_STAGE) 300 "ae test smoke" ./$(BUILD_DIR)/ae test examples/basics/hello.ae 2>&1) || { echo "$$out"; exit 1; }; echo "$$out" | tail -1
+	@out=$$(AETHER_HOME="" $(CI_STAGE) 300 "ae test smoke" ./$(BUILD_DIR)/ae test examples/01-language/01-hello.ae 2>&1) || { echo "$$out"; exit 1; }; echo "$$out" | tail -1
 	@echo "  [PASS] ae test runs correctly"
 	@echo ""
 	@echo "[9/11] Differential test (lowering paths agree)..."
@@ -3090,11 +3072,14 @@ ownership-grid ownership-grid-check: compiler ae stdlib
 # Extern widths (#3097): every extern bound to a C function of this tree
 # agrees with the C definition on the width of each argument and of the
 # result, and no bound C signature uses a plain `long` (32 bits on Windows,
-# 64 elsewhere). No C compiler sees an extern's prototype beside the C
+# 64 elsewhere). A size_t is pointer-sized, which a `long` is not on wasm32
+# and ESP32 (#3185). No C compiler sees an extern's prototype beside the C
 # definition, so nothing else catches a disagreement: the call is made with
-# the wrong width. The checker is Aether (tests/extern_widths/check.ae). Its
-# self-test first: the fixture holds exactly 11 mismatches, one of each
-# kind, among definitions that agree.
+# the wrong width, or on wasm32 replaced by a trap. Nor is a C function the
+# shared runtime, std and contrib define in two directories, which a program
+# that links both has twice. The checker is Aether
+# (tests/extern_widths/check.ae). Its self-test first: the fixture holds
+# exactly 13 findings, one of each kind, among definitions that agree.
 # -----------------------------------------------------------------
 EXTERN_WIDTHS_CHECKER := $(BUILD_DIR)/extern_widths/check$(EXE_EXT)
 EXTERN_WIDTHS_DIRS := std contrib runtime tests examples tools lsp benchmarks
@@ -3102,7 +3087,7 @@ EXTERN_WIDTHS_DIRS := std contrib runtime tests examples tools lsp benchmarks
 check-extern-widths: compiler ae stdlib
 	@mkdir -p $(BUILD_DIR)/extern_widths
 	@./$(BUILD_DIR)/ae$(EXE_EXT) build tests/extern_widths/check.ae -o $(EXTERN_WIDTHS_CHECKER)
-	@./$(EXTERN_WIDTHS_CHECKER) --expect 11 tests/extern_widths/fixture \
+	@./$(EXTERN_WIDTHS_CHECKER) --root tests/extern_widths/fixture --expect 13 tests/extern_widths/fixture \
 	    > $(BUILD_DIR)/extern_widths/self_test.log 2>&1 || \
 	    { cat $(BUILD_DIR)/extern_widths/self_test.log; exit 1; }
 	@./$(EXTERN_WIDTHS_CHECKER) --exclude tests/extern_widths/fixture $(EXTERN_WIDTHS_DIRS)
@@ -3113,17 +3098,52 @@ check-extern-widths: compiler ae stdlib
 # is stored, bounds). No std or contrib file calls such a binding that
 # another module declares; it calls that module's public function. The
 # checker is Aether (tests/raw_calls/check.ae). Its self-test first: the
-# fixture holds exactly 4 such calls among uses that are not.
+# fixture holds exactly 6 such calls and re-declarations among uses that
+# are not.
 # -----------------------------------------------------------------
+# Every .ae file under std and contrib type-checks without a warning: an
+# unused value there was often a test's error result nobody checked. The
+# examples have their own gate (check-examples). tests/warnings/check.ae.
+WARNINGS_CHECKER := $(BUILD_DIR)/warnings/check$(EXE_EXT)
+.PHONY: check-warnings
+check-warnings: compiler ae stdlib
+	@mkdir -p $(BUILD_DIR)/warnings
+	@./$(BUILD_DIR)/ae$(EXE_EXT) build tests/warnings/check.ae -o $(WARNINGS_CHECKER)
+	@./$(WARNINGS_CHECKER) ./$(BUILD_DIR)/ae$(EXE_EXT) --jobs $(NPROC) --expect 4 tests/warnings/fixture \
+	    > $(BUILD_DIR)/warnings/self_test.log 2>&1 || \
+	    { cat $(BUILD_DIR)/warnings/self_test.log; exit 1; }
+	@./$(WARNINGS_CHECKER) ./$(BUILD_DIR)/ae$(EXE_EXT) --jobs $(NPROC) std contrib
+
 RAW_CALLS_CHECKER := $(BUILD_DIR)/raw_calls/check$(EXE_EXT)
 .PHONY: check-raw-calls
 check-raw-calls: compiler ae stdlib
 	@mkdir -p $(BUILD_DIR)/raw_calls
 	@./$(BUILD_DIR)/ae$(EXE_EXT) build tests/raw_calls/check.ae -o $(RAW_CALLS_CHECKER)
-	@./$(RAW_CALLS_CHECKER) --expect 4 tests/raw_calls/fixture \
+	@./$(RAW_CALLS_CHECKER) --expect 6 tests/raw_calls/fixture \
 	    > $(BUILD_DIR)/raw_calls/self_test.log 2>&1 || \
 	    { cat $(BUILD_DIR)/raw_calls/self_test.log; exit 1; }
-	@./$(RAW_CALLS_CHECKER) std contrib
+	@./$(RAW_CALLS_CHECKER) --exclude tests/raw_calls/fixture std contrib tests examples
+
+# -----------------------------------------------------------------
+# Examples (#3105): examples/ is the path a learner follows, so each example
+# must still be true. Every example builds without a warning; each one that
+# ends in an `// Output:` block runs and prints exactly that block; one that
+# cannot run unattended says what it needs; examples/README.md links every
+# example and each of its links resolves; every file there is source. The
+# checker is Aether (tests/examples/check.ae). Its self-test first: the
+# fixture holds exactly 15 problems, one of each kind.
+# -----------------------------------------------------------------
+EXAMPLES_CHECKER := $(BUILD_DIR)/examples_check/check$(EXE_EXT)
+EXAMPLES_TIMEOUT ?= 60
+.PHONY: check-examples
+check-examples: compiler ae stdlib
+	@mkdir -p $(BUILD_DIR)/examples_check
+	@./$(BUILD_DIR)/ae$(EXE_EXT) build tests/examples/check.ae -o $(BUILD_DIR)/examples_check/check
+	@./$(EXAMPLES_CHECKER) --ae ./$(BUILD_DIR)/ae$(EXE_EXT) --timeout 2 --jobs $(NPROC) --expect 15 tests/examples/fixture \
+	    > $(BUILD_DIR)/examples_check/self_test.log 2>&1 || \
+	    { cat $(BUILD_DIR)/examples_check/self_test.log; exit 1; }
+	@PATH="$$(pwd)/$(BUILD_DIR):$$PATH" ./$(EXAMPLES_CHECKER) --ae ./$(BUILD_DIR)/ae$(EXE_EXT) \
+	    --timeout $(EXAMPLES_TIMEOUT) --jobs $(NPROC) examples
 
 # The C a program gets when the C compiler is not GCC-compatible
 # (AETHER_GCC_COMPAT 0, which is what MSVC compiles): strict C11 under gcc,
@@ -3144,6 +3164,18 @@ test-msvc-compat: compiler
 .PHONY: test-ae-opt-diff
 test-ae-opt-diff: compiler ae stdlib
 	@CC="$${CC:-$(BASE_CC)}" NPROC=$(NPROC) sh tests/differential/run_opt_diff.sh "$(AE_SWEEP_EXTRA_PRUNE)"
+
+# The C unit tests and the `test-ae` sweep under UndefinedBehaviorSanitizer
+# (#2488). Rebuilds the toolchain and libaether instrumented, into this tree's
+# build/ (CC becomes build/ubsan/bin/gcc, so the build-flags digest moves and
+# the next plain build recompiles), then runs `test` and `test-ae` with every
+# compile and link going through that sanitizing compiler. Fails on any test
+# failure and on any UBSan report (build/ubsan/reports). Linux or macOS: it
+# needs a UBSan runtime, which MinGW lacks. Not part of `ci`: ubsan.yml runs
+# it. See tests/scripts/ubsan_sweep.sh and docs/differential-testing.md.
+.PHONY: test-ubsan
+test-ubsan:
+	@MAKE="$(MAKE)" NPROC=$(NPROC) BASE_CC="$(BASE_CC)" sh tests/scripts/ubsan_sweep.sh
 
 # -----------------------------------------------------------------
 # contrib/host bridge check
@@ -3550,11 +3582,11 @@ ci-coop: clean compiler ae
 	           tests/syntax/test_coop_ask_reply.ae \
 	           tests/syntax/test_coop_self_send.ae \
 	           tests/syntax/test_coop_stubs.ae \
-	           examples/actors/counter.ae \
-	           examples/actors/ping-pong.ae \
-	           examples/actors/ask-pattern.ae \
-	           examples/actors/cooperative-demo.ae \
-	           examples/basics/hello.ae; do \
+	           examples/02-actors/02-state.ae \
+	           examples/02-actors/04-actor-refs.ae \
+	           examples/02-actors/03-ask-reply.ae \
+	           examples/02-actors/07-worker-pool.ae \
+	           examples/01-language/01-hello.ae; do \
 		printf "  %-50s " "$$src"; \
 		if AETHER_HOME="" ./$(BUILD_DIR)/ae run "$$src" >/tmp/ae_coop_out.txt 2>&1; then \
 			echo "PASS"; \
@@ -3572,7 +3604,7 @@ ci-coop: clean compiler ae
 	@echo "[3/4] Testing no-filesystem + no-networking stubs..."
 	@$(MAKE) stdlib EXTRA_CFLAGS="-DAETHER_NO_FILESYSTEM -DAETHER_NO_NETWORKING"
 	@printf "  %-50s " "hello.ae (no-fs/no-net)"; \
-	if AETHER_HOME="" ./$(BUILD_DIR)/ae run examples/basics/hello.ae >/dev/null 2>&1; then \
+	if AETHER_HOME="" ./$(BUILD_DIR)/ae run examples/01-language/01-hello.ae >/dev/null 2>&1; then \
 		echo "PASS"; \
 	else \
 		echo "FAIL"; \
@@ -3588,6 +3620,15 @@ ci-coop: clean compiler ae
 
 # WASM cross-compilation test (requires Emscripten — use Docker or local emsdk)
 # Builds native aetherc, generates .c, then compiles with emcc
+# The programs ci-wasm takes through aetherc, emcc and node: one list the
+# three steps share. Each step used to name its own files, and when hello
+# moved to examples/01-language/01-hello.ae the first step wrote
+# 01-hello.c while the second still compiled hello.c.
+WASM_CI_PROGRAMS := examples/01-language/01-hello.ae examples/02-actors/02-state.ae \
+                    tests/syntax/test_platform_caps.ae tests/syntax/test_coop_chain.ae
+# The runtime those programs link, the list ci-esp32's CMakeLists reads too.
+COOP_RUNTIME_SOURCES := $(shell sed -e '/^\#/d' runtime/coop_runtime_sources.txt)
+
 ci-wasm: clean compiler ae
 	@echo "==================================="
 	@echo "  WebAssembly (Emscripten) CI"
@@ -3596,10 +3637,7 @@ ci-wasm: clean compiler ae
 	@echo "[1/3] Generating C from test programs..."
 	@mkdir -p $(BUILD_DIR)/wasm
 	@pass=0; fail=0; \
-	for src in examples/basics/hello.ae \
-	           examples/actors/counter.ae \
-	           tests/syntax/test_platform_caps.ae \
-	           tests/syntax/test_coop_chain.ae; do \
+	for src in $(WASM_CI_PROGRAMS); do \
 		name=$$(basename $$src .ae); \
 		printf "  %-40s " "$$name → .c"; \
 		if ./$(BUILD_DIR)/aetherc "$$src" "$(BUILD_DIR)/wasm/$$name.c" 2>/tmp/ae_wasm_err.txt; then \
@@ -3614,6 +3652,10 @@ ci-wasm: clean compiler ae
 	echo "  $$pass generated, $$fail failed"; \
 	if [ "$$fail" -gt 0 ]; then exit 1; fi
 	@echo ""
+# wasm-ld only warns when a call and its definition disagree on the
+# signature (an int64_t where the definition takes a 32-bit size_t), and
+# links a stub that traps when the call runs: --fatal-warnings makes that
+# the build error it is.
 	@echo "[2/3] Compiling runtime + generated C with emcc..."
 	@WASM_CFLAGS="-O2 -DAETHER_NO_THREADING -DAETHER_NO_FILESYSTEM -DAETHER_NO_NETWORKING \
 		-Iruntime -Iruntime/actors -Iruntime/scheduler -Iruntime/utils -Iruntime/memory \
@@ -3621,32 +3663,12 @@ ci-wasm: clean compiler ae
 		-Wall -Wextra -Wno-unused-parameter -Wno-unused-function \
 		-Wno-unused-variable -Wno-missing-field-initializers -Wno-unused-label"; \
 	pass=0; fail=0; \
-	RUNTIME_FILES="runtime/scheduler/aether_scheduler_coop.c runtime/scheduler/scheduler_optimizations.c \
-		runtime/config/aether_optimization_config.c runtime/memory/aether_arena.c \
-		runtime/memory/aether_pool.c runtime/memory/aether_memory_stats.c \
-		runtime/utils/aether_bounds_check.c runtime/utils/aether_test.c runtime/memory/aether_arena_optimized.c \
-		runtime/utils/aether_spawn.c \
-		runtime/aether_runtime_types.c runtime/aether_locale_num.c runtime/utils/aether_cpu_detect.c \
-		runtime/utils/aether_simd_vectorized.c runtime/aether_runtime.c runtime/aether_numa.c \
-		runtime/aether_host.c \
-		runtime/actors/aether_send_buffer.c runtime/actors/aether_send_message.c \
-		runtime/actors/aether_unwind.c runtime/aether_callbacks.c \
-		runtime/actors/aether_actor_thread.c \
-		std/string/aether_string.c std/math/aether_math.c std/net/aether_http.c \
-		std/net/aether_http_server.c std/net/aether_http_pool.c std/net/aether_http_park.c std/net/aether_net.c std/net/aether_actor_bridge.c \
-		std/udp/aether_udp.c \
-		std/collections/aether_collections.c \
-		std/json/aether_json.c std/fs/aether_fs.c std/log/aether_log.c std/io/aether_io.c \
-		std/os/aether_os.c \
-		std/quote/aether_quote.c \
-		std/collections/aether_set.c std/collections/aether_pqueue.c std/collections/aether_intarr.c std/collections/aether_longarr.c std/collections/aether_bits.c \
-		runtime/sandbox/capsicum_autosandbox.c"; \
-	for src in $(BUILD_DIR)/wasm/hello.c $(BUILD_DIR)/wasm/counter.c $(BUILD_DIR)/wasm/test_platform_caps.c \
-	           $(BUILD_DIR)/wasm/test_coop_chain.c; do \
-		name=$$(basename $$src .c); \
+	RUNTIME_FILES="$(COOP_RUNTIME_SOURCES)"; \
+	for src in $(WASM_CI_PROGRAMS); do \
+		name=$$(basename $$src .ae); \
 		printf "  %-40s " "emcc $$name"; \
-		if emcc $$WASM_CFLAGS $$src $$RUNTIME_FILES \
-			-o "$(BUILD_DIR)/wasm/$$name.js" -lm 2>/tmp/emcc_err.txt; then \
+		if emcc $$WASM_CFLAGS "$(BUILD_DIR)/wasm/$$name.c" $$RUNTIME_FILES \
+			-Wl,--fatal-warnings -o "$(BUILD_DIR)/wasm/$$name.js" -lm 2>/tmp/emcc_err.txt; then \
 			echo "OK"; \
 			pass=$$((pass + 1)); \
 		else \
@@ -3660,11 +3682,10 @@ ci-wasm: clean compiler ae
 	@echo ""
 	@echo "[3/3] Running WASM programs with Node.js..."
 	@pass=0; fail=0; \
-	for js in $(BUILD_DIR)/wasm/hello.js $(BUILD_DIR)/wasm/counter.js $(BUILD_DIR)/wasm/test_platform_caps.js \
-	          $(BUILD_DIR)/wasm/test_coop_chain.js; do \
-		name=$$(basename $$js .js); \
+	for src in $(WASM_CI_PROGRAMS); do \
+		name=$$(basename $$src .ae); \
 		printf "  %-40s " "node $$name"; \
-		if node "$$js" >/tmp/wasm_out.txt 2>&1; then \
+		if node "$(BUILD_DIR)/wasm/$$name.js" >/tmp/wasm_out.txt 2>&1; then \
 			echo "PASS"; \
 			pass=$$((pass + 1)); \
 		else \
@@ -3728,7 +3749,7 @@ ci-embedded: clean compiler
 	@echo "[2/2] Generating and syntax-checking example programs..."
 	@mkdir -p $(BUILD_DIR)/embedded
 	@pass=0; fail=0; \
-	for src in examples/basics/hello.ae examples/actors/counter.ae; do \
+	for src in examples/01-language/01-hello.ae examples/02-actors/02-state.ae; do \
 		name=$$(basename $$src .ae); \
 		printf "  %-55s " "$$name → syntax-check"; \
 		./$(BUILD_DIR)/aetherc "$$src" "$(BUILD_DIR)/embedded/$$name.c" 2>/dev/null && \

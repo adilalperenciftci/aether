@@ -1,0 +1,66 @@
+// Trusted calls: a function the sandboxed block may use with your authority.
+//
+// Contained code often needs one service its grants should not give it:
+// a log it may append to but not rewrite, a database it reaches only
+// through your function. `sandbox.enforce(grants, record) callback { ... }`
+// names `record` as trusted: a call to it written in the block runs with
+// the authority of the code around the enforce, not with the block's
+// grants. Trust is lexical and narrow: the call's arguments are still
+// evaluated inside the sandbox, a function the block calls that calls
+// `record` itself stays sandboxed, and a trusted name cannot be used as a
+// value in the block. Only Aether functions can be trusted, not C externs.
+//
+// Run: ae run examples/05-containment/02-trusted-calls.ae
+// See: docs/containment-sandbox.md
+
+import std.fs
+import std.sandbox
+import std.string
+
+// The service: append one line to the log.
+record(log: string, line: string) {
+    old, _ = fs.read(log)
+    fs.write(log, "${old}${line}\n")
+}
+
+// Calls record, but is not the block's own call, so it is sandboxed.
+record_from_helper(log: string, line: string) {
+    record(log, line)
+}
+
+main() {
+    dir, err = fs.make_temp_dir("", "aether-trusted-")
+    if err != "" {
+        println("no temp dir: ${err}")
+        exit(1)
+    }
+    defer fs.remove_tree(dir)
+    fs.write(fs.join_clean(dir, "input.txt"), "one\ntwo\nthree\n")
+    log = fs.join_clean(dir, "audit.log")
+    fs.write(log, "")
+
+    // The job may read its input. It may not touch the log.
+    job = sandbox.new("job") {
+        grant_fs_read("${dir}/input.txt")
+    }
+    defer sandbox.free(job)
+
+    sandbox.enforce(job, record) callback {
+        text, _ = fs.read(fs.join_clean(dir, "input.txt"))
+        lines = string.lines(string.trim(text))
+        record(log, "job read ${string.seq_length(lines)} lines")
+
+        werr = fs.write(log, "a forged entry\n")
+        verdict = if werr == "" { "written" } else { "refused" }
+        record(log, "job wrote to the log itself: ${verdict}")
+
+        record_from_helper(log, "a line from a helper")
+    }
+
+    text, _ = fs.read(log)
+    print(text)
+}
+
+// Output:
+// job read 3 lines
+// job wrote to the log itself: refused

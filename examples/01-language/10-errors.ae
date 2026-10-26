@@ -1,0 +1,96 @@
+// Errors: results that can fail, and panics.
+//
+// A function that can fail returns its value and an error string: `""`
+// means it worked. `-> T!` names that pair, and gives three short forms:
+// `call() or fallback` uses a fallback on failure, `call() or { ... }`
+// runs a block with the message bound to `err` (it ends in a value, or
+// leaves), and `call()!` inside another `T!` function hands the error up
+// unchanged. The pair is always there to take apart by hand.
+//
+// A panic is for a bug, not for an expected failure: it unwinds to the
+// nearest `try` and its `catch` gets the message. Outside any `try` it
+// ends the program. A bad array index, a broken contract or a `none`
+// forced open are panics too.
+//
+// Run: ae run examples/01-language/10-errors.ae
+// See: docs/language-reference.md#the-t-result-type-and-or--sugar
+
+import std.string
+
+parse_port(text: string) -> int! {
+    n, err = string.to_int(text)
+    if err != "" {
+        return 0, "'${text}' is not a number"
+    }
+    if n < 1 || n > 65535 {
+        return 0, "port ${n} is out of range"
+    }
+    return n // wrapped into (n, "")
+}
+
+// `!` hands any error of parse_port up to this function's caller.
+parse_endpoint(host: string, port: string) -> string! {
+    p = parse_port(port)!
+    return "${host}:${p}"
+}
+
+average(xs: int[]) -> int {
+    if xs.len == 0 {
+        panic("average of no numbers")
+    }
+    total = 0
+    for i in 0..xs.len {
+        total = total + xs[i]
+    }
+    return total / xs.len
+}
+
+main() {
+    // By hand: the value and the error.
+    port, err = parse_port("8080")
+    println("${port} [${err}]")
+    _, err2 = parse_port("80x")
+    println("[${err2}]")
+
+    // A fallback, and a block that sees the error.
+    println(parse_port("99999") or 443)
+    p = parse_port("-1") or {
+        println("using the default: ${err}")
+        80
+    }
+    println(p)
+
+    // Propagation.
+    ok, e1 = parse_endpoint("example.org", "443")
+    _, e2 = parse_endpoint("example.org", "http")
+    println("${ok} [${e1}]")
+    println("[${e2}]")
+
+    // A panic, caught.
+    try {
+        println(average([2, 4, 9]))
+        println(average([]))
+        println("not reached")
+    } catch msg {
+        println("caught: ${msg}")
+    }
+    try {
+        xs = [1, 2, 3]
+        i = 3
+        println(xs[i])
+    } catch msg {
+        println("caught: ${msg}")
+    }
+}
+
+// Output:
+// 8080 []
+// ['80x' is not a number]
+// 443
+// using the default: port -1 is out of range
+// 80
+// example.org:443 []
+// ['http' is not a number]
+// 5
+// caught: average of no numbers
+// caught: examples/01-language/10-errors.ae:80: array index 3 out of range for length 3

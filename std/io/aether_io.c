@@ -44,6 +44,9 @@ _tuple_ptrintstr_io io_fd_read_n_tuple(int fd, int n) { (void)fd; (void)n; _tupl
 int io_fd_read_into_raw(int fd, void* buf, int length) { (void)fd; (void)buf; (void)length; return -1; }
 _tuple_ptrstr_io   io_fd_read_line_tuple(int fd) { (void)fd; _tuple_ptrstr_io t; t._0 = NULL; t._1 = "filesystem disabled"; return t; }
 _tuple_ptrboolstr_io io_fd_read_line_status_tuple(int fd) { (void)fd; _tuple_ptrboolstr_io t; t._0 = NULL; t._1 = 0; t._2 = "filesystem disabled"; return t; }
+/* No descriptor layer in this build (the fd calls above are stubs too), so
+ * nothing is a terminal (#3180). */
+int io_is_terminal_raw(int fd) { (void)fd; return 0; }
 #else
 
 #include <stdio.h>
@@ -528,5 +531,45 @@ _tuple_ptrstr_io io_fd_read_line_tuple(int fd) {
     return out;
 }
 
-#endif // AETHER_HAS_FILESYSTEM
+/* Whether fd is a terminal (#3180), the test behind coloured output. On
+ * Windows a terminal is a console: _isatty is also true for the NUL device,
+ * which is no terminal, so the test is whether the descriptor's handle has
+ * a console mode. */
+#ifdef _WIN32
+#include <windows.h>
+#ifdef _MSC_VER
+/* A descriptor that is not open makes the CRT's _get_osfhandle call the
+ * invalid-parameter handler, which under MSVC ends the process by default:
+ * io.is_terminal(9) ended a program instead of answering false. One that
+ * does nothing is installed for this call, on this thread. MinGW's runtimes
+ * (msvcrt and UCRT alike) install a quiet one at startup and return -1. */
+static void io_ignore_invalid_parameter(const wchar_t* expr, const wchar_t* func,
+                                        const wchar_t* file, unsigned int line,
+                                        uintptr_t reserved) {
+    (void)expr; (void)func; (void)file; (void)line; (void)reserved;
+}
+#endif
 
+int io_is_terminal_raw(int fd) {
+    if (fd < 0) return 0;
+#ifdef _MSC_VER
+    _invalid_parameter_handler prev =
+        _set_thread_local_invalid_parameter_handler(io_ignore_invalid_parameter);
+#endif
+    intptr_t h = _get_osfhandle(fd);
+#ifdef _MSC_VER
+    _set_thread_local_invalid_parameter_handler(prev);
+#endif
+    if (h == -1) return 0;
+    DWORD mode = 0;
+    return GetConsoleMode((HANDLE)h, &mode) ? 1 : 0;
+}
+#else
+#include <unistd.h>
+int io_is_terminal_raw(int fd) {
+    if (fd < 0) return 0;
+    return isatty(fd) ? 1 : 0;
+}
+#endif
+
+#endif // AETHER_HAS_FILESYSTEM

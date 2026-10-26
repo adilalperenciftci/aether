@@ -5,9 +5,9 @@
 // in typechecker.c infer_type() AST_FUNCTION_CALL case.
 
 import typed
+import std.map
 
 extern string_length(s: string) -> int
-extern map_get_raw(m: ptr, key: string) -> ptr
 extern string_from_cstr(cstr: string) -> string @heap
 
 main() {
@@ -35,7 +35,7 @@ main() {
     // Test 3: module function returning ptr (map)
     println("test 3: module returns ptr")
     pair = typed.make_pair("color", "blue")
-    val = map_get_raw(pair, "color")
+    val = map.lookup(pair, "color")
     // val is a void* pointing to the C text "blue": a ptr has no rendering
     // (#3018), so it is read as the text it holds
     println(string_from_cstr(val))

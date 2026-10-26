@@ -120,6 +120,14 @@ The list is bounded by what people actually do, keep it short and
 high-precision. False positives are worse than misses here, since
 the user is already confused.
 
+Such a line is usually where the parser gives up, and its errors from
+there on (`Expected RIGHT_BRACE, got IDENTIFIER` on the HCL line, a
+stray `}` at the end of the file) follow from it. A finding that names a
+line accounts for them, so the raw syntax errors from the first such line
+on are left out of the report; a syntax error on an earlier line is a
+problem of its own and stays. After the rewrite, `ae help` again shows
+whatever the parser still finds (#3150).
+
 ### 3. Type-mismatch with English
 
 When the typer reports "expected int, got string" on a setter call,
@@ -320,10 +328,16 @@ The pieces, as built in `tools/ae_help.c`:
 
 The error source is `aetherc` itself. Rather than carving a
 "diagnose" mode into the typer, `ae help` runs the real `aetherc` as
-a subprocess, captures its stderr, and parses the already-structured
-`error[Eabcd]: …` lines into findings. This avoids any risk of typer
-regressions from a parallel code path; the tradeoff is that it only
-sees the errors `aetherc` already surfaces.
+a subprocess, with the `--lib` directories it was given (before the
+input, where aetherc reads options), captures its stderr, and parses the
+already-structured error lines into findings: the coded `error[Eabcd]: …`
+ones and the uncoded `error: …` ones, an unresolved import among them,
+which names every directory the compile searched. This avoids any risk of
+typer regressions from a parallel code path; the tradeoff is that it only
+sees the errors `aetherc` already surfaces. A compile that fails with
+nothing ae help can read is reported as such, with what the compiler
+printed, and ae help exits 1; it never says "no diagnostics" about a file
+that does not compile. `--json` carries `"compiled": false` then.
 
 The hint loader walks the imported libraries, finds any
 `<name>.help.md` next to their `module.ae` / source, and parses the

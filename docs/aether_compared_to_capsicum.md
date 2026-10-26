@@ -182,7 +182,7 @@ main() {
 
     // Contained code as a closure. Closures bind inside a function body,
     // and the captured param is typed so the list passes as a ptr.
-    worker_code = |perms: ptr| {
+    worker_code = | perms: ptr | {
         if sandboxed_tcp_connect(perms, "db.internal", 5432) == 1 {
             println("Connected to DB")
         } else {
@@ -540,7 +540,7 @@ This inverts the traditional Unix model (allow by default, explicitly restrict),
 
 ```aether,fragment
 // Untrusted plugin (could be malicious)
-plugin = |ctx| {
+plugin = | ctx | {
     // This is sandboxed: permission checks will deny it
     sandboxed_tcp_connect(ctx, "evil.com", 443)  // Denied by language check
     
@@ -585,8 +585,8 @@ capsicum.fcntls_limit(fd, mask)   // narrow allowed fcntl commands
 Rights are an integer bitmask (`capsicum.R_READ | capsicum.R_SEEK | ...`)
 the kernel's `cap_rights_t` is an opaque struct, so the C wrapper
 translates the mask into `cap_rights_set()` calls internally. Worked
-example: `examples/capsicum-demo.ae` (read a file, `enter()`, watch the
-next `open` get refused by the kernel).
+example: `examples/05-containment/05-capsicum.ae` (open a file, `enter()`,
+read the held descriptor, watch the next `open` get refused by the kernel).
 
 Not yet bound: process descriptors (`pdfork`/`pdwait`) and Casper
 service delegation, additive, can land without disturbing the above.
@@ -681,7 +681,7 @@ for (i = 0; i < n; i = i + 1) {
 
 The hook lives in the compiler-emitted in-process checker, so it fires
 for any `sandbox { }` block and for embedded/hosted plugins. Worked
-example: `examples/audit-demo.ae`. Per-actor attribution (the
+example: `examples/05-containment/03-audit.ae`. Per-actor attribution (the
 `actor_id` argument the original sketch imagined) is not wired, the
 checker sees category + resource, not the calling actor; adding it
 would need the actor identity threaded into the check, an additive
@@ -694,7 +694,7 @@ Allow hosted modules (Java, Python, Go) to declare Capsicum requirements:
 
 ```aether,fragment
 // Aether code compiled to library, embedded in Java
-config = |ctx| {
+config = | ctx | {
     grant_tcp(ctx, "api.example.com", 443)
     grant_fs_read(ctx, "/etc/app/config")
     
@@ -744,7 +744,7 @@ Three services are bound: `system.net` (DNS, `casper.dns_resolve`),
 (`casper.sysctl`). The C wrapper flattens the service result structs
 (`addrinfo`, `passwd`) to Aether strings/ints. Off FreeBSD every call
 fails cleanly and `casper.available()` returns 0. Worked example:
-`examples/casper-demo.ae` resolves a hostname *inside* capability
+`examples/05-containment/06-casper.ae` resolves a hostname *inside* capability
 mode, which would otherwise be impossible. `syslog` and `grp` services
 are unbound but additive. Note this build vendors the Casper prototypes
 inline (the dev headers are absent on some installs, e.g. GhostBSD; the
@@ -783,7 +783,7 @@ The runtime would apply RCTL rules when spawning the actor.
 
 ```aether,fragment
 // Untrusted configuration script
-config = |ctx| {
+config = | ctx | {
     // Script can only access /etc/myapp/ and connect to config.internal
     grant_fs_read(ctx, "/etc/myapp/*")
     grant_tcp(ctx, "config.internal", 8080)
@@ -811,7 +811,7 @@ Even if the config script is malicious or compromised, it can't escape its sandb
 
 ```aether,fragment
 // User-supplied plugin
-plugin = |ctx| {
+plugin = | ctx | {
     // Plugin can query the database and read data files
     grant_tcp(ctx, "db.internal", 5432)
     grant_fs_read(ctx, "/var/lib/myapp/data/*")
@@ -837,7 +837,7 @@ main() {
 
 ```aether,fragment
 // Provisioning script
-script = |ctx| {
+script = | ctx | {
     grant_tcp(ctx, "*.cloud.provider", 443)        // Only to cloud provider
     grant_fs_read(ctx, "/var/lib/provisioning/*")
     grant_fs_write(ctx, "/tmp/provision-*")         // Scratch space

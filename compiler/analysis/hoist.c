@@ -438,6 +438,18 @@ static Type* fn_join_binds(ASTNode* root, const char* name, Type* acc) {
     return acc;
 }
 
+/* #3153: among the bindings of `name` under `root`, the optional of `seed`
+ * (a binding of the plain type), or NULL when none binds one. */
+static Type* optional_of_binds(ASTNode* root, const char* name, Type* seed) {
+    const HoistNameJoin* nj = body_binds(root, name);
+    for (int i = 0; nj && i < nj->count; i++) {
+        Type* t = hoist_decl_type((ASTNode*)nj->binds[i]);
+        if (t && t->kind == TYPE_OPTIONAL && t->element_type && types_equal(t->element_type, seed))
+            return clone_type(t);
+    }
+    return NULL;
+}
+
 Type* hoist_join_type(ASTNode* scope_body, const char* name, Type* seed) {
     if (!scope_body || !seed) return NULL;
     /* #3070: a type written for one binding is the local's type, whatever
@@ -458,6 +470,14 @@ Type* hoist_join_type(ASTNode* scope_body, const char* name, Type* seed) {
         Type* acc = fn_join_binds(scope_body, name, clone_type(seed));
         if (acc && types_equal(acc, seed)) { free_type(acc); return NULL; }
         return acc;
+    }
+    /* #3153: a `T` beside a `T?` is the `T?`: the value wraps into it as it
+     * does into an optional local bound twice in one block, and the optional
+     * fits no `T`. Typed from a first binding of the `T`, the C variable was
+     * a `const char*` the other binding's `ae_opt_string` could not go in. */
+    if (seed->kind != TYPE_OPTIONAL) {
+        Type* opt = optional_of_binds(scope_body, name, seed);
+        if (opt) return opt;
     }
     /* #3032: a `null` binding names no type of its own. A local hoisted
      * from `t = null` in one branch and `t = "b"` in another is a string,

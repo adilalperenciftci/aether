@@ -85,6 +85,7 @@ main() {
                 // input is.
                 data, n, err = zlib.inflate(string.bytes(""))
                 spec.assert_err(err, "inflate of an empty buffer is rejected")
+                spec.assert_true(data == "" && n == 0, "no data on the error path")
             }
 
             spec.it("rejects input that is not a zlib stream") callback {

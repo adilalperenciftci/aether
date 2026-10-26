@@ -1,0 +1,53 @@
+// Logging: levelled messages to a file or to stderr.
+//
+// `log.init(path, level)` sends log lines to a file (appending), or to
+// stderr when the path is "" or "-"; a message below the level is dropped,
+// and `log.set_level` moves the threshold while the program runs. The
+// levels are `log.LOG_LEVEL_DEBUG` .. `log.LOG_LEVEL_FATAL`. A message is
+// written as it is, so a `%` in it is plain text. Timestamps and colours
+// can be turned off, which is what makes the file below the same on every
+// run; `log.shutdown` flushes and closes it.
+//
+// Run: ae run examples/03-std/09-logging.ae
+// See: docs/stdlib-reference.md
+
+import std.fs
+import std.log
+
+main() {
+    dir, derr = fs.make_temp_dir("", "aether-log-")
+    if derr != "" {
+        println("no temp dir: ${derr}")
+        exit(1)
+    }
+    defer fs.remove_tree(dir)
+    path = fs.join_clean(dir, "app.log")
+
+    err = log.init(path, log.LOG_LEVEL_INFO)
+    if err != "" {
+        println(err)
+        exit(1)
+    }
+    log.set_timestamps(0)
+    log.set_colors(0)
+
+    log.write(log.LOG_LEVEL_DEBUG, "cache warmed") // below INFO: dropped
+    log.write(log.LOG_LEVEL_INFO, "service started on port 8080")
+    log.write(log.LOG_LEVEL_WARN, "disk 91% full")
+    log.set_level(log.LOG_LEVEL_ERROR)
+    log.write(log.LOG_LEVEL_WARN, "slow request") // below ERROR now: dropped
+    log.write(log.LOG_LEVEL_ERROR, "payment backend unreachable")
+    log.shutdown()
+
+    text, rerr = fs.read(path)
+    if rerr != "" {
+        println(rerr)
+        exit(1)
+    }
+    print(text)
+}
+
+// Output:
+// INFO : service started on port 8080
+// WARN : disk 91% full
+// ERROR: payment backend unreachable

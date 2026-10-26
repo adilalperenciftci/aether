@@ -75,10 +75,12 @@ main() {
             data, n, err = lzf.compress(string.bytes("abcdefgh"))
             spec.assert_err(err, "incompressible 8-byte input is refused")
             spec.assert_eq(n, 0, "no length on the error path")
+            spec.assert_true(data == "", "no data on the error path")
 
             data2, n2, err2 = lzf.compress(string.bytes("abcdefghijklmnopqrstuvwx"))
             spec.assert_err(err2, "incompressible 24-byte input is refused")
             spec.assert_eq(n2, 0, "no length on the error path")
+            spec.assert_true(data2 == "", "no data on the error path")
         }
     }
 

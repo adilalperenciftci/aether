@@ -224,7 +224,7 @@
     <a href="file.html" class="module-card">
       <h3>file</h3>
       <p>std.file - File Operations (alias for std.fs) This is a convenience module that re-exports file functions from std.fs.</p>
-      <span class="count">1 exports</span>
+      <span class="count">16 exports</span>
     </a>
     <a href="floatarr.html" class="module-card">
       <h3>floatarr</h3>
@@ -234,7 +234,7 @@
     <a href="fs.html" class="module-card">
       <h3>fs</h3>
       <p>std.fs - File System Module Import with: import std.fs Note: fs is otherwise extern-only (no std.string import) to stay a thin syscall layer.</p>
-      <span class="count">148 exports</span>
+      <span class="count">150 exports</span>
     </a>
     <a href="hash.html" class="module-card">
       <h3>hash</h3>
@@ -249,7 +249,7 @@
     <a href="http.html" class="module-card">
       <h3>http</h3>
       <p>std.http - HTTP Client &amp; Server (alias for std.net) NB the pure-Aether TLS backends are deliberately NOT imported here.</p>
-      <span class="count">2 exports</span>
+      <span class="count">143 exports</span>
     </a>
     <a href="http1.html" class="module-card">
       <h3>http1</h3>
@@ -269,7 +269,7 @@
     <a href="io.html" class="module-card">
       <h3>io</h3>
       <p>std.io - Input/Output Module Import with: import std.io Raw externs end in `_raw` and return the C-style NULL/0/1 convention.</p>
-      <span class="count">44 exports</span>
+      <span class="count">46 exports</span>
     </a>
     <a href="ipc.html" class="module-card">
       <h3>ipc</h3>
@@ -279,7 +279,7 @@
     <a href="json.html" class="module-card">
       <h3>json</h3>
       <p>std.json - JSON Module Import with: import std.json Parses and serializes JSON per RFC 8259.</p>
-      <span class="count">45 exports</span>
+      <span class="count">51 exports</span>
     </a>
     <a href="jsonpath.html" class="module-card">
       <h3>jsonpath</h3>
@@ -308,8 +308,8 @@
     </a>
     <a href="log.html" class="module-card">
       <h3>log</h3>
-      <p>std.log - Logging Module Import with: import std.log Log level constants LOG_LEVEL_DEBUG = 0, LOG_LEVEL_INFO = 1, LOG_LEVEL_WARN = 2 LOG_LEVEL_ERROR = 3, LOG_LEVEL_FATAL = 4</p>
-      <span class="count">9 exports</span>
+      <p>std.log - Logging Module Import with: import std.log err = log.init(&quot;app.log&quot;, log.LOG_LEVEL_INFO) // &quot;&quot; or &quot;-&quot;: stderr log.write(log.LOG_LEVEL_WARN, &quot;disk almost full&quot;) A message below the level init (or set_level) gave is dropped.</p>
+      <span class="count">14 exports</span>
     </a>
     <a href="longarr.html" class="module-card">
       <h3>longarr</h3>
@@ -389,7 +389,7 @@
     <a href="pqueue.html" class="module-card">
       <h3>pqueue</h3>
       <p>std.pqueue - priority queue over (priority, item) pairs Backed by a binary heap: push and pop are O(log n), peek and size are O(1).</p>
-      <span class="count">1 exports</span>
+      <span class="count">9 exports</span>
     </a>
     <a href="quote.html" class="module-card">
       <h3>quote</h3>
@@ -414,7 +414,7 @@
     <a href="sandbox.html" class="module-card">
       <h3>sandbox</h3>
       <p>std.sandbox — build a grant list and run code under it.</p>
-      <span class="count">14 exports</span>
+      <span class="count">15 exports</span>
     </a>
     <a href="schema.html" class="module-card">
       <h3>schema</h3>
@@ -424,7 +424,7 @@
     <a href="set.html" class="module-card">
       <h3>set</h3>
       <p>std.set - unordered set of unique strings Backed by the same hash table as std.map, so lookups are O(1) on average and items are copied on insert (the caller's string lifetime does not matter).</p>
-      <span class="count">1 exports</span>
+      <span class="count">14 exports</span>
     </a>
     <a href="signal.html" class="module-card">
       <h3>signal</h3>
@@ -1030,7 +1030,22 @@
       <li class="function-item" data-name="csv_count"><a href="encoding.html#csv_count"><span class="fn-name">csv_count</span><span class="fn-module">encoding</span></a></li>
       <li class="function-item" data-name="csv_field"><a href="encoding.html#csv_field"><span class="fn-name">csv_field</span><span class="fn-module">encoding</span></a></li>
       <li class="function-item" data-name="csv_free"><a href="encoding.html#csv_free"><span class="fn-name">csv_free</span><span class="fn-module">encoding</span></a></li>
-      <li class="function-item" data-name="below"><a href="file.html#below"><span class="fn-name">below</span><span class="fn-module">file</span></a></li>
+      <li class="function-item" data-name="open_raw"><a href="file.html#open_raw"><span class="fn-name">open_raw</span><span class="fn-module">file</span></a></li>
+      <li class="function-item" data-name="close_raw"><a href="file.html#close_raw"><span class="fn-name">close_raw</span><span class="fn-module">file</span></a></li>
+      <li class="function-item" data-name="read_all_raw"><a href="file.html#read_all_raw"><span class="fn-name">read_all_raw</span><span class="fn-module">file</span></a></li>
+      <li class="function-item" data-name="write_raw"><a href="file.html#write_raw"><span class="fn-name">write_raw</span><span class="fn-module">file</span></a></li>
+      <li class="function-item" data-name="exists"><a href="file.html#exists"><span class="fn-name">exists</span><span class="fn-module">file</span></a></li>
+      <li class="function-item" data-name="delete_raw"><a href="file.html#delete_raw"><span class="fn-name">delete_raw</span><span class="fn-module">file</span></a></li>
+      <li class="function-item" data-name="size_raw"><a href="file.html#size_raw"><span class="fn-name">size_raw</span><span class="fn-module">file</span></a></li>
+      <li class="function-item" data-name="fd_raw"><a href="file.html#fd_raw"><span class="fn-name">fd_raw</span><span class="fn-module">file</span></a></li>
+      <li class="function-item" data-name="open"><a href="file.html#open"><span class="fn-name">open</span><span class="fn-module">file</span></a></li>
+      <li class="function-item" data-name="close"><a href="file.html#close"><span class="fn-name">close</span><span class="fn-module">file</span></a></li>
+      <li class="function-item" data-name="read_all"><a href="file.html#read_all"><span class="fn-name">read_all</span><span class="fn-module">file</span></a></li>
+      <li class="function-item" data-name="read"><a href="file.html#read"><span class="fn-name">read</span><span class="fn-module">file</span></a></li>
+      <li class="function-item" data-name="write"><a href="file.html#write"><span class="fn-name">write</span><span class="fn-module">file</span></a></li>
+      <li class="function-item" data-name="delete"><a href="file.html#delete"><span class="fn-name">delete</span><span class="fn-module">file</span></a></li>
+      <li class="function-item" data-name="size"><a href="file.html#size"><span class="fn-name">size</span><span class="fn-module">file</span></a></li>
+      <li class="function-item" data-name="fd"><a href="file.html#fd"><span class="fn-name">fd</span><span class="fn-module">file</span></a></li>
       <li class="function-item" data-name="new"><a href="floatarr.html#new"><span class="fn-name">new</span><span class="fn-module">floatarr</span></a></li>
       <li class="function-item" data-name="new_filled"><a href="floatarr.html#new_filled"><span class="fn-name">new_filled</span><span class="fn-module">floatarr</span></a></li>
       <li class="function-item" data-name="get"><a href="floatarr.html#get"><span class="fn-name">get</span><span class="fn-module">floatarr</span></a></li>
@@ -1047,7 +1062,7 @@
       <li class="function-item" data-name="fill"><a href="floatarr.html#fill"><span class="fn-name">fill</span><span class="fn-module">floatarr</span></a></li>
       <li class="function-item" data-name="free"><a href="floatarr.html#free"><span class="fn-name">free</span><span class="fn-module">floatarr</span></a></li>
       <li class="function-item" data-name="file_open_raw"><a href="fs.html#file_open_raw"><span class="fn-name">file_open_raw</span><span class="fn-module">fs</span></a></li>
-      <li class="function-item" data-name="file_close"><a href="fs.html#file_close"><span class="fn-name">file_close</span><span class="fn-module">fs</span></a></li>
+      <li class="function-item" data-name="file_close_raw"><a href="fs.html#file_close_raw"><span class="fn-name">file_close_raw</span><span class="fn-module">fs</span></a></li>
       <li class="function-item" data-name="file_read_all_raw"><a href="fs.html#file_read_all_raw"><span class="fn-name">file_read_all_raw</span><span class="fn-module">fs</span></a></li>
       <li class="function-item" data-name="file_write_raw"><a href="fs.html#file_write_raw"><span class="fn-name">file_write_raw</span><span class="fn-module">fs</span></a></li>
       <li class="function-item" data-name="file_exists"><a href="fs.html#file_exists"><span class="fn-name">file_exists</span><span class="fn-module">fs</span></a></li>
@@ -1141,6 +1156,8 @@
       <li class="function-item" data-name="walk_raw"><a href="fs.html#walk_raw"><span class="fn-name">walk_raw</span><span class="fn-module">fs</span></a></li>
       <li class="function-item" data-name="watch_open_raw"><a href="fs.html#watch_open_raw"><span class="fn-name">watch_open_raw</span><span class="fn-module">fs</span></a></li>
       <li class="function-item" data-name="open"><a href="fs.html#open"><span class="fn-name">open</span><span class="fn-module">fs</span></a></li>
+      <li class="function-item" data-name="close"><a href="fs.html#close"><span class="fn-name">close</span><span class="fn-module">fs</span></a></li>
+      <li class="function-item" data-name="read_all"><a href="fs.html#read_all"><span class="fn-name">read_all</span><span class="fn-module">fs</span></a></li>
       <li class="function-item" data-name="read"><a href="fs.html#read"><span class="fn-name">read</span><span class="fn-module">fs</span></a></li>
       <li class="function-item" data-name="write"><a href="fs.html#write"><span class="fn-name">write</span><span class="fn-module">fs</span></a></li>
       <li class="function-item" data-name="delete"><a href="fs.html#delete"><span class="fn-name">delete</span><span class="fn-module">fs</span></a></li>
@@ -1214,8 +1231,149 @@
       <li class="function-item" data-name="caller_identity"><a href="host.html#caller_identity"><span class="fn-name">caller_identity</span><span class="fn-module">host</span></a></li>
       <li class="function-item" data-name="caller_attribute"><a href="host.html#caller_attribute"><span class="fn-name">caller_attribute</span><span class="fn-module">host</span></a></li>
       <li class="function-item" data-name="caller_deadline_ms"><a href="host.html#caller_deadline_ms"><span class="fn-name">caller_deadline_ms</span><span class="fn-module">host</span></a></li>
-      <li class="function-item" data-name="this"><a href="http.html#this"><span class="fn-name">this</span><span class="fn-module">http</span></a></li>
-      <li class="function-item" data-name="module"><a href="http.html#module"><span class="fn-name">module</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="get_raw"><a href="http.html#get_raw"><span class="fn-name">get_raw</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="get_with_timeout_raw"><a href="http.html#get_with_timeout_raw"><span class="fn-name">get_with_timeout_raw</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="get_with_timeout_ns_raw"><a href="http.html#get_with_timeout_ns_raw"><span class="fn-name">get_with_timeout_ns_raw</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="post_raw"><a href="http.html#post_raw"><span class="fn-name">post_raw</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="put_raw"><a href="http.html#put_raw"><span class="fn-name">put_raw</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="delete_raw"><a href="http.html#delete_raw"><span class="fn-name">delete_raw</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="response_free"><a href="http.html#response_free"><span class="fn-name">response_free</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="response_status_code"><a href="http.html#response_status_code"><span class="fn-name">response_status_code</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="response_body_str"><a href="http.html#response_body_str"><span class="fn-name">response_body_str</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="response_headers_str"><a href="http.html#response_headers_str"><span class="fn-name">response_headers_str</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="response_status"><a href="http.html#response_status"><span class="fn-name">response_status</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="response_body"><a href="http.html#response_body"><span class="fn-name">response_body</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="response_headers"><a href="http.html#response_headers"><span class="fn-name">response_headers</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="response_error"><a href="http.html#response_error"><span class="fn-name">response_error</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="response_ok"><a href="http.html#response_ok"><span class="fn-name">response_ok</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="get"><a href="http.html#get"><span class="fn-name">get</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="get_with_timeout"><a href="http.html#get_with_timeout"><span class="fn-name">get_with_timeout</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="post"><a href="http.html#post"><span class="fn-name">post</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="put"><a href="http.html#put"><span class="fn-name">put</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="delete"><a href="http.html#delete"><span class="fn-name">delete</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="status_text"><a href="http.html#status_text"><span class="fn-name">status_text</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="client_pool_configure_raw"><a href="http.html#client_pool_configure_raw"><span class="fn-name">client_pool_configure_raw</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="client_pool_clear_raw"><a href="http.html#client_pool_clear_raw"><span class="fn-name">client_pool_clear_raw</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="client_pool_idle_count_raw"><a href="http.html#client_pool_idle_count_raw"><span class="fn-name">client_pool_idle_count_raw</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="client_rx_buffer_allocs_raw"><a href="http.html#client_rx_buffer_allocs_raw"><span class="fn-name">client_rx_buffer_allocs_raw</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="client_pool_configure"><a href="http.html#client_pool_configure"><span class="fn-name">client_pool_configure</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="client_pool_disable"><a href="http.html#client_pool_disable"><span class="fn-name">client_pool_disable</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="client_pool_clear"><a href="http.html#client_pool_clear"><span class="fn-name">client_pool_clear</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="client_pool_idle_count"><a href="http.html#client_pool_idle_count"><span class="fn-name">client_pool_idle_count</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="client_rx_buffer_allocs"><a href="http.html#client_rx_buffer_allocs"><span class="fn-name">client_rx_buffer_allocs</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_create"><a href="http.html#server_create"><span class="fn-name">server_create</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_bind_raw"><a href="http.html#server_bind_raw"><span class="fn-name">server_bind_raw</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_error"><a href="http.html#server_error"><span class="fn-name">server_error</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_port"><a href="http.html#server_port"><span class="fn-name">server_port</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_start_raw"><a href="http.html#server_start_raw"><span class="fn-name">server_start_raw</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_set_host"><a href="http.html#server_set_host"><span class="fn-name">server_set_host</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_start_background_raw"><a href="http.html#server_start_background_raw"><span class="fn-name">server_start_background_raw</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_stop"><a href="http.html#server_stop"><span class="fn-name">server_stop</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_free"><a href="http.html#server_free"><span class="fn-name">server_free</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_set_tls_raw"><a href="http.html#server_set_tls_raw"><span class="fn-name">server_set_tls_raw</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_set_tls"><a href="http.html#server_set_tls"><span class="fn-name">server_set_tls</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_set_keepalive_raw"><a href="http.html#server_set_keepalive_raw"><span class="fn-name">server_set_keepalive_raw</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_set_keepalive"><a href="http.html#server_set_keepalive"><span class="fn-name">server_set_keepalive</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_set_h2_raw"><a href="http.html#server_set_h2_raw"><span class="fn-name">server_set_h2_raw</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_set_h2"><a href="http.html#server_set_h2"><span class="fn-name">server_set_h2</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_set_multi_accept_raw"><a href="http.html#server_set_multi_accept_raw"><span class="fn-name">server_set_multi_accept_raw</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_set_multi_accept"><a href="http.html#server_set_multi_accept"><span class="fn-name">server_set_multi_accept</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_set_h2_concurrent_dispatch_raw"><a href="http.html#server_set_h2_concurrent_dispatch_raw"><span class="fn-name">server_set_h2_concurrent_dispatch_raw</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_set_h2_concurrent_dispatch"><a href="http.html#server_set_h2_concurrent_dispatch"><span class="fn-name">server_set_h2_concurrent_dispatch</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_drain_connection"><a href="http.html#server_drain_connection"><span class="fn-name">server_drain_connection</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_shutdown_graceful_raw"><a href="http.html#server_shutdown_graceful_raw"><span class="fn-name">server_shutdown_graceful_raw</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_shutdown_graceful"><a href="http.html#server_shutdown_graceful"><span class="fn-name">server_shutdown_graceful</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_monitor_listening_raw"><a href="http.html#server_monitor_listening_raw"><span class="fn-name">server_monitor_listening_raw</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_monitor_stopped_raw"><a href="http.html#server_monitor_stopped_raw"><span class="fn-name">server_monitor_stopped_raw</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_monitor_null_raw"><a href="http.html#server_monitor_null_raw"><span class="fn-name">server_monitor_null_raw</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_has_monitor"><a href="http.html#server_has_monitor"><span class="fn-name">server_has_monitor</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="monitor"><a href="http.html#monitor"><span class="fn-name">monitor</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="listening"><a href="http.html#listening"><span class="fn-name">listening</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="stopped"><a href="http.html#stopped"><span class="fn-name">stopped</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="console_monitor"><a href="http.html#console_monitor"><span class="fn-name">console_monitor</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="null_monitor"><a href="http.html#null_monitor"><span class="fn-name">null_monitor</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_set_health_probes_raw"><a href="http.html#server_set_health_probes_raw"><span class="fn-name">server_set_health_probes_raw</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_set_health_probes"><a href="http.html#server_set_health_probes"><span class="fn-name">server_set_health_probes</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_set_access_log_raw"><a href="http.html#server_set_access_log_raw"><span class="fn-name">server_set_access_log_raw</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_set_access_log"><a href="http.html#server_set_access_log"><span class="fn-name">server_set_access_log</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_set_metrics_raw"><a href="http.html#server_set_metrics_raw"><span class="fn-name">server_set_metrics_raw</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_set_metrics"><a href="http.html#server_set_metrics"><span class="fn-name">server_set_metrics</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_sse"><a href="http.html#server_sse"><span class="fn-name">server_sse</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="response_sse_upgrade_raw"><a href="http.html#response_sse_upgrade_raw"><span class="fn-name">response_sse_upgrade_raw</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="sse_send"><a href="http.html#sse_send"><span class="fn-name">sse_send</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="sse_send_id"><a href="http.html#sse_send_id"><span class="fn-name">sse_send_id</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="sse_send_full"><a href="http.html#sse_send_full"><span class="fn-name">sse_send_full</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="sse_comment"><a href="http.html#sse_comment"><span class="fn-name">sse_comment</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="sse_close"><a href="http.html#sse_close"><span class="fn-name">sse_close</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="response_upgrade_sse"><a href="http.html#response_upgrade_sse"><span class="fn-name">response_upgrade_sse</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="response_begin_chunked"><a href="http.html#response_begin_chunked"><span class="fn-name">response_begin_chunked</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="chunked_write"><a href="http.html#chunked_write"><span class="fn-name">chunked_write</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="chunked_end"><a href="http.html#chunked_end"><span class="fn-name">chunked_end</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_websocket"><a href="http.html#server_websocket"><span class="fn-name">server_websocket</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="ws_connect"><a href="http.html#ws_connect"><span class="fn-name">ws_connect</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="ws_client_free"><a href="http.html#ws_client_free"><span class="fn-name">ws_client_free</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="ws_message_length"><a href="http.html#ws_message_length"><span class="fn-name">ws_message_length</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="ws_send_text"><a href="http.html#ws_send_text"><span class="fn-name">ws_send_text</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="ws_send_binary"><a href="http.html#ws_send_binary"><span class="fn-name">ws_send_binary</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="ws_recv"><a href="http.html#ws_recv"><span class="fn-name">ws_recv</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="ws_recv_timeout"><a href="http.html#ws_recv_timeout"><span class="fn-name">ws_recv_timeout</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="ws_poll"><a href="http.html#ws_poll"><span class="fn-name">ws_poll</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="ws_fd"><a href="http.html#ws_fd"><span class="fn-name">ws_fd</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="ws_message"><a href="http.html#ws_message"><span class="fn-name">ws_message</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="ws_message_bytes"><a href="http.html#ws_message_bytes"><span class="fn-name">ws_message_bytes</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="ws_close"><a href="http.html#ws_close"><span class="fn-name">ws_close</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_bind"><a href="http.html#server_bind"><span class="fn-name">server_bind</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_start"><a href="http.html#server_start"><span class="fn-name">server_start</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_start_background"><a href="http.html#server_start_background"><span class="fn-name">server_start_background</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_add_route"><a href="http.html#server_add_route"><span class="fn-name">server_add_route</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_get"><a href="http.html#server_get"><span class="fn-name">server_get</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_post"><a href="http.html#server_post"><span class="fn-name">server_post</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_put"><a href="http.html#server_put"><span class="fn-name">server_put</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_delete"><a href="http.html#server_delete"><span class="fn-name">server_delete</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_use_middleware"><a href="http.html#server_use_middleware"><span class="fn-name">server_use_middleware</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="get_header"><a href="http.html#get_header"><span class="fn-name">get_header</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="get_query_param"><a href="http.html#get_query_param"><span class="fn-name">get_query_param</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="get_path_param"><a href="http.html#get_path_param"><span class="fn-name">get_path_param</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="request_free"><a href="http.html#request_free"><span class="fn-name">request_free</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="response_create"><a href="http.html#response_create"><span class="fn-name">response_create</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="response_set_status"><a href="http.html#response_set_status"><span class="fn-name">response_set_status</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="response_get_status"><a href="http.html#response_get_status"><span class="fn-name">response_get_status</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="response_set_header"><a href="http.html#response_set_header"><span class="fn-name">response_set_header</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="response_add_header"><a href="http.html#response_add_header"><span class="fn-name">response_add_header</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="response_clear_headers"><a href="http.html#response_clear_headers"><span class="fn-name">response_clear_headers</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="response_set_body"><a href="http.html#response_set_body"><span class="fn-name">response_set_body</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="response_set_body_bytes"><a href="http.html#response_set_body_bytes"><span class="fn-name">response_set_body_bytes</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="response_accept_tunnel"><a href="http.html#response_accept_tunnel"><span class="fn-name">response_accept_tunnel</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="response_json"><a href="http.html#response_json"><span class="fn-name">response_json</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_response_free"><a href="http.html#server_response_free"><span class="fn-name">server_response_free</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_set_actor_handler"><a href="http.html#server_set_actor_handler"><span class="fn-name">server_set_actor_handler</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="request_body_read_raw"><a href="http.html#request_body_read_raw"><span class="fn-name">request_body_read_raw</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="get_request_body_read"><a href="http.html#get_request_body_read"><span class="fn-name">get_request_body_read</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="get_request_body_read_length"><a href="http.html#get_request_body_read_length"><span class="fn-name">get_request_body_read_length</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="release_request_body_read"><a href="http.html#release_request_body_read"><span class="fn-name">release_request_body_read</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="request_body_read"><a href="http.html#request_body_read"><span class="fn-name">request_body_read</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="request_body_complete"><a href="http.html#request_body_complete"><span class="fn-name">request_body_complete</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="mime_type"><a href="http.html#mime_type"><span class="fn-name">mime_type</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="serve_file"><a href="http.html#serve_file"><span class="fn-name">serve_file</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="serve_static"><a href="http.html#serve_static"><span class="fn-name">serve_static</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="request_method"><a href="http.html#request_method"><span class="fn-name">request_method</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="request_path"><a href="http.html#request_path"><span class="fn-name">request_path</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="request_body"><a href="http.html#request_body"><span class="fn-name">request_body</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="request_body_length"><a href="http.html#request_body_length"><span class="fn-name">request_body_length</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="request_body_bytes"><a href="http.html#request_body_bytes"><span class="fn-name">request_body_bytes</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="request_query"><a href="http.html#request_query"><span class="fn-name">request_query</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="request_remote_addr"><a href="http.html#request_remote_addr"><span class="fn-name">request_remote_addr</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="request_remote_port"><a href="http.html#request_remote_port"><span class="fn-name">request_remote_port</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="request_local_addr"><a href="http.html#request_local_addr"><span class="fn-name">request_local_addr</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="request_local_port"><a href="http.html#request_local_port"><span class="fn-name">request_local_port</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="request_scheme"><a href="http.html#request_scheme"><span class="fn-name">request_scheme</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="request_is_tls"><a href="http.html#request_is_tls"><span class="fn-name">request_is_tls</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="request_http_version"><a href="http.html#request_http_version"><span class="fn-name">request_http_version</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="request_header_count"><a href="http.html#request_header_count"><span class="fn-name">request_header_count</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="request_header_name"><a href="http.html#request_header_name"><span class="fn-name">request_header_name</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="request_header_value"><a href="http.html#request_header_value"><span class="fn-name">request_header_value</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="ae_io_cancel"><a href="http.html#ae_io_cancel"><span class="fn-name">ae_io_cancel</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="await_io"><a href="http.html#await_io"><span class="fn-name">await_io</span><span class="fn-module">http</span></a></li>
       <li class="function-item" data-name="HttpResponse"><a href="http1.html#HttpResponse"><span class="fn-name">HttpResponse</span><span class="fn-module">http1</span></a></li>
       <li class="function-item" data-name="response_new"><a href="http1.html#response_new"><span class="fn-name">response_new</span><span class="fn-module">http1</span></a></li>
       <li class="function-item" data-name="response_free"><a href="http1.html#response_free"><span class="fn-name">response_free</span><span class="fn-module">http1</span></a></li>
@@ -1273,6 +1431,7 @@
       <li class="function-item" data-name="unsetenv_raw"><a href="io.html#unsetenv_raw"><span class="fn-name">unsetenv_raw</span><span class="fn-module">io</span></a></li>
       <li class="function-item" data-name="stderr_write_raw"><a href="io.html#stderr_write_raw"><span class="fn-name">stderr_write_raw</span><span class="fn-module">io</span></a></li>
       <li class="function-item" data-name="stdout_write_raw"><a href="io.html#stdout_write_raw"><span class="fn-name">stdout_write_raw</span><span class="fn-module">io</span></a></li>
+      <li class="function-item" data-name="is_terminal_raw"><a href="io.html#is_terminal_raw"><span class="fn-name">is_terminal_raw</span><span class="fn-module">io</span></a></li>
       <li class="function-item" data-name="perror_raw"><a href="io.html#perror_raw"><span class="fn-name">perror_raw</span><span class="fn-module">io</span></a></li>
       <li class="function-item" data-name="errno_message_raw"><a href="io.html#errno_message_raw"><span class="fn-name">errno_message_raw</span><span class="fn-module">io</span></a></li>
       <li class="function-item" data-name="fd_open_read_tuple"><a href="io.html#fd_open_read_tuple"><span class="fn-name">fd_open_read_tuple</span><span class="fn-module">io</span></a></li>
@@ -1291,6 +1450,7 @@
       <li class="function-item" data-name="unsetenv"><a href="io.html#unsetenv"><span class="fn-name">unsetenv</span><span class="fn-module">io</span></a></li>
       <li class="function-item" data-name="stderr_write"><a href="io.html#stderr_write"><span class="fn-name">stderr_write</span><span class="fn-module">io</span></a></li>
       <li class="function-item" data-name="stdout_write"><a href="io.html#stdout_write"><span class="fn-name">stdout_write</span><span class="fn-module">io</span></a></li>
+      <li class="function-item" data-name="is_terminal"><a href="io.html#is_terminal"><span class="fn-name">is_terminal</span><span class="fn-module">io</span></a></li>
       <li class="function-item" data-name="perror"><a href="io.html#perror"><span class="fn-name">perror</span><span class="fn-module">io</span></a></li>
       <li class="function-item" data-name="errno_message"><a href="io.html#errno_message"><span class="fn-name">errno_message</span><span class="fn-module">io</span></a></li>
       <li class="function-item" data-name="fd_open_read"><a href="io.html#fd_open_read"><span class="fn-name">fd_open_read</span><span class="fn-module">io</span></a></li>
@@ -1350,6 +1510,12 @@
       <li class="function-item" data-name="KIND_PARSE_ERROR"><a href="json.html#KIND_PARSE_ERROR"><span class="fn-name">KIND_PARSE_ERROR</span><span class="fn-module">json</span></a></li>
       <li class="function-item" data-name="KIND_OUT_OF_MEMORY"><a href="json.html#KIND_OUT_OF_MEMORY"><span class="fn-name">KIND_OUT_OF_MEMORY</span><span class="fn-module">json</span></a></li>
       <li class="function-item" data-name="KIND_INVALID_INPUT"><a href="json.html#KIND_INVALID_INPUT"><span class="fn-name">KIND_INVALID_INPUT</span><span class="fn-module">json</span></a></li>
+      <li class="function-item" data-name="JSON_NULL"><a href="json.html#JSON_NULL"><span class="fn-name">JSON_NULL</span><span class="fn-module">json</span></a></li>
+      <li class="function-item" data-name="JSON_BOOL"><a href="json.html#JSON_BOOL"><span class="fn-name">JSON_BOOL</span><span class="fn-module">json</span></a></li>
+      <li class="function-item" data-name="JSON_NUMBER"><a href="json.html#JSON_NUMBER"><span class="fn-name">JSON_NUMBER</span><span class="fn-module">json</span></a></li>
+      <li class="function-item" data-name="JSON_STRING"><a href="json.html#JSON_STRING"><span class="fn-name">JSON_STRING</span><span class="fn-module">json</span></a></li>
+      <li class="function-item" data-name="JSON_ARRAY"><a href="json.html#JSON_ARRAY"><span class="fn-name">JSON_ARRAY</span><span class="fn-module">json</span></a></li>
+      <li class="function-item" data-name="JSON_OBJECT"><a href="json.html#JSON_OBJECT"><span class="fn-name">JSON_OBJECT</span><span class="fn-module">json</span></a></li>
       <li class="function-item" data-name="parse"><a href="jsonpath.html#parse"><span class="fn-name">parse</span><span class="fn-module">jsonpath</span></a></li>
       <li class="function-item" data-name="free_query"><a href="jsonpath.html#free_query"><span class="fn-name">free_query</span><span class="fn-module">jsonpath</span></a></li>
       <li class="function-item" data-name="query"><a href="jsonpath.html#query"><span class="fn-name">query</span><span class="fn-module">jsonpath</span></a></li>
@@ -1522,6 +1688,11 @@
       <li class="function-item" data-name="get_stats"><a href="log.html#get_stats"><span class="fn-name">get_stats</span><span class="fn-module">log</span></a></li>
       <li class="function-item" data-name="print_stats"><a href="log.html#print_stats"><span class="fn-name">print_stats</span><span class="fn-module">log</span></a></li>
       <li class="function-item" data-name="init"><a href="log.html#init"><span class="fn-name">init</span><span class="fn-module">log</span></a></li>
+      <li class="function-item" data-name="LOG_LEVEL_DEBUG"><a href="log.html#LOG_LEVEL_DEBUG"><span class="fn-name">LOG_LEVEL_DEBUG</span><span class="fn-module">log</span></a></li>
+      <li class="function-item" data-name="LOG_LEVEL_INFO"><a href="log.html#LOG_LEVEL_INFO"><span class="fn-name">LOG_LEVEL_INFO</span><span class="fn-module">log</span></a></li>
+      <li class="function-item" data-name="LOG_LEVEL_WARN"><a href="log.html#LOG_LEVEL_WARN"><span class="fn-name">LOG_LEVEL_WARN</span><span class="fn-module">log</span></a></li>
+      <li class="function-item" data-name="LOG_LEVEL_ERROR"><a href="log.html#LOG_LEVEL_ERROR"><span class="fn-name">LOG_LEVEL_ERROR</span><span class="fn-module">log</span></a></li>
+      <li class="function-item" data-name="LOG_LEVEL_FATAL"><a href="log.html#LOG_LEVEL_FATAL"><span class="fn-name">LOG_LEVEL_FATAL</span><span class="fn-module">log</span></a></li>
       <li class="function-item" data-name="new"><a href="longarr.html#new"><span class="fn-name">new</span><span class="fn-module">longarr</span></a></li>
       <li class="function-item" data-name="new_filled"><a href="longarr.html#new_filled"><span class="fn-name">new_filled</span><span class="fn-module">longarr</span></a></li>
       <li class="function-item" data-name="get"><a href="longarr.html#get"><span class="fn-name">get</span><span class="fn-module">longarr</span></a></li>
@@ -1939,7 +2110,15 @@
       <li class="function-item" data-name="join_clean"><a href="path.html#join_clean"><span class="fn-name">join_clean</span><span class="fn-module">path</span></a></li>
       <li class="function-item" data-name="category"><a href="plural.html#category"><span class="fn-name">category</span><span class="fn-module">plural</span></a></li>
       <li class="function-item" data-name="category_decimal"><a href="plural.html#category_decimal"><span class="fn-name">category_decimal</span><span class="fn-module">plural</span></a></li>
-      <li class="function-item" data-name="2976"><a href="pqueue.html#2976"><span class="fn-name">2976</span><span class="fn-module">pqueue</span></a></li>
+      <li class="function-item" data-name="new"><a href="pqueue.html#new"><span class="fn-name">new</span><span class="fn-module">pqueue</span></a></li>
+      <li class="function-item" data-name="push"><a href="pqueue.html#push"><span class="fn-name">push</span><span class="fn-module">pqueue</span></a></li>
+      <li class="function-item" data-name="pop"><a href="pqueue.html#pop"><span class="fn-name">pop</span><span class="fn-module">pqueue</span></a></li>
+      <li class="function-item" data-name="peek"><a href="pqueue.html#peek"><span class="fn-name">peek</span><span class="fn-module">pqueue</span></a></li>
+      <li class="function-item" data-name="peek_priority"><a href="pqueue.html#peek_priority"><span class="fn-name">peek_priority</span><span class="fn-module">pqueue</span></a></li>
+      <li class="function-item" data-name="size"><a href="pqueue.html#size"><span class="fn-name">size</span><span class="fn-module">pqueue</span></a></li>
+      <li class="function-item" data-name="is_empty"><a href="pqueue.html#is_empty"><span class="fn-name">is_empty</span><span class="fn-module">pqueue</span></a></li>
+      <li class="function-item" data-name="clear"><a href="pqueue.html#clear"><span class="fn-name">clear</span><span class="fn-module">pqueue</span></a></li>
+      <li class="function-item" data-name="free"><a href="pqueue.html#free"><span class="fn-name">free</span><span class="fn-module">pqueue</span></a></li>
       <li class="function-item" data-name="Tree"><a href="quote.html#Tree"><span class="fn-name">Tree</span><span class="fn-module">quote</span></a></li>
       <li class="function-item" data-name="Node"><a href="quote.html#Node"><span class="fn-name">Node</span><span class="fn-module">quote</span></a></li>
       <li class="function-item" data-name="Capture"><a href="quote.html#Capture"><span class="fn-name">Capture</span><span class="fn-module">quote</span></a></li>
@@ -2135,6 +2314,7 @@
       <li class="function-item" data-name="grant_tcp_listen"><a href="sandbox.html#grant_tcp_listen"><span class="fn-name">grant_tcp_listen</span><span class="fn-module">sandbox</span></a></li>
       <li class="function-item" data-name="grant_udp"><a href="sandbox.html#grant_udp"><span class="fn-name">grant_udp</span><span class="fn-module">sandbox</span></a></li>
       <li class="function-item" data-name="grant_native"><a href="sandbox.html#grant_native"><span class="fn-name">grant_native</span><span class="fn-module">sandbox</span></a></li>
+      <li class="function-item" data-name="grant_fork"><a href="sandbox.html#grant_fork"><span class="fn-name">grant_fork</span><span class="fn-module">sandbox</span></a></li>
       <li class="function-item" data-name="STR"><a href="schema.html#STR"><span class="fn-name">STR</span><span class="fn-module">schema</span></a></li>
       <li class="function-item" data-name="INT"><a href="schema.html#INT"><span class="fn-name">INT</span><span class="fn-module">schema</span></a></li>
       <li class="function-item" data-name="FLOAT"><a href="schema.html#FLOAT"><span class="fn-name">FLOAT</span><span class="fn-module">schema</span></a></li>
@@ -2170,7 +2350,20 @@
       <li class="function-item" data-name="free"><a href="schema.html#free"><span class="fn-name">free</span><span class="fn-module">schema</span></a></li>
       <li class="function-item" data-name="values_free"><a href="schema.html#values_free"><span class="fn-name">values_free</span><span class="fn-module">schema</span></a></li>
       <li class="function-item" data-name="errors_free"><a href="schema.html#errors_free"><span class="fn-name">errors_free</span><span class="fn-module">schema</span></a></li>
-      <li class="function-item" data-name="2976"><a href="set.html#2976"><span class="fn-name">2976</span><span class="fn-module">set</span></a></li>
+      <li class="function-item" data-name="map_keys_size_raw"><a href="set.html#map_keys_size_raw"><span class="fn-name">map_keys_size_raw</span><span class="fn-module">set</span></a></li>
+      <li class="function-item" data-name="map_keys_get_raw"><a href="set.html#map_keys_get_raw"><span class="fn-name">map_keys_get_raw</span><span class="fn-module">set</span></a></li>
+      <li class="function-item" data-name="new"><a href="set.html#new"><span class="fn-name">new</span><span class="fn-module">set</span></a></li>
+      <li class="function-item" data-name="add"><a href="set.html#add"><span class="fn-name">add</span><span class="fn-module">set</span></a></li>
+      <li class="function-item" data-name="try_add"><a href="set.html#try_add"><span class="fn-name">try_add</span><span class="fn-module">set</span></a></li>
+      <li class="function-item" data-name="contains"><a href="set.html#contains"><span class="fn-name">contains</span><span class="fn-module">set</span></a></li>
+      <li class="function-item" data-name="remove"><a href="set.html#remove"><span class="fn-name">remove</span><span class="fn-module">set</span></a></li>
+      <li class="function-item" data-name="size"><a href="set.html#size"><span class="fn-name">size</span><span class="fn-module">set</span></a></li>
+      <li class="function-item" data-name="clear"><a href="set.html#clear"><span class="fn-name">clear</span><span class="fn-module">set</span></a></li>
+      <li class="function-item" data-name="free"><a href="set.html#free"><span class="fn-name">free</span><span class="fn-module">set</span></a></li>
+      <li class="function-item" data-name="items"><a href="set.html#items"><span class="fn-name">items</span><span class="fn-module">set</span></a></li>
+      <li class="function-item" data-name="items_free"><a href="set.html#items_free"><span class="fn-name">items_free</span><span class="fn-module">set</span></a></li>
+      <li class="function-item" data-name="items_size"><a href="set.html#items_size"><span class="fn-name">items_size</span><span class="fn-module">set</span></a></li>
+      <li class="function-item" data-name="items_get"><a href="set.html#items_get"><span class="fn-name">items_get</span><span class="fn-module">set</span></a></li>
       <li class="function-item" data-name="SIGHUP"><a href="signal.html#SIGHUP"><span class="fn-name">SIGHUP</span><span class="fn-module">signal</span></a></li>
       <li class="function-item" data-name="SIGINT"><a href="signal.html#SIGINT"><span class="fn-name">SIGINT</span><span class="fn-module">signal</span></a></li>
       <li class="function-item" data-name="SIGQUIT"><a href="signal.html#SIGQUIT"><span class="fn-name">SIGQUIT</span><span class="fn-module">signal</span></a></li>

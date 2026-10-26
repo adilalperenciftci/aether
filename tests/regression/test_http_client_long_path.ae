@@ -12,8 +12,6 @@ import std.strbuilder
 
 extern exit(code: int)
 extern sleep(ms: int)
-extern http_server_start_background_raw(server: ptr) -> int
-extern http_server_port(server: ptr) -> int
 
 handle_long(req: ptr, res: ptr, ud: ptr) {
     path = http.request_path(req)
@@ -57,12 +55,12 @@ main() {
     http.server_set_host(s, "127.0.0.1")
     http.server_get(s, "/long/*", handle_long, 0)
     http.server_get(s, "/redir/*", handle_redir, 0)
-    http_server_start_background_raw(s)
+    _ = http.server_start_background(s)
     port = 0
     tries = 0
     while port <= 0 && tries < 100 {
         sleep(20)
-        port = http_server_port(s)
+        port = http.server_port(s)
         tries = tries + 1
     }
     if port <= 0 {

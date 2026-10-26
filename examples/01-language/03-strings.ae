@@ -1,0 +1,57 @@
+// Strings: interpolation, escapes, comparison, and std.string.
+//
+// A string is immutable UTF-8 text that knows its length. `${expr}` puts
+// any number, bool or string into a literal; `==` and `<` compare by
+// content, byte by byte. The functions that take strings apart and build
+// new ones live in std.string, called through the module name. A new
+// string is a new value: nothing here frees one (the compiler does,
+// see 17-ownership.ae).
+//
+// Run: ae run examples/01-language/03-strings.ae
+// See: docs/language-reference.md#string-literals
+
+import std.string
+
+main() {
+    lang = "Aether"
+    version = 0.8
+    println("${lang} ${version}: ${string.length(lang)} letters, ${2 + 3} is five")
+    println("quote:\" backslash:\\ hex:\x41 newline:\nsecond line")
+
+    // Content, not identity. Strings join with interpolation or
+    // string.concat; `+` is for numbers.
+    built = string.concat("Ae", "ther")
+    println("${built == lang} ${"apple" < "banana"} ${"b" > "abc"}")
+
+    line = "  name = Ada Lovelace  "
+    trimmed = string.trim(line)
+    eq = string.index_of(trimmed, "=")
+    key = string.trim(string.substring(trimmed, 0, eq))
+    value = string.trim(string.substring(trimmed, eq + 1, string.length(trimmed)))
+    println("[${key}] [${value}] upper=${string.to_upper(value)}")
+    println("starts=${string.starts_with(value, "Ada")} contains=${string.contains(value, "Love")}")
+    println(string.replace_all("a-b-c", "-", "+"))
+
+    // Numbers to text and back. Parsing can fail, so it returns a
+    // value and an error (see 10-errors.ae).
+    n, err = string.to_int("1234")
+    bad, err2 = string.to_int("12x")
+    println("${n + 1} [${err}] ${bad} [${err2}]")
+    println("${string.from_int(255)}!")
+
+    // Splitting gives a sequence of strings, joined back with a separator.
+    parts = string.split_to_seq("red,green,blue", ",")
+    println("${string.seq_length(parts)} parts: ${string.join(parts, " / ")}")
+}
+
+// Output:
+// Aether 0.8: 6 letters, 5 is five
+// quote:" backslash:\ hex:A newline:
+// second line
+// true true true
+// [name] [Ada Lovelace] upper=ADA LOVELACE
+// starts=1 contains=1
+// a+b+c
+// 1235 [] 0 [invalid integer]
+// 255!
+// 3 parts: red / green / blue

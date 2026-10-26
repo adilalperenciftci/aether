@@ -243,6 +243,10 @@ make test-valgrind
 
 # With AddressSanitizer
 make test-asan
+
+# The C unit tests and the whole .ae corpus with everything under UBSan
+# (Linux, macOS); fails on any report, listed in build/ubsan/reports
+make test-ubsan
 ```
 
 ### Prove the test can fail
@@ -258,7 +262,7 @@ the test ran, not that it would notice the bug.
   in one line of the PR description: "fails on main with ..., passes with the
   fix."
 - **Logic changes in a std module: run the mutation tester on it.**
-  `ae run examples/mutation-testing/mutate.ae -- <sut.ae> <test.ae>` makes
+  `ae run examples/06-tooling/02-mutation/mutate.ae -- <sut.ae> <test.ae>` makes
   small semantic changes to the subject (`>=` to `<`, `==` to `!=`, a string
   literal to empty) and reruns the suite; see `docs/mutation-testing.md`.
   Add tests that kill the survivors on the lines you changed, or say in the
@@ -383,10 +387,13 @@ native program makes the MSYS2 runtime signal unrelated processes found
 through recycled parent pids, the CI step's own shell among them (#2479); the
 helpers end the program itself there, and send a signal to a job elsewhere.
 `make check-tests` runs `tests/scripts/check_shell_kills.py`, which rejects a
-`kill` of a pid held in a variable, `pkill` and `killall` in `tests/**/*.sh`.
-`kill -0 "$pid"` (a liveness probe) is fine; a POSIX-only test whose subject
-is a signal to a process that is no job of the script marks that line
-`kill-ok: <why>`.
+`kill` of a pid held in a variable or of a job (`kill %1`: on Windows the
+job's process is the same stand-in), `pkill`, `killall`, and `timeout(1)` or
+`gtimeout` (as a command, or held in a variable as a command prefix) in
+`tests/**/*.sh`; a test bounds a command of its own with the sweep's limit,
+below (#3154). `kill -0 "$pid"` (a liveness probe) is fine; a POSIX-only test
+whose subject is a signal to a process that is no job of the script, or a
+script that never runs under MSYS2, marks that line `kill-ok: <why>`.
 
 ### Test time limits
 
@@ -400,7 +407,8 @@ and on Windows a job object around the test, which a native watchdog
 (`tests/lib/sweep_watchdog.c`, compiled into `build/` on first use) ends with
 TerminateJobObject. Windows never gets `timeout(1)`: its signal to a hung
 test's native programs would make the MSYS2 runtime signal unrelated
-processes, as above (#2758). A runner script of your own does the same:
+processes, as above (#2758). A runner script of your own, or a test that
+bounds a client or a compile of its own, does the same (#3154):
 
 ```sh
 . "$root/tests/lib/sweep_timeout.sh"
@@ -500,6 +508,7 @@ treat `.github/workflows/` as authoritative and this as the shape.)
 | **Windows MSYS2** | MinGW-w64 GCC | `#ifdef _WIN32` branches actually execute; POSIX syscalls (`symlink`, `readlink`, `fork`, `execvp`, `pipe`) are absent or stubbed; `/bin/sh` / `rm` / `ln` not guaranteed; path separators; `_mkdir`/`_unlink` instead of `mkdir`/`unlink`; `$PATH` uses `;` not `:` |
 | **`ci-coop`** | `gcc`, `AETHER_NO_THREADING` | Cooperative scheduler only, tests that assume pthreads / `spawn` semantics may behave differently |
 | **AddressSanitizer** | Clang/GCC | Any use-after-free / leak in your new C code (runs on Linux and macOS) |
+| **UBSan** (`ubsan.yml`) | `gcc`, `make test-ubsan` | Undefined behaviour in the C you add or the C a program compiles to: signed shifts that overflow, misaligned loads, null stores. Runs on PRs touching compiler/, runtime/, std/, tools/ or the Makefile, and nightly |
 | **Valgrind** | Linux | Same, slower, catches a slightly different set |
 
 (A local `make ci-windows` cross-builds with `x86_64-w64-mingw32-gcc`;
@@ -519,15 +528,21 @@ Anticipate the CI permutations while writing the feature, not after the
 first red build. A few patterns the stdlib and existing tests use:
 
 **1. Detect the platform at the top of a test and skip the parts that
-don't apply.** Aether programs can read `$OS` it's set to `Windows_NT`
-on both MSYS2 and mingw-w64 (cmd.exe inherits it, bash picks it up). This
-is cleaner than probing a stub function because the SKIP message
-self-documents *why*:
+don't apply.** Ask the build, never the environment: an Aether program
+compares `os.platform()` (compiled into the binary, `"windows"` on Windows),
+and a shell test cases on `uname -s` (`MINGW*|MSYS*|CYGWIN*` on Windows).
+The `OS=Windows_NT` variable is not a test of the platform: a shell started
+without the user's environment, such as an MSYS2 login shell run from Git
+Bash, does not carry it, and the test then takes its POSIX branch on Windows
+and fails (#3119, #3160). `make check-tests` rejects a `getenv("OS")` in a
+program and a read of `$OS` in a shell script that never sets it. This is
+cleaner than probing a stub function because the SKIP message self-documents
+*why*:
 
 ```aether
 import std.os
 main() {
-    if os_getenv("OS") == "Windows_NT" {
+    if os.platform() == "windows" {
         println("SKIP os_which: Windows backend not yet implemented")
         return
     }
@@ -767,8 +782,8 @@ Brief description of changes
 ### Review Process
 
 1. Automated CI checks must pass, Linux (GCC, Clang, and a hardened GCC
-   build), macOS, Windows (MSYS2 + MinGW-w64), and the AddressSanitizer /
-   Valgrind memory-safety jobs
+   build), macOS, Windows (MSYS2 + MinGW-w64), the AddressSanitizer /
+   Valgrind memory-safety jobs, and UBSan where the PR touches what it checks
 2. Code review by maintainer
 3. Address feedback
 4. Merge when approved

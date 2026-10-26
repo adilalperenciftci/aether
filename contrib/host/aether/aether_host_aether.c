@@ -32,6 +32,7 @@ static const char* get_ae_path(void) {
 #include <sys/wait.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <errno.h>
 #include <fcntl.h>
 
 // List operations (from libaether.a)
@@ -46,30 +47,9 @@ extern const char* aether_string_data(const void*);
 // Helpers
 // ---------------------------------------------------------------
 
-// Find libaether_sandbox.so next to the running binary
-static int find_preload_path(char* buf, int bufsize) {
-  char exe[512];
-  ssize_t len = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
-  if (len <= 0) {
-    snprintf(buf, bufsize, "./libaether_sandbox.so");
-    return access(buf, F_OK) == 0;
-  }
-  exe[len] = '\0';
-
-  char* slash = strrchr(exe, '/');
-  if (slash) *(slash + 1) = '\0';
-
-  snprintf(buf, bufsize, "%slibaether_sandbox.so", exe);
-  if (access(buf, F_OK) == 0) return 1;
-
-  if (slash) *slash = '\0';
-  slash = strrchr(exe, '/');
-  if (slash) *(slash + 1) = '\0';
-  snprintf(buf, bufsize, "%sbuild/libaether_sandbox.so", exe);
-  if (access(buf, F_OK) == 0) return 1;
-
-  return 0;
-}
+// Where libaether_sandbox.so is: the runtime's lookup, shared with
+// spawn_sandboxed (#3177).
+#include "../../../runtime/sandbox/aether_sandbox_preload_path.h"
 
 // Serialize grants to POSIX shared memory
 // Format: "category:pattern\n" lines, null-terminated
@@ -141,9 +121,9 @@ static int spawn_sandboxed_full(
   // 1. Find preload library
   char preload_path[1024];
   if (perms) {
-    if (!find_preload_path(preload_path, sizeof(preload_path))) {
-      fprintf(stderr,
-              "[aether-host] cannot find libaether_sandbox.so\n");
+    char tried[2048];
+    if (!aether_sandbox_find_preload(preload_path, sizeof(preload_path), tried, sizeof(tried))) {
+        aether_sandbox_preload_missing("[aether-host]", tried);
       return -1;
     }
   }
@@ -175,12 +155,54 @@ static int spawn_sandboxed_full(
     }
   }
 
-  // 4. Set up stdout pipe if capturing. Close-on-exec (#3040): a child
+  // 4. The child's env, made here (#3200): this process's, with the
+  //    preload, the grant source and the map put in. The child used to
+  //    setenv them between fork and exec, which a child of a threaded
+  //    parent may not do: setenv mallocs and takes the environment's lock,
+  //    and a lock another thread held at the fork stays held in the child.
+  //    The program is binary_path as given, as execl took it.
+  char preload_var[sizeof preload_path + 16];
+  char grants_var[512];
+  char map_var[512];
+  const char* set[3];
+  int nset = 0;
+  if (perms) {
+    snprintf(preload_var, sizeof preload_var, "LD_PRELOAD=%s", preload_path);
+    snprintf(grants_var, sizeof grants_var, "AETHER_SANDBOX_SHM=%s", grants_shm);
+    set[nset++] = preload_var;
+    set[nset++] = grants_var;
+  }
+  if (map_shm) {
+    snprintf(map_var, sizeof map_var, "AETHER_MAP_SHM=%s", map_shm);
+    set[nset++] = map_var;
+  }
+  char** env = aether_spawn_env(aether_spawn_environ(), set, nset);
+  char* child_argv[] = { (char*)binary_path, NULL };
+
+  // 5. Set up stdout pipe if capturing. Close-on-exec (#3040): a child
   //    another thread starts while it is open must not hold its write end,
   //    or the read below waits for that child too. Ours keeps it through
   //    dup2 onto stdout, which clears the flag on the copy.
   int pipefd[2] = {-1, -1};
-  if (capture && aether_pipe_cloexec(pipefd) != 0) {
+  if (!env || (capture && aether_pipe_cloexec(pipefd) != 0)) {
+    free(env);
+    if (grants_shm) {
+      shm_unlink(grants_shm); free(grants_shm);
+    }
+    if (map_shm) {
+      aether_shared_map_unlink_shm(map_shm); free(map_shm);
+    }
+    return -1;
+  }
+  // A program that cannot start is an error, -1, as std.os reports one
+  // (#3170), never an exit of 127, which a program that ran can give: the
+  // child writes its exec errno to this close-on-exec pipe, and an exec that
+  // succeeds closes it unwritten. Made after the capture pipe, which so
+  // holds the lowest free descriptors.
+  int errp[2];
+  if (aether_pipe_cloexec(errp) != 0) {
+    free(env);
+    if (capture) { close(pipefd[0]); close(pipefd[1]); }
     if (grants_shm) {
       shm_unlink(grants_shm); free(grants_shm);
     }
@@ -190,10 +212,12 @@ static int spawn_sandboxed_full(
     return -1;
   }
 
-  // 5. Fork
+  // 6. Fork
   pid_t pid = aether_fork();
   if (pid < 0) {
+    free(env);
     if (capture) { close(pipefd[0]); close(pipefd[1]); }
+    close(errp[0]); close(errp[1]);
     if (grants_shm) {
       shm_unlink(grants_shm); free(grants_shm);
     }
@@ -205,25 +229,34 @@ static int spawn_sandboxed_full(
 
   if (pid == 0) {
     // ---- Child process ----
+    // Only async-signal-safe calls from here to the exec (#3200).
+    close(errp[0]);
     if (capture) {
       close(pipefd[0]);
-      dup2(pipefd[1], STDOUT_FILENO);
-      close(pipefd[1]);
+      // Already stdout when the parent had stdout closed (#3199): dup2
+      // onto itself does nothing, and the close after it closed stdout.
+      if (pipefd[1] == STDOUT_FILENO) {
+        fcntl(STDOUT_FILENO, F_SETFD, 0);   // kept across the exec
+      } else {
+        dup2(pipefd[1], STDOUT_FILENO);
+        close(pipefd[1]);
+      }
     }
-
-    if (perms) {
-      setenv("LD_PRELOAD", preload_path, 1);
-      setenv("AETHER_SANDBOX_SHM", grants_shm, 1);
-    }
-    if (map_shm) {
-      setenv("AETHER_MAP_SHM", map_shm, 1);
-    }
-
-    execl(binary_path, binary_path, (char*)NULL);
+    execve(binary_path, child_argv, env);
+    int e = errno;
+    ssize_t w;
+    do { w = write(errp[1], &e, sizeof e); } while (w < 0 && errno == EINTR);
     _exit(127);
   }
 
   // ---- Parent process ----
+  free(env);
+  close(errp[1]);
+  int exec_errno = 0;
+  ssize_t got;
+  do { got = read(errp[0], &exec_errno, sizeof exec_errno); } while (got < 0 && errno == EINTR);
+  close(errp[0]);
+  int not_started = got == (ssize_t)sizeof exec_errno;
   if (capture) {
     close(pipefd[1]);
 
@@ -251,13 +284,13 @@ static int spawn_sandboxed_full(
   int status = 0;
   waitpid(pid, &status, 0);
 
-  // 6. Read outputs back from shared map
+  // 7. Read outputs back from shared map
   if (map_shm && map_token != 0) {
     aether_shared_map_read_outputs_from_shm_by_token(
         map_token, map_shm);
   }
 
-  // 7. Cleanup shm segments
+  // 8. Cleanup shm segments
   if (grants_shm) {
     shm_unlink(grants_shm); free(grants_shm);
   }
@@ -265,6 +298,7 @@ static int spawn_sandboxed_full(
     aether_shared_map_unlink_shm(map_shm); free(map_shm);
   }
 
+  if (not_started) return -1;
   if (WIFEXITED(status)) return WEXITSTATUS(status);
   return -1;
 }

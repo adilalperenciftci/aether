@@ -22,14 +22,8 @@ import std.string
 import std.fs
 import std.cryptography
 
-extern http_server_start_raw(server: ptr) -> int
 extern http_server_post(server: ptr, path: string, handler: ptr, user_data: ptr)
-// std.fs exposes `open` / `pwrite` as wrappers but `file_close` only as
-// a raw extern (not callable via the fs. namespace), so bind it here.
-extern file_close(file: ptr) -> int
 extern exit(code: int)
-extern http_server_bind_raw(server: ptr, host: string, port: int) -> int
-extern http_server_port(server: ptr) -> int
 
 handle_upload(req: ptr, res: ptr, ud: ptr) {
     // #644: a streaming request is not complete at handler entry (the
@@ -54,7 +48,7 @@ handle_upload(req: ptr, res: ptr, ud: ptr) {
     while off < total {
         chunk, n, err = http.request_body_read(req, off, 65536)
         if err != "" {
-            file_close(f)
+            _ = fs.close(f)
             http.response_set_status(res, 500)
             http.response_set_body(res, "read error: ${err}")
             return
@@ -66,7 +60,7 @@ handle_upload(req: ptr, res: ptr, ud: ptr) {
         received = received + n
         off = off + n
     }
-    file_close(f)
+    _ = fs.close(f)
 
     // Digest the file we just wrote, so the driver can verify identity
     // without the body ever having been whole in server RAM.
@@ -110,7 +104,7 @@ handle_ping(req: ptr, res: ptr, ud: ptr) {
 message StartSrv { raw: ptr }
 actor SrvActor {
     state s = 0
-    receive { StartSrv(raw) -> { s = raw; http_server_start_raw(raw) } }
+    receive { StartSrv(raw) -> { s = raw; _ = http.server_start(raw) } }
 }
 
 main() {
@@ -133,11 +127,11 @@ main() {
     // server_start reuses a socket the caller already bound, so this also
     // means READY is printed AFTER the listen socket exists rather than
     // before it, which is what the fixed sleep in the runner was covering.
-    if http_server_bind_raw(s, "127.0.0.1", 0) < 0 {
+    if http.server_bind(s, "127.0.0.1", 0) != "" {
         println("FAIL: bind")
         exit(1)
     }
-    println("READY ${http_server_port(s)}")
+    println("READY ${http.server_port(s)}")
 
     a = spawn(SrvActor())
     a ! StartSrv { raw: s }

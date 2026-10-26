@@ -5,11 +5,11 @@
 # expected state).
 #
 # Skips cleanly when the toolchain isn't available — needs javac/java
-# JDK 22+. The example itself lives at examples/embedded-java/trading/
+# JDK 22+. The example itself lives at examples/04-interop/06-java-host/
 # so its README points the user there directly.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-EXAMPLE_DIR="$ROOT/examples/embedded-java/trading"
+EXAMPLE_DIR="$ROOT/examples/04-interop/06-java-host"
 
 case "$(uname -s 2>/dev/null)" in
     MINGW*|MSYS*|CYGWIN*|Windows_NT)

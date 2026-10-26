@@ -123,7 +123,7 @@ main() {
     fails = fails + check(pe == "" && pn == N, "pwrite wrote 48 bytes")
     en, ee = fs.pwrite(f, string.bytes(""), 10)
     fails = fails + check(ee == "" && en == 0, "pwrite of an empty slice writes nothing and succeeds")
-    file_close(f)
+    _ = fs.close(f)
     fails = fails + check(file_matches(wp, payload), "pwrite wrote the 48 bytes verbatim")
 
     // Empty slices: string.bytes("") is the null slice.

@@ -1,0 +1,47 @@
+// Regression (#3180): io.is_terminal tells a terminal from everything else.
+//
+// std had no way for a program to ask whether a descriptor is a terminal,
+// so std.spec coloured its output into pipes and files. A descriptor open
+// on a file is not a terminal, and a closed, negative or never-opened one
+// is none at all.
+// Whether stdout is a terminal depends on how the test is run, so it is
+// not asserted here; tests/integration/spec_color runs a spec suite into
+// a file and checks its output is plain.
+
+import std.fs
+import std.io
+
+check(name: string, got: bool, want: bool) -> int {
+    if got == want {
+        println("${name}: ${got}")
+        return 0
+    }
+    println("FAIL: ${name} is ${got}, should be ${want}")
+    return 1
+}
+
+main() {
+    dir, err = fs.make_temp_dir("", "aether-isatty-")
+    if err != "" {
+        println("FAIL: no temp dir: ${err}")
+        exit(1)
+    }
+    defer fs.remove_tree(dir)
+    fd, oerr = io.fd_open_write(fs.join_clean(dir, "out.txt"))
+    if oerr != "" {
+        println("FAIL: cannot open a file: ${oerr}")
+        exit(1)
+    }
+
+    fails = 0
+    fails = fails + check("a file", io.is_terminal(fd), false)
+    io.fd_close(fd)
+    fails = fails + check("a closed descriptor", io.is_terminal(fd), false)
+    fails = fails + check("a negative descriptor", io.is_terminal(-1), false)
+    // Never opened: an answer, not the end of the program (MSVC's CRT ended
+    // it from its invalid-parameter handler).
+    fails = fails + check("a descriptor never opened", io.is_terminal(9999), false)
+    if fails > 0 {
+        exit(1)
+    }
+}

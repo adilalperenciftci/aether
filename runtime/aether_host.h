@@ -127,7 +127,7 @@ typedef struct AetherManifest {
  *     }
  *
  * matching Aether's existing builder DSL idiom (see contrib/tinyweb,
- * examples/calculator-tui).
+ * examples/07-applications/04-calculator.ae).
  *
  * These names (describe, event, input, java, ...) are short and could
  * collide with user code in the embedding host's C compilation unit.

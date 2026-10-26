@@ -49,7 +49,7 @@ WAIVED = {
     "std.time.calendar": "exercised through std.time (std/time/test_time.ae)",
     # An outer driver: it edits a SUT on disk, rebuilds and re-runs a
     # suite per mutant, so its test is a shell harness that runs the
-    # documented example (examples/mutation-testing/mutate.ae imports it)
+    # documented example (examples/06-tooling/02-mutation/mutate.ae imports it)
     # against a fixture and checks the exact mutation-score line.
     "std.mutation": "driven end-to-end by tests/integration/mutation_testing",
 }

@@ -1,0 +1,8 @@
+// Waits for a key, so CI only builds it.
+//
+// Run: ae run tests/examples/fixture/needs.ae
+// Needs: a terminal
+
+main() {
+    println("press a key")
+}

@@ -60,20 +60,16 @@ exports(
 // callers don't have to handle a NULL root. Note that the directory
 // may not yet exist; ensure_root_exists below creates it on demand.
 cas_root_raw() -> string {
+    // An unset variable is the null string, which reads as "" (#3129).
     env_root = os_getenv("AETHER_CAS")
-    if env_root != null {
-        if string.length(env_root) > 0 {
-            return string.concat(env_root, "")
-        }
+    if env_root != "" {
+        return string.concat(env_root, "")
     }
     home = os_getenv("HOME")
-    if home == null {
+    if home == "" {
         // No HOME — fall back to a uid-specific /tmp dir so two
         // users on the same box don't collide. The pid would also
         // work but persistent identity is more useful for a CAS.
-        return "/tmp/aether-cas"
-    }
-    if string.length(home) == 0 {
         return "/tmp/aether-cas"
     }
     base = string.concat(home, "/.aether/cas")

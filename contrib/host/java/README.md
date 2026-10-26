@@ -70,7 +70,7 @@ unless the JDK is 22+, the version that stabilized Panama
 
 The end-to-end test is
 [`tests/integration/embedded_java_trading_e2e/`](../../../tests/integration/embedded_java_trading_e2e/): [`test_embedded_java_trading_e2e.sh`](../../../tests/integration/embedded_java_trading_e2e/test_embedded_java_trading_e2e.sh)
-copies `examples/embedded-java/trading/` to a temp dir, runs its `build.sh`
+copies `examples/04-interop/06-java-host/` to a temp dir, runs its `build.sh`
 (namespace build + `javac` + `java`), and asserts the full trading set-piece:
 each event fires with the right id (`OrderPlaced 100`, `OrderRejected 101`,
 `UnknownTicker 102`, `TradeKilled 100`), the book ends at `{100=KILLED}`, and

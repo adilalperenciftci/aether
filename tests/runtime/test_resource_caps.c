@@ -200,7 +200,7 @@ TEST_CATEGORY(caps_fs_dir_list_accounting_balances, TEST_CATEGORY_STDLIB) {
 
 /* #462 caps-audit, std.fs file handle: file_open_raw now routes the File
  * struct AND its retained path copy (a sandboxed caller can craft an
- * enormous filename) through aether_caps_malloc; file_close releases both
+ * enormous filename) through aether_caps_malloc; file_close_raw releases both
  * with the matching sizes. The accounting must return exactly to baseline
  * after open + close — a size-mismatched free would drift the counter. */
 TEST_CATEGORY(caps_fs_file_open_close_balances, TEST_CATEGORY_STDLIB) {
@@ -219,7 +219,7 @@ TEST_CATEGORY(caps_fs_file_open_close_balances, TEST_CATEGORY_STDLIB) {
         ASSERT_TRUE(f != NULL);
         /* The File struct + the path copy sit above baseline. */
         ASSERT_TRUE(aether_caps_used_bytes() > base);
-        file_close(f);
+        file_close_raw(f);
         /* ...and both are released with their exact sizes. */
         ASSERT_EQ(base, aether_caps_used_bytes());
     }
@@ -254,7 +254,7 @@ TEST_CATEGORY(caps_fs_read_denied_past_cap, TEST_CATEGORY_STDLIB) {
     ASSERT_EQ(headroom, aether_caps_used_bytes()); /* counter not drifted */
 
     aether_caps_set_memory_cap(0);
-    file_close(f);
+    file_close_raw(f);
     remove(tp);
 }
 #endif

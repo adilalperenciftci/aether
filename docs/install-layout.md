@@ -15,6 +15,9 @@ $PREFIX/
 ├── lib/aether/
 │   ├── libaether.a               # prebuilt static archive, link target for downstream
 │   │                              # programs / libraries that compile against the runtime
+│   ├── libaether_sandbox.so      # Linux and FreeBSD: the LD_PRELOAD library
+│   │                              # spawn_sandboxed starts a child with; it looks
+│   │                              # here under AETHER_HOME (containment-sandbox.md)
 │   └── modules/std/…/*.aea       # compiled module artifacts: each std module already
 │                                  # parsed, so importers skip the parse (see
 │                                  # compiled-module-artifacts.md)

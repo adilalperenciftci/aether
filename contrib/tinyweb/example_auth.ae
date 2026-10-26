@@ -50,7 +50,6 @@ main() {
         }
 
         tinyweb.end_point(tinyweb.POST, "/login") |req: ptr, res: ptr, ctx: ptr| {
-            body = tinyweb.request_get_body(req)
             tinyweb.response_set_header(res, "Set-Cookie", "session=valid-session-abc; Path=/; HttpOnly")
             tinyweb.response_write(res, "Logged in!")
         }

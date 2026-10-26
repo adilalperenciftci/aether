@@ -21,15 +21,27 @@
 // library) is not checked, nor one marked @c_import: the C compiler checks
 // that call against the real prototype.
 //
-//     check [--exclude DIR]... [--expect N] DIR...
+// A size_t is pointer-sized, so only Aether's `size_t` (or `ssize_t`,
+// `intptr_t`, `uintptr_t`) declares one: a `long` is int64_t, the same
+// width on a 64-bit host and twice it on wasm32 and ESP32, which build
+// std's C too. There the linker swapped string_new_with_length's every
+// call, declared with a `long` length, for a trap (#3185).
 //
-// Exits 1 on a mismatch; with --expect, unless exactly N were found (the
-// self-test over tests/extern_widths/fixture). `make check-extern-widths`
-// runs both.
+// It also fails on a C function the shared runtime, std and contrib define
+// in two directories: a program that links both has it twice
+// (contrib.parsers.xml_expat and std.xml both defined xml_parser_new).
+//
+//     check [--exclude DIR]... [--root DIR] [--expect N] DIR...
+//
+// --root is where the shared directories are, `.` by default (the
+// self-test's fixture has its own std/ and contrib/). Exits 1 on a
+// mismatch; with --expect, unless exactly N were found (the self-test over
+// tests/extern_widths/fixture). `make check-extern-widths` runs both.
 
 import std.fs
 import std.os
 import std.io
+import std.map
 import std.string
 import std.strbuilder
 import std.collections
@@ -335,13 +347,15 @@ c_class(text: string, named: int) -> string {
 }
 
 // The C definitions found: each one's symbol, its classes ("ret|p1|p2",
-// "..." last for variadic), its text, where it is, and its directory.
+// "..." last for variadic), its text, where it is, and its directory; and
+// where the shared directories are (--root).
 struct CDefs {
     names: ptr
     sigs: ptr
     texts: ptr
     locs: ptr
     dirs: ptr
+    root: string
 }
 
 // The function defined by the text before a `{` at file scope, if any.
@@ -385,6 +399,14 @@ c_header(defs: CDefs, header: string, path: string, dir: string, line: int) {
         ret = string.trim(string.substring(ret, rp + 1, string.length(ret)))
     }
     if name == "" || ret == "" {
+        return
+    }
+    // A C keyword is no function, whatever the text before it looked like:
+    // `else if (x) {` read as a definition named `if` when a line ending or a
+    // macro left the scan at file scope, and the duplicate check then found
+    // "if" in two directories (Windows CI, std/net and std/audio).
+    if name == "if" || name == "for" || name == "while" || name == "switch" || name == "return" ||
+    name == "sizeof" || name == "do" || name == "else" || name == "case" || name == "defined" {
         return
     }
     rw = " ${words_of(ret)} "
@@ -449,6 +471,13 @@ scan_c(defs: CDefs, path: string, dir: string) {
                 if d == 92 && i + 1 < n && string.char_at_n(text, n, i + 1) == 10 {
                     line = line + 1
                     i = i + 2
+                } else if d == 92 && i + 2 < n && string.char_at_n(text, n, i + 1) == 13 &&
+                string.char_at_n(text, n, i + 2) == 10 {
+                    // A CRLF checkout (Windows CI): the continuation is
+                    // `\` then CR LF, and missing it read a multi-line
+                    // #define's body as code.
+                    line = line + 1
+                    i = i + 3
                 } else if d == 10 {
                     stop = 1
                 } else {
@@ -571,6 +600,21 @@ ae_class(text: string) -> string {
         "f32" -> "f32"
         "float32" -> "f32"
         "size_t" -> "iptr"
+        "ssize_t" -> "iptr"
+        "intptr_t" -> "iptr"
+        "uintptr_t" -> "iptr"
+        "int64_t" -> "i64"
+        "uint64_t" -> "i64"
+        "off_t" -> "i64"
+        "time_t" -> "i64"
+        "int32_t" -> "i32"
+        "uint32_t" -> "i32"
+        "pid_t" -> "i32"
+        "mode_t" -> "i32"
+        "int16_t" -> "i16"
+        "uint16_t" -> "i16"
+        "int8_t" -> "i8"
+        "uint8_t" -> "i8"
         "string" -> "ptr"
         "ptr" -> "ptr"
         "sandbox" -> "ptr"
@@ -579,27 +623,31 @@ ae_class(text: string) -> string {
     }
 }
 
-// Whether C in `dir` serves externs anywhere: the runtime, std and contrib.
-shared_dir(dir: string) -> int {
-    if string.starts_with(dir, "std") == 1 || string.starts_with(dir, "contrib") == 1 ||
-    string.starts_with(dir, "runtime") == 1 {
+// Whether C in `dir` serves externs anywhere: the runtime, std and contrib
+// under `root`.
+shared_dir(root: string, dir: string) -> int {
+    rel = dir
+    if root != "." && string.starts_with(dir, "${root}/") == 1 {
+        rel = string.substring(dir, string.length(root) + 1, string.length(dir))
+    } else if root != "." {
+        return 0
+    }
+    if string.starts_with(rel, "std") == 1 || string.starts_with(rel, "contrib") == 1 ||
+    string.starts_with(rel, "runtime") == 1 {
         return 1
     }
     return 0
 }
 
 // Two width classes that disagree. A slot this cannot size is not compared.
-// A pointer-sized C integer is taken as 64 bits: every target that builds
-// the bound C is 64-bit.
+// A pointer-sized C integer is its own class: a 64-bit Aether `long` has
+// its width only where pointers are 64 bits (#3185).
 mismatch(a: string, c: string) -> int {
     if a == "?" || c == "?" || a == "byval" || c == "byval" {
         return 0
     }
     if c == "long" {
         return 1
-    }
-    if c == "iptr" && a == "i64" {
-        return 0
     }
     if a == c {
         return 0
@@ -686,7 +734,7 @@ check_extern(defs: CDefs, apath: string, aline: int, adir: string, name: string,
     while i < total {
         if collections.string_list_get(defs.names, i) == csym {
             dd = collections.string_list_get(defs.dirs, i)
-            if (local_n > 0 && dd == adir) || (local_n == 0 && shared_dir(dd) == 1) {
+            if (local_n > 0 && dd == adir) || (local_n == 0 && shared_dir(defs.root, dd) == 1) {
                 found = found + compare_one(defs, i, apath, aline, name, params, ret)
             }
         }
@@ -794,6 +842,39 @@ scan_ae(defs: CDefs, path: string, dir: string) -> (int, int) {
     return found, checked
 }
 
+// A C function two shared directories define, each reported once: a
+// program that links both (std's runtime and a contrib module) has two.
+// Definitions in one directory are its platform's branches.
+duplicates(defs: CDefs) -> int {
+    first = map.new()
+    reported = map.new()
+    found = 0
+    total = collections.string_list_size(defs.names)
+    i = 0
+    while i < total {
+        name = collections.string_list_get(defs.names, i)
+        dir = collections.string_list_get(defs.dirs, i)
+        if name != "main" && shared_dir(defs.root, dir) == 1 {
+            seen, _e = map.get_string(first, name)
+            if seen == null {
+                map.put(first, name, "${i}")
+            } else {
+                j = string.get_int(seen)
+                other = collections.string_list_get(defs.dirs, j)
+                if other != dir && map.has(reported, name) == 0 {
+                    map.put(reported, name, dir)
+                    say("${collections.string_list_get(defs.locs, i)}: ${name} is defined in ${other} too (${collections.string_list_get(defs.locs, j)}); a program that links both has two, so one needs a name of its own")
+                    found = found + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    map.free(first)
+    map.free(reported)
+    return found
+}
+
 // ---------------------------------------------------------------------------
 
 excluded(excludes: ptr, p: string) -> int {
@@ -820,6 +901,7 @@ main() {
     dirs = collections.string_list_new()
     excludes = collections.string_list_new()
     expect = -1
+    shared_root = "."
     argc = os.args_count()
     i = 1
     while i < argc {
@@ -827,6 +909,9 @@ main() {
         if a == "--exclude" && i + 1 < argc {
             i = i + 1
             collections.string_list_add(excludes, string.replace_all(os.args_get(i), "\\", "/"))
+        } else if a == "--root" && i + 1 < argc {
+            i = i + 1
+            shared_root = string.replace_all(os.args_get(i), "\\", "/")
         } else if a == "--expect" && i + 1 < argc {
             i = i + 1
             expect = string.get_int(os.args_get(i))
@@ -880,7 +965,8 @@ main() {
         sigs: collections.string_list_new(),
         texts: collections.string_list_new(),
         locs: collections.string_list_new(),
-        dirs: collections.string_list_new()
+        dirs: collections.string_list_new(),
+        root: shared_root
     }
     nc = collections.string_list_size(cfiles)
     i = 0
@@ -890,7 +976,7 @@ main() {
         i = i + 1
     }
 
-    found = 0
+    found = duplicates(defs)
     checked = 0
     na = collections.string_list_size(aefiles)
     i = 0

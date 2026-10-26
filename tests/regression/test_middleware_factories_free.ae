@@ -1,0 +1,91 @@
+// Each std.http.middleware factory's options go with the server (#3191).
+//
+// Every factory allocated an options block and registered it with
+// http_server_use_middleware (or, for gzip and error pages, as a response
+// transformer); http_server_free released the chain, not what each node's
+// options held, so every factory leaked one block per server. Each now hands
+// its block to the server with the block's own free.
+//
+// A round builds a server, installs one factory, and frees the server;
+// nothing listens. Where mem.heap_in_use() is exact (Windows), a round must
+// leave it as it found it.
+
+import std.http
+import std.http.middleware
+import std.mem
+
+extern exit(code: int)
+extern http_server_free(server: ptr)
+
+@c_callback
+deny_basic(user: ptr, pass: ptr, ud: ptr) -> int {
+    return 0
+}
+
+@c_callback
+deny_token(token: ptr, ud: ptr) -> int {
+    return 0
+}
+
+// One server with the factory `which` installed, then freed.
+round(which: int) {
+    s = http.server_create(0)
+    err = ""
+    if which == 0 { err = middleware.use_cors(s, "*", "GET", "", 0, 60) }
+    if which == 1 { err = middleware.use_basic_auth(s, "r", deny_basic, 0) }
+    if which == 2 { err = middleware.use_bearer_auth(s, "r", deny_token, 0) }
+    if which == 3 { err = middleware.use_session_auth(s, "SID", "/login", deny_token, 0) }
+    if which == 4 { err = middleware.use_rate_limit(s, 10, 1000) }
+    if which == 5 { err = middleware.use_vhost(s, "a.example, b.example") }
+    if which == 6 { err = middleware.use_gzip(s, 256, 6) }
+    if which == 7 { err = middleware.use_static_files(s, "/static", ".") }
+    if which == 8 {
+        rw = middleware.rewrite_new()
+        err = middleware.rewrite_add_rule(rw, "/old/", "/new/")
+        if err == "" { err = middleware.use_rewrite(s, rw) }
+    }
+    if which == 9 {
+        ep = middleware.error_pages_new()
+        err = middleware.error_pages_register(ep, 404, "<h1>no</h1>", "text/html")
+        if err == "" { err = middleware.use_error_pages(s, ep) }
+    }
+    if which == 10 { err = middleware.use_real_ip(s, "", "127.0.0.1") }
+    if err != "" {
+        println("FAIL: factory ${which}: ${err}")
+        exit(1)
+    }
+    http_server_free(s)
+}
+
+main() {
+    println("=== each middleware factory's options go with the server (#3191) ===")
+    names = ["cors", "basic_auth", "bearer_auth", "session_auth", "rate_limit", "vhost", "gzip",
+        "static_files", "rewrite", "error_pages", "real_ip"]
+    i = 0
+    while i < 11 {
+        round(i)
+        i = i + 1
+    }
+    if !mem.heap_in_use_exact() {
+        println("  (heap_in_use is not exact here: the rounds ran, a leak tool checks them)")
+        println("All PASS")
+        return
+    }
+    bad = 0
+    k = 0
+    while k < 11 {
+        grown = mem.steady_growth(|| { round(k) }, 6)
+        if grown != 0 {
+            println("  FAIL use_${names[k]}: a server built and freed left ${grown} bytes held")
+            bad = bad + 1
+        } else {
+            println("  PASS use_${names[k]}")
+        }
+        k = k + 1
+    }
+    if bad > 0 {
+        println("FAIL: ${bad} factories leak")
+        exit(1)
+    }
+    println("All PASS")
+}

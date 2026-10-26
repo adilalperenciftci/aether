@@ -1,0 +1,75 @@
+// Contracts: what a function requires and what it promises.
+//
+// `requires` states a precondition, checked when the function is entered;
+// `ensures` states a postcondition about `result`, checked at each
+// return. A parameter can carry its precondition inline with `where`. A
+// broken contract is a panic naming the clause and the function, which a
+// `try` can catch. When every operand is a constant the compiler decides
+// the clause itself: a call that can never satisfy it is a compile error,
+// and one that always does costs nothing. `--no-contracts` builds without
+// the runtime checks.
+//
+// Run: ae run examples/01-language/15-contracts.ae
+// See: docs/language-reference.md#function-contracts-requires--ensures
+
+clamp(x: int, lo: int, hi: int) -> int
+requires lo <= hi
+ensures result >= lo
+ensures result <= hi
+{
+    if x < lo {
+        return lo
+    }
+    if x > hi {
+        return hi
+    }
+    return x
+}
+
+percent(part: int, whole: int where whole > 0) -> int {
+    return part * 100 / whole
+}
+
+// A buggy implementation: the postcondition catches it before the wrong
+// value reaches the caller.
+absolute(x: int) -> int
+ensures result >= 0
+{
+    if x < -100 {
+        return x // forgot to negate
+    }
+    if x < 0 {
+        return -x
+    }
+    return x
+}
+
+main() {
+    println("${clamp(150, 0, 100)} ${clamp(-5, 0, 100)} ${percent(3, 4)}")
+    println(absolute(-42))
+
+    lo = 10
+    try {
+        println(clamp(5, lo, 1))
+    } catch e {
+        println("caught: ${e}")
+    }
+    try {
+        println(absolute(-500))
+    } catch e {
+        println("caught: ${e}")
+    }
+    total = 0
+    try {
+        println(percent(1, total))
+    } catch e {
+        println("caught: ${e}")
+    }
+}
+
+// Output:
+// 100 0 75
+// 42
+// caught: precondition_violation: lo <= hi in clamp
+// caught: postcondition_violation: result >= 0 in absolute
+// caught: precondition_violation: whole > 0 in percent

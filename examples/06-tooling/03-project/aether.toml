@@ -1,0 +1,8 @@
+[package]
+name = "project"
+version = "0.1.0"
+description = "A program in src/ and a module of its own in lib/"
+
+[[bin]]
+name = "project"
+path = "src/main.ae"

@@ -1,9 +1,9 @@
 // The sandbox half of test_http_ipv6.sh, run under libaether_sandbox.so: a
-// loopback listener, then one tcp_connect_raw to TARGET at its port. Prints
+// loopback listener, then one tcp.connect to TARGET at its port. Prints
 // "allowed" or "denied", so the runner can check which grants admit which
 // peer families.
 
-import std.net
+import std.tcp
 import std.os
 
 extern exit(code: int)
@@ -12,21 +12,21 @@ main() {
     // Only an allowed connect reaches a listener, so there is one on the
     // target's family: LISTEN=v6 for ::1, else 127.0.0.1 (which a
     // ::ffff:127.0.0.1 dial also reaches). Loopback either way.
-    srv = net.tcp_listen_on_raw("127.0.0.1", 0)
-    if os.getenv("LISTEN") == "v6" {
-        _ = net.tcp_server_close(srv)
-        srv = net.tcp_listen_on_raw("::1", 0)
+    srv, lerr = tcp.listen_on("127.0.0.1", 0)
+    if lerr == "" && os.getenv("LISTEN") == "v6" {
+        _ = tcp.server_close(srv)
+        srv, lerr = tcp.listen_on("::1", 0)
     }
-    if srv == null {
+    if lerr != "" {
         println("LISTEN FAILED")
         exit(3)
     }
-    conn = net.tcp_connect_raw(os.getenv("TARGET"), net.tcp_server_port_raw(srv))
-    if conn == null {
+    conn, cerr = tcp.connect(os.getenv("TARGET"), tcp.server_port(srv))
+    if cerr != "" {
         println("denied")
     } else {
         println("allowed")
-        _ = net.tcp_close(conn)
+        _ = tcp.close(conn)
     }
-    _ = net.tcp_server_close(srv)
+    _ = tcp.server_close(srv)
 }

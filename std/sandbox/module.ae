@@ -58,7 +58,7 @@ extern aether_string_raw_ptr(s: ptr) -> ptr
 exports(
     Grants, new, enforce, free,
     grant_all, grant_fs_read, grant_fs_write, grant_fs, grant_exec,
-    grant_env, grant_tcp, grant_tcp_listen, grant_udp, grant_native
+    grant_env, grant_tcp, grant_tcp_listen, grant_udp, grant_native, grant_fork
 )
 
 // A grant list. Opaque: made by new(), filled by the grant_* calls in its
@@ -214,3 +214,8 @@ grant_udp(_ctx: Grants, host: string, port: int) {
 
 // Loading native code (dlopen) from paths matching `path`.
 grant_native(_ctx: Grants, path: string) { add_grant(_ctx, "native", path) }
+
+// Starting new processes, in a child spawn_sandboxed starts: fork, vfork,
+// and a clone or clone3 that is not a thread. Without it the child can start
+// threads but no process; the kernel fence refuses the rest.
+grant_fork(_ctx: Grants) { add_grant(_ctx, "fork", "*") }

@@ -1,0 +1,11 @@
+// Runs longer than the self-test's two-second bound.
+//
+// Run: ae run tests/examples/fixture/slow.ae
+
+main() {
+    sleep(5000)
+    println("late")
+}
+
+// Output:
+// late

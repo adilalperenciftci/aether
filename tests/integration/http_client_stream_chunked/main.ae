@@ -7,16 +7,10 @@
 // scheduler threads with a second blocking accept loop.
 
 import std.http.client
+import std.tcp
 import std.string
 
 extern exit(code: int)
-// Loopback only: tcp_listen_raw listens on every interface, and on Windows
-// each new executable listening there opens a firewall prompt (#2639).
-extern tcp_listen_on_raw(address: string, port: int) -> ptr
-extern tcp_accept_raw(server: ptr) -> ptr
-extern tcp_receive_raw(sock: ptr, max_bytes: int) -> string @heap
-extern tcp_send_raw(sock: ptr, data: string) -> int
-extern tcp_close(sock: ptr) -> int
 
 const PORT = 18099
 
@@ -32,17 +26,20 @@ actor RawChunkedSrv {
             s = srv
             keep = 1
             while keep == 1 {
-                conn = tcp_accept_raw(srv)
-                if conn == null {
+                conn, aerr = tcp.accept(srv)
+                if aerr != "" {
                     keep = 0
                 } else {
-                    junk = tcp_receive_raw(conn, 4096)
-                    e1 = tcp_send_raw(conn, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
-                    e2 = tcp_send_raw(conn, "5\r\nhello\r\n")
-                    e3 = tcp_send_raw(conn, "1\r\n \r\n")
-                    e4 = tcp_send_raw(conn, "5\r\nworld\r\n")
-                    e5 = tcp_send_raw(conn, "0\r\n\r\n")
-                    c = tcp_close(conn)
+                    _req, _rerr = tcp.read(conn, 4096)
+                    _n1, e1 = tcp.write(conn, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+                    _n2, e2 = tcp.write(conn, "5\r\nhello\r\n")
+                    _n3, e3 = tcp.write(conn, "1\r\n \r\n")
+                    _n4, e4 = tcp.write(conn, "5\r\nworld\r\n")
+                    _n5, e5 = tcp.write(conn, "0\r\n\r\n")
+                    if e1 != "" || e2 != "" || e3 != "" || e4 != "" || e5 != "" {
+                        println("FAIL: the chunked server could not send its response")
+                    }
+                    _ = tcp.close(conn)
                 }
             }
         }
@@ -50,8 +47,10 @@ actor RawChunkedSrv {
 }
 
 main() {
-    lst = tcp_listen_on_raw("127.0.0.1", PORT)
-    if lst == null { println("FAIL: chunked listen failed"); exit(1) }
+    // Loopback only: listening on every interface opens a firewall prompt
+    // on Windows for each new executable (#2639).
+    lst, lerr = tcp.listen_on("127.0.0.1", PORT)
+    if lerr != "" { println("FAIL: chunked listen failed: ${lerr}"); exit(1) }
 
     srv = spawn(RawChunkedSrv())
     srv ! StartRaw { srv: lst }

@@ -199,15 +199,24 @@ jobs:
       if: matrix.os == 'ubuntu-latest'
       run: bash tests/scripts/check_compiler_leaks.sh
 
+    # The C unit tests under UBSan, on macOS (Apple clang). On Linux they run
+    # instrumented in ubsan.yml's `make test-ubsan`, with the .ae corpus.
+    # A report stops the runner (-fno-sanitize-recover, and halt_on_error for
+    # a check built recoverable), so it fails the step: this step used to let
+    # UBSan print and go on, and passed whatever it printed.
     - name: Build with UndefinedBehaviorSanitizer
+      if: matrix.os == 'macos-latest'
       run: |
         make clean
-        make compiler CFLAGS="-fsanitize=undefined -fno-omit-frame-pointer -O1 -g" \
+        make compiler CFLAGS="-fsanitize=undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -O1 -g" \
                       LDFLAGS="-fsanitize=undefined -pthread -lm"
-        make test-build CFLAGS="-fsanitize=undefined -fno-omit-frame-pointer -O1 -g" \
+        make test-build CFLAGS="-fsanitize=undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -O1 -g" \
                         LDFLAGS="-fsanitize=undefined -pthread -lm"
 
     - name: Run tests with UBSAN
+      if: matrix.os == 'macos-latest'
+      env:
+        UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
       run: |
         ./build/test_runner
 

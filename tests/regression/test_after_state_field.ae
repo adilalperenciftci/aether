@@ -18,16 +18,22 @@ message Stop {}
 // Compile-only: exercises `after <state-field>` typechecking +
 // codegen pathway in the spawn function (the original "use of
 // undeclared identifier 'self'" failure).
+// Stop counts down again (#3162), so the timeout fires once more after it,
+// finds the poller stopped and sends nothing, which leaves it idle.
 actor PollerWithStateInterval {
     state interval_ms = 30
+    state stopped = 0
 
     receive {
         Stop -> {
+            stopped = 1
             println("interval poller stopped")
         }
     } after interval_ms -> {
-        println("interval timeout fired")
-        self ! Stop {}
+        if stopped == 0 {
+            println("interval timeout fired")
+            self ! Stop {}
+        }
     }
 }
 
@@ -38,14 +44,18 @@ actor PollerWithStateInterval {
 actor PollerWithStateExpr {
     state base = 30
     state multiplier = 2
+    state stopped = 0
 
     receive {
         Stop -> {
+            stopped = 1
             println("expr poller stopped")
         }
     } after base * multiplier -> {
-        println("expr timeout fired (60ms)")
-        self ! Stop {}
+        if stopped == 0 {
+            println("expr timeout fired (60ms)")
+            self ! Stop {}
+        }
     }
 }
 

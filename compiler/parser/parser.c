@@ -345,6 +345,37 @@ static void missing_operand(Parser* parser, Token* after, int errors_before,
     if (parser->suppress_errors || parser->depth_exceeded) return;
     if (aether_error_count() != errors_before) return;
     Token* found = peek_token(parser);
+    if (found && found->type == TOKEN_TRY) {
+        /* #3150: `r = try { work() } catch e { ... }`. A `try` is a
+         * statement and gives no value. Reported as a keyword used for a
+         * name, and with only `try {` taken as the rest of the line, the
+         * block's own `}` then closed the function and its `catch` was read
+         * at top level: six errors. Say what it is once, and step over the
+         * whole statement, its `catch` included, so nothing after it is
+         * misread. */
+        aether_error_full("`try` is a statement and gives no value",
+                          found->line, found->column,
+                          "bind the value inside it: `try { r = work() } catch e { ... }`",
+                          NULL, AETHER_ERR_SYNTAX);
+        advance_token(parser); // `try`
+        for (int part = 0; part < 2; part++) {
+            if (part == 1) {
+                if (!peek_token(parser) || peek_token(parser)->type != TOKEN_CATCH) break;
+                advance_token(parser); // `catch`
+                if (peek_token(parser) && peek_token(parser)->type == TOKEN_IDENTIFIER) {
+                    advance_token(parser); // the name the message binds
+                }
+            }
+            if (!peek_token(parser) || peek_token(parser)->type != TOKEN_LEFT_BRACE) break;
+            int depth = 0;
+            while (!is_at_end(parser)) {
+                Token* t = advance_token(parser);
+                if (t->type == TOKEN_LEFT_BRACE) depth++;
+                if (t->type == TOKEN_RIGHT_BRACE && --depth == 0) break;
+            }
+        }
+        return;
+    }
     if (found && found->value && token_is_reserved_keyword(found) &&
         !token_is_value_ident(found)) {
         /* `rc = send()`: the operand is there, named by a keyword. */
@@ -636,6 +667,27 @@ static int parse_array_length(Parser* parser) {
     }
     parser->current_token = ce.pos;
     return (int)v;
+}
+
+/* After `actor_ref`, at its `[`: is that the type parameter
+ * (`actor_ref[Counter]`, `actor_ref[mod.Counter]`), or the start of an
+ * array of untyped references (`actor_ref[]`, `actor_ref[8]`,
+ * `actor_ref[MAX]`, `actor_ref[N + 1]`)? A parameter is a name that is not
+ * an integer `const` of the file; a size starts with a number, a `(`, a
+ * `-` or such a const, and `]` is a dynamic array. Every `[` was read as
+ * a parameter, so `state members: actor_ref[8]` was a parse error at the
+ * 8 (#3189). */
+static int actor_ref_bracket_is_parameter(Parser* parser) {
+    int i = parser->current_token + 1;
+    if (i >= parser->token_count) return 1;
+    Token* t = parser->tokens[i];
+    if (t->type == TOKEN_IDENTIFIER) {
+        if (!parser->int_consts_scanned) scan_int_consts(parser);
+        long long v;
+        return !ce_lookup(parser, t->value, &v);
+    }
+    return t->type != TOKEN_NUMBER && t->type != TOKEN_RIGHT_BRACKET &&
+           t->type != TOKEN_LEFT_PAREN && t->type != TOKEN_MINUS;
 }
 
 // #340: a type may carry a postfix `?` making it optional (`int?`, `string?`,
@@ -1221,8 +1273,11 @@ static Type* parse_type_unsuffixed(Parser* parser) {
         }
         case TOKEN_ACTOR_REF:
             advance_token(parser);
-            // Optional type parameter: ActorRef[Type] or bare actor_ref
-            if (peek_token(parser) && peek_token(parser)->type == TOKEN_LEFT_BRACKET) {
+            // Optional type parameter: ActorRef[Type] or bare actor_ref. A
+            // `[` that opens an array instead (`actor_ref[8]`,
+            // `actor_ref[MAX]`, `actor_ref[]`) is the array suffix below.
+            if (peek_token(parser) && peek_token(parser)->type == TOKEN_LEFT_BRACKET &&
+                actor_ref_bracket_is_parameter(parser)) {
                 advance_token(parser); // consume '['
                 Type* actor_type = parse_type(parser);
                 if (!expect_token(parser, TOKEN_RIGHT_BRACKET)) return NULL;
@@ -1823,11 +1878,45 @@ static ASTNode* parse_primary_expression_inner(Parser* parser) {
                     int column = token->column;
                     advance_token(parser);                       // consume sizeof/offsetof
                     if (!expect_token(parser, TOKEN_LEFT_PAREN)) return NULL;
-                    Token* tyname = expect_token(parser, TOKEN_IDENTIFIER);
-                    if (!tyname) return NULL;
+                    /* #3174: the operand is any type a declaration takes,
+                     * read by the type parser: `sizeof(int)`, `uint32`,
+                     * `ptr`, `*Node`, `int[4]`, a struct. A struct named
+                     * bare keeps its name as the node's value (the C tag
+                     * form codegen and the module merge already handle);
+                     * any other type rides in a type-annotation child. Only
+                     * an identifier was read before: `sizeof(int)` was
+                     * "'int' is a reserved keyword". */
+                    Token* operand_tok = peek_token(parser);
+                    Type* operand = parse_type(parser);
+                    if (!operand) {
+                        if (!parser->suppress_errors && operand_tok) {
+                            aether_error_full(is_offsetof
+                                                  ? "offsetof expects a struct type, then a field"
+                                                  : "sizeof expects a type",
+                                              operand_tok->line, operand_tok->column,
+                                              is_offsetof ? "write offsetof(Point, x)"
+                                                          : "write sizeof(int), sizeof(Point) or sizeof(*Node)",
+                                              NULL, AETHER_ERR_SYNTAX);
+                        }
+                        return NULL;
+                    }
+                    int bare_struct = operand->kind == TYPE_STRUCT && operand->struct_name &&
+                                      !operand->qualifier;
                     ASTNode* node = create_ast_node(
                         is_offsetof ? AST_OFFSETOF : AST_SIZEOF,
-                        tyname->value, line, column);
+                        bare_struct ? operand->struct_name : NULL, line, column);
+                    if (bare_struct && is_offsetof) {
+                        free_type(operand);
+                    } else {
+                        /* A sizeof keeps the type even for a bare name, which
+                         * may turn out to be an enum or a distinct type once
+                         * names are resolved: codegen spells a struct by its
+                         * tag and anything else as its C type. */
+                        ASTNode* ty = create_ast_node(AST_TYPE_ANNOTATION, NULL,
+                                                      operand_tok->line, operand_tok->column);
+                        ty->node_type = operand;
+                        add_child(node, ty);
+                    }
                     node->node_type = create_type(TYPE_INT);
                     if (is_offsetof) {
                         if (!expect_token(parser, TOKEN_COMMA)) {
@@ -4943,6 +5032,16 @@ ASTNode* parse_return_statement(Parser* parser) {
                                            ret_tok ? ret_tok->column : 0);
 
     if (!match_token(parser, TOKEN_SEMICOLON)) {
+        /* #3150: `return try { ... } catch e { ... }` on the return's line
+         * is a `try` given as the value, which it cannot be. Read on, it
+         * was a bare `return` (an E0200 in a function with a result) and a
+         * try statement after it. */
+        Token* tv = peek_token(parser);
+        if (tv && tv->type == TOKEN_TRY && ret_tok && tv->line == ret_tok->line) {
+            missing_operand(parser, ret_tok, aether_error_count(), "a value");
+            free_ast_node(return_stmt);
+            return NULL;
+        }
         // #1054: `return match x { ... }`; codegen lowers a match in return
         // position to a value-producing form. A `match` is an expression
         // (#2993), so `return match x { ... } + 1` returns the sum.
@@ -5397,6 +5496,152 @@ static int block_closes(Parser* parser, ASTNode* block) {
     return 1;
 }
 
+/* #3167: is the statement at the current token a destructure with a place
+ * among its slots (`names[0], _ = pair()`, `p.x, n = pair()`)? Its slots,
+ * at bracket depth 0 before a `=` on the statement's line, are each a name
+ * or `_` (one token), or a name followed by `[` or `.`, and one of them is
+ * the latter. A destructure of names only is the ordinary form
+ * (parse_python_style_declaration); anything else is not a destructure. */
+static int at_place_destructure(Parser* parser) {
+    Token* first = peek_token(parser);
+    if (!first) return 0;
+    int line = first->line, depth = 0, commas = 0, places = 0, slot_len = 0;
+    int slot_ok = 1;
+    for (int i = parser->current_token; i < parser->token_count; i++) {
+        Token* t = parser->tokens[i];
+        if (depth == 0 && t->line != line) return 0;
+        if (depth == 0 && (t->type == TOKEN_COMMA || t->type == TOKEN_ASSIGN)) {
+            if (slot_len == 0 || !slot_ok) return 0;
+            if (slot_len > 1) places++;
+            if (t->type == TOKEN_ASSIGN) return commas > 0 && places > 0;
+            commas++;
+            slot_len = 0;
+            slot_ok = 1;
+            continue;
+        }
+        if (slot_len == 0 && !token_is_value_ident(t)) return 0;
+        if (slot_len == 1 && t->type != TOKEN_LEFT_BRACKET && t->type != TOKEN_DOT) slot_ok = 0;
+        if (t->type == TOKEN_LEFT_PAREN || t->type == TOKEN_LEFT_BRACKET) depth++;
+        else if (t->type == TOKEN_RIGHT_PAREN || t->type == TOKEN_RIGHT_BRACKET) depth--;
+        else if (depth == 0 && (t->type == TOKEN_LEFT_BRACE || t->type == TOKEN_RIGHT_BRACE ||
+                                t->type == TOKEN_SEMICOLON))
+            return 0;
+        if (depth < 0) return 0;
+        slot_len++;
+    }
+    return 0;
+}
+
+/* #3167: a destructure into places. Each element or field slot binds a
+ * hidden local of the destructure, and a store `place = local` follows it
+ * in the block, so the place takes the value as any store does, ownership
+ * included, and the names among the slots bind in the block's scope as an
+ * ordinary destructure's do. Appends the statements to `block`. */
+static int g_place_destructure_seq = 0;
+
+/* The index operands of a place slot (`a[i]`, `rows[i][j]`, `o.items[i]`),
+ * outermost first, each bound to a hidden local appended to `block` and
+ * read from it by the place. They are evaluated before the destructure
+ * binds anything, as Go does: `xs[i], i = pair()` stores into the element `i`
+ * named before the statement, not the one the statement gives `i`, and an
+ * index with a side effect runs once, before the value. A literal index
+ * reads the same either way and stays. */
+static void hoist_place_indices(ASTNode* place, ASTNode* block, int seq, int* k) {
+    if (!place) return;
+    if (place->type == AST_ARRAY_ACCESS && place->child_count >= 2) {
+        hoist_place_indices(place->children[0], block, seq, k);
+        ASTNode* idx = place->children[1];
+        if (!idx || idx->type == AST_LITERAL) return;
+        char name[48];
+        snprintf(name, sizeof(name), "_ae_dix%d_%d", seq, (*k)++);
+        ASTNode* decl = create_ast_node(AST_VARIABLE_DECLARATION, name, idx->line, idx->column);
+        decl->node_type = create_type(TYPE_UNKNOWN);
+        decl->type_inferred = 1;
+        add_child(decl, idx);
+        add_child(block, decl);
+        place->children[1] = create_ast_node(AST_IDENTIFIER, name, idx->line, idx->column);
+    } else if (place->type == AST_MEMBER_ACCESS && place->child_count >= 1) {
+        hoist_place_indices(place->children[0], block, seq, k);
+    }
+}
+
+static void parse_place_destructure(Parser* parser, ASTNode* block) {
+    Token* head = peek_token(parser);
+    ASTNode* destructure = create_ast_node(AST_TUPLE_DESTRUCTURE, NULL, head->line, head->column);
+    enum { MAX_PLACES = 64 };
+    ASTNode* places[MAX_PLACES];
+    char* hidden[MAX_PLACES];
+    int np = 0;
+    int seq = ++g_place_destructure_seq;
+    for (;;) {
+        Token* t = peek_token(parser);
+        Token* after = peek_ahead(parser, 1);
+        if (t && token_is_value_ident(t) && after &&
+            (after->type == TOKEN_COMMA || after->type == TOKEN_ASSIGN)) {
+            if (strcmp(t->value, "_") != 0 && reject_none_binding(parser, t, "variable name")) break;
+            advance_token(parser);
+            ASTNode* var = create_ast_node(AST_VARIABLE_DECLARATION, t->value, t->line, t->column);
+            var->node_type = create_type(TYPE_UNKNOWN);
+            add_child(destructure, var);
+        } else {
+            ASTNode* place = parse_unary_expression(parser);
+            if (!place || (place->type != AST_ARRAY_ACCESS && place->type != AST_MEMBER_ACCESS) ||
+                np == MAX_PLACES) {
+                if (!parser->suppress_errors && t) {
+                    aether_error_with_code(
+                        "a destructure slot is a name, `_`, an element (`a[i]`) or a field (`o.f`)",
+                        t->line, t->column, AETHER_ERR_SYNTAX);
+                }
+                if (place) free_ast_node(place);
+                break;
+            }
+            char name[48];
+            snprintf(name, sizeof(name), "_ae_dslot%d_%d", seq, np);
+            ASTNode* var = create_ast_node(AST_VARIABLE_DECLARATION, name, place->line, place->column);
+            var->node_type = create_type(TYPE_UNKNOWN);
+            add_child(destructure, var);
+            places[np] = place;
+            hidden[np] = strdup(name);
+            np++;
+        }
+        if (!match_token(parser, TOKEN_COMMA)) break;
+    }
+    Token* eq = peek_token(parser);
+    ASTNode* rhs = NULL;
+    if (eq && eq->type == TOKEN_ASSIGN) {
+        advance_token(parser);
+        int errors_before = aether_error_count();
+        rhs = parse_expression(parser);
+        if (!rhs) missing_operand(parser, eq, errors_before, "a value");
+    } else if (!parser->suppress_errors && eq) {
+        aether_error_with_code("expected `=` after a destructure's slots", eq->line, eq->column,
+                               AETHER_ERR_SYNTAX);
+    }
+    if (!rhs) {
+        /* Recover past the rest of the statement's line. */
+        while (peek_token(parser) && peek_token(parser)->line == head->line &&
+               peek_token(parser)->type != TOKEN_RIGHT_BRACE &&
+               peek_token(parser)->type != TOKEN_EOF) advance_token(parser);
+        free_ast_node(destructure);
+        for (int i = 0; i < np; i++) { free_ast_node(places[i]); free(hidden[i]); }
+        return;
+    }
+    add_child(destructure, rhs);  // Last child is the RHS
+    match_token(parser, TOKEN_SEMICOLON);
+    int hoisted = 0;
+    for (int i = 0; i < np; i++) hoist_place_indices(places[i], block, seq, &hoisted);
+    add_child(block, destructure);
+    for (int i = 0; i < np; i++) {
+        ASTNode* assign = create_ast_node(AST_BINARY_EXPRESSION, "=", places[i]->line, places[i]->column);
+        add_child(assign, places[i]);
+        add_child(assign, create_ast_node(AST_IDENTIFIER, hidden[i], places[i]->line, places[i]->column));
+        ASTNode* stmt = create_ast_node(AST_EXPRESSION_STATEMENT, NULL, places[i]->line, places[i]->column);
+        add_child(stmt, assign);
+        add_child(block, stmt);
+        free(hidden[i]);
+    }
+}
+
 ASTNode* parse_block(Parser* parser) {
     expect_token(parser, TOKEN_LEFT_BRACE);
 
@@ -5450,6 +5695,10 @@ ASTNode* parse_block(Parser* parser) {
                 }
                 continue;
             }
+        }
+        if (at_place_destructure(parser)) {
+            parse_place_destructure(parser, block);
+            continue;
         }
         ASTNode* stmt = parse_statement(parser);
         if (stmt) {
@@ -5557,6 +5806,8 @@ ASTNode* parse_actor_definition(Parser* parser) {
                             next_tok->type == TOKEN_FLOAT ||
                             next_tok->type == TOKEN_STRING || next_tok->type == TOKEN_BOOL ||
                             next_tok->type == TOKEN_BYTE || next_tok->type == TOKEN_PTR ||
+                            /* #3163: `state actor_ref next` */
+                            next_tok->type == TOKEN_ACTOR_REF ||
                             /* #2921: a tuple type, `state (string, int) v` */
                             next_tok->type == TOKEN_LEFT_PAREN))) {
                 // Explicit type: state int count = 0  or  state long total = 0
@@ -5567,6 +5818,25 @@ ASTNode* parse_actor_definition(Parser* parser) {
                 if (name) {
                     state_decl = create_ast_node(AST_VARIABLE_DECLARATION, name->value, name->line, name->column);
                     state_decl->node_type = create_type(TYPE_UNKNOWN);
+
+                    /* #3163: `state next: actor_ref = null`, the type
+                     * written as a struct field, a parameter, `let` and a
+                     * module `var` write it, so a state field takes every
+                     * type a field takes. The declaration is the one the
+                     * type-first form makes, `state int n = 0`: the written
+                     * type, then the value checked against it as a typed
+                     * binding's is. It was three "Unexpected token in actor
+                     * body" errors, and an actor_ref could be held only as
+                     * a bare `state next = null`. */
+                    if (match_token(parser, TOKEN_COLON)) {
+                        Type* written = parse_type(parser);
+                        if (written) {
+                            free_type(state_decl->node_type);
+                            state_decl->node_type = written;
+                        } else if (!parser->suppress_errors) {
+                            parser_error(parser, "expected a type after `:` in a state declaration");
+                        }
+                    }
 
                     Token* eq = peek_token(parser);
                     if (match_token(parser, TOKEN_ASSIGN)) {
@@ -6298,6 +6568,23 @@ static int starts_return_type_then_body(Parser* parser) {
     return typed;
 }
 
+/* True when the tokens at the cursor are a result type followed by an arrow
+ * body, `-> Point -> p` or `-> (int, int) -> (a, b)` (#3158). An arrow-body
+ * expression is never followed by a second `->`, so a type that parses with
+ * one after it is the written result type. */
+static int starts_return_type_then_arrow(Parser* parser) {
+    int saved_pos = parser->current_token;
+    int saved_suppress = parser->suppress_errors;
+    parser->suppress_errors = 1;
+    Type* t = parse_type(parser);
+    Token* after = peek_token(parser);
+    int typed = t && after && after->type == TOKEN_ARROW;
+    if (t) free_type(t);
+    parser->current_token = saved_pos;
+    parser->suppress_errors = saved_suppress;
+    return typed;
+}
+
 ASTNode* parse_function_definition(Parser* parser) {
     // Erlang-style pattern matching functions!
     // Syntax: 
@@ -6432,7 +6719,9 @@ ASTNode* parse_function_definition(Parser* parser) {
         //   the token(s) between `->` and `{` as a return type and
         //   fall through to the traditional block-body path below.
         int is_typed_return = 0;
-        if (peek) {
+        if (peek && starts_return_type_then_arrow(parser)) {
+            is_typed_return = 1;
+        } else if (peek) {
             switch (peek->type) {
                 case TOKEN_INT:
                 case TOKEN_INT64:
@@ -6637,10 +6926,32 @@ ASTNode* parse_function_definition(Parser* parser) {
                 add_child(clause, expr);
                 add_child(func, clause);
             }
-            // Now expect the traditional block body `{ ... }`.
-            ASTNode* body = parse_block(parser);
-            if (body) {
-                add_child(func, body);
+            if (match_token(parser, TOKEN_ARROW)) {
+                /* #3158: an arrow body after a written result type,
+                 * `square(x: int) -> int -> x * x` or `-> int -> { ... }`.
+                 * The body is the one an untyped arrow body is, and its
+                 * value is returned against the written type, as a block
+                 * body's `return` is. Read as a block body, it was
+                 * "Expected LEFT_BRACE, got ARROW", and the block parser
+                 * then took the rest of the file as the missing block's
+                 * statements: nine errors, the last ones in later
+                 * functions. */
+                if (peek_token(parser) && peek_token(parser)->type == TOKEN_LEFT_BRACE) {
+                    ASTNode* body = parse_block(parser);
+                    arrow_block_return_tail(body);
+                    add_child(func, body);
+                } else {
+                    ASTNode* body_block = parse_arrow_expression_body(parser);
+                    if (body_block) {
+                        add_child(func, body_block);
+                    }
+                }
+            } else {
+                // Now expect the traditional block body `{ ... }`.
+                ASTNode* body = parse_block(parser);
+                if (body) {
+                    add_child(func, body);
+                }
             }
         } else if (peek && peek->type == TOKEN_LEFT_BRACE) {
             // Multi-statement arrow body: -> { stmt1; stmt2; expr }

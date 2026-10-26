@@ -17,6 +17,12 @@ check(label: string, ok: bool) -> int {
 }
 
 main() {
+    // Re-run as a child: a program that runs and exits 127.
+    if os.args_count() > 1 {
+        if os.args_get(1) == "exit127" {
+            exit(127)
+        }
+    }
     fails = 0
 
     // ---- spawn + single wait, exit code fidelity ----
@@ -48,17 +54,20 @@ main() {
     // from a spawn/reap failure (which sets err and returns -1).
     fails = fails + check("false exits non-zero, err empty", bc != 0 && berr == "")
 
-    // ---- spawn failure is distinguishable ----
+    // ---- a program that cannot start fails the spawn (#3170) ----
+    // On every platform: token -1 and the reason, nothing to reap. POSIX
+    // used to start a child that exited 127, which a program that ran and
+    // exited 127 also gives; that one spawns and reaps 127.
     ft, ferr = os.spawn_proc("this_program_does_not_exist_xyz", null, null)
-    // The spawn itself may succeed (fork ok) with the child exec-failing to
-    // 127 on POSIX, OR fail outright on Windows. Either way it must be
-    // distinguishable from a clean exit: reap and confirm non-zero.
-    if ferr == "" {
-        fc, _ = os.wait(ft)
-        fails = fails + check("missing program does not report exit 0", fc != 0)
-    } else {
-        fails = fails + check("missing program reports spawn err", ft == -1)
-    }
+    fails = fails + check("missing program fails the spawn with its reason",
+        ft == -1 && ferr == "program not found")
+    av127 = list.new()
+    _ = list.add(av127, "exit127")
+    t127, e127 = os.spawn_proc(os.argv0(), av127, null)
+    fails = fails + check("a program that exits 127 spawns", e127 == "")
+    c127, w127 = os.wait(t127)
+    fails = fails + check("and reaps 127 with no err", c127 == 127 && w127 == "")
+    list.free(av127)
 
     // ---- wait_any returns children in COMPLETION order, not spawn order ----
     // The order is made, not timed (#2892): the slow child does not exit on

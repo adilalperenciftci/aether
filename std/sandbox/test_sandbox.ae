@@ -37,6 +37,20 @@ fn has_grant(perms: ptr, i: int, category: string, pattern: string) -> int {
     return same(list.at(perms, i * 2 + 1), pattern)
 }
 
+// An fs grant's pattern as the list stores it: resolved as the checks
+// resolve paths (std.sandbox's add_grant), which leaves `/r/*` as written
+// where it leads nowhere on POSIX and puts it on the current drive on
+// Windows (`D:\r\*`).
+extern aether_sandbox_grant_pattern(category: string, pattern: string) -> ptr
+@extern("free") libc_free(p: ptr)
+
+fn stored(category: string, pattern: string) -> string {
+    p = aether_sandbox_grant_pattern(category, pattern)
+    s = string.from_cstr(p)
+    libc_free(p)
+    return s
+}
+
 main() {
     fw = spec.init()
 
@@ -63,18 +77,20 @@ main() {
                 grant_tcp_listen()
                 grant_udp("dns.local", 0)
                 grant_native("/opt/lib/*")
+                grant_fork()
                 grant_all()
             }
-            spec.assert_eq(list.size(g as ptr), 18, "nine grants, two entries each")
-            spec.assert_true(has_grant(g as ptr, 0, "fs_read", "/r/*"), "grant_fs_read")
-            spec.assert_true(has_grant(g as ptr, 1, "fs_write", "/w/*"), "grant_fs_write")
+            spec.assert_eq(list.size(g as ptr), 20, "ten grants, two entries each")
+            spec.assert_true(has_grant(g as ptr, 0, "fs_read", stored("fs_read", "/r/*")), "grant_fs_read")
+            spec.assert_true(has_grant(g as ptr, 1, "fs_write", stored("fs_write", "/w/*")), "grant_fs_write")
             spec.assert_true(has_grant(g as ptr, 2, "exec", "echo *"), "grant_exec")
             spec.assert_true(has_grant(g as ptr, 3, "env", "HOME"), "grant_env")
             spec.assert_true(has_grant(g as ptr, 4, "tcp", "*.corp"), "grant_tcp")
             spec.assert_true(has_grant(g as ptr, 5, "tcp_listen", "*"), "grant_tcp_listen")
             spec.assert_true(has_grant(g as ptr, 6, "udp", "dns.local"), "grant_udp")
             spec.assert_true(has_grant(g as ptr, 7, "native", "/opt/lib/*"), "grant_native")
-            spec.assert_true(has_grant(g as ptr, 8, "*", "*"), "grant_all")
+            spec.assert_true(has_grant(g as ptr, 8, "fork", "*"), "grant_fork")
+            spec.assert_true(has_grant(g as ptr, 9, "*", "*"), "grant_all")
             sandbox.free(g)
         }
 
@@ -123,9 +139,9 @@ main() {
                 grant_fs("/data/*")
             }
             spec.assert_eq(list.size(g as ptr), 6, "three grants")
-            spec.assert_true(has_grant(g as ptr, 0, "fs_read", "/data/*"), "read")
-            spec.assert_true(has_grant(g as ptr, 1, "fs_write", "/data/*"), "write")
-            spec.assert_true(has_grant(g as ptr, 2, "fs", "/data/*"), "directory operations")
+            spec.assert_true(has_grant(g as ptr, 0, "fs_read", stored("fs_read", "/data/*")), "read")
+            spec.assert_true(has_grant(g as ptr, 1, "fs_write", stored("fs_write", "/data/*")), "write")
+            spec.assert_true(has_grant(g as ptr, 2, "fs", stored("fs", "/data/*")), "directory operations")
             sandbox.free(g)
         }
     }
@@ -267,6 +283,7 @@ main() {
         }
     }
 
-    _rc = spec.run_summary(fw)
+    rc = spec.run_summary(fw)
     _ = fs.remove_tree(dir)
+    return rc
 }

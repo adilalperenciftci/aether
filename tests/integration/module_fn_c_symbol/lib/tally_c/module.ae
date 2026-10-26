@@ -1,0 +1,5 @@
+// A bare binding of the C function tally_total.
+
+exports(tally_total)
+
+extern tally_total(x: int) -> int

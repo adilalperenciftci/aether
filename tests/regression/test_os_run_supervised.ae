@@ -14,7 +14,7 @@
 // landed, so that backend went unexercised by CI.
 //
 // The child is this program: invoked with a first argument it acts as
-// `exit3`, `sleep30`, or `leak` (spawn a `sleep30` copy of itself and
+// `exit3`, `exit127`, `sleep30`, or `leak` (spawn a `sleep30` copy of itself and
 // exit 0 without waiting for it). That keeps the test off /bin/sh and
 // `sleep`, so the same cases run against both backends.
 
@@ -26,6 +26,7 @@ extern exit(code: int)
 
 child(mode: string) -> int {
     if mode == "exit3" { return 3 }
+    if mode == "exit127" { return 127 }
     if mode == "sleep30" {
         sleep(30000)
         return 0
@@ -82,6 +83,24 @@ main() {
     }
     list.free(av0)
     println("  PASS: run_supervised clean exit → outcome exited, code 3")
+
+    // --- run_supervised: a program that cannot start (#3170) ----------
+    // -1 with the reason, on every platform; POSIX used to read it as an
+    // exit of 127. A program that ran and exited 127 is (127, "exited").
+    code_m, outcome_m = os.run_supervised("/no/such/program_3170", null, null, 1, 1, 0, 1)
+    if code_m != -1 || outcome_m != "program not found" {
+        println("  FAIL: missing program code=${code_m} outcome=${outcome_m}, expected -1 / program not found")
+        exit(1)
+    }
+    av127 = list.new()
+    list.add(av127, "exit127")
+    code_e, outcome_e = os.run_supervised(me, av127, null, 1, 1, 0, 1)
+    if code_e != 127 || outcome_e != "exited" {
+        println("  FAIL: exit127 code=${code_e} outcome=${outcome_e}, expected 127 / exited")
+        exit(1)
+    }
+    list.free(av127)
+    println("  PASS: run_supervised missing program → (-1, program not found); exit 127 → (127, exited)")
 
     // --- run_supervised: timeout -------------------------------------
     // Child sleeps 30s; a 1s timeout must tear it down and report 124

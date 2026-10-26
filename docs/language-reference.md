@@ -415,7 +415,7 @@ main() {
 - **A `T[N]` array converts to `T[]` implicitly** wherever a slice is expected: a parameter, a `T[]`-typed binding or field, a `return` from a `-> T[]` function. The length travels with it. `null`, and the empty literal `[]`, convert to the empty slice: `.len` is `0`, it views no storage, and it compares equal to `null`. So `s == []` is `s == null` (it asks whether `s` views any storage; test `s.len == 0` for emptiness), a C function's `T[]` parameter takes `[]` as the null pointer, and an if-expression or a `match` given to a `T[]` converts each arm on its own. A module-level `var` or `const` of type `T[]` takes either as its initial value.
 - **A string is not a slice.** Passing one where a `T[]` is expected (a parameter, a binding, a `return`) is a type error; `string.bytes(s)` is the bounded, read-only `byte[]` view of a string's bytes, and it decays to their pointer at a C extern like any slice. Reading it costs what any slice's read does; a store through it (an element store, `+=`, `++`), or through any view made from it (a sub-slice, a pattern's tail), in this function or one it is given to, panics with "a write through a read-only view of a string", and one the checker can see through a local bound to it is a compile error (E0200) (#3025). A string's own bytes are read-only too: `s[i]` reads one, and a write (`s[i] = v`, `s[i] += v`, `s[i]++`) is a compile error (E0200). Build the new text as a new string, or work on the bytes in a `byte[N]` array of your own.
 - **A slice decays to its pointer** wherever a `ptr` is expected, exactly as a `T[N]` array does: a `ptr` parameter, a C extern's parameter (including one declared `T[]`), a comparison against `null`, and pointer arithmetic (`s + n` is a `ptr` to element `n`). `s as ptr` spells the same conversion explicitly, for a `ptr` return or binding. The length is dropped at that boundary; nothing else about the extern ABI changes.
-- **`make([]T, n)`** allocates `n` zeroed elements and returns them as a bounded slice; `free(s)` releases them. Only the slice that holds such a buffer, or a view of a raw pointer the program owns from its start (`(p as T[])[0..n]`), may be freed: a view owns nothing. `free` of a sub-slice (`b[2..4]`, `b[1..]`, a list pattern's tail), of an array viewed as a slice, of `string.bytes(s)`, or of an array `T[N]`, is a compile error where the checker sees it (a local bound once to one, or the expression itself), and a named panic at run time anywhere else (`free of a view of elements another slice or an array holds, which owns nothing`). Before, the allocator was given a pointer it never handed out. In a module that defines a `free` of its own (`bignum.free`, `json.free`), `free(s)` of a slice is still this release, unless the module's `free` itself takes a slice: the module's function would only see the slice's pointer (#3116).
+- **`make([]T, n)`** allocates `n` zeroed elements and returns them as a bounded slice; `free(s)` releases them, and first what they hold: each element is a place a store into it takes a reference for (a string, a closure, a struct that holds one), so the free gives each back, as a struct's destroy does its fields (#3159). The elements of C memory viewed as a slice hold no reference, and its free releases only the memory. Only the slice that holds such a buffer, or a view of a raw pointer the program owns from its start (`(p as T[])[0..n]`), may be freed: a view owns nothing. `free` of a sub-slice (`b[2..4]`, `b[1..]`, a list pattern's tail), of an array viewed as a slice, of `string.bytes(s)`, or of an array `T[N]`, is a compile error where the checker sees it (a local bound once to one, or the expression itself), and a named panic at run time anywhere else (`free of a view of elements another slice or an array holds, which owns nothing`). Before, the allocator was given a pointer it never handed out. In a module that defines a `free` of its own (`bignum.free`, `json.free`), `free(s)` of a slice is still this release, unless the module's `free` itself takes a slice: the module's function would only see the slice's pointer (#3116).
 - A slice does not own the storage it views. It is valid for exactly as long as that storage: an array in an enclosing scope, a `make` buffer until its `free`, a C buffer until C reclaims it. The elements are the storage's: a string read out of a `string[]` slice (`t = s[i]`, a return, a field) takes a reference of its own, and a store into an element (`s[i] = v`) takes the new string and releases the one it replaces, as a store into the array itself does. Memory C owns, viewed as `p as string[]`, owns nothing: a store there gives C the characters and takes no reference ([memory-management.md](memory-management.md#ptr-slots)).
 - **A slice of a function's own storage stays in the function** (E0900). An array literal in a slice slot, and a function's own fixed-size array, live in its frame, which ends when the function returns. A slice of either may be used while the function runs and passed down to the functions it calls, but it may not leave the function: returned (alone, in a struct or tuple, or in a closure that captured it), stored in a module-level `var`, or stored in a field of something that may outlive the function: a struct behind a pointer, or a global (a struct value of the function's own may take it, and is then itself such a slice). Each of those is refused at the value that leaves, `'lit' returns a slice of its own storage (an array literal)`. Keep such a slice in storage that lives as long as it: a `make([]T, n)` buffer, a slice the caller passed in, or a module-level array. A slice parameter (`xs: int[]`) views the caller's storage and may be returned; a fixed-size array parameter (`a: int[3]`) is the function's own copy of the caller's array, so a slice of it is a slice of the function's storage. What a name holds where it leaves is what counts, path by path: a local or a field of a local struct re-bound to a `make` buffer before the `return` holds no slice of the frame any more, but one that still holds it on any path to the `return` (an `if` that re-binds it in one branch only, a loop that may `break` before the re-bind) is refused. A call of a closure the function binds (`reset()` after `reset = || { v = make([]int, 4) }`) counts what the closure re-binds for sure: a name of the function it binds on every way through its body before any `return` (both branches of an `if`, every arm of a `match` that covers its value, not a loop's body) holds what the closure gave it after the call. The name is the function's own when the function binds it ahead of the closure, in a block around it, and the closure does not declare one of its own first; a closure bound more than once, or called before it is bound, re-binds nothing that counts. A `try` around such a call starts its handler from what held a slice before any statement of its body ran, or after any. The other way is counted, conservatively: a closure that may store a slice of the function's storage into one of its names (`setview = || { v = arr }`) gives that name a slice from where the closure is written on, whether and whenever it is called, and a store a closure makes through a pointer or into a module-level `var` is judged as the same store written in the function. What the closure stores is judged as the function's own stores are: a fixed-size array of the function or an array literal, a name that holds such a slice at some point of the function, a local of the closure bound to one, or a parameter of the closure it is called with one for (any parameter that can hold a slice, when the closure is passed on or stored). A slice parameter of the function, a `make` buffer, a module-level `var` or `[]` stored by a closure leaves the name as it was. A call's result is taken to be no view of the caller, so a function that hands back the slice it was given is not seen through, in a closure (`v = same(arr)`) or not.
 
@@ -460,7 +460,7 @@ The full surface lives in `std.string` (alongside `string.array_*` for the legac
 
 ### Numeric Literal Formats
 
-Integer literals support hex, octal, and binary notation. Underscore separators are allowed anywhere in digits for readability.
+Integer literals support hex, octal, and binary notation.
 
 | Format | Prefix | Example | Value |
 |--------|--------|---------|-------|
@@ -469,11 +469,36 @@ Integer literals support hex, octal, and binary notation. Underscore separators 
 | Octal | `0o` / `0O` | `0o377` | 255 |
 | Binary | `0b` / `0B` | `0b1111_1111` | 255 |
 
-```aether,fragment
-mask = 0xFF
-flags = 0b1010_0101
-perms = 0o755
-big = 1_000_000
+An underscore separates two digits, for readability, in every form: the
+digits of an integer, the fraction and the exponent of a float, a duration's
+digits, and the digits after a `0x`, `0o` or `0b` prefix (#3155). It changes
+nothing about the value.
+
+```aether,run
+main() {
+    mask = 0xFF_FF
+    flags = 0b1010_0101
+    perms = 0o755
+    big = 1_000_000
+    long huge = 3_000_000_000
+    rate = 1_234.567_8
+    println("${mask} ${flags} ${perms} ${big} ${huge} ${rate} ${30_000ms}")
+}
+```
+```output
+65535 165 493 1000000 3000000000 1234.57 30s
+```
+
+An underscore anywhere else, at the end of the digits, beside another `_`,
+beside the `.` or the exponent's `e`, or straight after the prefix, is a
+compile error at the `_`:
+
+```aether,fails
+main() {
+    n = 1_000_
+}
+// error[E0100]: misplaced `_` in a number
+// help: an underscore goes between two digits, as in 1_000_000 or 0xFF_FF
 ```
 
 All numeric literal formats work with bitwise operators and in any expression context.
@@ -585,7 +610,7 @@ Aether has **no general-purpose cast operator**. The `as` keyword is reserved fo
 - `expr as Name` where `Name` is a named function-pointer type (`type Name = fn(...) -> R` or `cfn Name(...) -> R`), the same function-pointer cast under a name (see [§ Named C function-pointer types](#named-c-function-pointer-types-type-name--fnt1-t2---r) below)
 - `expr as T[]` typed-array view cast (reinterpret a raw pointer as an unbounded `T[]` slice; see [§ Slices](#slices-t))
 
-After `as` the parser also accepts a primitive **value cast**: `n as int` and other numeric casts compile and run, and a cast between a distinct type and its base type is allowed too. Casts the type system can't justify (for example `buf as string` or `p as ptr`) still parse, but are rejected at type-check with `E0200`, wherever they appear (a `return` value included), use a named helper for those. The `*StructName`, `fn(...) -> R`, and `T[]` forms remain available. Other primitive conversions:
+After `as` the parser also accepts a primitive **value cast**: `n as int` and other numeric casts compile and run, and a cast between a distinct type and its base type is allowed too, an enum and an integer included (`Direction.West as int`, `3 as Direction`; two different enums never convert, #3157). Casts the type system can't justify (for example `buf as string` or `p as ptr`) still parse, but are rejected at type-check with `E0200`, wherever they appear (a `return` value included), use a named helper for those. The `*StructName`, `fn(...) -> R`, and `T[]` forms remain available. Other primitive conversions:
 
 | From → To | How |
 |---|---|
@@ -600,7 +625,7 @@ After `as` the parser also accepts a primitive **value cast**: `n as int` and ot
 
 ### Null
 
-The `null` keyword represents a null pointer, typed as `ptr`:
+The `null` keyword represents a null pointer, typed as `ptr`. In a `string` slot it is the null string: it reads as the empty text, and `s == null` tells it apart from `""` ([Comparison Operators](#comparison-operators)):
 
 ```aether,fragment
 x = null             // inferred: ptr
@@ -660,6 +685,22 @@ const STR_PADDED      = sizeof(JSString) + 8      // arithmetic over them is ok 
 ```
 
 This lets a port that mirrors C structs as `extern struct` overlays centralise its offset/size table as named consts that are **self-verifying by construction**, the C compiler computes each value, so it cannot drift from the real layout, instead of hand-maintaining numeric offsets plus `_Static_assert` drift guards. The general "no function calls in a `const` initializer" rule is unchanged; these two layout builtins are the only carve-out.
+
+`sizeof` takes any type a declaration takes (#3174): a keyword type (`int`, `long`, `float`, `byte`, `bool`, `ptr`, `string`), a width (`uint16`, `uint32`, `f32`, `size_t`), a pointer (`*Node`), a fixed-size array (`int[4]`, its element's size times its length), a struct, an enum or a distinct type, each the size C gives the type it lowers to. `offsetof` takes a struct, bare or qualified (`gpu.Shader`); another type has no fields and is an error at the type.
+
+```aether,run
+struct Pair {
+    a: int
+    b: long
+}
+
+main() {
+    println("${sizeof(int)} ${sizeof(long)} ${sizeof(uint16)} ${sizeof(int[4])} ${sizeof(Pair)} ${offsetof(Pair, b)}")
+}
+```
+```output
+4 8 2 16 16 8
+```
 
 ### Mutable module-level globals
 
@@ -1000,9 +1041,9 @@ Guards add conditions using the `when` keyword:
 
 ```aether,fragment
 // Classify numbers using guards
-classify(x) when x < 0 -> print("negative\n")
-classify(x) when x == 0 -> print("zero\n")
-classify(x) when x > 0 -> print("positive\n")
+classify(x) when x < 0 -> println("negative")
+classify(x) when x == 0 -> println("zero")
+classify(x) when x > 0 -> println("positive")
 
 // Factorial with guard
 factorial(0) -> 1
@@ -1166,6 +1207,34 @@ clamp(x, lo, hi) -> {
 
 This allows complex logic in arrow-style functions without switching to block syntax.
 
+A written result type may come before an arrow body, `-> T -> expr` or
+`-> T -> { ... }`, with any contract clauses between them (#3158). The
+body's value is returned against `T`, as a block body's `return` is: a
+value of another type is E0200 at the value.
+
+```aether,run
+struct Point {
+    x: int
+    y: int
+}
+
+square(x: int) -> int -> x * x
+
+origin() -> Point -> Point { x: 0, y: 0 }
+
+label(n: int) -> string -> {
+    s = "n=${n}"
+    s
+}
+
+main() {
+    println("${square(7)} ${origin().y} ${label(3)}")
+}
+```
+```output
+49 0 n=3
+```
+
 The last statement is the result only when it has a value: an expression, other than a call of a function that returns nothing, or a `match` one of whose arms gives a value. Any other statement there is a statement like any other, and the body ends with it:
 
 - An `if`, a loop, a `switch`, a `try`, a `defer` or a `panic`. A body ending in one has to `return` on every path its own way: `-> { if x > 0 { return 1 } }` is a [missing return](#returning-on-every-path-e0700) when `x` is not positive.
@@ -1208,14 +1277,17 @@ is_odd(n) when n > 0 -> is_even(n - 1)
 ### If Statements
 
 ```aether,fragment
-if (x > 0) {
-    print("Positive\n");
-} else if (x < 0) {
-    print("Negative\n");
+if x > 0 {
+    println("positive")
+} else if x < 0 {
+    println("negative")
 } else {
-    print("Zero\n");
+    println("zero")
 }
 ```
+
+The condition needs no parentheses; `if (x > 0)` is accepted too, the
+parentheses read as grouping.
 
 ### If-Expressions
 
@@ -1247,20 +1319,21 @@ Each branch is an expression that gives a value, so a branch made of a call that
 ### While Loops
 
 ```aether,fragment
-i = 0;
-while (i < 10) {
-    print(i);
-    print("\n");
-    i = i + 1;
+i = 0
+while i < 10 {
+    println(i)
+    i = i + 1
 }
 ```
 
 ### For Loops
 
+The C-style loop: an init, a condition and a step. A loop over a range of
+numbers is usually written as a range-for (below).
+
 ```aether,fragment
-for (i = 0; i < 10; i = i + 1) {
-    print(i);
-    print("\n");
+for (i = 0; i < 10; i++) {
+    println(i)
 }
 ```
 
@@ -1350,10 +1423,9 @@ main() {
 Iterate over a range with `for VAR in START..END`:
 
 ```aether,fragment
-// Prints 0 1 2 3 4
+// Prints 0 to 4, one a line
 for i in 0..5 {
-    print(i)
-    print(" ")
+    println(i)
 }
 
 // Sum with variable bound
@@ -1368,19 +1440,19 @@ The range `start..end` is exclusive of `end` (like Python's `range(start, end)`)
 ### Loop Control
 
 ```aether,fragment
-// Break - exit loop early
-for (i = 0; i < 100; i = i + 1) {
-    if (i == 50) {
-        break;
+// break: leave the loop early
+for i in 0..100 {
+    if i == 50 {
+        break
     }
 }
 
-// Continue - skip to next iteration
-for (i = 0; i < 10; i = i + 1) {
-    if (i == 5) {
-        continue;
+// continue: on to the next pass
+for i in 0..10 {
+    if i == 5 {
+        continue
     }
-    print(i);
+    println(i)
 }
 ```
 
@@ -1415,11 +1487,11 @@ Match statements provide pattern-based dispatch:
 ### Integer Matching
 
 ```aether,fragment
-match (value) {
-    0 -> { print("zero\n"); }
-    1 -> { print("one\n"); }
-    2 -> { print("two\n"); }
-    _ -> { print("other\n"); }
+match value {
+    0 -> { println("zero") }
+    1 -> { println("one") }
+    2 -> { println("two") }
+    _ -> { println("other") }
 }
 ```
 
@@ -1603,25 +1675,33 @@ main() {
 C-style switch for simple value dispatch:
 
 ```aether,fragment
-switch (month) {
-    case 1: name = "January";
-    case 2: name = "February";
-    case 3: name = "March";
+switch month {
+    case 1: name = "January"
+    case 2: name = "February"
+    case 3: name = "March"
     // ... more cases
-    default: name = "Invalid";
+    default: name = "Invalid"
 }
 ```
 
 Aether's `switch` has **no fall-through**: each case auto-breaks after its body.
 Cases also accept comma-lists and ranges, the same as `match` arms:
 
-```aether,fragment
-switch code {
-case 200, 201, 204: kind = "success";
-case 300..<400:     kind = "redirect";   // ranged case (lowered to an if-chain)
-case 400..<500:     kind = "client-error";
-default:            kind = "other";
+```aether,run
+main() {
+    code = 404
+    kind = ""
+    switch code {
+        case 200, 201, 204: kind = "success"
+        case 300..<400: kind = "redirect" // a ranged case, lowered to an if-chain
+        case 400..<500: kind = "client-error"
+        default: kind = "other"
+    }
+    println(kind)
 }
+```
+```output
+client-error
 ```
 
 A comma-list case lowers to several C `case` labels sharing one body; a `switch`
@@ -1742,12 +1822,12 @@ The `defer` statement schedules code to run when leaving the current scope:
 
 ```aether,fragment
 process_file() {
-    handle = open_resource();
-    defer close_resource(handle);  // Runs when function exits
+    handle = open_resource()
+    defer close_resource(handle) // runs when the function exits
 
-    use_resource(handle);
-    use_resource(handle);
-    // close_resource(handle) called automatically here
+    use_resource(handle)
+    use_resource(handle)
+    // close_resource(handle) runs here
 }
 ```
 
@@ -1755,13 +1835,17 @@ process_file() {
 
 Multiple defers execute in Last-In-First-Out order:
 
-```aether,fragment
-example() {
-    defer print("First\n");   // Runs third
-    defer print("Second\n");  // Runs second
-    defer print("Third\n");   // Runs first
+```aether,run
+main() {
+    defer println("First") // runs third
+    defer println("Second") // runs second
+    defer println("Third") // runs first
 }
-// Output: Third, Second, First
+```
+```output
+Third
+Second
+First
 ```
 
 ### `defer try` and `defer catch`, cleanup for one outcome only
@@ -1899,8 +1983,7 @@ main() {
     defer list.free(items)
 
     list.add(items, "hello")
-    print(list.size(items))
-    print("\n")
+    println(list.size(items))
     // list.free(items) runs here (scope exit)
 }
 ```
@@ -1914,12 +1997,10 @@ A function that returns a handle it allocated gives it to the caller, which free
 ```aether
 import std.list
 
-build_list(n) : ptr {
+build_list(n: int) -> ptr {
     result = list.new()
-    i = 0
-    while i < n {
-        list.add(result, i)
-        i = i + 1
+    for i in 0..n {
+        list.add(result, "item ${i}")
     }
     return result
 }
@@ -1928,8 +2009,7 @@ main() {
     items = build_list(10)
     defer list.free(items)
 
-    print(list.size(items))
-    print("\n")
+    println(list.size(items))
 }
 ```
 
@@ -1963,6 +2043,8 @@ main() {
 The error convention: empty string `""` means no error, non-empty string is the error message. Use `!= ""` to check for errors.
 
 Tuple destructuring creates typed local variables. The compiler generates C structs for each unique tuple type (`_tuple_int_string`, etc.).
+
+A slot is a name, `_` (the value is dropped), an element or a field (#3167): `names[0], _ = pair()`, `p.name, p.n = pair()`, `last, counts[1] = pair()`. An element or a field takes its value as `place = value` stores it, ownership included, and the names among the slots bind as they would in a destructure of names only. An element's index is evaluated first, left to right and before the value, as in Go: `xs[i], i = pair()` stores into the element `i` named before the statement (#3208).
 
 #### Explicit tuple return type
 
@@ -2077,6 +2159,65 @@ Used outside a `T!` function, `expr!` is *unwrap-or-trap*: it panics on a
 non-empty error slot (catchable with `try`/`catch`). Both `!` and `or` accept
 any `(value, err)` tuple, not just `T!` returns.
 
+### Panics: `panic`, `try` and `catch`
+
+An error result is for a failure the caller expects and handles; a panic is
+for a bug. `panic("reason")` unwinds to the nearest enclosing `try`, whose
+`catch name { ... }` block runs with the reason bound to `name`. The runtime
+raises the same kind of panic for a broken contract, an index out of range,
+`x!` on `none` and a call through an empty closure, each reason starting
+with its [category](#panic-categories). Outside any `try` a panic prints its
+reason and ends the program; in an actor's handler it ends that actor.
+What the scopes it leaves hold is released, and their plain `defer`s run.
+
+```aether,run
+average(xs: int[]) -> int {
+    if xs.len == 0 {
+        panic("average of no numbers")
+    }
+    total = 0
+    for i in 0..xs.len {
+        total = total + xs[i]
+    }
+    return total / xs.len
+}
+
+main() {
+    result = 0
+    try {
+        result = average([4, 8])
+        result = average([])
+    } catch reason {
+        println("caught: ${reason}")
+    }
+    println(result)
+}
+```
+```output
+caught: average of no numbers
+6
+```
+
+`try` is a statement and gives no value: to keep what its block computes,
+assign it inside the block, as above. A `try` where a value goes is one
+error (#3150):
+
+```aether,fails
+work() -> int {
+    return 42
+}
+
+main() {
+    r = try {
+        work()
+    } catch e {
+        println("caught ${e}")
+    }
+}
+// error[E0100]: `try` is a statement and gives no value
+// help: bind the value inside it: `try { r = work() } catch e { ... }`
+```
+
 ### Function contracts: `requires` / `ensures`
 
 Eiffel-style runtime-checked preconditions and postconditions. Clauses appear after the typed return arrow and before the body; each is a single boolean expression, panic on violation.
@@ -2178,7 +2319,7 @@ outcomes:
   helper function is not tracked (that would be dataflow analysis).
 - The `--emit=lib` `aether_describe()` metadata doesn't yet surface contracts to FFI consumers; that's the next layer.
 
-See [examples/basics/contracts.ae](../examples/basics/contracts.ae) for runnable demos.
+See [examples/01-language/15-contracts.ae](../examples/01-language/15-contracts.ae) for a runnable example.
 
 ---
 
@@ -2244,7 +2385,7 @@ while i < 1000000 {
 }
 ```
 
-See [examples/basics/string-ownership.ae](../examples/basics/string-ownership.ae) for a runnable demonstration.
+See [examples/01-language/17-ownership.ae](../examples/01-language/17-ownership.ae) for a runnable example.
 
 #### Migrating from 0.835
 
@@ -2384,6 +2525,8 @@ let empty: int? = none      // the absent sentinel
 ```
 
 `T?` works for any element type, value types (`int?`, `float?`, `bool?`, an enum's `Color?`, a distinct type's `Meters?`) and reference types (`string?`, `*Node?`) alike, with one uniform representation, so there is no ambiguity between "the value is a null pointer" and "the key was absent". An optional can also be an element of a tuple, `-> (string?, int)`, returned as `return "pos", n` or `return none, n`, and a tuple can be optional: `let t: (int, int)? = (3, 4)` wraps the tuple literal as it wraps any value (#2833).
+
+A value wraps into an optional on its own, and an optional never unwraps on its own: a `T?` is no `T`, wherever a `T` goes. A binding, a `return`, a field, an element and an argument all refuse it, `shout(maybe(1))` for a `shout(s: string)` included (E0200, *Argument 1 's' of 'shout': expected string, got string?*), and the way out is to say what happens when it holds `none`: `maybe(1) ?? "fallback"`, `maybe(1)!` (which panics on `none`), or a `match`. A local bound to a `T` in one branch or loop body and to a `T?` in another is one `T?` variable (a local first bound in a branch or loop body is one variable for the whole function), so a read of it in either body is optional too, and passing it where a `T` goes names that (#3153).
 
 A struct field can be optional (#2820): `struct Box { v: int?  at: Point? }`. A struct literal (`Box { v: 7, at: none }`) and a field store (`b.v = 9`, `b.v = none`) take the value as an optional binding does, a bare value wrapped. An optional field whose value owns memory (a `string?`, an optional `fn`, or an optional of a struct, a fixed-size array or a tuple that holds a string or a closure, such as `(string, int)?`) owns it as a field of the bare type does: a literal or a store takes the value, and a later store and the struct's destroy release it (#2822).
 
@@ -2609,7 +2752,9 @@ enums are never compatible with each other.
 
 Where the expected type is already a known enum, a member may be written **bare**,
 without the enum prefix. This applies to a function argument, a typed
-initializer, an assignment, a return, and either side of an enum comparison:
+initializer, an assignment, a return, and either side of an enum comparison,
+and to the value of each arm of a `match` or an `if` in one of those places,
+since such a value is converted arm by arm (#3156):
 
 ```aether,fragment
 paint(c: Color) -> string { ... }
@@ -2619,6 +2764,14 @@ let c: Direction = North     // typed initializer
 c = South                    // assignment
 if c == North { ... }        // comparison (either order)
 heading() -> Direction { return West }   // return
+flip(d: Direction) -> Direction {
+    return match d {         // each arm's value, too
+        North -> South
+        South -> North
+        _ -> d
+    }
+}
+let e: Direction = if c == North { East } else { West }
 ```
 
 A real binding always wins: if a variable named `North` is in scope, `North`
@@ -2864,34 +3017,35 @@ follow-up.
 
 ## Structs
 
-Structs group related data:
+Structs group related data, each field with its name and its type:
 
-```aether
+```aether,run
 struct Point {
-    x,
-    y
+    x: int
+    y: int
 }
 
 struct Person {
-    name,
-    age
+    name: string
+    age: int
 }
 
 main() {
-    p = Point { x: 10, y: 20 };
-    print(p.x);  // 10
-    print(p.y);  // 20
+    p = Point { x: 10, y: 20 }
+    who = Person { name: "Ada", age: 36 }
+    println("${p.x} ${p.y} ${who.name} ${who.age}")
 }
 ```
+```output
+10 20 Ada 36
+```
 
-### Explicit Field Types
+### Field Types
+
+A field's type may also come first, C's way, with commas between the
+fields:
 
 ```aether,fragment
-struct Point {
-    int x,
-    int y
-}
-
 struct Config {
     string name,
     int timeout,
@@ -3102,26 +3256,56 @@ Actors are the core concurrency primitive with encapsulated state and message ha
 
 ### Actor Definition
 
-```aether,fragment
+```aether,run
+message Increment {
+    amount: int
+}
+
+message Move {
+    dx: int
+    dy: int
+}
+
+message Show {}
+
 actor Counter {
-    state count = 0;
+    state count = 0
+    state x = 0
 
     receive {
         Increment(amount) -> {
-            count = count + amount;
+            count = count + amount
         }
-        GetCount() -> {
-            print(count);
-            print("\n");
+        Move(dx: step, dy) -> {
+            x = x + step + dy
         }
-        _ -> {
-            print("Unknown message\n");
+        Show -> {
+            println("count ${count}, x ${x}")
         }
     }
 }
+
+main() {
+    c = spawn(Counter())
+    c ! Increment { amount: 5 }
+    c ! Move { dx: 2, dy: 1 }
+    c ! Show {}
+    wait_for_idle()
+}
+```
+```output
+count 5, x 3
 ```
 
-An actor has one arm per message: an arm matches by the message alone, so a second arm for a message the actor already receives (in the same `receive` block or another) could never run, and the compiler refuses it, naming the first.
+An arm binds the message's fields **by name**: `Increment(amount)` binds the
+field `amount`, `Move(dx: step, dy)` binds the field `dx` as `step` and `dy`
+as itself, in any order, and an arm may leave fields out (`Show` binds none).
+A name that is no field of the message is an error at the arm, naming the
+fields it has (#3164); so is a binding named like a state of the actor, which
+the `field: name` form renames. An actor has one arm per message: an arm
+matches by the message alone, so a second arm for a message the actor already
+receives (in the same `receive` block or another) could never run, and the
+compiler refuses it, naming the first.
 
 ### Receive Timeouts
 
@@ -3140,32 +3324,106 @@ actor Monitor {
 }
 ```
 
-The timeout is one-shot: it is cancelled when any message is received. The countdown starts when the actor's mailbox becomes empty.
+The countdown starts when the actor waits on an empty mailbox: at spawn, and again each time it has handled a message. A message that arrives within the interval stops it, and the next wait starts it from the beginning, so the Monitor above warns every time five seconds pass without a heartbeat, however many came before. The timeout fires once per countdown: when its handler has run, only a message starts the next one. A handler that sends the actor a message keeps a cycle going, as a poller does:
+
+```aether,fragment
+actor Poller {
+    state ticks = 0
+
+    receive {
+        Tick -> { ticks = ticks + 1 }
+    } after 1000 -> {
+        self ! Tick {}
+    }
+}
+```
+
+and a handler that sends nothing leaves the actor idle, so `wait_for_idle()` returns. `wait_for_idle()` waits for every countdown that is running, so a poller that never stops keeps it waiting (#3162), and so does the end of `main`: a countdown of a minute that started just before `main` returned holds the exit for that minute. There is no way yet to let `main` end without it (#3219).
 
 ### State Variables
 
-State persists across messages:
+State persists across messages. A state takes its type from its value, or
+from a type written as a struct field's is, `state name: T = value` (#3163),
+for every type a field takes: a number of any width, a string, a struct, an
+enum, a tuple, an optional, a fixed-size array, a closure, and an
+`actor_ref`, which holds another actor's reference. The value is checked
+against a written type as a typed binding's is, and a state written with
+no value starts at its type's zero. The type-first form `state int[100]
+history` is accepted too. An array of references takes its size after
+`actor_ref`, a number or a `const` of the file (`state members:
+actor_ref[8]`), and a typed one after its parameter
+(`actor_ref[Member][8]`): a name after `actor_ref[` that is not such a
+`const` is the actor type (#3189).
 
-```aether,fragment
-actor BankAccount {
-    state balance = 0;
-    state transactions = 0;
-    state int[100] history;
+```aether,run
+message Deposit {
+    amount: int
 }
+
+message Connect {
+    to: actor_ref
+}
+
+message Report {}
+
+message Balance {
+    amount: long
+}
+
+actor Account {
+    state balance: long = 0
+    state history: int[4]
+    state count = 0
+    state auditor: actor_ref = null
+
+    receive {
+        Connect(to) -> {
+            auditor = to
+        }
+        Deposit(amount) -> {
+            balance = balance + amount
+            history[count % 4] = amount
+            count = count + 1
+        }
+        Report -> {
+            auditor ! Balance { amount: balance }
+        }
+    }
+}
+
+actor Auditor {
+    receive {
+        Balance(amount) -> {
+            println("balance ${amount}")
+        }
+    }
+}
+
+main() {
+    a = spawn(Account())
+    a ! Connect { to: spawn(Auditor()) }
+    a ! Deposit { amount: 70 }
+    a ! Deposit { amount: 30 }
+    a ! Report {}
+    wait_for_idle()
+}
+```
+```output
+balance 100
 ```
 
 ### Spawning Actors
 
 ```aether,fragment
-counter = spawn(Counter());
-calculator = spawn(Calculator());
+counter = spawn(Counter())
+calculator = spawn(Calculator())
 ```
 
 ### Sending Messages (Fire-and-Forget)
 
 ```aether,fragment
-counter ! Increment { amount: 10 };
-counter ! Reset {};
+counter ! Increment { amount: 10 }
+counter ! Reset {}
 ```
 
 ### Ask Pattern (Request-Reply)
@@ -3177,7 +3435,7 @@ each message carries its own reply slot.
 
 ```aether,fragment
 // Synchronous request-reply, result is an int (from Result.value)
-result = calculator ? Add { a: 5, b: 3 };
+result = calculator ? Add { a: 5, b: 3 }
 ```
 
 A handler replies in one of two ways, and the ask takes its type from whichever
@@ -3206,13 +3464,49 @@ outlives the handler's own scope, and the asker owns it: it is reclaimed at
 scope exit like any other owned string, and freeing it by hand is not
 required.
 
-If the handler does not call `reply` within the timeout (default 5 seconds), `?`
-returns 0.
+An ask that gets no reply gives the reply type's zero value (`0`, `""`).
+Destructured into two names, it says why, in the result convention: the reply
+and `""`, or the zero value and the reason (#3151):
+
+```aether,fragment
+size, err = store ? GetSize {}
+if err != "" {
+    println("no size: ${err}")
+}
+```
+
+Two names after an ask are always the reply and the reason, whatever the
+reply's type: a reply that is a pair itself is the first name, whole, and is
+destructured from there (`p, err = store ? GetRange {}`, then `lo, hi = p`).
+
+| `err` | when |
+|---|---|
+| `""` | the handler replied |
+| `"ask timed out after 5000 ms"` | no reply within the timeout (default 5 seconds) |
+| `"the actor is dead"` | the actor had died (or was released) before the ask reached it |
+| `"the actor died before it replied"` | the handler panicked with the ask in hand |
+| `"the handler returned without replying"` | the handler that took the ask finished without a `reply` |
+
+An ask to a dead actor, in either form, ends at once rather than after the
+timeout, and so does one whose actor dies before replying or whose handler
+returns without a reply: a `reply` answers the ask its own handler took, so
+none can come later.
+
+An ask made inside a handler blocks the asking actor's core until the reply,
+and no actor is moved onto that core meanwhile. An asked actor that is the
+core's own (an actor the handler spawned starts there) is stepped by the
+waiting thread itself, as a send steps an idle actor of the core, so it
+answers, and one that asks another of the core's actors in turn has it
+stepped the same way: a chain of asks among one core's actors answers
+(#3196, #3220). The core's other actors wait for the reply, so an asked
+actor on another core that asks one of them in turn waits with it, to the
+timeout (#3197).
 
 ### Reply Statement
 
 The `reply` statement sends a response back to the waiting `?` caller. Omitting
-`reply` in a handler that was invoked via `?` causes the caller to time out.
+`reply` in a handler that was invoked via `?` causes the caller to time out
+(`err` is `"ask timed out after 5000 ms"` in the two-name form above).
 
 Actors respond using the `reply` statement:
 
@@ -3220,8 +3514,8 @@ Actors respond using the `reply` statement:
 actor Calculator {
     receive {
         Add(a, b) -> {
-            result = a + b;
-            reply Result { value: result };
+            result = a + b
+            reply Result { value: result }
         }
     }
 }
@@ -3234,7 +3528,7 @@ The `_` pattern catches unmatched messages:
 ```aether,fragment
 receive {
     Known() -> { /* handle */ }
-    _ -> { print("Unknown message\n"); }
+    _ -> { println("unknown message") }
 }
 ```
 
@@ -3264,6 +3558,8 @@ receive {
 | `>=` | Greater or equal | `a >= b` |
 
 > **String comparison:** When both operands are strings, `==` and `!=` compare by content, not by pointer identity: two strings are equal when they have the same length and the same bytes, embedded NULs included, however they were allocated. `<`, `<=`, `>` and `>=` order them byte by byte over their whole length, a string after any proper prefix of it. A string comparison in a function-clause guard (`f(s) when s == "bob"`) works the same way.
+>
+> **A null string is the empty text** wherever it is read as text: `==`, `!=` and the ordering operators, `string.equals`, `string.length`, printing and interpolation (#3129). So `os.getenv("X") != ""` is false for an unset `X`, and `"[${s}]"` is `"[]"` for a null `s`, where it used to give C's `(null)`. Whether there is a string at all is `s == null` (or `s != null`), which compares the pointer: an unset variable is `null`, a variable set to the empty string is not.
 
 ### Bitwise Operators
 
@@ -3375,15 +3671,15 @@ type (`float`, `f32`, `longdouble`). Any other operand is a compile error
 ### Standard Library Imports
 
 ```aether,fragment
-import std.file;         // File operations
-import std.string;       // String utilities
-import std.list;         // ArrayList
-import std.http;         // HTTP client & server
-import std.json;         // JSON parsing
+import std.fs      // files and directories
+import std.string  // string utilities
+import std.list    // a list that grows
+import std.http    // HTTP client and server
+import std.json    // JSON
 
 // Use with namespace syntax
-result = string.new("hello");
-if (file.exists("config.txt") == 1) { }
+loud = string.to_upper("hello")
+if fs.exists("config.txt") == 1 { }
 ```
 
 ### Selective Imports
@@ -3682,10 +3978,10 @@ solve(constraints: ptr, n: int) {
 ### Local Module Imports
 
 ```aether,fragment
-import utils;           // Loads lib/utils/module.ae
-import helpers;         // Loads lib/helpers/module.ae
+import utils    // loads lib/utils/module.ae
+import helpers  // loads lib/helpers/module.ae
 
-result = utils.double_value(21);
+result = utils.double_value(21)
 ```
 
 In `utils.name`, `utils` is the imported module unless a value of that name
@@ -4066,10 +4362,10 @@ animate(el: @keep ptr, tick: fn(@keep ptr, float)) {
 main() {
     registry = list.new()
     shape = list.new()
-    animate(shape) callback |el: @keep ptr, t: float| {
+    animate(shape) callback | el: @keep ptr, t: float | {
         element_set_fill(el, "red")
     }
-    animate(shape) callback |el, t| {     // takes `@keep ptr` and `float`
+    animate(shape) callback | el, t | {     // takes `@keep ptr` and `float`
         element_set_fill(el, "blue")
     }
     println("${list.size(registry)}")
@@ -4128,7 +4424,7 @@ struct Model @observable {
 
 main() {
     m = heap.new(Model)
-    token = observe.observe(m, |obj: ptr| {
+    token = observe.observe(m, | obj: ptr | {
         println("count is now ${m.count}")
     })
     m.count = 1          // count is now 1
@@ -5269,8 +5565,8 @@ Explicit types are optional but can improve clarity:
 
 ```aether,fragment
 // Both are valid:
-x = 42;
-int y = 42;
+x = 42
+int y = 42
 ```
 
 ---
@@ -5279,50 +5575,61 @@ int y = 42;
 
 ### Hello World
 
-```aether
+```aether,run
 main() {
-    print("Hello, World!\n");
+    println("Hello, World!")
 }
+```
+```output
+Hello, World!
 ```
 
 ### Factorial with Pattern Matching
 
-```aether
+```aether,run
 factorial(0) -> 1
 factorial(n) when n > 0 -> n * factorial(n - 1)
 
 main() {
-    print(factorial(10))  // 3628800
+    println(factorial(10))
 }
+```
+```output
+3628800
 ```
 
 ### Counter Actor
 
-```aether
-message Increment { amount: int }
+```aether,run
+message Increment {
+    amount: int
+}
+
 message GetCount {}
 
 actor Counter {
-    state count = 0;
+    state count = 0
 
     receive {
         Increment(amount) -> {
-            count = count + amount;
+            count = count + amount
         }
-        GetCount() -> {
-            print(count);
-            print("\n");
+        GetCount -> {
+            println(count)
         }
     }
 }
 
 main() {
-    c = spawn(Counter());
-    c ! Increment { amount: 5 };
-    c ! Increment { amount: 3 };
-    c ! GetCount {};
-    wait_for_idle();  // Output: 8
+    c = spawn(Counter())
+    c ! Increment { amount: 5 }
+    c ! Increment { amount: 3 }
+    c ! GetCount {}
+    wait_for_idle()
 }
+```
+```output
+8
 ```
 
 ### Resource Management with Defer
@@ -5331,11 +5638,11 @@ main() {
 extern fopen(path: string, mode: string) -> ptr
 extern fclose(file: ptr) -> int
 
-process_file(path) {
-    file = fopen(path, "r");
-    defer fclose(file);
+process_file(path: string) {
+    file = fopen(path, "r")
+    defer fclose(file)
 
-    // Process file...
-    // fclose called automatically
+    // Process the file...
+    // fclose runs when the function returns
 }
 ```

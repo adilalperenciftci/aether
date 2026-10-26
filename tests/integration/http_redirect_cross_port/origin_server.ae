@@ -11,7 +11,6 @@
 import std.http
 
 extern exit(code: int)
-extern http_server_start_raw(server: ptr) -> int
 
 const PORT = 18221
 const TARGET_PORT = 18222
@@ -59,6 +58,6 @@ main() {
     http.server_get(s, "/same", same_origin_handler, 0)
     http.server_get(s, "/landing", echo_handler, 0)
     println("READY")
-    http_server_start_raw(s)
+    _ = http.server_start(s)
     exit(0)
 }

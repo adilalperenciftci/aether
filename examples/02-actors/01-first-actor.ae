@@ -1,0 +1,44 @@
+// A first actor: messages, receive, spawn, send.
+//
+// An actor is a piece of state that only messages reach. `message`
+// declares what can be sent, `actor` declares what an actor does with each
+// kind (its `receive` arms), `spawn` starts one and gives back its
+// reference, and `ref ! Message { ... }` sends without waiting. The actor
+// handles its messages one at a time, in the order one sender sent them,
+// on whichever core the scheduler gives it. `wait_for_idle()` blocks main
+// until every actor has nothing left to do.
+//
+// Run: ae run examples/02-actors/01-first-actor.ae
+// See: docs/language-reference.md#actors
+
+message Greet {
+    name: string
+}
+
+message Wave {}
+
+actor Greeter {
+    receive {
+        Greet(name) -> {
+            println("Hello, ${name}!")
+        }
+        Wave -> {
+            println("*waves*")
+        }
+    }
+}
+
+main() {
+    greeter = spawn(Greeter())
+    greeter ! Greet { name: "Ada" }
+    greeter ! Greet { name: "Grace" }
+    greeter ! Wave {}
+    wait_for_idle()
+    println("main: the greeter is idle")
+}
+
+// Output:
+// Hello, Ada!
+// Hello, Grace!
+// *waves*
+// main: the greeter is idle

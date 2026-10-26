@@ -9,9 +9,8 @@
 //   - Aether-native wrappers (below) use Go-style `(value, err)` tuple
 //     returns and are the idiomatic way to call JSON operations.
 //
-// JSON type constants (returned by json.type):
-//   JSON_NULL = 0, JSON_BOOL = 1, JSON_NUMBER = 2,
-//   JSON_STRING = 3, JSON_ARRAY = 4, JSON_OBJECT = 5
+// What json.type returns, one constant per kind of value: JSON_NULL,
+// JSON_BOOL, JSON_NUMBER, JSON_STRING, JSON_ARRAY and JSON_OBJECT.
 
 import std.bytes
 
@@ -27,8 +26,17 @@ exports(
     array_get,
     obj, arr, str, num, from_int, boolean, null_value, set, push, encode,
     parse_strict, last_error_kind, last_error_line, last_error_col,
-    KIND_OK, KIND_PARSE_ERROR, KIND_OUT_OF_MEMORY, KIND_INVALID_INPUT
+    KIND_OK, KIND_PARSE_ERROR, KIND_OUT_OF_MEMORY, KIND_INVALID_INPUT,
+    JSON_NULL, JSON_BOOL, JSON_NUMBER, JSON_STRING, JSON_ARRAY, JSON_OBJECT
 )
+
+// The kind of a value, as json.type returns it (aether_json.h's JsonType).
+const JSON_NULL = 0
+const JSON_BOOL = 1
+const JSON_NUMBER = 2
+const JSON_STRING = 3
+const JSON_ARRAY = 4
+const JSON_OBJECT = 5
 
 // ---- Structured-error pilot (issue #392) ----
 //
@@ -112,24 +120,15 @@ extern string_concat(a: string, b: string) -> string @heap
 // "expected ':' at 3:17". Caller owns the returned value and must free
 // with json.free.
 //
-// Heap-classification shape: position 1 (the error message) is heap on
-// both return paths so the destructure wrapper at the call site fires
-// uniformly. The failure path uses string_concat(json_last_error(), "")
-// for an owned copy; the success path uses string_concat("", "") for
-// a (tiny) empty heap string. Without both paths returning heap,
-// function_def_returns_heap_at's AND-fold would mark position 1
-// non-heap and every destructure of `_, err = json.parse(...)` would
-// leak the success-path "" allocation — except the success "" was
-// already a literal so there'd be nothing TO leak, only an over-free
-// risk on the failure path. The uniform-heap shape sidesteps the
-// classifier's mixed-path conservatism. See # further-bug-fix4 for
-// the wider context.
+// The error is a copy of the parser's last message, which the next parse
+// overwrites, so it outlives that parse; the caller holds it like any
+// other string (#3168).
 parse(json_str: string) -> ptr! {
     value = json_parse_raw(json_str)
     if value == null {
         return null, string_concat(json_last_error(), "")
     }
-    return value, string_concat("", "")
+    return value, ""
 }
 
 // Issue #392 — structured-error variant of `parse`. Returns the
@@ -149,7 +148,7 @@ parse_strict(json_str: string) -> (ptr, int, string) {
         return null, json_last_error_kind(),
         string_concat(json_last_error(), "")
     }
-    return value, KIND_OK, string_concat("", "")
+    return value, KIND_OK, ""
 }
 
 // Programmatic accessors for the most recent parse failure on this
@@ -166,35 +165,24 @@ last_error_col() -> int { return json_last_error_col() }
 // the most `parse` reads back, is an error rather than output with the
 // deep part replaced by null. The returned string is a refcounted
 // Aether string — no manual free required.
-//
-// Uniform-heap shape on both positions: see `parse` for the rationale.
 stringify(value: ptr) -> string! {
     raw = json_stringify_raw(value)
     if raw == null {
-        return string_concat("", ""), string_concat("json: stringify: nesting deeper than 256 levels", "")
+        return "", "json: stringify: nesting deeper than 256 levels"
     }
-    return string_concat(raw, ""), string_concat("", "")
+    return string_concat(raw, ""), ""
 }
 
 // Read the string payload out of a JSON value. Returns (string, "") on
 // success, ("", error) if `value` is not a JSON_STRING. The returned
 // string is an owned copy — safe to hold past a json.free of the value.
-//
-// Uniform-heap shape on both positions. This is the high-volume avn
-// hot-path identified in `further-bug-fix4.md`: every `b64, _ =
-// json.get_string(jcontent)` in a commit loop is a ~133 KB
-// allocation per call. Pre-refactor the failure-path literal `""`
-// at position 0 made `function_def_returns_heap_at` AND-fold to
-// non-heap, so the destructure wrapper at the call site never set
-// `_heap_b64 = 1` and the function-exit defer-free never ran. avn's
-// 5000-commit bench retained ~666 MB just from this site.
 get_string(value: ptr) -> string! {
     raw = json_get_string_data(value)
     if raw == null {
-        return string_concat("", ""), string_concat("not a string", "")
+        return "", "not a string"
     }
     // Copied by its length, not to a NUL: "a\u0000b" is 3 bytes (#2469).
-    return bytes.string_from_ptr(raw, json_get_string_length(value)), string_concat("", "")
+    return bytes.string_from_ptr(raw, json_get_string_length(value)), ""
 }
 
 // Look up `key` in a JSON object.
@@ -204,7 +192,7 @@ get_string(value: ptr) -> string! {
 // The returned value is borrowed from `obj` — don't json.free it, and
 // don't use it after `obj` is freed.
 object_get(obj: ptr, key: string) -> {
-    if json_type(obj) != 5 {
+    if json_type(obj) != JSON_OBJECT {
         return null, "not an object"
     }
     v = json_object_get_raw(obj, key)
@@ -245,27 +233,21 @@ object_size(obj: ptr) -> int {
 // must not be json.free'd separately, nor used after `obj` is freed.
 // Mutating `obj` during iteration is not supported: order becomes
 // unpredictable and entries may be skipped or revisited.
-// Uniform-heap shape on positions 0 (key) and 2 (error message): all
-// return paths use string_concat so the per-position structural
-// analyzer marks both as heap. The success path's `owned_key` is the
-// big one — iterating a large object via object_entry without this
-// would leak a key allocation per iteration. See `parse` for the
-// wider rationale.
 object_entry(obj: ptr, i: int) -> (string, ptr, string) {
-    if json_type(obj) != 5 {
-        return string_concat("", ""), null, string_concat("not an object", "")
+    if json_type(obj) != JSON_OBJECT {
+        return "", null, "not an object"
     }
     n = json_object_size_raw(obj)
     if i < 0 {
-        return string_concat("", ""), null, string_concat("index out of range", "")
+        return "", null, "index out of range"
     }
     if i >= n {
-        return string_concat("", ""), null, string_concat("index out of range", "")
+        return "", null, "index out of range"
     }
     // Copied by its length, not to a NUL: a key may hold U+0000 (#2469).
     return bytes.string_from_ptr(json_object_key_data_at(obj, i), json_object_key_len_at(obj, i)),
     json_object_value_at(obj, i),
-    string_concat("", "")
+    ""
 }
 
 // Index into a JSON array.
@@ -275,7 +257,7 @@ object_entry(obj: ptr, i: int) -> (string, ptr, string) {
 // An empty error means the value is good, as everywhere else in std (#2439).
 // The returned value is borrowed from `arr`.
 array_get(arr: ptr, index: int) -> {
-    if json_type(arr) != 4 {
+    if json_type(arr) != JSON_ARRAY {
         return null, "not an array"
     }
     if index < 0 || index >= json_array_size(arr) {

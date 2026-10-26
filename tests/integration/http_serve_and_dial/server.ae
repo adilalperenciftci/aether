@@ -9,7 +9,7 @@
 //
 // This exercises two things at once:
 //   1. serve-and-dial is possible when servers start NON-BLOCKING
-//      (http_server_start_background_raw), so one process hosts both.
+//      (http.server_start_background), so one process hosts both.
 //   2. concurrent name resolution across threads is safe — the inner dial
 //      runs on a server worker thread while main's dial runs on the main
 //      thread. A regression to gethostbyname (shared static hostent) would
@@ -26,7 +26,6 @@ import std.string
 extern exit(code: int)
 // Non-blocking start. Present in the C runtime + aether_http_server.h but not
 // yet re-exported through std/net/module.ae, so declare it directly here.
-extern http_server_start_background_raw(server: ptr) -> int
 
 const PORT_C = 18581
 const PORT_D = 18582
@@ -69,8 +68,8 @@ main() {
     }
 
     // Non-blocking: both return immediately and listen on detached threads.
-    http_server_start_background_raw(d)
-    http_server_start_background_raw(c)
+    _ = http.server_start_background(d)
+    _ = http.server_start_background(c)
     sleep(500)
 
     rq = client.request("GET", "http://127.0.0.1:${PORT_C}/x")

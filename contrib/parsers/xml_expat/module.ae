@@ -55,10 +55,11 @@ exports (
     // Closure builder veneer: parse_with { bind_start / bind_end / bind_text }
     parse_full, parse_with, bind_start, bind_end, bind_text,
 
-    // Raw externs — exposed so escape-hatch callers can use the
-    // `xml_*` C symbols directly without going through the Aether-
-    // side wrappers above.
-    xml_parser_new, xml_parser_free,
+    // Raw externs, exposed so escape-hatch callers can use the `xml_*`
+    // C symbols directly. A parser is made and freed by parser_new and
+    // parser_free only: their C functions are xml_expat_new and
+    // xml_expat_free, since std.xml defines xml_parser_new and
+    // xml_parser_free, and a program linking both had two of each.
     xml_parser_set_user_data, xml_parser_get_user_data,
     xml_parser_set_start_handler, xml_parser_set_end_handler,
     xml_parser_set_text_handler,
@@ -69,8 +70,8 @@ exports (
 
 // ---- Raw externs ----------------------------------------------------
 
-extern xml_parser_new() -> ptr
-extern xml_parser_free(p: ptr)
+extern xml_expat_new() -> ptr
+extern xml_expat_free(p: ptr)
 extern xml_parser_set_user_data(p: ptr, ud: ptr)
 extern xml_parser_get_user_data(p: ptr) -> ptr
 extern xml_parser_set_start_handler(p: ptr, fn: ptr)
@@ -90,11 +91,11 @@ extern xml_attr_value(atts: ptr, i: int) -> string
 // MUST call `parser_free(p)` when done (or `defer parser_free(p)` at
 // allocation site).
 parser_new() -> ptr {
-    return xml_parser_new()
+    return xml_expat_new()
 }
 
 parser_free(p: ptr) {
-    xml_parser_free(p)
+    xml_expat_free(p)
 }
 
 // User-data slot forwarded to libexpat's XML_SetUserData. The pointer
@@ -286,11 +287,11 @@ bind_text(_ctx: ptr, cb: @keep fn) {
 // Returns 1 on success, 0 on parse error. (For error details use
 // the raw API — `parse_with` doesn't expose them in v1.)
 builder parse_with(input: string): int {
-    p = xml_parser_new()
+    p = xml_expat_new()
     if p == null { return 0 }
     hs = xml_handlerset_new()
     if hs == null {
-        xml_parser_free(p)
+        xml_expat_free(p)
         return 0
     }
 
@@ -314,6 +315,6 @@ builder parse_with(input: string): int {
     ok = xml_parse_chunk(p, input, n, 1)
 
     xml_handlerset_free(hs)
-    xml_parser_free(p)
+    xml_expat_free(p)
     return ok
 }

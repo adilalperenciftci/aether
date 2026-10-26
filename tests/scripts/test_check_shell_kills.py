@@ -54,16 +54,53 @@ class RememberedPidTest(unittest.TestCase):
         self.assertEqual(len(csk.check_source(
             'kill -- "-$P" 2>/dev/null || kill "$P" 2>/dev/null || true\n')), 2)
 
+    def test_a_job_is_flagged(self):
+        # On Windows the job's process is the native program's stand-in.
+        self.assertEqual(lines('kill %1\n'), [1])
+        self.assertEqual(lines('kill -9 "%$_sj" 2>/dev/null\n'), [1])
+        self.assertEqual(lines('kill -s TERM %2\n'), [1])
+
+
+class TimeoutTest(unittest.TestCase):
+    """timeout(1) signals what it bounds at the limit (#3154)."""
+
+    def test_timeout_as_a_command_is_flagged(self):
+        self.assertEqual(lines('timeout 60 "$AETHERC" "$T/deep.ae" "$T/out.c"\n'), [1])
+        self.assertEqual(lines('gtimeout 30 "$TMP/wscli"\n'), [1])
+        self.assertEqual(lines('out=$(timeout -k 5 30 ./prog)\n'), [1])
+        self.assertEqual(lines('set +e; timeout 5 ./prog; rc=$?\n'), [1])
+        self.assertEqual(lines('command timeout 5 ./prog\n'), [1])
+
+    def test_timeout_held_as_a_prefix_is_flagged(self):
+        self.assertEqual(lines('    TIMEOUT="timeout 30"\n'), [1])
+        self.assertEqual(lines("TO='gtimeout 60'\n"), [1])
+        self.assertEqual(lines('TO=timeout\n'), [1])
+        self.assertEqual(lines('TO="timeout -k 5 30"\n'), [1])
+        self.assertEqual(lines(
+            'if command -v timeout >/dev/null 2>&1; then TIMEOUT="timeout 60"\n'), [1])
+
+    def test_asking_for_timeout_is_not_running_it(self):
+        self.assertEqual(lines('if command -v timeout >/dev/null 2>&1; then\n'), [])
+        self.assertEqual(lines('command -v gtimeout >/dev/null || exit 0\n'), [])
+
+    def test_the_sweep_bound_is_allowed(self):
+        self.assertEqual(lines('sweep_timeout_bound TO "$ROOT" 60\n'), [])
+        self.assertEqual(lines('$TO "$AETHERC" "$T/deep.ae"\n'), [])
+        self.assertEqual(lines('OUT=$(AE_TEST_PORT="$PORT" $TIMEOUT "$TMP/wscli" 2>&1)\n'), [])
+
+    def test_timeout_in_text_is_not_a_command(self):
+        self.assertEqual(lines('echo "  [FAIL] no READY within timeout"\n'), [])
+        self.assertEqual(lines('# a bare `timeout 60` was GNU coreutils\n'), [])
+        self.assertEqual(lines('curl -s --connect-timeout 0.3 --max-time 1 "$U"\n'), [])
+        self.assertEqual(lines('AE_SH_TEST_TIMEOUT=420 sh run.sh\n'), [])
+        self.assertEqual(lines('MSG="timeout reached"\n'), [])
+
 
 class AllowedTest(unittest.TestCase):
     def test_signal_zero_is_a_probe(self):
         self.assertEqual(lines('kill -0 "$pid" 2>/dev/null\n'), [])
         self.assertEqual(lines('while kill -0 "$cpid" 2>/dev/null; do\n'), [])
         self.assertEqual(lines('kill -s 0 "$pid"\n'), [])
-
-    def test_a_job_is_allowed(self):
-        self.assertEqual(lines('kill %1\n'), [])
-        self.assertEqual(lines('kill -9 "%$_sj" 2>/dev/null\n'), [])
 
     def test_the_scripts_own_shell_is_allowed(self):
         self.assertEqual(lines('kill -TERM $$\n'), [])

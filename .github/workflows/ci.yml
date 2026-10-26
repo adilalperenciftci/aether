@@ -1455,7 +1455,7 @@ jobs:
         echo "hello -> $out"
         [ "$out" = "hello from wasi" ]
 
-        ./build/ae build --target=wasm32-wasi examples/actors/counter.ae \
+        ./build/ae build --target=wasm32-wasi examples/02-actors/02-state.ae \
           -o "$RUNNER_TEMP/counter.wasm"
         out="$(timeout 60 "$WASMTIME" "$RUNNER_TEMP/counter.wasm")"
         echo "$out"

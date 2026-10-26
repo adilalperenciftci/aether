@@ -48,7 +48,6 @@ sneaky() {
 
 boom() -> int {
     panic("boom")
-    return 0
 }
 
 // A trusted service with a fence of its own, as an injected service keeps
@@ -225,5 +224,5 @@ main() {
         }
     }
 
-    _rc = spec.run_summary(fw)
+    return spec.run_summary(fw)
 }

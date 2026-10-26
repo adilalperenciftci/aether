@@ -1,0 +1,92 @@
+// A state machine: an actor whose state is an enum.
+//
+// The actor's state says where the door is, and each message carries an
+// event. Which event leads where is a plain function of the two enums,
+// the transition table, which gives the next state or `none` for an
+// event that makes no sense there. A `match` over an enum must name every
+// case, so a new state or event shows every place that has to learn it.
+// The actor applies one event at a time, so no event ever sees the door
+// half-way between two states. Main asks for each answer, so the
+// transcript prints in order.
+//
+// Run: ae run examples/02-actors/08-state-machine.ae
+// See: docs/language-reference.md#enums
+
+enum Door { Closed, Open, Locked }
+
+enum Event { Push, Pull, Lock, Unlock }
+
+message Press {
+    event: Event
+}
+
+// The transition table: where `e` takes a door that is `d`, if anywhere.
+next(d: Door, e: Event) -> Door? {
+    return match d {
+        Closed -> match e {
+            Push -> Door.Open
+            Lock -> Door.Locked
+            _ -> none
+        }
+        Open -> match e {
+            Pull -> Door.Closed
+            _ -> none
+        }
+        Locked -> match e {
+            Unlock -> Door.Closed
+            _ -> none
+        }
+    }
+}
+
+door_name(d: Door) -> string {
+    return match d {
+        Closed -> "closed"
+        Open -> "open"
+        Locked -> "locked"
+    }
+}
+
+event_name(e: Event) -> string {
+    return match e {
+        Push -> "push"
+        Pull -> "pull"
+        Lock -> "lock"
+        Unlock -> "unlock"
+    }
+}
+
+actor DoorControl {
+    state door: Door = Door.Closed
+
+    receive {
+        Press(event) -> {
+            answer = ""
+            to = next(door, event)
+            if to != none {
+                answer = "${event_name(event)}: ${door_name(door)} -> ${door_name(to)}"
+                door = to
+            } else {
+                answer = "${event_name(event)}: refused, the door is ${door_name(door)}"
+            }
+            reply answer
+        }
+    }
+}
+
+main() {
+    d = spawn(DoorControl())
+    events = [Event.Push, Event.Lock, Event.Pull, Event.Lock, Event.Push, Event.Unlock, Event.Push]
+    for i in 0..events.len {
+        println(d ? Press { event: events[i] })
+    }
+}
+
+// Output:
+// push: closed -> open
+// lock: refused, the door is open
+// pull: open -> closed
+// lock: closed -> locked
+// push: refused, the door is locked
+// unlock: locked -> closed
+// push: closed -> open

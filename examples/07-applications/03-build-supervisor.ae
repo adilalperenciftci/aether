@@ -1,0 +1,83 @@
+// A build supervisor: run a command with a deadline, and clean up after it.
+//
+// `os.run_supervised(prog, argv, env, own_group, forward_signals,
+// timeout_secs, reap_group)` runs a program in a process group of its own
+// (a Job Object on Windows), passes Ctrl-C on to the whole group, stops it
+// at the deadline (TERM, five seconds' grace, then KILL, reported as exit
+// code 124 the way GNU timeout does), and afterwards ends anything it left
+// running: a test server, a helper in the background. It returns the exit
+// code and how the program ended: "exited", "signalled" (never on
+// Windows), "timeout" or "error". That is a CI step or a build wrapper in
+// one call, so a supervisor is a short program, and its settings are code.
+//
+// Given a command after `--` it supervises that command and exits with its
+// code: `ae run examples/07-applications/03-build-supervisor.ae -- make
+// -j8`. With none, it supervises three jobs of its own, this program
+// started again: one that succeeds, one that fails, one that never ends.
+//
+// Run: ae run examples/07-applications/03-build-supervisor.ae
+// See: docs/stdlib-reference.md
+
+import std.list
+import std.os
+
+// The deadline for a command given on the command line, in seconds.
+const TIMEOUT_SECS = 600
+
+// A job of the demonstration, run as `<this program> job <kind>`.
+job(kind: string) {
+    if kind == "fail" {
+        exit(3)
+    }
+    if kind == "hang" {
+        while true {
+            sleep(1000)
+        }
+    }
+}
+
+// Run `prog` with `args` under supervision; say how it ended.
+supervise(label: string, prog: string, args: ptr, timeout: int) -> int {
+    code, outcome = os.run_supervised(prog, args, null, 1, 1, timeout, 1)
+    if outcome == "timeout" {
+        println("${label}: stopped at its ${timeout} s deadline (code ${code})")
+    } else if outcome == "exited" {
+        verdict = if code == 0 { "succeeded" } else { "failed" }
+        println("${label}: ${verdict} (code ${code})")
+    } else {
+        println("${label}: ${outcome} (code ${code})")
+    }
+    return code
+}
+
+main() {
+    n = os.args_count()
+    if n > 2 && os.args_get(1) == "job" {
+        job(os.args_get(2))
+        return
+    }
+
+    if n > 1 {
+        args = list.new()
+        defer list.free(args)
+        for i in 2..n {
+            list.add(args, os.args_get(i))
+        }
+        exit(supervise(os.args_get(1), os.args_get(1), args, TIMEOUT_SECS))
+    }
+
+    me = os.argv0()
+    kinds = ["ok", "fail", "hang"]
+    for i in 0..kinds.len {
+        args = list.new()
+        list.add(args, "job")
+        list.add(args, kinds[i])
+        supervise("job ${kinds[i]}", me, args, 2)
+        list.free(args)
+    }
+}
+
+// Output:
+// job ok: succeeded (code 0)
+// job fail: failed (code 3)
+// job hang: stopped at its 2 s deadline (code 124)

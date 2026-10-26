@@ -30,7 +30,7 @@ exports(
     http_response_body_str, http_response_headers_str,
     http_response_status, http_response_body, http_response_headers,
     http_response_error, http_response_ok,
-    get, get_with_timeout, post, put, delete,
+    get, get_with_timeout, post, put, delete, status_text,
     http_client_pool_configure_raw, http_client_pool_clear_raw,
     http_client_pool_idle_count_raw, http_client_rx_buffer_allocs_raw,
     client_pool_configure, client_pool_disable, client_pool_clear,
@@ -42,6 +42,7 @@ exports(
     http_server_set_tls_raw, server_set_tls,
     http_server_set_keepalive_raw, server_set_keepalive,
     http_server_set_h2_raw, server_set_h2,
+    http_server_set_multi_accept_raw, server_set_multi_accept,
     http_server_set_h2_concurrent_dispatch_raw, server_set_h2_concurrent_dispatch,
     http_server_drain_connection,
     http_server_shutdown_graceful_raw, server_shutdown_graceful,
@@ -132,6 +133,7 @@ extern http_response_body(response: ptr) -> string @heap
 extern http_response_headers(response: ptr) -> string
 extern http_response_error(response: ptr) -> string
 extern http_response_ok(response: ptr) -> int
+extern http_status_text(code: int) -> string
 
 // string_concat used internally to duplicate borrowed strings before the
 // backing response is freed. The concat of any string with "" produces a
@@ -144,8 +146,8 @@ extern string_concat(a: string, b: string) -> string @heap
 //
 // On success, the error string is empty ("") and the value is valid.
 // On failure, the value is a zero-value ("" or 0) and the error string
-// describes what went wrong. Errors include both transport-level
-// failures (DNS, connect, send) and non-2xx HTTP status codes.
+// describes what went wrong: a transport failure (DNS, connect, send)
+// names its cause, and a status other than 2xx reads "HTTP 404 Not Found".
 
 // Resize the idle connection pool: how many idle connections to keep in
 // total, how many of those may be to one origin, and how long an unused one
@@ -188,9 +190,19 @@ client_rx_buffer_allocs() -> long {
     return http_client_rx_buffer_allocs_raw()
 }
 
-// GET a URL and return the response body. Most common case.
-get(url: string) -> {
-    response = http_get_raw(url)
+// The reason phrase registered for a status code ("Not Found" for 404), or
+// "" for a code nobody registered. Names a status a std.http.client
+// response carries as well as the ones the wrappers below report.
+status_text(code: int) -> string {
+    return http_status_text(code)
+}
+
+// What every one-line call below returns for its response, which it frees:
+// the body and "" for a 2xx; "" and the transport error when there was no
+// response; "" and "HTTP 404 Not Found" (the status and its reason) for any
+// other status, so a caller can tell a missing page from a failing server.
+// std.http.client hands back the whole response instead.
+response_result(response: ptr) -> {
     if response == null {
         return "", "out of memory"
     }
@@ -201,13 +213,13 @@ get(url: string) -> {
         return "", err_copy
     }
     status = http_response_status(response)
-    if status < 200 {
+    if status < 200 || status >= 300 {
         http_response_free(response)
-        return "", "unexpected status"
-    }
-    if status >= 300 {
-        http_response_free(response)
-        return "", "http error"
+        reason = http_status_text(status)
+        if reason == "" {
+            return "", "HTTP ${status}"
+        }
+        return "", "HTTP ${status} ${reason}"
     }
     body = http_response_body(response)
     body_copy = string_concat(body, "")
@@ -215,117 +227,34 @@ get(url: string) -> {
     return body_copy, ""
 }
 
+// GET a URL and return the response body. Most common case.
+get(url: string) -> {
+    return response_result(http_get_raw(url))
+}
+
 // GET a URL with a per-call timeout. Same return shape
-// as `get`. Use this for any third-party URL — without it, a hung
+// as `get`. Use this for any third-party URL: without it, a hung
 // site stalls the calling actor's whole message handler. 0ns
 // preserves `get`'s "block forever" default; values <1000 are rounded
 // up to 1 second under the hood (the underlying socket-timeout field
 // is integer seconds today).
 get_with_timeout(url: string, timeout: Duration) -> {
-    response = http_get_with_timeout_ns_raw(url, timeout)
-    if response == null {
-        return "", "out of memory"
-    }
-    err = http_response_error(response)
-    if err != "" {
-        err_copy = string_concat(err, "")
-        http_response_free(response)
-        return "", err_copy
-    }
-    status = http_response_status(response)
-    if status < 200 {
-        http_response_free(response)
-        return "", "unexpected status"
-    }
-    if status >= 300 {
-        http_response_free(response)
-        return "", "http error"
-    }
-    body = http_response_body(response)
-    body_copy = string_concat(body, "")
-    http_response_free(response)
-    return body_copy, ""
+    return response_result(http_get_with_timeout_ns_raw(url, timeout))
 }
 
 // POST a body and return the response body.
 post(url: string, body: string, content_type: string) -> {
-    response = http_post_raw(url, body, content_type)
-    if response == null {
-        return "", "out of memory"
-    }
-    err = http_response_error(response)
-    if err != "" {
-        err_copy = string_concat(err, "")
-        http_response_free(response)
-        return "", err_copy
-    }
-    status = http_response_status(response)
-    if status < 200 {
-        http_response_free(response)
-        return "", "unexpected status"
-    }
-    if status >= 300 {
-        http_response_free(response)
-        return "", "http error"
-    }
-    result = http_response_body(response)
-    result_copy = string_concat(result, "")
-    http_response_free(response)
-    return result_copy, ""
+    return response_result(http_post_raw(url, body, content_type))
 }
 
 // PUT a body and return the response body.
 put(url: string, body: string, content_type: string) -> {
-    response = http_put_raw(url, body, content_type)
-    if response == null {
-        return "", "out of memory"
-    }
-    err = http_response_error(response)
-    if err != "" {
-        err_copy = string_concat(err, "")
-        http_response_free(response)
-        return "", err_copy
-    }
-    status = http_response_status(response)
-    if status < 200 {
-        http_response_free(response)
-        return "", "unexpected status"
-    }
-    if status >= 300 {
-        http_response_free(response)
-        return "", "http error"
-    }
-    result = http_response_body(response)
-    result_copy = string_concat(result, "")
-    http_response_free(response)
-    return result_copy, ""
+    return response_result(http_put_raw(url, body, content_type))
 }
 
 // DELETE a URL and return the response body.
 delete(url: string) -> {
-    response = http_delete_raw(url)
-    if response == null {
-        return "", "out of memory"
-    }
-    err = http_response_error(response)
-    if err != "" {
-        err_copy = string_concat(err, "")
-        http_response_free(response)
-        return "", err_copy
-    }
-    status = http_response_status(response)
-    if status < 200 {
-        http_response_free(response)
-        return "", "unexpected status"
-    }
-    if status >= 300 {
-        http_response_free(response)
-        return "", "http error"
-    }
-    result = http_response_body(response)
-    result_copy = string_concat(result, "")
-    http_response_free(response)
-    return result_copy, ""
+    return response_result(http_delete_raw(url))
 }
 
 // HTTP Server - lifecycle
@@ -422,6 +351,24 @@ extern http_server_set_h2_concurrent_dispatch_raw(server: ptr, worker_count: int
 
 server_set_h2_concurrent_dispatch(server: ptr, worker_count: int) -> {
     return http_server_set_h2_concurrent_dispatch_raw(server, worker_count)
+}
+
+// Multi-accept (#3194): in actor dispatch mode, one listener per core (up
+// to 16) on the server's one port, each with SO_REUSEPORT and an accept
+// thread of its own, the kernel spreading connections across them. For
+// connection rates where a single accept() is the bottleneck. `on` is 1 or
+// 0; off by default, and thread-pool mode does not use it. Call it before
+// server_start, after server_bind or without it: a bound socket is kept as
+// the first listener and gives the others its port (a port 0's included),
+// and without one a port 0 is resolved once, so server_port reports the
+// port every listener shares. Returns "" on success, or an error where the
+// kernel does not spread connections across the listeners: it does on Linux
+// and DragonFly (SO_REUSEPORT) and FreeBSD (SO_REUSEPORT_LB), not on
+// Windows, macOS, OpenBSD or NetBSD.
+extern http_server_set_multi_accept_raw(server: ptr, on: int) -> string
+
+server_set_multi_accept(server: ptr, on: int) -> {
+    return http_server_set_multi_accept_raw(server, on)
 }
 
 // HTTP/1.1 keep-alive (#260 Tier 0). When enabled, the server reads
@@ -994,7 +941,7 @@ extern http_request_body_complete(req: ptr) -> int
 extern http_get_request_body_read() -> ptr
 extern http_get_request_body_read_length() -> int
 extern http_release_request_body_read()
-extern string_new_with_length(data: ptr, length: long) -> string @heap
+extern string_new_with_length(data: ptr, length: size_t) -> string @heap
 extern http_request_query(req: ptr) -> string
 
 // Trusted TCP peer address — the IP `getpeername(2)` reports for the

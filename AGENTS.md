@@ -143,7 +143,7 @@ plays that role), no interfaces.
 - **A test that has never failed has not been shown to work.** An agent
   writes the change and its tests together, so writing the test first
   proves nothing. Before committing, break the change (revert the fix, or
-  run `ae run examples/mutation-testing/mutate.ae -- <sut.ae> <test.ae>`)
+  run `ae run examples/06-tooling/02-mutation/mutate.ae -- <sut.ae> <test.ae>`)
   and watch the new test fail. For a safety property, remove the guard and
   confirm the test notices. `CONTRIBUTING.md` ("Prove the test can fail")
   has the details.

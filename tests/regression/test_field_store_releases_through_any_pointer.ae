@@ -53,7 +53,7 @@ fn check(cond: bool, msg: string) {
 
 // A pointer into a list, handed back by a call.
 widget(items: ptr, id: int) -> *Widget {
-    return list_get_raw(items, id) as *Widget
+    return list.at(items, id) as *Widget
 }
 
 set_label(items: ptr, id: int, text: string) {
@@ -110,13 +110,13 @@ malloc_box(text: string) -> int {
 
 round(word: string) -> int {
     items = list_new()
-    list_add_raw(items, heap.new(Widget) as ptr)
+    _ = list.add(items, heap.new(Widget) as ptr)
     set_label(items, 0, word)
     set_label(items, 0, word)
     w = widget(items, 0)
     check(w.label == "w!", "a store through a pointer a call returned")
-    set_clip(list_get_raw(items, 0), word)
-    set_clip(list_get_raw(items, 0), word)
+    set_clip(list.at(items, 0), word)
+    set_clip(list.at(items, 0), word)
     check(w.label == "w?", "a store through a cast parameter")
     set_parts(w, word)
     set_parts(w, word)

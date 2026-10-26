@@ -1,0 +1,28 @@
+// `as` converts an enum to an integer and an integer to an enum (#3157), the
+// conversion a binding makes on its own; it was refused as "cannot cast
+// Direction to int with `as`".
+
+extern exit(code: int)
+
+enum Direction { North, East, South = 7, West }
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    check(Direction.East as int == 1, "an enum as int")
+    check(Direction.West as int == 8, "an explicit value counts on")
+    check(Direction.South as long == 7, "an enum as long")
+    check(Direction.West as byte == 8, "an enum as byte")
+    check(7 as Direction == Direction.South, "an int as an enum")
+    b = 1 as byte
+    check(b as Direction == Direction.East, "a byte as an enum")
+    n = 3
+    d = (n - 2) as Direction
+    check(d == Direction.East, "an expression as an enum")
+    println("PASS")
+}

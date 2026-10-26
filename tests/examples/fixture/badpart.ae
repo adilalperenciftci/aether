@@ -1,0 +1,9 @@
+// Part of a file that is no example.
+//
+// Part of: tests/examples/fixture/nothing.ae
+
+exports(one)
+
+one() -> int {
+    return 1
+}

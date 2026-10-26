@@ -1,0 +1,48 @@
+// Your own C: a C file the program ships, and the calls into it.
+//
+// `@source("shim.c")` at the top of the file compiles shim.c into the
+// program, so `ae run` needs no flags and no build script. Each function
+// is declared with `extern`. A `string` goes to C as its characters; a
+// slice or an array goes as a pointer to its elements, so C can fill
+// memory the program owns; a struct goes by pointer, `&p`, when its layout
+// is the C struct's. A `const char*` C returns is C's: storing it in a
+// `string` copies it into a string the program owns, so C may keep or
+// reuse its buffer. docs/c-interop.md covers callbacks, renaming,
+// variadic functions and C headers.
+//
+// Run: ae run examples/04-interop/02-own-c/main.ae
+// See: docs/c-interop.md
+
+@source("shim.c")
+
+extern shim_fnv1a(text: string) -> uint32
+extern shim_fill_squares(out: int[], n: int)
+extern shim_version() -> string
+extern shim_mirror(p: *Point)
+
+struct Point {
+    x: int
+    y: int
+}
+
+main() {
+    println("fnv1a(\"aether\") = ${shim_fnv1a("aether")}")
+
+    squares = make([]int, 5)
+    defer free(squares)
+    shim_fill_squares(squares, squares.len)
+    println("squares: ${squares[0]} ${squares[1]} ${squares[2]} ${squares[3]} ${squares[4]}")
+
+    v = shim_version()
+    println("version: ${v}")
+
+    p = Point { x: 3, y: 8 }
+    shim_mirror(&p)
+    println("mirrored: ${p.x},${p.y}")
+}
+
+// Output:
+// fnv1a("aether") = 2288658004
+// squares: 0 1 4 9 16
+// version: shim 1.2
+// mirrored: 8,3

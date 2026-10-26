@@ -79,19 +79,20 @@ static void get_timestamp(char* buffer, size_t size) {
     strftime(buffer, size, "%Y-%m-%d %H:%M:%S", &tm_buf);
 }
 
-// Initialize logging. Returns 1 on success, 0 if the requested log
-// file could not be opened (logging still works, falling back to stderr).
-// The Aether wrapper `log.init` turns 0 into an error string.
+// Initialize logging. NULL, "" and "-" mean stderr. Returns 1 on success,
+// 0 if the requested log file could not be opened (logging still works,
+// falling back to stderr). The Aether wrapper `log.init` turns 0 into an
+// error naming the file, so this prints nothing of its own.
 int log_init_raw(const char* filename, LogLevel min_level) {
     int ok = 1;
-    if (g_log.initialized && g_log.config.output_file) {
+    if (g_log.initialized && g_log.config.output_file &&
+        g_log.config.output_file != stderr && g_log.config.output_file != stdout) {
         fclose(g_log.config.output_file);
     }
 
-    if (filename) {
+    if (filename && filename[0] && strcmp(filename, "-") != 0) {
         g_log.config.output_file = fopen(filename, "a");
         if (!g_log.config.output_file) {
-            fprintf(stderr, "[LOG] Failed to open log file: %s\n", filename);
             g_log.config.output_file = stderr;
             ok = 0;
         }
@@ -105,7 +106,8 @@ int log_init_raw(const char* filename, LogLevel min_level) {
 }
 
 void log_init_with_config(LogConfig* config) {
-    if (g_log.initialized && g_log.config.output_file) {
+    if (g_log.initialized && g_log.config.output_file &&
+        g_log.config.output_file != stderr && g_log.config.output_file != stdout) {
         fclose(g_log.config.output_file);
     }
 
@@ -126,8 +128,8 @@ void log_shutdown(void) {
     g_log.initialized = 0;
 }
 
-// Core logging function
-void log_write(LogLevel level, const char* fmt, ...) {
+// Core logging function, printf-style: the LOG_* macros.
+void log_writef(LogLevel level, const char* fmt, ...) {
     if (!g_log.initialized) {
         log_init_raw(NULL, LOG_LEVEL_INFO);
     }
@@ -172,6 +174,12 @@ void log_write(LogLevel level, const char* fmt, ...) {
     if (level == LOG_LEVEL_FATAL) {
         abort();
     }
+}
+
+// A message written as it is. Aether's log.write lands here, so a "%" in the
+// text is a percent sign, not a conversion reading arguments nobody passed.
+void log_write(LogLevel level, const char* msg) {
+    log_writef(level, "%s", msg ? msg : "");
 }
 
 // Logging with source location

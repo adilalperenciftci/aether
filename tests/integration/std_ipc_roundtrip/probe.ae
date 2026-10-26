@@ -16,6 +16,20 @@
 //      ipc.parent_channel() == -1 and exits 1 with an error
 //      message. Pins the contract that AETHER_IPC_FD only appears
 //      when the parent uses run_pipe.
+//
+//   4-6. A program that cannot start is an err with no child, through
+//      run_pipe and run_pipe_drain_and_wait, and one that ran and
+//      exited 127 is exit 127 with no err (#3170). Both used to read
+//      as exit 127.
+//
+//   7. An explicit env is the child's, with AETHER_IPC_FD=3 in place of
+//      the one it gives. It used to make the child exit 127 without
+//      running the program, and then was refused.
+//
+//   8. With an AETHER_IPC_FD of this process's own, the child's is still
+//      3: the parent builds the child's env, environ without its own entry
+//      plus AETHER_IPC_FD=3, where the child used to setenv it between
+//      fork and exec (#3200).
 
 import std.os
 import std.fs
@@ -164,10 +178,85 @@ main() {
         }
     }
 
+    // Case 4 — run_pipe on a program that cannot start (#3170).
+    {
+        argv4 = list.new()
+        fd4, pid4, err4 = os.run_pipe("/no/such/program_3170", argv4, null)
+        if fd4 != -1 || pid4 != -1 || err4 != "program not found" {
+            println("  [4] FAIL run_pipe missing program: (${fd4}, ${pid4}, '${err4}'), expected (-1, -1, 'program not found')")
+            failed = failed + 1
+        } else {
+            println("  [4] PASS run_pipe missing program → (-1, -1, program not found)")
+            passed = passed + 1
+        }
+    }
+
+    // Case 5 — run_pipe_drain_and_wait on a program that cannot start.
+    {
+        argv5 = list.new()
+        _p5, code5, err5 = os.run_pipe_drain_and_wait("/no/such/program_3170", argv5, null)
+        if code5 != -1 || err5 != "program not found" {
+            println("  [5] FAIL run_pipe_drain_and_wait missing program: exit=${code5} err='${err5}', expected -1 'program not found'")
+            failed = failed + 1
+        } else {
+            println("  [5] PASS run_pipe_drain_and_wait missing program → (-1, program not found)")
+            passed = passed + 1
+        }
+    }
+
+    // Case 6 — a program that ran and exited 127 is just that.
+    {
+        argv6 = list.new()
+        list.add(argv6, "-c")
+        list.add(argv6, "exit 127")
+        _p6, code6, err6 = os.run_pipe_drain_and_wait("/bin/sh", argv6, null)
+        if code6 != 127 || err6 != "" {
+            println("  [6] FAIL run_pipe_drain_and_wait sh 'exit 127': exit=${code6} err='${err6}', expected 127 and no err")
+            failed = failed + 1
+        } else {
+            println("  [6] PASS run_pipe_drain_and_wait sh 'exit 127' → 127, no err")
+            passed = passed + 1
+        }
+    }
+
+    // Case 7: an explicit env is the child's, with AETHER_IPC_FD=3 in place
+    // of one the env gives. It was refused ("explicit env unsupported").
+    {
+        argv7 = list.new()
+        list.add(argv7, "-c")
+        list.add(argv7, "printf '%s %s' \"$A\" \"$AETHER_IPC_FD\" >&3")
+        env7 = list.new()
+        list.add(env7, "A=1")
+        list.add(env7, "AETHER_IPC_FD=9")
+        p7, code7, err7 = os.run_pipe_drain_and_wait("/bin/sh", argv7, env7)
+        if err7 != "" || code7 != 0 || p7 != "1 3" {
+            println("  [7] FAIL run_pipe with env: payload='${p7}' exit=${code7} err='${err7}', expected '1 3', 0 and no err")
+            failed = failed + 1
+        } else {
+            println("  [7] PASS run_pipe with an explicit env → the child has it, AETHER_IPC_FD=3")
+            passed = passed + 1
+        }
+    }
+
+    // Case 8 — this process's own AETHER_IPC_FD does not reach the child.
+    {
+        os.setenv("AETHER_IPC_FD", "9")
+        argv8 = list.new()
+        payload8, code8, err8 = os.run_pipe_drain_and_wait(child_bin, argv8, null)
+        os.unsetenv("AETHER_IPC_FD")
+        if err8 != "" || code8 != 0 || string_equals(payload8, EXPECTED_PAYLOAD) == 0 {
+            println("  [8] FAIL with AETHER_IPC_FD=9 here: exit=${code8} err='${err8}' payload=${payload8}")
+            failed = failed + 1
+        } else {
+            println("  [8] PASS with AETHER_IPC_FD=9 here, the child's is 3 (payload byte-equal, exit 0)")
+            passed = passed + 1
+        }
+    }
+
     fs.delete(child_bin)
 
     println("")
-    println("std_ipc_roundtrip: ${passed} passing, ${failed} failing (of 3)")
+    println("std_ipc_roundtrip: ${passed} passing, ${failed} failing (of 8)")
     if failed > 0 {
         exit(1)
     }

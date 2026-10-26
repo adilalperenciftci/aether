@@ -8,20 +8,20 @@ A DSL-style HTTP server library. Port of [Tiny](https://github.com/phamm/tiny).
 server = web_server_host("localhost", 8080) {
 
     path("/foo") {
-        filter(GET, "/.*") |req, res, ctx| {
+        filter(GET, "/.*") | req, res, ctx | {
             return CONTINUE
         }
-        end_point(GET, "/bar") |req, res, ctx| {
+        end_point(GET, "/bar") | req, res, ctx | {
             response_write(res, "Hello, World!")
         }
-        web_socket("/eee") |msg, sender, ctx| {
+        web_socket("/eee") | msg, sender, ctx | {
             http.ws_send_text(sender, "Echo: ${msg}")
         }
     }
 
     serve_static("/static", ".")
 
-    end_point(GET, "/users/(\\w+)") |req, res, ctx| {
+    end_point(GET, "/users/(\\w+)") | req, res, ctx | {
         response_write(res, "User: ${request_get_path_param(ctx, \"1\")}")
     }
 }
@@ -88,7 +88,7 @@ IPv6 loopback alone, and `"localhost"` still means 127.0.0.1.
 
 ```aether
 server = tinyweb.web_server_host("::", 8443) {
-    tinyweb.end_point(tinyweb.GET, "/") |req: ptr, res: ptr, ctx: ptr| {
+    tinyweb.end_point(tinyweb.GET, "/") | req: ptr, res: ptr, ctx: ptr | {
         tinyweb.response_write(res, "hello over either family")
     }
 }
@@ -98,7 +98,7 @@ server = tinyweb.web_server_host("::", 8443) {
 
 ```aether
 server = tinyweb.web_server_host("0.0.0.0", 443) {
-    tinyweb.end_point(tinyweb.GET, "/") |req: ptr, res: ptr, ctx: ptr| {
+    tinyweb.end_point(tinyweb.GET, "/") | req: ptr, res: ptr, ctx: ptr | {
         tinyweb.response_write(res, "hello over https")
     }
 }
@@ -133,7 +133,7 @@ user = schema.record() {
 registry = list.new()
 server = tinyweb.web_server_host("127.0.0.1", 8080) {
     u = schema_api.json_api("/users", user) {
-        schema_api.create() |req, res, ctx| {
+        schema_api.create() | req, res, ctx | {
             // body already parsed, coerced, and normalized: handle it
             tinyweb.response_write_status(res, "{\"ok\":true}", 201)
         }

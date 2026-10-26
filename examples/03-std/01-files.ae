@@ -1,0 +1,81 @@
+// Files: write, read, list and remove them with std.fs.
+//
+// std.fs is the file system module: `fs.write` and `fs.read` take a path
+// and the whole text, and every call that can fail returns an error string
+// beside its value (`""` when it worked). The example works in a fresh
+// directory under the system's temp directory, made with
+// `fs.make_temp_dir`, and `defer fs.remove_tree` deletes it however main
+// ends. `fs.walk` visits a tree, calling a closure for each entry; the
+// order a directory lists its entries in is the platform's, so the names
+// are sorted before they are printed.
+//
+// Run: ae run examples/03-std/01-files.ae
+// See: docs/stdlib-reference.md
+
+import std.fs
+import std.list
+import std.sort
+import std.string
+
+main() {
+    root, err = fs.make_temp_dir("", "aether-files-")
+    if err != "" {
+        println("no temp dir: ${err}")
+        exit(1)
+    }
+    defer fs.remove_tree(root)
+
+    notes = fs.join_clean(root, "notes.txt")
+    werr = fs.write(notes, "buy milk\ncall the bank\nwrite the report\n")
+    if werr != "" {
+        println("write failed: ${werr}")
+        exit(1)
+    }
+    text, rerr = fs.read(notes)
+    size, _ = fs.size(notes)
+    lines = string.lines(string.trim(text))
+    println("notes.txt: ${size} bytes, ${string.seq_length(lines)} lines, read error [${rerr}]")
+    println("first line: ${string.seq_head(lines)}")
+
+    _, missing = fs.read(fs.join_clean(root, "missing.txt"))
+    println("reading a missing file fails: ${missing != ""}")
+
+    // A small tree, walked.
+    fs.mkdir_p(fs.join_clean(root, "src/util"))
+    fs.write(fs.join_clean(root, "src/main.ae"), "main() {}\n")
+    fs.write(fs.join_clean(root, "src/util/strings.ae"), "\n")
+    found = list.new()
+    defer list.free(found)
+    fs.walk(root) | path: string, kind: int, depth: int | {
+        if depth > 0 {
+            name = string.replace_all(fs.rel(root, path), "\\", "/")
+            tag = if kind == fs.STAT_KIND_DIR { "/" } else { "" }
+            list.add(found, "${name}${tag}")
+        }
+        return fs.WALK_CONTINUE
+    }
+    names = make([]string, list.size(found))
+    defer free(names)
+    for i in 0..names.len {
+        name, _ = list.get_string(found, i)
+        names[i] = name
+    }
+    sort.strings(names)
+    for i in 0..names.len {
+        println("  ${names[i]}")
+    }
+
+    fs.delete(notes)
+    println("notes.txt exists after delete: ${fs.exists(notes) == 1}")
+}
+
+// Output:
+// notes.txt: 40 bytes, 3 lines, read error []
+// first line: buy milk
+// reading a missing file fails: true
+//   notes.txt
+//   src/
+//   src/main.ae
+//   src/util/
+//   src/util/strings.ae
+// notes.txt exists after delete: false

@@ -207,7 +207,7 @@ events, methods named after each Aether function, and `AutoCloseable`
 so try-with-resources releases the `Arena`. The host developer writes
 no JNI, no `MethodHandle` lookups, no `MemorySegment` plumbing. See
 **[`embedded-namespaces-and-host-bindings.md`](embedded-namespaces-and-host-bindings.md)**
-for the design and `examples/embedded-java/trading/` for a worked example.
+for the design and `examples/04-interop/06-java-host/` for a worked example.
 
 For hosts that want raw FFI without the namespace SDK:
 
@@ -237,7 +237,7 @@ The original sketch:
 main() {
     server = web_server(8080) {
         path("/api") {
-            end_point(GET, "/health") |req, res, ctx| { ... }
+            end_point(GET, "/health") | req, res, ctx | { ... }
         }
     }
     return server  // the map IS the config
@@ -339,7 +339,7 @@ inv = host_call("get_inventory")
 
 web_server(8080) {
     path("/api/cart") {
-        end_point(POST, "/add") |req, res, ctx| {
+        end_point(POST, "/add") | req, res, ctx | {
             hide inv   // can't touch inventory directly here
             sku = request_param(req, "sku")
             host_call("cart_add", sku)

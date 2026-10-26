@@ -179,6 +179,7 @@ extern const char* aether_string_data(const void* s);
 #ifndef _WIN32
 #include <unistd.h>
 #include <sys/types.h>
+#include <sys/stat.h>  /* fstat: which descriptors are the standard streams */
 #include <sys/wait.h>
 #include <errno.h>
 #include <fcntl.h>  /* fcntl, F_GETFD — used by ipc_parent_channel_raw */
@@ -217,7 +218,79 @@ static int win_launch(const char* prog, void* argv_list, void* env_list,
  * word, the signal handling and the waits retried on EINTR. */
 #define AETHER_OS_SHELL "/bin/sh"
 
+/* This process's environment: what a child execs with when no env is given
+ * (#3201). */
+#define aether_environ (aether_spawn_environ())
+
 static int aether_child_fd(int fd, int target);   /* below */
+
+/* A program that cannot start (#3170). exec fails in the forked child, so
+ * on its own the parent saw only an exit of 127, the same as a program that
+ * ran and exited 127. Every spawner here gives the child a close-on-exec
+ * pipe: the child writes its errno there before it exits 127, and an exec
+ * that succeeds closes the pipe unwritten, so the parent reads EOF. The
+ * parent reads it before anything else and reports the failure in the
+ * call's own shape, as Windows does, which looks the program up before any
+ * child exists. The child moves its end with aether_child_lift_fd. */
+
+/* In a forked child: move `fd` off 0 to 3 and return where it went. A child
+ * installs pipe ends and files on 0, 1 and 2 (and 3 for os.run_pipe), and
+ * when the parent has some of its own closed, the descriptors it made can
+ * sit on those slots. Installed in place, one would overwrite another still
+ * to be installed, and the close of an original would close what had been
+ * installed there: os.run_full's child lost its stdout when the parent's
+ * was closed, os.spawn_proc_to's its output file when the parent's stdin
+ * was (#3199). So every descriptor a child installs is moved first, and so
+ * is the exec-error pipe's end (#3170), which the wiring would overwrite.
+ *
+ * The copy closes on exec. The original is closed: a slot from 0 to 2 is
+ * one the parent had closed, and aether_child_keep_stdio clears its
+ * close-on-exec flag, so left open it would outlive the exec (the
+ * exec-error pipe's end would make the parent wait for the program to
+ * end). */
+static int aether_child_lift_fd(int fd) {
+    if (fd > 3) return fd;
+    int moved = fcntl(fd, F_DUPFD_CLOEXEC, 4);
+    close(fd);
+    return moved;
+}
+
+/* In the child: report errno on `errfd` and exit 127. */
+static void aether_child_exec_failed(int errfd) {
+    int e = errno;
+    if (errfd >= 0) {
+        ssize_t w;
+        do { w = write(errfd, &e, sizeof e); } while (w < 0 && errno == EINTR);
+    }
+    _exit(127);
+}
+
+/* In the parent: the errno the child reported, 0 when its exec succeeded. */
+static int aether_exec_errno(int errpipe[2]) {
+    close(errpipe[1]);
+    int e = 0;
+    ssize_t n;
+    do { n = read(errpipe[0], &e, sizeof e); } while (n < 0 && errno == EINTR);
+    close(errpipe[0]);
+    if (n != (ssize_t)sizeof e) return 0;
+    return e ? e : EIO;
+}
+
+/* The err a failed start reads as, the words Windows uses where it has them. */
+static const char* aether_exec_failure(int e) {
+    switch (e) {
+        case ENOENT: case ENOTDIR: return "program not found";
+        case EACCES: case EPERM:   return "permission denied";
+        case ENOEXEC:              return "not an executable";
+        default:                   return "exec failed";
+    }
+}
+
+/* Reap a child whose exec failed. */
+static void aether_reap_failed(pid_t pid) {
+    int st = 0;
+    while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+}
 
 /* Wait for `pid`, retried on EINTR; its wait-status word, or -1. */
 static int aether_os_shell_wait(pid_t pid) {
@@ -231,22 +304,42 @@ static int aether_os_shell_wait(pid_t pid) {
 /* popen(cmd, "r"): the shell's stdout is a close-on-exec pipe's write
  * end, made its stdout as every capture here makes it; its stdin, stderr,
  * signal dispositions and mask are this process's, as popen leaves them.
- * NULL where popen fails (no pipe, no fork). */
+ * NULL where popen fails (no pipe, no fork) and where the shell could not
+ * start, which _popen gives on Windows too (#3170). */
 static FILE* aether_os_shell_open(const char* cmd, pid_t* out_pid) {
     int pipefd[2];
     if (aether_pipe_cloexec(pipefd) != 0) return NULL;
-    pid_t pid = aether_fork();
-    if (pid < 0) {
+    int errp[2];
+    if (aether_pipe_cloexec(errp) != 0) {
         close(pipefd[0]);
         close(pipefd[1]);
         return NULL;
     }
+    char* sh_argv[] = { (char*)"sh", (char*)"-c", (char*)"--", (char*)cmd, NULL };
+    /* environ is read in the child, after the fork: see aether_child_exec. */
+    pid_t pid = aether_fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        close(errp[0]);
+        close(errp[1]);
+        return NULL;
+    }
     if (pid == 0) {
-        if (aether_child_fd(pipefd[1], 1) < 0) _exit(127);
-        execl(AETHER_OS_SHELL, "sh", "-c", "--", cmd, (char*)NULL);
-        _exit(127);
+        close(errp[0]);
+        int ef = aether_child_lift_fd(errp[1]);
+        int out_fd = aether_child_lift_fd(pipefd[1]);
+        if (aether_child_fd(out_fd, 1) < 0) aether_child_exec_failed(ef);
+        close(out_fd);
+        execve(AETHER_OS_SHELL, sh_argv, aether_environ);
+        aether_child_exec_failed(ef);
     }
     close(pipefd[1]);
+    if (aether_exec_errno(errp)) {
+        close(pipefd[0]);
+        (void)aether_os_shell_wait(pid);
+        return NULL;
+    }
     FILE* f = fdopen(pipefd[0], "r");
     if (!f) {
         close(pipefd[0]);
@@ -275,6 +368,10 @@ static int aether_system_waiting = 0;
 static struct sigaction aether_system_intr, aether_system_quit;
 
 static int aether_os_system_posix(const char* cmd) {
+    /* A shell that could not start is -1, as Windows's system() gives it,
+     * not the 127 POSIX system() reports for it (#3170). */
+    int errp[2];
+    if (aether_pipe_cloexec(errp) != 0) return -1;
     struct sigaction ign;
     memset(&ign, 0, sizeof ign);
     ign.sa_handler = SIG_IGN;
@@ -293,19 +390,31 @@ static int aether_os_system_posix(const char* cmd) {
     sigaddset(&chld, SIGCHLD);
     sigprocmask(SIG_BLOCK, &chld, &omask);
 
+    struct sigaction dfl;
+    memset(&dfl, 0, sizeof dfl);
+    dfl.sa_handler = SIG_DFL;
+    sigemptyset(&dfl.sa_mask);
+    char* sh_argv[] = { (char*)"sh", (char*)"-c", (char*)"--", (char*)cmd, NULL };
+    /* environ is read in the child, after the fork: see aether_child_exec. */
     pid_t pid = aether_fork();
     if (pid == 0) {
-        struct sigaction dfl;
-        memset(&dfl, 0, sizeof dfl);
-        dfl.sa_handler = SIG_DFL;
-        sigemptyset(&dfl.sa_mask);
         if (!intr_ignored) sigaction(SIGINT, &dfl, NULL);
         if (!quit_ignored) sigaction(SIGQUIT, &dfl, NULL);
         sigprocmask(SIG_SETMASK, &omask, NULL);
-        execl(AETHER_OS_SHELL, "sh", "-c", "--", cmd, (char*)NULL);
-        _exit(127);
+        close(errp[0]);
+        int ef = aether_child_lift_fd(errp[1]);
+        execve(AETHER_OS_SHELL, sh_argv, aether_environ);
+        aether_child_exec_failed(ef);
     }
-    int status = pid > 0 ? aether_os_shell_wait(pid) : -1;
+    int status = -1;
+    if (pid > 0) {
+        int exec_err = aether_exec_errno(errp);
+        status = aether_os_shell_wait(pid);
+        if (exec_err) status = -1;
+    } else {
+        close(errp[0]);
+        close(errp[1]);
+    }
 
     pthread_mutex_lock(&aether_system_lock);
     if (--aether_system_waiting == 0) {
@@ -1141,8 +1250,9 @@ char* os_which(const char* name) {
 // large class of quoting bugs and makes the same Aether code portable
 // to platforms without a POSIX shell.
 //
-// Implementation: POSIX uses fork + execvp + waitpid, with execve when
-// an explicit env is provided. Windows uses CreateProcessW (see win_launch
+// Implementation: POSIX resolves the program on PATH in the parent and
+// uses fork + execve + waitpid, with the explicit env or this process's
+// (#3201). Windows uses CreateProcessW (see win_launch
 // below), building an argv-quoted command line and capturing stdout through
 // an inheritable pipe, so the same argv-based contract holds on both.
 
@@ -1225,6 +1335,92 @@ static char** build_envp_array(void* env_list) {
     return envp;
 }
 
+/* The program a spawn runs (#3201) is resolved in the parent, by
+ * aether_spawn_resolve (runtime/utils/aether_spawn.c): a name with a '/' as
+ * given, a bare name on this process's PATH whatever env the child is
+ * given, as Windows and Go do. A name not found is "program not found"
+ * before any fork.
+ *
+ * It used to be the child's execvp, and with an explicit env the child's
+ * execve, which does no lookup: a bare name was never found by os.run,
+ * os.run_capture, os.run_full or os.run_supervised, and os.spawn_proc and
+ * os.spawn_proc_to fell back to execvp, which ran it with this process's
+ * environment instead of the one given.
+ *
+ * Resolving in the parent is what lets every child exec with execve and a
+ * ready env (the explicit one, or environ). Between fork and exec a child
+ * then calls only functions POSIX lists as async-signal-safe: sigemptyset,
+ * sigprocmask, sigaction, memset, fcntl, dup2, close, open, setpgid, execve
+ * (the program, then /bin/sh for a file with no #! line, as execvp does),
+ * write (the exec-error pipe) and _exit. No malloc, no setenv (os.run_pipe's
+ * env is built in the parent, #3200), no stdio, no execvp, whose PATH walk
+ * POSIX does not promise to be safe there. */
+
+/* What a child execs, all made in the parent before the fork (#3201). */
+typedef struct {
+    char*  path;     /* the program, resolved: aether_spawn_resolve */
+    char** argv;     /* build_argv_array */
+    char** sh_argv;  /* /bin/sh, path, argv[1..]: for a file with no #! */
+    char** envp;     /* build_envp_array: the explicit env, or NULL */
+    char** env;      /* what execve gets: envp, or NULL for this process's
+                      * environ, which the child reads after the fork: taken
+                      * in the parent, a setenv on another thread before the
+                      * fork could move the array and leave the pointer
+                      * dangling */
+} AetherExec;
+
+/* NULL when `x` is ready, else the err the spawn reports. */
+static const char* aether_exec_prepare(AetherExec* x, const char* prog,
+                                       void* argv_list, void* env_list) {
+    memset(x, 0, sizeof *x);
+    x->path = aether_spawn_resolve(prog);
+    if (!x->path) return errno == ENOMEM ? "out of memory" : "program not found";
+    x->argv = build_argv_array(prog, argv_list);
+    size_t n = 0;
+    while (x->argv && x->argv[n]) n++;
+    x->sh_argv = x->argv ? (char**)malloc((n + 2) * sizeof(char*)) : NULL;
+    if (!x->sh_argv) {
+        free(x->argv);
+        free(x->path);
+        memset(x, 0, sizeof *x);
+        return "argv build failed";
+    }
+    x->sh_argv[0] = (char*)AETHER_OS_SHELL;
+    x->sh_argv[1] = x->path;
+    for (size_t i = 1; i <= n; i++) x->sh_argv[i + 1] = x->argv[i];
+    x->envp = build_envp_array(env_list);
+    if (env_list && !x->envp) {
+        free(x->sh_argv);
+        free(x->argv);
+        free(x->path);
+        memset(x, 0, sizeof *x);
+        return "env build failed";
+    }
+    x->env = x->envp;
+    return NULL;
+}
+
+static void aether_exec_release(AetherExec* x) {
+    free(x->path);
+    free(x->argv);
+    free(x->sh_argv);
+    free(x->envp);
+    memset(x, 0, sizeof *x);
+}
+
+/* In the child: exec the program. A file with no #! line, which execve
+ * refuses with ENOEXEC, runs under /bin/sh with its arguments, as execvp
+ * runs it, so a script that never had one keeps working. Returns only when
+ * neither could start, errno set: "not an executable" then means /bin/sh
+ * could not run it either. Only execve, which is async-signal-safe. */
+static void aether_child_exec(const AetherExec* x) {
+    char** env = x->env ? x->env : aether_environ;
+    execve(x->path, x->argv, env);
+    if (errno != ENOEXEC) return;
+    execve(AETHER_OS_SHELL, x->sh_argv, env);
+    errno = ENOEXEC;
+}
+
 /* Give a freshly-forked child a clean signal slate before exec.
  *
  * POSIX inherits the signal MASK across both fork and execve, and inherits a
@@ -1264,12 +1460,40 @@ static void aether_child_reset_signals(void) {
  * start Chrome with stdin closed ("Failed to create Chrome process"), and the
  * first file a child opened took descriptor 0. fork leaves the flag set on the
  * child's copies; clear it on those three, which is what "inherits the
- * parent's streams" means. A stream the parent has closed stays closed. Only
- * fcntl, so it is legal between fork and exec like the reset above. */
+ * parent's streams" means. A stream the parent has closed stays closed.
+ *
+ * Which descriptors are the parent's streams: those that were 0, 1 and 2
+ * when the process started (when this library was loaded), known by the
+ * file they refer to. One the parent closed since gives its number to the
+ * next descriptor opened, a pipe of another thread's spawn among them, and
+ * clearing the flag on that one handed another spawn's pipe end to this
+ * child as its stdout: that spawn then waited for this child to exit (#3209).
+ * A descriptor marked close-on-exec on one of those numbers that is not the
+ * file it was at the start is its owner's, and closes at exec as its owner
+ * asked. */
+static struct { int open; dev_t dev; ino_t ino; } aether_std_stream[3];
+
+__attribute__((constructor))
+static void aether_record_std_streams(void) {
+    for (int fd = 0; fd <= 2; fd++) {
+        struct stat st;
+        if (fstat(fd, &st) != 0) continue;
+        aether_std_stream[fd].open = 1;
+        aether_std_stream[fd].dev = st.st_dev;
+        aether_std_stream[fd].ino = st.st_ino;
+    }
+}
+
+/* fcntl and fstat only: legal between fork and exec. */
 static void aether_child_keep_stdio(void) {
     for (int fd = 0; fd <= 2; fd++) {
         int fl = fcntl(fd, F_GETFD);
-        if (fl >= 0 && (fl & FD_CLOEXEC)) fcntl(fd, F_SETFD, fl & ~FD_CLOEXEC);
+        if (fl < 0 || !(fl & FD_CLOEXEC) || !aether_std_stream[fd].open) continue;
+        struct stat st;
+        if (fstat(fd, &st) != 0 || st.st_dev != aether_std_stream[fd].dev ||
+            st.st_ino != aether_std_stream[fd].ino)
+            continue;
+        fcntl(fd, F_SETFD, fl & ~FD_CLOEXEC);
     }
 }
 
@@ -1283,42 +1507,50 @@ int os_run(const char* prog, void* argv_list, void* env_list) {
     if (!prog) return -1;
     if (!aether_sandbox_check("exec", prog)) return -1;
 
-    char** av = build_argv_array(prog, argv_list);
-    if (!av) return -1;
-    char** envp = build_envp_array(env_list);
+    int errp[2];
+    if (aether_pipe_cloexec(errp) != 0) return -1;
+    AetherExec x;
+    const char* xerr = aether_exec_prepare(&x, prog, argv_list, env_list);
+    if (xerr) {
+        close(errp[0]);
+        close(errp[1]);
+        return -1;
+    }
 
     pid_t pid = aether_fork();
     if (pid < 0) {
-        free(av);
-        free(envp);
+        close(errp[0]);
+        close(errp[1]);
+        aether_exec_release(&x);
         return -1;
     }
     if (pid == 0) {
         // Child
         aether_child_reset_signals();
         aether_child_keep_stdio();
-        if (envp) {
-            execve(prog, av, envp);
-        } else {
-            execvp(prog, av);
-        }
+        close(errp[0]);
+        int ef = aether_child_lift_fd(errp[1]);
+        aether_child_exec(&x);
         // exec only returns on failure
-        _exit(127);
+        aether_child_exec_failed(ef);
     }
     // Parent
-    free(av);
-    free(envp);
+    aether_exec_release(&x);
+    /* A program that could not start is -1, as on Windows (#3170). */
+    int exec_err = aether_exec_errno(errp);
     int status = 0;
     while (waitpid(pid, &status, 0) < 0) {
         if (errno != EINTR) return -1;
     }
+    if (exec_err) return -1;
     if (WIFEXITED(status)) return WEXITSTATUS(status);
     if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
     return -1;
 }
 
 
-/* In a forked child: make `fd` the descriptor `target`, open across exec. */
+/* In a forked child: make `fd` the descriptor `target`, open across exec.
+ * `fd` comes from aether_child_lift_fd, so it is never another target. */
 static int aether_child_fd(int fd, int target) {
     if (fd == target) return fcntl(target, F_SETFD, 0) == -1 ? -1 : target;
     return dup2(fd, target);
@@ -1333,21 +1565,30 @@ char* os_run_capture_raw(const char* prog, void* argv_list, void* env_list) {
 
     int pipefd[2];
     if (aether_pipe_cloexec(pipefd) != 0) return NULL;
-
-    char** av = build_argv_array(prog, argv_list);
-    if (!av) {
+    int errp[2];
+    if (aether_pipe_cloexec(errp) != 0) {
         close(pipefd[0]);
         close(pipefd[1]);
         return NULL;
     }
-    char** envp = build_envp_array(env_list);
+
+    AetherExec x;
+    const char* xerr = aether_exec_prepare(&x, prog, argv_list, env_list);
+    if (xerr) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        close(errp[0]);
+        close(errp[1]);
+        return NULL;
+    }
 
     pid_t pid = aether_fork();
     if (pid < 0) {
         close(pipefd[0]);
         close(pipefd[1]);
-        free(av);
-        free(envp);
+        close(errp[0]);
+        close(errp[1]);
+        aether_exec_release(&x);
         return NULL;
     }
     if (pid == 0) {
@@ -1355,19 +1596,23 @@ char* os_run_capture_raw(const char* prog, void* argv_list, void* env_list) {
         aether_child_reset_signals();
         aether_child_keep_stdio();
         close(pipefd[0]);
-        if (aether_child_fd(pipefd[1], 1) < 0) _exit(127);
-        if (pipefd[1] != 1) close(pipefd[1]);
-        if (envp) {
-            execve(prog, av, envp);
-        } else {
-            execvp(prog, av);
-        }
-        _exit(127);
+        close(errp[0]);
+        int ef = aether_child_lift_fd(errp[1]);
+        int out_fd = aether_child_lift_fd(pipefd[1]);
+        if (aether_child_fd(out_fd, 1) < 0) aether_child_exec_failed(ef);
+        close(out_fd);
+        aether_child_exec(&x);
+        aether_child_exec_failed(ef);
     }
     // Parent: close write end, read until EOF
     close(pipefd[1]);
-    free(av);
-    free(envp);
+    aether_exec_release(&x);
+    /* A program that could not start is NULL, as on Windows (#3170). */
+    if (aether_exec_errno(errp)) {
+        close(pipefd[0]);
+        aether_reap_failed(pid);
+        return NULL;
+    }
 
     // Read buffer is page-sized for fewer syscalls on large output;
     // result buffer starts at 4 KB with doubling growth.
@@ -1452,22 +1697,32 @@ _tuple_string_int_string os_run_capture_status_raw(const char* prog, void* argv_
         out._2 = "pipe failed";
         return out;
     }
-
-    char** av = build_argv_array(prog, argv_list);
-    if (!av) {
+    int errp[2];
+    if (aether_pipe_cloexec(errp) != 0) {
         close(pipefd[0]);
         close(pipefd[1]);
-        out._2 = "argv build failed";
+        out._2 = "pipe failed";
         return out;
     }
-    char** envp = build_envp_array(env_list);
+
+    AetherExec x;
+    const char* xerr = aether_exec_prepare(&x, prog, argv_list, env_list);
+    if (xerr) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        close(errp[0]);
+        close(errp[1]);
+        out._2 = xerr;
+        return out;
+    }
 
     pid_t pid = aether_fork();
     if (pid < 0) {
         close(pipefd[0]);
         close(pipefd[1]);
-        free(av);
-        free(envp);
+        close(errp[0]);
+        close(errp[1]);
+        aether_exec_release(&x);
         out._2 = "fork failed";
         return out;
     }
@@ -1475,15 +1730,24 @@ _tuple_string_int_string os_run_capture_status_raw(const char* prog, void* argv_
         aether_child_reset_signals();
         aether_child_keep_stdio();
         close(pipefd[0]);
-        if (aether_child_fd(pipefd[1], 1) < 0) _exit(127);
-        if (pipefd[1] != 1) close(pipefd[1]);
-        if (envp) execve(prog, av, envp);
-        else      execvp(prog, av);
-        _exit(127);
+        close(errp[0]);
+        int ef = aether_child_lift_fd(errp[1]);
+        int out_fd = aether_child_lift_fd(pipefd[1]);
+        if (aether_child_fd(out_fd, 1) < 0) aether_child_exec_failed(ef);
+        close(out_fd);
+        aether_child_exec(&x);
+        aether_child_exec_failed(ef);
     }
     close(pipefd[1]);
-    free(av);
-    free(envp);
+    aether_exec_release(&x);
+    /* A program that could not start reads as Windows has it (#3170). */
+    int exec_err = aether_exec_errno(errp);
+    if (exec_err) {
+        close(pipefd[0]);
+        aether_reap_failed(pid);
+        out._2 = aether_exec_failure(exec_err);
+        return out;
+    }
 
     size_t cap = 4096;
     size_t len = 0;
@@ -1589,6 +1853,19 @@ _tuple_string_int_string os_run_capture_status_raw(const char* prog, void* argv_
 typedef struct { int _0; int _1; const char* _2; } _tuple_int_int_string;
 typedef struct { int _0; int _1; int _2; const char* _3; } _tuple_int_int_int_string;
 
+/* os.run_pipe's child env (#3200): `base` (the env the caller gave, or this
+ * process's environ when it gave none) without any AETHER_IPC_FD of its
+ * own, plus AETHER_IPC_FD=3, which tells the child that fd 3 carries the
+ * parent channel (its ipc.parent_channel() reads it). Built in the parent:
+ * the child used to call setenv between fork and exec, which mallocs and
+ * takes the environment's lock, and a lock another thread held at the fork
+ * is never released in the child. The array is malloc'd; its strings are
+ * the base's and a literal. NULL when malloc fails. */
+static char** aether_ipc_env(char** base) {
+    static const char* const ipc[] = { "AETHER_IPC_FD=3" };
+    return aether_spawn_env(base ? base : aether_environ, ipc, 1);
+}
+
 /* Spawn child with a back-channel pipe at fd 3 (write end), set
  * AETHER_IPC_FD=3 in child's env. Returns (parent_read_fd,
  * child_pid, err). On success, err is "" and caller must:
@@ -1596,7 +1873,11 @@ typedef struct { int _0; int _1; int _2; const char* _3; } _tuple_int_int_int_st
  *   2. Call os_wait_pid_raw(child_pid) to reap.
  *   3. Close parent_read_fd.
  *
- * Failure modes return (-1, -1, "<reason>") with no spawn done.
+ * Failure modes return (-1, -1, "<reason>") with no child left to reap:
+ * a program that could not start reads so too, the reason from its exec
+ * (#3170). An explicit env is refused before the fork: the child's
+ * AETHER_IPC_FD would have to be spliced into it, and it used to make the
+ * child exit 127 without running the program.
  *
  * Pipe-buffer deadlock window: if child writes > OS pipe buffer
  * (typically 16K-64K) without parent reading concurrently, the
@@ -1613,64 +1894,78 @@ _tuple_int_int_string os_run_pipe_raw(const char* prog, void* argv_list, void* e
         return out;
     }
 
+
     int pipefd[2];
     if (aether_pipe_cloexec(pipefd) != 0) {
         out._2 = "pipe failed";
         return out;
     }
-
-    char** av = build_argv_array(prog, argv_list);
-    if (!av) {
+    int errp[2];
+    if (aether_pipe_cloexec(errp) != 0) {
         close(pipefd[0]);
         close(pipefd[1]);
-        out._2 = "argv build failed";
+        out._2 = "pipe failed";
         return out;
     }
-    char** envp = build_envp_array(env_list);
+
+    AetherExec x;
+    const char* xerr = aether_exec_prepare(&x, prog, argv_list, env_list);
+    if (xerr) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        close(errp[0]);
+        close(errp[1]);
+        out._2 = xerr;
+        return out;
+    }
+    /* The child's env: the one given, or environ, with AETHER_IPC_FD=3. The
+     * spliced array borrows the given one's strings, so only its array goes. */
+    char** spliced = aether_ipc_env(x.envp);
+    free(x.envp);
+    x.envp = spliced;
+    if (!x.envp) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        close(errp[0]);
+        close(errp[1]);
+        aether_exec_release(&x);
+        out._2 = "env build failed";
+        return out;
+    }
+    x.env = x.envp;
 
     pid_t pid = aether_fork();
     if (pid < 0) {
         close(pipefd[0]);
         close(pipefd[1]);
-        free(av);
-        free(envp);
+        close(errp[0]);
+        close(errp[1]);
+        aether_exec_release(&x);
         out._2 = "fork failed";
         return out;
     }
     if (pid == 0) {
-        /* Child — wire pipefd[1] to fd 3 and tell child where it is. */
+        /* Child — wire pipefd[1] to fd 3; its env says so. */
         aether_child_reset_signals();
         aether_child_keep_stdio();
         close(pipefd[0]);
-        if (aether_child_fd(pipefd[1], 3) < 0) _exit(127);
-        /* Close the original write end if dup2 didn't already (it
-         * does when pipefd[1] != 3; the conditional close is a
-         * defensive no-op when dup2 was a self-dup). */
-        if (pipefd[1] != 3) close(pipefd[1]);
-        /* AETHER_IPC_FD tells the child via env that fd 3 carries
-         * the parent channel. The child's ipc.parent_channel()
-         * reads this and returns the int — a future change can
-         * pick a different fd by setting a different value, no
-         * code change needed in the child. */
-        setenv("AETHER_IPC_FD", "3", 1);
-        if (envp) {
-            /* If the caller supplied an explicit envp, AETHER_IPC_FD
-             * needs to be present in it — setenv above only updates
-             * the current process's environ, but execve will use
-             * envp, not environ. Build augmented envp.
-             *
-             * For now, error if explicit envp is supplied; future
-             * work can splice AETHER_IPC_FD into the supplied envp
-             * before execve. Most aeb consumers pass null env. */
-            _exit(127);
-        } else {
-            execvp(prog, av);
-        }
-        _exit(127);
+        close(errp[0]);
+        int ef = aether_child_lift_fd(errp[1]);
+        int chan = aether_child_lift_fd(pipefd[1]);
+        if (aether_child_fd(chan, 3) < 0) aether_child_exec_failed(ef);
+        close(chan);
+        aether_child_exec(&x);
+        aether_child_exec_failed(ef);
     }
     close(pipefd[1]);
-    free(av);
-    free(envp);
+    aether_exec_release(&x);
+    int exec_err = aether_exec_errno(errp);
+    if (exec_err) {
+        close(pipefd[0]);
+        aether_reap_failed(pid);
+        out._2 = aether_exec_failure(exec_err);
+        return out;
+    }
 
     out._0 = pipefd[0];
     out._1 = pid;
@@ -1738,13 +2033,20 @@ _tuple_int_string os_spawn_raw(const char* prog, void* argv_list, void* env_list
     if (!prog) { out._1 = "null prog"; return out; }
     if (!aether_sandbox_check("exec", prog)) { out._1 = "denied by sandbox"; return out; }
 
-    char** av = build_argv_array(prog, argv_list);
-    if (!av) { out._1 = "argv build failed"; return out; }
-    char** envp = build_envp_array(env_list);
+    int errp[2];
+    if (aether_pipe_cloexec(errp) != 0) { out._1 = "pipe failed"; return out; }
+    AetherExec x;
+    const char* xerr = aether_exec_prepare(&x, prog, argv_list, env_list);
+    if (xerr) {
+        close(errp[0]); close(errp[1]);
+        out._1 = xerr;
+        return out;
+    }
 
     pid_t pid = aether_fork();
     if (pid < 0) {
-        free(av); free(envp);
+        close(errp[0]); close(errp[1]);
+        aether_exec_release(&x);
         out._1 = "fork failed";
         return out;
     }
@@ -1752,18 +2054,19 @@ _tuple_int_string os_spawn_raw(const char* prog, void* argv_list, void* env_list
         /* Child — no pipe, no fd 3, no AETHER_IPC_FD. Plain exec. */
         aether_child_reset_signals();
         aether_child_keep_stdio();
-        if (envp) {
-            execve(prog, av, envp);
-            /* execve doesn't PATH-resolve; fall back to execvp so a bare
-             * program name still works when an explicit env was supplied. */
-            execvp(prog, av);
-        } else {
-            execvp(prog, av);
-        }
-        _exit(127);
+        close(errp[0]);
+        int ef = aether_child_lift_fd(errp[1]);
+        aether_child_exec(&x);
+        aether_child_exec_failed(ef);
     }
-    free(av);
-    free(envp);
+    aether_exec_release(&x);
+    /* A program that could not start fails the spawn, as on Windows (#3170). */
+    int exec_err = aether_exec_errno(errp);
+    if (exec_err) {
+        aether_reap_failed(pid);
+        out._1 = aether_exec_failure(exec_err);
+        return out;
+    }
     out._0 = (int)pid;   /* token == pid on POSIX */
     return out;
 }
@@ -1831,15 +2134,24 @@ _tuple_int_string os_spawn_to_raw(const char* prog, void* argv_list, void* env_l
 
     int fd = open(out_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (fd < 0) { out._1 = "cannot open the output file"; return out; }
-    char** av = build_argv_array(prog, argv_list);
-    if (!av) { close(fd); out._1 = "argv build failed"; return out; }
-    char** envp = build_envp_array(env_list);
+    int errp[2];
+    if (aether_pipe_cloexec(errp) != 0) { close(fd); out._1 = "pipe failed"; return out; }
+    AetherExec x;
+    const char* xerr = aether_exec_prepare(&x, prog, argv_list, env_list);
+    if (xerr) {
+        close(fd);
+        close(errp[0]);
+        close(errp[1]);
+        out._1 = xerr;
+        return out;
+    }
 
     pid_t pid = aether_fork();
     if (pid < 0) {
         close(fd);
-        free(av);
-        free(envp);
+        close(errp[0]);
+        close(errp[1]);
+        aether_exec_release(&x);
         out._1 = "fork failed";
         return out;
     }
@@ -1847,28 +2159,32 @@ _tuple_int_string os_spawn_to_raw(const char* prog, void* argv_list, void* env_l
         aether_child_reset_signals();
         aether_child_keep_stdio();
         setpgid(0, 0);
+        close(errp[0]);
+        int ef = aether_child_lift_fd(errp[1]);
+        int out_fd = aether_child_lift_fd(fd);
         int nul = open("/dev/null", O_RDONLY);
         if (nul >= 0 && nul != 0) {
             dup2(nul, 0);
             close(nul);
         }
-        if (aether_child_fd(fd, 1) < 0) _exit(127);
-        if (dup2(1, 2) < 0) _exit(127);
-        if (fd != 1 && fd != 2) close(fd);
-        if (envp) {
-            execve(prog, av, envp);
-            execvp(prog, av);
-        } else {
-            execvp(prog, av);
-        }
-        _exit(127);
+        if (aether_child_fd(out_fd, 1) < 0) aether_child_exec_failed(ef);
+        if (dup2(1, 2) < 0) aether_child_exec_failed(ef);
+        close(out_fd);
+        aether_child_exec(&x);
+        aether_child_exec_failed(ef);
     }
     /* Also set here, so the group exists before this call returns whichever
      * of the two runs first. */
     setpgid(pid, pid);
     close(fd);
-    free(av);
-    free(envp);
+    aether_exec_release(&x);
+    /* A program that could not start fails the spawn, as on Windows (#3170). */
+    int exec_err = aether_exec_errno(errp);
+    if (exec_err) {
+        aether_reap_failed(pid);
+        out._1 = aether_exec_failure(exec_err);
+        return out;
+    }
     group_add(pid);
     out._0 = (int)pid;   /* token == pid on POSIX */
     return out;
@@ -2144,7 +2460,10 @@ static void aether_os_forward_signal(int sig) {
  *   "exited"    — child exited normally; exit_code is its status.
  *   "signalled" — child was killed by a signal; exit_code is 128+signo.
  *   "timeout"   — deadline hit, group torn down; exit_code is 124.
- *   "error"     — spawn / wait failure; exit_code is -1.
+ *   "error"     — wait failure; exit_code is -1.
+ * A child that could not be started is exit_code -1 with the reason as the
+ * outcome, as on Windows: "program not found", "permission denied", "not an
+ * executable" for a failed exec (#3170), "fork failed" and the like.
  */
 _tuple_int_string os_run_supervised_raw(const char* prog, void* argv_list, void* env_list,
                                         int new_process_group, int forward_signals,
@@ -2153,13 +2472,20 @@ _tuple_int_string os_run_supervised_raw(const char* prog, void* argv_list, void*
     if (!prog) { out._1 = "null prog"; return out; }
     if (!aether_sandbox_check("exec", prog)) { out._1 = "denied by sandbox"; return out; }
 
-    char** av = build_argv_array(prog, argv_list);
-    if (!av) { out._1 = "argv build failed"; return out; }
-    char** envp = build_envp_array(env_list);
+    int errp[2];
+    if (aether_pipe_cloexec(errp) != 0) { out._1 = "pipe failed"; return out; }
+    AetherExec x;
+    const char* xerr = aether_exec_prepare(&x, prog, argv_list, env_list);
+    if (xerr) {
+        close(errp[0]); close(errp[1]);
+        out._1 = xerr;
+        return out;
+    }
 
     pid_t pid = aether_fork();
     if (pid < 0) {
-        free(av); free(envp);
+        close(errp[0]); close(errp[1]);
+        aether_exec_release(&x);
         out._1 = "fork failed";
         return out;
     }
@@ -2170,13 +2496,21 @@ _tuple_int_string os_run_supervised_raw(const char* prog, void* argv_list, void*
          * parent can address the whole subtree as -pid. Setting it in
          * both child and parent (below) closes the fork/exec race. */
         if (new_process_group) setpgid(0, 0);
-        if (envp) execve(prog, av, envp);
-        else      execvp(prog, av);
-        _exit(127);
+        close(errp[0]);
+        int ef = aether_child_lift_fd(errp[1]);
+        aether_child_exec(&x);
+        aether_child_exec_failed(ef);
     }
     /* Parent. */
     if (new_process_group) setpgid(pid, pid); /* harmless if child won the race */
-    free(av); free(envp);
+    aether_exec_release(&x);
+    /* A child that could not start is (-1, reason), as on Windows (#3170). */
+    int exec_err = aether_exec_errno(errp);
+    if (exec_err) {
+        aether_reap_failed(pid);
+        out._1 = aether_exec_failure(exec_err);
+        return out;
+    }
 
     /* The group we can address with a negative pid. 0 means "no group"
      * (new_process_group was off) — signal/reap-group steps are skipped. */
@@ -2315,10 +2649,11 @@ static void aether_os_set_nonblock(int fd) {
  *   - stdout / stderr: @heap counted captures the caller owns; "" if
  *     empty. They carry their length, so an embedded NUL is kept.
  *   - exit_code: WEXITSTATUS on normal exit, 128+signo if the child
- *     was killed by a signal, 127 on exec failure, -1 on spawn/IO
- *     error (err non-empty in that last case).
+ *     was killed by a signal, -1 when it could not be started or on an
+ *     IO error (err non-empty then).
  *   - err: "" on a successful spawn (regardless of exit code);
- *     non-empty only when the fork/exec/pipe couldn't run.
+ *     non-empty only when the fork/exec/pipe couldn't run; a failed
+ *     exec gives its reason, "program not found" for one (#3170).
  *
  * A poll(2) loop pumps all three fds at once, so the child can write
  * unbounded stdout/stderr while we stream its stdin — no classic
@@ -2345,42 +2680,60 @@ _tuple_string_string_int_string os_run_full_raw(const char* prog, void* argv_lis
         close(out_pipe[0]); close(out_pipe[1]);
         out._3 = "pipe failed"; return out;
     }
-
-    char** av = build_argv_array(prog, argv_list);
-    if (!av) {
+    int errp[2] = { -1, -1 };
+    if (aether_pipe_cloexec(errp) != 0) {
         close(in_pipe[0]); close(in_pipe[1]);
         close(out_pipe[0]); close(out_pipe[1]);
         close(err_pipe[0]); close(err_pipe[1]);
-        out._3 = "argv build failed"; return out;
+        out._3 = "pipe failed"; return out;
     }
-    char** envp = build_envp_array(env_list);
+
+    AetherExec x;
+    const char* xerr = aether_exec_prepare(&x, prog, argv_list, env_list);
+    if (xerr) {
+        close(in_pipe[0]); close(in_pipe[1]);
+        close(out_pipe[0]); close(out_pipe[1]);
+        close(err_pipe[0]); close(err_pipe[1]);
+        close(errp[0]); close(errp[1]);
+        out._3 = xerr; return out;
+    }
 
     pid_t pid = aether_fork();
     if (pid < 0) {
         close(in_pipe[0]); close(in_pipe[1]);
         close(out_pipe[0]); close(out_pipe[1]);
         close(err_pipe[0]); close(err_pipe[1]);
-        free(av); free(envp);
+        close(errp[0]); close(errp[1]);
+        aether_exec_release(&x);
         out._3 = "fork failed"; return out;
     }
     if (pid == 0) {
         /* Child: wire stdin/stdout/stderr to the pipes, close the rest. */
         aether_child_reset_signals();
         aether_child_keep_stdio();
-        close(in_pipe[1]); close(out_pipe[0]); close(err_pipe[0]);
-        if (aether_child_fd(in_pipe[0], 0) < 0)  _exit(127);
-        if (aether_child_fd(out_pipe[1], 1) < 0) _exit(127);
-        if (aether_child_fd(err_pipe[1], 2) < 0) _exit(127);
-        if (in_pipe[0] != 0) close(in_pipe[0]);
-        if (out_pipe[1] != 1) close(out_pipe[1]);
-        if (err_pipe[1] != 2) close(err_pipe[1]);
-        if (envp) execve(prog, av, envp);
-        else      execvp(prog, av);
-        _exit(127);
+        close(in_pipe[1]); close(out_pipe[0]); close(err_pipe[0]); close(errp[0]);
+        int ef = aether_child_lift_fd(errp[1]);
+        int in_fd = aether_child_lift_fd(in_pipe[0]);
+        int out_fd = aether_child_lift_fd(out_pipe[1]);
+        int err_fd = aether_child_lift_fd(err_pipe[1]);
+        if (aether_child_fd(in_fd, 0) < 0)  aether_child_exec_failed(ef);
+        if (aether_child_fd(out_fd, 1) < 0) aether_child_exec_failed(ef);
+        if (aether_child_fd(err_fd, 2) < 0) aether_child_exec_failed(ef);
+        close(in_fd); close(out_fd); close(err_fd);
+        aether_child_exec(&x);
+        aether_child_exec_failed(ef);
     }
     /* Parent. */
-    free(av); free(envp);
+    aether_exec_release(&x);
     close(in_pipe[0]); close(out_pipe[1]); close(err_pipe[1]);
+    /* A program that could not start reads as Windows has it (#3170). */
+    int exec_err = aether_exec_errno(errp);
+    if (exec_err) {
+        close(in_pipe[1]); close(out_pipe[0]); close(err_pipe[0]);
+        aether_reap_failed(pid);
+        out._3 = aether_exec_failure(exec_err);
+        return out;
+    }
     int in_fd = in_pipe[1], o_fd = out_pipe[0], e_fd = err_pipe[0];
 
     size_t in_total = (stdin_data && stdin_len > 0) ? (size_t)stdin_len : 0;

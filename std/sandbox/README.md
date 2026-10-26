@@ -50,6 +50,7 @@ after:     PATH visible = true
 | `grant_tcp_listen()` | listening for and accepting TCP connections |
 | `grant_udp(host, port)` | UDP with matching hosts on `port` (0 = any) |
 | `grant_native(path)` | loading native libraries (`dlopen`) |
+| `grant_fork()` | starting new processes, in a child `spawn_sandboxed` starts (it may always start threads) |
 | `grant_all()` | everything |
 
 A pattern is `"*"` (anything), a prefix ending in `*` (`"/etc/*"`, `"echo *"`),
@@ -154,4 +155,5 @@ with other sandboxes, is in `docs/containment-sandbox.md`.
 
 `new`, `enforce` (with optional trusted names), `free`, and the grants
 `grant_all`, `grant_fs_read`, `grant_fs_write`, `grant_fs`, `grant_exec`,
-`grant_env`, `grant_tcp`, `grant_tcp_listen`, `grant_udp`, `grant_native`.
+`grant_env`, `grant_tcp`, `grant_tcp_listen`, `grant_udp`, `grant_native`,
+`grant_fork`.

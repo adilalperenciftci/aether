@@ -1,0 +1,60 @@
+// ae help: what a configuration script got wrong, and how to fix it.
+//
+// This file does not compile, on purpose. A configuration written in
+// Aether is code, and someone who knows YAML or HCL writes `port: 9990`
+// or `host = "127.0.0.1"` in it. The compiler says only that it expected
+// a statement. `ae help file.ae` reads the same file and says what was
+// meant: each finding has the line, what it looks like, the suggestion
+// (`port(9990)`), and whether `--fix` can apply it. `ae help --fix`
+// applies the safe ones after showing the diff, and `--json` gives the
+// findings to a tool. The YAML and HCL lines stop the parse, so the
+// misspelt setter (`superuser_tokn`) is found once they are fixed: then it
+// gets a "did you mean", from the names the imported module exports.
+// help.sh shows both runs, the second in a copy with the two rewrites
+// made. It all runs on the machine: no network. fixed.ae is the result.
+//
+// Run: sh examples/06-tooling/05-ae-help/help.sh
+// See: docs/cic-help.md
+
+import my_lib
+
+main() {
+    my_lib.serve() {
+        port: 9990
+        host = "127.0.0.1"
+        superuser_tokn("admin-1234")
+        repo("alpha", "/data/alpha")
+    }
+}
+
+// Output:
+//
+// ae help, 2 findings for examples/06-tooling/05-ae-help/broken.ae
+//
+// [1] YAML-style colon at examples/06-tooling/05-ae-help/broken.ae:23:9
+//     port on line 23 looks like YAML; Aether setters use call form
+//       23 |         port: 9990
+//          |         ^
+//     help: Did you mean: port(9990)?
+//     (safe to auto-apply with --fix)
+//     see:  docs/closures-and-builder-dsl.md
+//
+// [2] HCL-style equals at examples/06-tooling/05-ae-help/broken.ae:24:9
+//     host on line 24 looks like HCL; Aether setters use call form
+//       24 |         host = "127.0.0.1"
+//          |         ^
+//     help: Did you mean: host("127.0.0.1")?
+//     (safe to auto-apply with --fix)
+//     see:  docs/closures-and-builder-dsl.md
+//
+// --- with those two rewrites made:
+//
+// ae help, 1 finding for broken.ae
+//
+// [1] undefined function at broken.ae:25:9
+//     Undefined function 'superuser_tokn'
+//       25 |         superuser_tokn("admin-1234")
+//          |         ^
+//     help: Did you mean: superuser_token (in my_lib)?
+//     (safe to auto-apply with --fix)
+//     see:  docs/module-system-design.md (Selective import / exports)

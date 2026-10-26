@@ -348,7 +348,10 @@ opts_set_trace_inject(opts: ptr, inject: int) -> string {
 
 // Mount the proxy under path_prefix. "/" forwards everything;
 // "/api" forwards just the /api subtree. Pool refcount is bumped
-// (and decremented on opts_free).
+// (and decremented on opts_free). The opts stay the caller's: the
+// server uses them for as long as it runs, and the caller frees them
+// (opts_free, then upstream_pool_free) after http.server_free (#3171).
+// The same holds for mount_methods and mount_match.
 mount(server: ptr,
     path_prefix: string,
     pool: ptr,
@@ -381,8 +384,9 @@ mount_match(server: ptr,
 }
 
 // One-upstream convenience: builds a pool with one upstream + RR +
-// default opts, mounts the middleware, and returns "". The pool is
-// owned by the middleware and freed alongside the server.
+// default opts, mounts the middleware, and returns "". The server owns
+// the opts and the pool it builds, and http.server_free frees both
+// (#3171).
 mount_simple(server: ptr,
     path_prefix: string,
     upstream_url: string,

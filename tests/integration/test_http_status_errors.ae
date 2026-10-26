@@ -1,0 +1,94 @@
+// The one-line client calls name the status of a response that is not a
+// 2xx (#3147). They used to turn every one of them into "http error", so a
+// caller could not tell a missing page from a failing server without moving
+// to std.http.client. Self-contained: the server runs in this process on a
+// port the kernel picks, and the client calls go to it.
+
+import std.http
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+expect(what: string, got: string, want: string) {
+    if got != want {
+        fail("${what}: got '${got}', want '${want}'")
+    }
+}
+
+handle_ok(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_body(res, "fine")
+}
+
+handle_missing(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 404)
+    http.response_set_body(res, "no such page")
+}
+
+handle_broken(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 500)
+    http.response_set_body(res, "it broke")
+}
+
+handle_conflict(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 409)
+    http.response_set_body(res, "taken")
+}
+
+// A code nobody registered: the status line carries no reason phrase, and
+// the error is the number alone.
+handle_odd(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 599)
+    http.response_set_body(res, "odd")
+}
+
+main() {
+    server = http.server_create(0)
+    if server == null { fail("server_create") }
+    http.server_get(server, "/ok", handle_ok, null)
+    http.server_get(server, "/missing", handle_missing, null)
+    http.server_get(server, "/broken", handle_broken, null)
+    http.server_get(server, "/odd", handle_odd, null)
+    http.server_post(server, "/conflict", handle_conflict, null)
+    http.server_put(server, "/broken", handle_broken, null)
+    berr = http.server_bind(server, "127.0.0.1", 0)
+    if berr != "" { fail("bind: ${berr}") }
+    serr = http.server_start_background(server)
+    if serr != "" { fail("start: ${serr}") }
+    base = "http://127.0.0.1:${http.server_port(server)}"
+
+    body, err = http.get("${base}/ok")
+    expect("a 200's error", err, "")
+    expect("a 200's body", body, "fine")
+
+    body, err = http.get("${base}/missing")
+    expect("a 404 from get", err, "HTTP 404 Not Found")
+    expect("a 404's body", body, "")
+
+    body, err = http.get_with_timeout("${base}/broken", 10s)
+    expect("a 500 from get_with_timeout", err, "HTTP 500 Internal Server Error")
+
+    body, err = http.post("${base}/conflict", "name=x", "text/plain")
+    expect("a 409 from post", err, "HTTP 409 Conflict")
+
+    body, err = http.put("${base}/broken", "x", "text/plain")
+    expect("a 500 from put", err, "HTTP 500 Internal Server Error")
+
+    // No DELETE route: the server's own 404.
+    body, err = http.delete("${base}/ok")
+    expect("a 404 from delete", err, "HTTP 404 Not Found")
+
+    body, err = http.get("${base}/odd")
+    expect("an unregistered status", err, "HTTP 599")
+
+    expect("status_text(404)", http.status_text(404), "Not Found")
+    expect("status_text(429)", http.status_text(429), "Too Many Requests")
+    expect("status_text(599)", http.status_text(599), "")
+
+    http.server_stop(server)
+    println("PASS: every failed status is named")
+}

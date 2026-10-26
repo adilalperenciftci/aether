@@ -1,0 +1,9 @@
+// Part of: examples/06-tooling/04-lib-path/main.ae
+//
+// The vendored foo: found only when vendor/ comes before lib/.
+
+exports(origin)
+
+origin() -> string {
+    return "vendor/, the vendored copy"
+}

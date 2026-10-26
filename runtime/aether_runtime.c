@@ -59,12 +59,54 @@ void aether_sleep_ms(int ms) {
 /* UTF-8 console code pages, so a program prints Unicode correctly, and
  * stdout and stderr in binary mode, so "\n" is not written as "\r\n": a
  * program's output, redirected to a file or piped on, is byte for byte what
- * it printed. */
+ * it printed. A console stream also gets virtual terminal processing, so
+ * the ANSI colour escapes a program writes to a terminal (std.spec's, when
+ * io.is_terminal says stdout is one, #3180) are rendered rather than shown
+ * as text. A pipe or a file has no console mode and is left as it is. */
+#ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
+#define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x0004
+#endif
+/* The console is the shell's, shared with every program run in it, so the
+ * code pages and modes changed here are given back at exit: left as they
+ * were, the shell kept UTF-8 and VT processing after the program ended. */
+static UINT  g_console_out_cp, g_console_in_cp;
+static DWORD g_console_vt_which[2];
+static DWORD g_console_vt_mode[2];
+static int   g_console_vt_count;
+
+static void aether_console_enable_vt(DWORD which) {
+    HANDLE h = GetStdHandle(which);
+    DWORD mode = 0;
+    if (h == NULL || h == INVALID_HANDLE_VALUE || !GetConsoleMode(h, &mode)) return;
+    if (mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING) return;
+    if (!SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING)) return;
+    g_console_vt_which[g_console_vt_count] = which;
+    g_console_vt_mode[g_console_vt_count] = mode;
+    g_console_vt_count++;
+}
+
+static void aether_console_restore(void) {
+    for (int i = g_console_vt_count - 1; i >= 0; i--) {
+        HANDLE h = GetStdHandle(g_console_vt_which[i]);
+        if (h != NULL && h != INVALID_HANDLE_VALUE) SetConsoleMode(h, g_console_vt_mode[i]);
+    }
+    if (g_console_out_cp) SetConsoleOutputCP(g_console_out_cp);
+    if (g_console_in_cp) SetConsoleCP(g_console_in_cp);
+}
+
 void aether_console_init(void) {
+    static int done;   /* once: a second call would record UTF-8 as the original */
+    if (done) return;
+    done = 1;
+    g_console_out_cp = GetConsoleOutputCP();   // 0 with no console
+    g_console_in_cp = GetConsoleCP();
     SetConsoleOutputCP(65001);   // CP_UTF8
     SetConsoleCP(65001);
     _setmode(_fileno(stdout), _O_BINARY);
     _setmode(_fileno(stderr), _O_BINARY);
+    aether_console_enable_vt(STD_OUTPUT_HANDLE);
+    aether_console_enable_vt(STD_ERROR_HANDLE);
+    atexit(aether_console_restore);
 }
 
 /* The monotonic clock behind clock_ns() and actor timeouts. The generated

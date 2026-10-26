@@ -4401,11 +4401,14 @@ int is_owned_string_unwrap(CodeGenerator* gen, ASTNode* e) {
 
 /* An expression whose value is a heap string nobody else holds, which the
  * expression that reads it must free: a call or an interpolation that
- * makes one, a fallible's `or`, an unwrapped `string?` call. */
+ * makes one, a fallible's `or`, an unwrapped `string?` call, an ask whose
+ * reply is a string (the reply hands over a copy, #3165: given straight to
+ * a function or an interpolation, the copy was never reclaimed). */
 int is_fresh_heap_string_temp(CodeGenerator* gen, ASTNode* e) {
     if (!e) return 0;
     if (e->type != AST_FUNCTION_CALL && e->type != AST_STRING_INTERP &&
-        e->type != AST_OR_ELSE && !is_owned_string_unwrap(gen, e)) return 0;
+        e->type != AST_OR_ELSE && e->type != AST_SEND_ASK &&
+        !is_owned_string_unwrap(gen, e)) return 0;
     return is_heap_string_expr(gen, e);
 }
 
@@ -7701,6 +7704,13 @@ static TuplePosOwn tuple_pos_own(CodeGenerator* gen, ASTNode* rhs, ASTNode* call
     po.is_closure = pt && pt->kind == TYPE_FUNCTION && !pt->is_fnptr;
     po.closure_owned = po.is_closure && rhs && rhs->type == AST_FUNCTION_CALL &&
                        !call_is_extern(gen, rhs);
+    /* `v, err = actor ? Msg {}` (#3151): the reply was copied for the
+     * asker, who owns it as a single ask's binding does; the reason is a
+     * literal the pair lends. */
+    if (rhs && rhs->type == AST_SEND_ASK) {
+        po.is_heap = po.is_string && j == 0;
+        po.closure_owned = po.is_closure && j == 0;
+    }
     return po;
 }
 
@@ -8889,6 +8899,14 @@ void generate_value_statement(CodeGenerator* gen, const char* lhs, ASTNode* valu
     print_indent(gen);
     if (type_is_sized_array(t)) {
         emit_array_fill(gen, lhs, value, t);
+    } else if (t && t->kind == TYPE_OPTIONAL && !own_type_owns(gen, t)) {
+        /* #3163: a value going into an optional slot is wrapped, `none` is
+         * the empty optional, as a `let x: T? = v` binding does. An actor's
+         * `state maybe: int? = 4` (or `= none`) is initialised here, and
+         * reached C as an int assigned to an ae_opt_int. An optional that
+         * owns memory (a `string?`) goes through the take below. */
+        fprintf(gen->output, "%s = ", lhs);
+        emit_optional_coerced(gen, value, t);
     } else {
         fprintf(gen->output, "%s = ", lhs);
         if (t && t->kind != TYPE_STRING && own_type_owns(gen, t)) emit_value_take(gen, value, t);
@@ -9032,10 +9050,35 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             const char* tuple_type_name = rhs_type ? get_c_type(rhs_type) : "_tuple_unknown";
             static int tuple_tmp_counter = 0;
             int tmp_id = tuple_tmp_counter++;
-            print_indent(gen);
-            fprintf(gen->output, "%s _tup%d = ", tuple_type_name, tmp_id);
-            generate_expression(gen, rhs);
-            fprintf(gen->output, ";\n");
+            if (rhs->type == AST_SEND_ASK && rhs_type && rhs_type->kind == TYPE_TUPLE &&
+                rhs_type->tuple_count == 2) {
+                /* `v, err = actor ? Msg {}` (#3151): the ask writes why no
+                 * reply came, and the pair is its value and the reason, ""
+                 * when it replied. The reasons are literals the pair lends. */
+                int to = ask_timeout_ms(rhs);
+                print_indent(gen);
+                fprintf(gen->output, "int _ask_st%d = 0;\n", tmp_id);
+                print_indent(gen);
+                fprintf(gen->output, "%s _ask_v%d = ", get_c_type(rhs_type->tuple_types[0]), tmp_id);
+                gen->ask_status_var = cg_internf("_ask_st%d", tmp_id);
+                generate_expression(gen, rhs);
+                gen->ask_status_var = NULL;
+                fprintf(gen->output, ";\n");
+                print_indent(gen);
+                fprintf(gen->output,
+                        "%s _tup%d = { _ask_v%d, _ask_st%d == AETHER_ASK_REPLIED ? \"\" : "
+                        "_ask_st%d == AETHER_ASK_TIMED_OUT ? \"ask timed out after %d ms\" : "
+                        "_ask_st%d == AETHER_ASK_DEAD ? \"the actor is dead\" : "
+                        "_ask_st%d == AETHER_ASK_DIED ? \"the actor died before it replied\" : "
+                        "_ask_st%d == AETHER_ASK_NO_REPLY ? \"the handler returned without replying\" : "
+                        "\"out of memory\" };\n",
+                        tuple_type_name, tmp_id, tmp_id, tmp_id, tmp_id, to, tmp_id, tmp_id, tmp_id);
+            } else {
+                print_indent(gen);
+                fprintf(gen->output, "%s _tup%d = ", tuple_type_name, tmp_id);
+                generate_expression(gen, rhs);
+                fprintf(gen->output, ";\n");
+            }
 
             /* Per-position heap-ness lookup for the destructure
              * (issue #420). For each tuple position `j`, decide
@@ -11556,6 +11599,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 char len_name[64] = "_match_len";
                 ValueTemps subject_temps;
                 int has_subject_temps = 0;
+                const char* subject_owner = NULL;   /* a fresh string subject's owner */
+                ScopedStringLocal subject_sl;
 
                 // Wrap match in a block and store the match expression in a temp
                 // to avoid evaluating it multiple times (could have side effects).
@@ -11629,6 +11674,25 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     if (!compares) fprintf(gen->output, " (void)_match_val;");
                     fprintf(gen->output, "\n");
                     if (has_subject_temps) temps_unmap(&subject_temps);
+                    /* A fresh string the match is on (a call's result, an
+                     * ask's reply) is the match's alone: only the arms'
+                     * tests read `_match_val`, so it is freed when the match
+                     * ends, whichever way it ends (#3207). Nothing freed it,
+                     * and each such match leaked its subject. A name of its
+                     * own, so a match nested in an arm frees only its own. */
+                    if (match_expr->node_type && match_expr->node_type->kind == TYPE_STRING &&
+                        is_fresh_heap_string_temp(gen, match_expr)) {
+                        static int match_str_counter = 0;
+                        subject_owner = cg_internf("_match_str%d", match_str_counter++);
+                        print_indent(gen);
+                        fprintf(gen->output, "%s %s = _match_val;\n",
+                                volatile_decl_type(try_volatile_qual_for(gen, subject_owner),
+                                                   "const char*"),
+                                subject_owner);
+                        scoped_string_local_begin(gen, &subject_sl, subject_owner, NULL, 1);
+                        enter_scope(gen);
+                        push_scoped_string_local_free(gen, &subject_sl, stmt->line, stmt->column);
+                    }
                 }
 
                 for (int i = 1; i < stmt->child_count; i++) {
@@ -11736,6 +11800,10 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     print_line(gen, "}");
                 }
 
+                if (subject_owner) {
+                    exit_scope(gen);
+                    scoped_string_local_end(gen, &subject_sl);
+                }
                 if (has_subject_temps) temps_close(gen, &subject_temps, 1);
                 // Close the match scoping block
                 unindent(gen);
@@ -11837,6 +11905,21 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             if (sexpr) generate_expression(gen, sexpr);
             else fprintf(gen->output, "0");
             fprintf(gen->output, ";\n");
+            /* A fresh string subject is the switch's alone, freed when it
+             * ends, as a match's is (#3207). */
+            const char* subject_owner = NULL;
+            ScopedStringLocal subject_sl;
+            if (is_str && is_fresh_heap_string_temp(gen, sexpr)) {
+                static int switch_str_counter = 0;
+                subject_owner = cg_internf("_switch_str%d", switch_str_counter++);
+                print_indent(gen);
+                fprintf(gen->output, "%s %s = _switch_val;\n",
+                        volatile_decl_type(try_volatile_qual_for(gen, subject_owner), "const char*"),
+                        subject_owner);
+                scoped_string_local_begin(gen, &subject_sl, subject_owner, NULL, 1);
+                enter_scope(gen);
+                push_scoped_string_local_free(gen, &subject_sl, stmt->line, stmt->column);
+            }
 
             ASTNode* default_case = NULL;
             int emitted = 0;
@@ -11862,6 +11945,10 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 emit_case_body(gen, default_case, 0);
                 unindent(gen);
                 print_line(gen, "}");
+            }
+            if (subject_owner) {
+                exit_scope(gen);
+                scoped_string_local_end(gen, &subject_sl);
             }
             unindent(gen);
             print_line(gen, "}");
@@ -13207,7 +13294,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         // Construct the reply message (validates fields at compile time)
                         fprintf(gen->output, "{ %s _reply = { ._message_id = %d",
                                 reply_expr->value, msg_def->message_id);
-                        emit_message_field_inits(gen, reply_expr, msg_def);
+                        emit_message_field_inits(gen, reply_expr, msg_def, 0);
                         fprintf(gen->output, " }; ");
                         emit_message_array_fills(gen, reply_expr, "_reply", NULL);
 
@@ -13224,6 +13311,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                     message_field_init_expr(reply_expr, f->name));
                             }
                         }
+                        emit_message_publishes(gen, reply_expr, "_reply", NULL);
 
                         /* Send reply back to the waiting asker via the
                          * scheduler reply slot. #2528: a reply that owns

@@ -33,19 +33,25 @@ exports(
     memory_resident, memory_private
 )
 
-// Run a shell command, returns exit code (0 = success)
+// Run a shell command, returns exit code (0 = success). A command the
+// shell cannot find is the shell's own 127; a shell that could not start
+// is -1 on every platform (#3170).
 extern os_system(cmd: string) -> int
 
 // Run a command and capture stdout as a string. Raw extern returns
-// NULL on failure. Use the Go-style wrapper `os.exec` below in most code.
+// NULL on failure, a shell that could not start included (#3170). Use the
+// Go-style wrapper `os.exec` below in most code.
 extern os_exec_raw(cmd: string) -> string @heap
 
 // Run a child process directly via fork+execvp+waitpid (POSIX). NO SHELL
 // is interpreted: argv items are passed verbatim, so paths-with-spaces,
 // $variables, |, ;, *, and other shell metacharacters in arguments are
-// not metachars. Returns the child's exit code, or -1 on spawn failure.
+// not metachars. Returns the child's exit code, or -1 when it could not
+// be started: a missing program is -1 on every platform, so 127 is a
+// program that ran and exited 127 (#3170).
 //
-//   prog  — program to execute (resolved via PATH if it has no '/')
+//   prog  — program to execute; with no '/' it is looked up on this
+//           process's PATH, whatever env is given (#3201)
 //   argv  — list of strings to pass as arguments AFTER argv[0]=prog,
 //           or null/empty list for no arguments
 //   env   — list of "KEY=VALUE" strings to pass as the child's
@@ -53,7 +59,8 @@ extern os_exec_raw(cmd: string) -> string @heap
 extern os_run(prog: string, argv: ptr, env: ptr) -> int
 
 // Same as os_run but captures the child's stdout. Raw extern returns
-// null on spawn failure. Use the Go-style wrapper `os.run_capture` in
+// null when the child could not be started, a missing program included
+// (#3170). Use the Go-style wrapper `os.run_capture` in
 // most code. The child's exit code is discarded — use os_run, or the
 // tuple-returning `os_run_capture_status_raw` below, if you need both.
 extern os_run_capture_raw(prog: string, argv: ptr, env: ptr) -> string @heap
@@ -93,6 +100,11 @@ extern os_run_capture_status_raw(prog: string, argv: ptr, env: ptr) -> (string @
 // position 0 (the read fd) is always -1 there, and position 1 is a
 // reap token (not an OS pid). For a pipe-less fan-out scheduler prefer
 // the cross-platform spawn / wait / wait_any trio below.
+//
+// A program that cannot start is (-1, -1, reason) with no child to reap,
+// "program not found" for a missing one, on every platform (#3170). An
+// explicit env is the child's whole environment, with AETHER_IPC_FD=3 in
+// place of any it gives.
 extern os_run_pipe_raw(prog: string, argv: ptr, env: ptr) -> (int, int, string)
 
 // Wait for a child to exit and reap it. Companion to
@@ -107,7 +119,8 @@ extern os_wait_pid_raw(pid: int) -> (int, string)
 // EOF concurrently with the child running, wait for child, reap.
 // Returns (channel_payload, exit_code, err). No deadlock
 // regardless of payload size — the read loop drains continuously
-// so the pipe buffer never fills.
+// so the pipe buffer never fills. A program that cannot start is
+// ("", -1, reason), as os_run_pipe_raw gives it.
 //
 // This is the recommended entry point for the common case
 // "child writes a structured report at exit, parent reads it
@@ -143,7 +156,9 @@ extern os_run_pipe_drain_and_wait_raw(prog: string, argv: ptr, env: ptr) -> (str
 // use run_pipe (POSIX-only) instead. These carry no back-channel.
 
 // Spawn a child without blocking. Returns (token, err). err is "" on a
-// successful spawn regardless of the child's eventual exit code.
+// successful spawn regardless of the child's eventual exit code. A program
+// that cannot start fails the spawn, (-1, reason), "program not found" for
+// a missing one, on every platform (#3170).
 extern os_spawn_raw(prog: string, argv: ptr, env: ptr) -> (int, string)
 
 // Spawn a child without blocking, its stdout and stderr written to the file
@@ -153,7 +168,8 @@ extern os_spawn_raw(prog: string, argv: ptr, env: ptr) -> (int, string)
 // POSIX, so os_kill_raw(token, sig) ends its whole tree: a build tool's
 // compilers too. The file and the null device are the only handles it
 // inherits. Anything the child leaves running when it exits on its own is
-// not ended.
+// not ended. A program that cannot start is (-1, reason), as for
+// os_spawn_raw.
 extern os_spawn_to_raw(prog: string, argv: ptr, env: ptr, out_path: string) -> (int, string)
 
 // Reap one token. Blocks until that child exits. Returns (exit_code,
@@ -298,11 +314,13 @@ exec(cmd: string) -> {
 //             child was killed by a signal (the shell convention, so
 //             SIGKILL reads 137); -1 when the spawn itself failed.
 //   - err:    "" on successful spawn regardless of exit code;
-//             non-empty only when the child couldn't be started. On
-//             POSIX a missing program is found by exec inside the
-//             forked child, so the parent sees status 127 with no err;
-//             on Windows the program is looked up in the parent, so it is
-//             (-1, "program not found").
+//             non-empty only when the child couldn't be started, with
+//             status -1: a missing program is (-1, "program not found")
+//             on every platform, so a program that ran and exited 127
+//             reads as (127, ""). On POSIX exec fails in the forked
+//             child, which reports its errno to the parent on a
+//             close-on-exec pipe (#3170); "permission denied" and "not
+//             an executable" are the other reasons it gives.
 //
 // Argv-based — no shell, no quoting issues. The status slot lets
 // callers distinguish "ran cleanly" (status == 0) from "ran but
@@ -456,7 +474,9 @@ extern os_wait_pid_timeout_raw(pid: int, secs: int) -> (int, int, string)
 //     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE). Needs new_process_group.
 // outcome ∈ {"exited","signalled","timeout","error"}. Windows never
 // reports "signalled" (no signal concept) — a killed child reads as
-// "exited" with its terminate code.
+// "exited" with its terminate code. A child that could not start is
+// exit_code -1 with the reason as the outcome, "program not found" for a
+// missing program, on every platform (#3170).
 extern os_run_supervised_raw(prog: string, argv: ptr, env: ptr,
     new_process_group: int, forward_signals: int,
     timeout_secs: int, reap_group: int) -> (int, string)
@@ -500,9 +520,11 @@ extern string_length(str: string) -> int
 //     os.run_capture they are counted strings carrying their length, so
 //     an embedded NUL is kept.
 //   - exit_code: WEXITSTATUS on normal exit, 128+signo if signalled,
-//     127 on exec failure, -1 on spawn/IO error.
+//     -1 when the child could not be started or on spawn/IO error.
 //   - err: "" on a successful spawn (regardless of exit code);
-//     non-empty only when the fork/exec/pipe itself failed.
+//     non-empty only when the fork/exec/pipe itself failed. A missing
+//     program is (-1, "program not found") on every platform, as
+//     os.run_capture gives it (#3170).
 // No pipe-buffer deadlock regardless of stream sizes: POSIX pumps all
 // three fds in one poll(2) loop; Windows drains stdout/stderr on reader
 // threads while the main thread writes stdin (Win32 anonymous pipes

@@ -31,6 +31,7 @@
     <li><a href="#unsetenv_raw">unsetenv_raw</a></li>
     <li><a href="#stderr_write_raw">stderr_write_raw</a></li>
     <li><a href="#stdout_write_raw">stdout_write_raw</a></li>
+    <li><a href="#is_terminal_raw">is_terminal_raw</a></li>
     <li><a href="#perror_raw">perror_raw</a></li>
     <li><a href="#errno_message_raw">errno_message_raw</a></li>
     <li><a href="#fd_open_read_tuple">fd_open_read_tuple</a></li>
@@ -49,6 +50,7 @@
     <li><a href="#unsetenv">unsetenv</a></li>
     <li><a href="#stderr_write">stderr_write</a></li>
     <li><a href="#stdout_write">stdout_write</a></li>
+    <li><a href="#is_terminal">is_terminal</a></li>
     <li><a href="#perror">perror</a></li>
     <li><a href="#errno_message">errno_message</a></li>
     <li><a href="#fd_open_read">fd_open_read</a></li>
@@ -245,6 +247,12 @@
       <pre class="usage"><code>stdout_write_raw(data, length) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">data: string, length: int</span></p>
     </div>
+    <div class="function" id="is_terminal_raw" data-name="is_terminal_raw">
+      <h3 class="function-name">is_terminal_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>is_terminal_raw(fd) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">fd: int</span></p>
+      <p class="doc">1 when the descriptor is a terminal (a console on Windows). See is_terminal below.</p>
+    </div>
     <div class="function" id="perror_raw" data-name="perror_raw">
       <h3 class="function-name">perror_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>perror_raw(name)</code></pre>
@@ -345,6 +353,12 @@
       <pre class="usage"><code>stdout_write(data) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">data: string</span></p>
       <p class="doc">Unbuffered write to stdout (fd 1). Same shape as stderr_write. Useful for shell-pipe-friendly tools that need to flush each record before the next stage reads.</p>
+    </div>
+    <div class="function" id="is_terminal" data-name="is_terminal">
+      <h3 class="function-name">is_terminal <span class="kind">fn</span></h3>
+      <pre class="usage"><code>is_terminal(fd) <span class="arrow">-&gt;</span> bool</code></pre>
+      <p class="signature"><span class="sig-params">fd: int</span></p>
+      <p class="doc">Whether `fd` is a terminal a person reads (on Windows, a console), not a pipe, a file or the null device: `io.is_terminal(1)` for stdout, `io.is_terminal(2)` for stderr. It is how a program decides to colour its output; NO_COLOR and FORCE_COLOR are the program's to check (std.spec does). False for a descriptor that is not open, and in a build without a filesystem.</p>
     </div>
     <div class="function" id="perror" data-name="perror">
       <h3 class="function-name">perror <span class="kind">fn</span></h3>

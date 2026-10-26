@@ -1,0 +1,28 @@
+// Modules: code split across files.
+//
+// `import geometry` loads lib/geometry/module.ae next to this file and
+// makes its exported names reachable as `geometry.name`, its functions,
+// constants and struct types alike. A name the module does not export is
+// an error here (E0303). `import geometry (area)` would also let the file
+// write `area` bare, and `import std.string as str` gives a module a
+// shorter prefix. A module of std is imported by its path, `std.string`,
+// and named by its last part.
+//
+// Run: ae run examples/01-language/14-modules/main.ae
+// See: docs/language-reference.md#modules-and-imports
+
+import geometry
+import std.string as str
+
+main() {
+    r = geometry.Rect { corner: geometry.Point { x: 2, y: 3 }, w: 3, h: 4 }
+    println("area ${geometry.area(r)}, diagonal squared ${geometry.diagonal_squared(r)}")
+    u = geometry.unit_square()
+    println("unit square at ${u.corner.x},${u.corner.y} of area ${geometry.area(u)}")
+    println(str.to_upper("from the ${geometry.NAME} module"))
+}
+
+// Output:
+// area 12, diagonal squared 25
+// unit square at 0,0 of area 1
+// FROM THE GEOMETRY MODULE

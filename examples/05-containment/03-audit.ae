@@ -1,0 +1,53 @@
+// The audit trail: what sandboxed code asked for, and what it was told.
+//
+// Every check the sandbox makes, allowed or refused, goes into a ring
+// buffer that keeps the last 256. std.audit reads it back:
+// `audit.count()`, `audit.entry(i)` (the category, the resource, and 1
+// when it was allowed), `audit.denied_count()`; `audit.clear()` starts a
+// fresh record, so a query covers just the work after it. A program can
+// say why a plugin failed, and a test can check exactly what code touched.
+// With AETHER_SANDBOX_AUDIT=stderr set, each check is also printed as it
+// happens, with no code at all.
+//
+// Run: ae run examples/05-containment/03-audit.ae
+// See: docs/containment-sandbox.md
+
+import std.audit
+import std.os
+import std.sandbox
+
+// A plugin: it reads its settings and tries a little more.
+plugin() {
+    _ = os.getenv("PLUGIN_NAME")
+    _ = os.getenv("DATABASE_URL")
+    _ = os.getenv("AWS_SECRET_KEY")
+    _, _ = os.exec("echo hello")
+}
+
+main() {
+    os.setenv("PLUGIN_NAME", "thumbnailer")
+    perms = sandbox.new("plugin") {
+        grant_env("PLUGIN_NAME")
+    }
+    defer sandbox.free(perms)
+
+    audit.clear()
+    sandbox.enforce(perms) callback {
+        plugin()
+    }
+
+    n = audit.count()
+    println("${n} checks, ${audit.denied_count()} refused:")
+    for i in 0..n {
+        category, resource, allowed = audit.entry(i)
+        verdict = if allowed == 1 { "allowed" } else { "refused" }
+        println("  ${verdict}  ${category} ${resource}")
+    }
+}
+
+// Output:
+// 4 checks, 3 refused:
+//   allowed  env PLUGIN_NAME
+//   refused  env DATABASE_URL
+//   refused  env AWS_SECRET_KEY
+//   refused  exec echo hello

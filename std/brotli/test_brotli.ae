@@ -168,7 +168,7 @@ main() {
                 back, blen, derr = brotli.decompress(string.bytes(packed)[0..plen])
                 spec.assert_ok(derr, "decompress succeeds")
                 spec.assert_eq(blen, n, "length restored, NULs and all")
-                spec.assert_true(string.string_equals(back, plain) == 1, "content restored byte for byte")
+                spec.assert_true(string.equals(back, plain) == 1, "content restored byte for byte")
                 _exact, elen, eerr = brotli.decompress_max(string.bytes(packed)[0..plen], n)
                 spec.assert_ok(eerr, "a limit equal to the output size is enough")
                 spec.assert_eq(elen, n, "length at the exact limit")
@@ -313,7 +313,7 @@ main() {
                 _t, tn, ferr = brotli.decompress_stream_finish(ds)
                 spec.assert_ok(ferr, "finish after the last byte")
                 spec.assert_eq(got + tn, n, "every byte came out")
-                spec.assert_true(string.string_equals(bytes.finish(out, got), plain) == 1, "in order")
+                spec.assert_true(string.equals(bytes.finish(out, got), plain) == 1, "in order")
                 brotli.decompress_stream_free(ds)
             }
 

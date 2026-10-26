@@ -59,8 +59,9 @@ print_tail() {
     done
 }
 
+. "$root/tests/scripts/sweep_name.sh"
 for sh_test in $scripts; do
-    name=$(echo "$sh_test" | sed "s|tests/||;s|/|_|g;s|\.sh$||")
+    name=$(echo "$sh_test" | sed "$SWEEP_NAME_SED")
     sh "$root/tests/scripts/sweep_resource_probe.sh" "$name" 2>/dev/null
     sweep_clock; t_start=$sweep_ms
     $TO bash "$sh_test" >"$tmpdir/run_$name.out" 2>"$tmpdir/run_$name.err"

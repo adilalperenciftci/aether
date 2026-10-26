@@ -269,5 +269,7 @@ DSL builders) as described above.
    wrapper, as a co-located `std/<name>/test_<name>.ae` (#1584): the
    sweep runs it, the install strips it, and `make check-tests` fails a
    module that has no test anywhere.
-7. Add an example under `examples/stdlib/<name>-demo.ae` showing
-   idiomatic use of the Go-style API.
+7. Add an example under `examples/03-std/` showing idiomatic use of
+   the Go-style API, in the format examples/README.md describes (what it
+   teaches, how to run it, the output it prints), and its row in that
+   README.

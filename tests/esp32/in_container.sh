@@ -15,6 +15,7 @@ for p in "$@"; do
     fi
     (cd build && esptool.py --chip esp32 merge_bin --fill-flash-size 4MB \
         -o flash.bin @flash_args > /dev/null 2>&1)
+    # kill-ok: runs only inside the Linux espressif/idf container, never under MSYS2
     timeout 60 "$Q/qemu-system-xtensa" -nographic -machine esp32 -m 4M \
         -drive file=build/flash.bin,if=mtd,format=raw -nic none 2>&1 |
         awk '{ print; fflush() }

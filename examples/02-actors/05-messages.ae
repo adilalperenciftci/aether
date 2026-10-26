@@ -1,0 +1,75 @@
+// Messages: what a message can carry.
+//
+// A message field can be a number, a bool, a string, an array or slice,
+// a string sequence, an `actor_ref`, or a `ptr` to a handle. The message
+// owns its strings, arrays and sequences: sending takes them, the handler
+// reads them in place, and they are released after the handler, so the
+// sender can reuse its variables at once. A handle is different: a `ptr`
+// owns nothing, so sending one hands the handle over, and the receiver
+// frees it when done; the sender must not touch it again.
+//
+// Run: ae run examples/02-actors/05-messages.ae
+// See: docs/memory-management.md#containers-module-variables-actor-state-messages
+
+import std.list
+import std.string
+
+message Batch {
+    source: string
+    lines: string[]
+    sizes: int[]
+}
+
+message Words {
+    words: *StringSeq
+}
+
+message Report {
+    rows: ptr // a std.list the receiver takes over
+}
+
+actor Worker {
+    receive {
+        Batch(source, lines, sizes) -> {
+            total = 0
+            for i in 0..sizes.len {
+                total = total + sizes[i]
+            }
+            println("${source}: ${lines.len} lines, first '${lines[0]}', ${total} bytes")
+        }
+        Words(words) -> {
+            println("${string.seq_length(words)} words: ${string.join(words, "+")}")
+        }
+        Report(rows) -> {
+            for i in 0..list.size(rows) {
+                row, _ = list.get_string(rows, i)
+                println("row ${i}: ${row}")
+            }
+            list.free(rows) // the handle was handed over: the receiver frees it
+        }
+    }
+}
+
+main() {
+    w = spawn(Worker())
+    w ! Batch {
+        source: "access.log",
+        lines: ["GET /", "GET /docs", "POST /login"],
+        sizes: [512, 2048, 128]
+    }
+
+    text = "actors share nothing"
+    w ! Words { words: string.split_to_seq(text, " ") }
+
+    rows = list.new()
+    list.add(rows, "alpha")
+    list.add(rows, "beta")
+    w ! Report { rows: rows } // from here on, `rows` is the worker's
+    wait_for_idle()
+}
+
+// Output:
+// access.log: 3 lines, first 'GET /', 2688 bytes
+// 3 words: actors+share+nothing
+// row 0: alpha
+// row 1: beta

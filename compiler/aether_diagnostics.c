@@ -1,4 +1,5 @@
 #include "aether_diagnostics.h"
+#include "aether_error.h"   // aether_display_path
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -227,9 +228,10 @@ void print_diagnostic_colored(EnhancedDiagnostic* diag) {
     fprintf(stderr, "%serror[E%04d]%s: %s\n",
             COLOR_RED, diag->code, COLOR_RESET, diag->message);
     
+    char shown[4096];
     fprintf(stderr, "  %s--> %s%s:%d:%d%s\n",
             COLOR_CYAN, COLOR_RESET,
-            diag->filename ? diag->filename : "<unknown>",
+            diag->filename ? aether_display_path(diag->filename, shown, sizeof shown) : "<unknown>",
             diag->line, diag->column, "");
     
     // Print context if available

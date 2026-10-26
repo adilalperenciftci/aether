@@ -112,7 +112,7 @@ main() {
     // Test 8: float number
     print("\nTest 8: JSON float\n")
     j8, _ = json.parse("3.14")
-    if json.type(j8) == 2 {
+    if json.type(j8) == json.JSON_NUMBER {
         print("  PASS: 3.14 is number type\n")
     } else {
         print("  FAIL\n")
@@ -128,9 +128,9 @@ main() {
         e1, _ = json.array_get(j9, 1)
         e2, _ = json.array_get(j9, 2)
         e3, _ = json.array_get(j9, 3)
-        if json.type(e0) == 2 {
-            if json.type(e1) == 3 {
-                if json.type(e2) == 1 {
+        if json.type(e0) == json.JSON_NUMBER {
+            if json.type(e1) == json.JSON_STRING {
+                if json.type(e2) == json.JSON_BOOL {
                     if json.is_null(e3) == 1 {
                         print("  PASS: [number, string, bool, null]\n")
                     } else {
@@ -202,7 +202,7 @@ main() {
     // Test 13: 4-level nested array
     print("\nTest 13: moderately nested JSON\n")
     j13, _ = json.parse("[[[[1]]]]")
-    if json.type(j13) == 4 {
+    if json.type(j13) == json.JSON_ARRAY {
         lvl1, _ = json.array_get(j13, 0)
         lvl2, _ = json.array_get(lvl1, 0)
         lvl3, _ = json.array_get(lvl2, 0)

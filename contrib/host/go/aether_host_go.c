@@ -36,6 +36,7 @@
 #include <sys/wait.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <errno.h>
 #include <fcntl.h>
 
 extern int list_size(void*);
@@ -55,37 +56,9 @@ static const char* get_go_path(void) {
     return "go";
 }
 
-// -----------------------------------------------------------------
-// Find libaether_sandbox.so next to the running binary. Identical
-// logic to contrib/host/aether — kept duplicated so each host is
-// self-contained and can evolve independently.
-// -----------------------------------------------------------------
-static int find_preload_path(char* buf, int bufsize) {
-    char exe[512];
-    ssize_t len = 0;
-#ifdef __linux__
-    len = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
-#endif
-    if (len <= 0) {
-        snprintf(buf, bufsize, "./libaether_sandbox.so");
-        return access(buf, F_OK) == 0;
-    }
-    exe[len] = '\0';
-
-    char* slash = strrchr(exe, '/');
-    if (slash) *(slash + 1) = '\0';
-
-    snprintf(buf, bufsize, "%slibaether_sandbox.so", exe);
-    if (access(buf, F_OK) == 0) return 1;
-
-    if (slash) *slash = '\0';
-    slash = strrchr(exe, '/');
-    if (slash) *(slash + 1) = '\0';
-    snprintf(buf, bufsize, "%sbuild/libaether_sandbox.so", exe);
-    if (access(buf, F_OK) == 0) return 1;
-
-    return 0;
-}
+// Where libaether_sandbox.so is: the runtime's lookup, shared with
+// spawn_sandboxed (#3177).
+#include "../../../runtime/sandbox/aether_sandbox_preload_path.h"
 
 // -----------------------------------------------------------------
 // Serialize grant list to shared memory for the child's sandbox
@@ -132,8 +105,16 @@ static char* serialize_grants_to_shm(void* perms) {
 
 // -----------------------------------------------------------------
 // Core: fork + exec with sandbox preload.
-// argv is NULL-terminated. program is argv[0]; the exec is execvp
-// so PATH resolution works for "go" without an absolute path.
+// argv is NULL-terminated. program is argv[0], looked up on PATH in
+// the parent so "go" works without an absolute path.
+//
+// Everything the child execs with is made here (#3200): the program's
+// path, the /bin/sh argv for a file with no #! line (execvp ran those
+// under /bin/sh), and the env with the preload, the grant source and
+// the map put in. The child used to setenv them and call execvp between
+// fork and exec, which a child of a threaded parent may not do: setenv
+// mallocs and takes the environment's lock, and a lock another thread
+// held at the fork stays held in the child. It now calls only execve.
 // -----------------------------------------------------------------
 static int spawn_go_sandboxed(void* perms,
                               const char* program,
@@ -144,9 +125,9 @@ static int spawn_go_sandboxed(void* perms,
     // Preload library.
     char preload_path[1024];
     if (perms) {
-        if (!find_preload_path(preload_path, sizeof(preload_path))) {
-            fprintf(stderr,
-                    "[go-host] cannot find libaether_sandbox.so\n");
+        char tried[2048];
+        if (!aether_sandbox_find_preload(preload_path, sizeof(preload_path), tried, sizeof(tried))) {
+            aether_sandbox_preload_missing("[go-host]", tried);
             return -1;
         }
     }
@@ -178,8 +159,48 @@ static int spawn_go_sandboxed(void* perms,
         }
     }
 
+    char preload_var[sizeof preload_path + 16];
+    char grants_var[512];
+    char map_var[512];
+    const char* set[3];
+    int nset = 0;
+    if (perms) {
+        snprintf(preload_var, sizeof preload_var, "LD_PRELOAD=%s", preload_path);
+        snprintf(grants_var, sizeof grants_var, "AETHER_SANDBOX_SHM=%s", grants_shm);
+        set[nset++] = preload_var;
+        set[nset++] = grants_var;
+    }
+    if (map_shm) {
+        snprintf(map_var, sizeof map_var, "AETHER_MAP_SHM=%s", map_shm);
+        set[nset++] = map_var;
+    }
+    size_t argc = 0;
+    while (argv[argc]) argc++;
+    char* path = aether_spawn_resolve(program);
+    char** env = aether_spawn_env(aether_spawn_environ(), set, nset);
+    char** sh_argv = (char**)malloc((argc + 2) * sizeof(char*));
+    /* A program that cannot start is an error, -1, as std.os reports one
+     * (#3170), never an exit of 127, which a program that ran can give: one
+     * on no PATH entry here, and one whose exec fails through this
+     * close-on-exec pipe, where the child writes its errno and an exec that
+     * succeeds closes it unwritten. */
+    int errp[2] = { -1, -1 };
+    if (!path || !env || !sh_argv || aether_pipe_cloexec(errp) != 0) {
+        free(path); free(env); free(sh_argv);
+        if (grants_shm) { shm_unlink(grants_shm); free(grants_shm); }
+        if (map_shm) {
+            aether_shared_map_unlink_shm(map_shm); free(map_shm);
+        }
+        return -1;
+    }
+    sh_argv[0] = (char*)"/bin/sh";
+    sh_argv[1] = path;
+    for (size_t i = 1; i <= argc; i++) sh_argv[i + 1] = argv[i];
+
     pid_t pid = aether_fork();
     if (pid < 0) {
+        free(path); free(env); free(sh_argv);
+        close(errp[0]); close(errp[1]);
         if (grants_shm) { shm_unlink(grants_shm); free(grants_shm); }
         if (map_shm) {
             aether_shared_map_unlink_shm(map_shm); free(map_shm);
@@ -188,15 +209,25 @@ static int spawn_go_sandboxed(void* perms,
     }
 
     if (pid == 0) {
-        // Child.
-        if (perms) {
-            setenv("LD_PRELOAD", preload_path, 1);
-            setenv("AETHER_SANDBOX_SHM", grants_shm, 1);
+        // Child: only async-signal-safe calls from here (#3200).
+        close(errp[0]);
+        execve(path, argv, env);
+        if (errno == ENOEXEC) {
+            execve("/bin/sh", sh_argv, env);
+            errno = ENOEXEC;
         }
-        if (map_shm) setenv("AETHER_MAP_SHM", map_shm, 1);
-        execvp(program, argv);
+        int e = errno;
+        ssize_t w;
+        do { w = write(errp[1], &e, sizeof e); } while (w < 0 && errno == EINTR);
         _exit(127);
     }
+    free(path); free(env); free(sh_argv);
+    close(errp[1]);
+    int exec_errno = 0;
+    ssize_t got;
+    do { got = read(errp[0], &exec_errno, sizeof exec_errno); } while (got < 0 && errno == EINTR);
+    close(errp[0]);
+    int not_started = got == (ssize_t)sizeof exec_errno;
 
     int status = 0;
     waitpid(pid, &status, 0);
@@ -209,6 +240,7 @@ static int spawn_go_sandboxed(void* perms,
         aether_shared_map_unlink_shm(map_shm); free(map_shm);
     }
 
+    if (not_started) return -1;
     if (WIFEXITED(status)) return WEXITSTATUS(status);
     return -1;
 }

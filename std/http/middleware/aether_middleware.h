@@ -133,9 +133,10 @@ typedef struct AetherRateLimitOpts AetherRateLimitOpts;
 // bucket is refilled continuously; clients that exceed the rate get a
 // 429 Too Many Requests response with a Retry-After header.
 //
-// Implementation: hash table keyed by the X-Forwarded-For header (or
-// the request path's prefix as a fallback when no IP is available
-// in the request struct). Single mutex protects the table.
+// Implementation: hash table keyed by the peer the request reports,
+// http_request_remote_addr (the connection's, or the client use_real_ip
+// resolved), never a client-sent header (#3173); "anonymous" when there
+// is no IP peer. Single mutex protects the table.
 AetherRateLimitOpts* aether_rate_limit_opts_new(int max_requests, int window_ms);
 void aether_rate_limit_opts_free(AetherRateLimitOpts* opts);
 
@@ -243,23 +244,26 @@ void aether_xform_error_pages(HttpRequest* req, HttpServerResponse* res, void* u
 // real client in an `X-Forwarded-For: client, proxy1, proxy2`
 // header (left-to-right oldest → newest).
 //
-// This middleware reads the configured header (default
-// X-Forwarded-For), takes the leftmost non-empty IP as the
-// original client, and adds an `X-Real-IP: <ip>` header to the
-// request so downstream handlers, rate-limit middleware, access
-// logs, and metrics see the original client identity.
-//
-// Trust model: the middleware does NOT validate that the request
-// came through a trusted proxy. Operators are responsible for
-// only running this middleware behind a trusted edge — typical
-// setups are firewall-restricted ports plus an LB rule, or a CDN
-// that strips client-supplied X-Forwarded-For. Without that
-// upstream guarantee, callers can spoof their apparent client IP.
+// This middleware believes the configured header (default
+// X-Forwarded-For; `Forwarded` reads each element's for=) only when
+// the connection's peer is one of the trusted proxies, and reads it
+// from the right: the first entry that is not a trusted proxy is the
+// client (#3212), as nginx's set_real_ip_from with real_ip_recursive
+// has it. The client becomes the peer the request reports
+// (http_request_remote_addr answers it from then on, the port 0) and
+// its `X-Real-IP: <ip>`, replacing an X-Real-IP the client sent
+// (#3169), so downstream handlers, rate-limit middleware, access
+// logs, metrics and std.http.proxy see the original client. From a
+// peer that is not trusted the header is the client's own word and is
+// ignored: the peer is the client.
 typedef struct AetherRealIpOpts AetherRealIpOpts;
 
 // `header_name` is the header to read from (canonical default:
 // "X-Forwarded-For"). NULL or empty falls back to the default.
-AetherRealIpOpts* aether_real_ip_opts_new(const char* header_name);
+// `trusted` lists the proxies, comma-separated addresses and networks
+// ("127.0.0.1, 10.0.0.0/8, fd00::/8"). NULL when it is empty or an
+// entry is no address or network, or on allocation failure.
+AetherRealIpOpts* aether_real_ip_opts_new(const char* header_name, const char* trusted);
 void aether_real_ip_opts_free(AetherRealIpOpts* opts);
 
 int aether_middleware_real_ip(HttpRequest* req, HttpServerResponse* res, void* user_data);

@@ -402,6 +402,15 @@ static int state_zero_is_aggregate(Type* t) {
     }
 }
 
+/* The end of a message's handling, in an actor with a receive timeout: the
+ * countdown starts again (#3162). A message still waiting disarms it again
+ * at once, so it runs only once the mailbox is empty. */
+static void emit_timeout_rearm(CodeGenerator* gen, ASTNode* timeout_arm) {
+    if (!timeout_arm) return;
+    print_line(gen, "if (self->_aether_base.timeout_ns > 0) "
+                    "self->_aether_base.last_activity_ns = (uint64_t)_aether_clock_ns();");
+}
+
 void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     if (!actor || actor->type != AST_ACTOR_DEFINITION) return;
     
@@ -819,16 +828,24 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     // in runtime/scheduler/multicore_scheduler.h.
     print_line(gen, "aether_step_actor_set(self);");
 
-    // Timeout check — fires if idle longer than timeout_ns
+    // The receive timeout (#3162). timeout_ns is the interval the `after`
+    // names, set at spawn and kept; last_activity_ns is when the countdown
+    // was armed, 0 while it is not. The spawn arms it, a message disarms it,
+    // and the end of each message's handling arms it again, so it counts
+    // from the moment the actor waits on an empty mailbox. It fires once
+    // the interval passes with no message waiting, and the firing disarms
+    // it: only a message (one the arm sends to self, say) arms it again,
+    // so an arm that sends nothing leaves the actor idle and wait_for_idle()
+    // returns (#3102).
     if (timeout_arm) {
-        print_line(gen, "// Timeout check");
-        print_line(gen, "if (self->_aether_base.timeout_ns > 0 && self->_aether_base.last_activity_ns > 0) {");
+        print_line(gen, "// Timeout check: armed, the interval passed, and no message waiting");
+        print_line(gen, "if (self->_aether_base.timeout_ns > 0 && self->_aether_base.last_activity_ns > 0 &&");
+        print_line(gen, "    atomic_load_explicit(&self->_aether_base.mailbox.count, memory_order_relaxed) == 0) {");
         indent(gen);
         print_line(gen, "uint64_t _now = (uint64_t)_aether_clock_ns();");
         print_line(gen, "if ((_now - self->_aether_base.last_activity_ns) >= self->_aether_base.timeout_ns) {");
         indent(gen);
-        print_line(gen, "self->_aether_base.timeout_ns = 0;  // one-shot");
-        print_line(gen, "self->_aether_base.last_activity_ns = 0;");
+        print_line(gen, "self->_aether_base.last_activity_ns = 0;  // fired: only a message arms it again");
         // Generate the timeout body
         if (timeout_arm->child_count >= 2 && timeout_arm->children[1]) {
             ASTNode* tbody = timeout_arm->children[1];
@@ -871,21 +888,12 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     print_line(gen, "");
     print_line(gen, "if (unlikely(!mailbox_receive(&self->_aether_base.mailbox, &msg))) {");
     indent(gen);
-    if (timeout_arm) {
-        // Start timeout countdown when mailbox is empty
-        print_line(gen, "if (self->_aether_base.timeout_ns > 0 && self->_aether_base.last_activity_ns == 0) {");
-        indent(gen);
-        print_line(gen, "self->_aether_base.last_activity_ns = (uint64_t)_aether_clock_ns();");
-        unindent(gen);
-        print_line(gen, "}");
-    }
     print_line(gen, "atomic_store_explicit(&self->_aether_base.active, 0, memory_order_relaxed);");
     print_line(gen, "return;");
     unindent(gen);
     print_line(gen, "}");
     if (timeout_arm) {
-        // Message received — cancel timeout (one-shot: fire only if no messages ever arrive)
-        print_line(gen, "self->_aether_base.timeout_ns = 0;");
+        // A message disarms the timeout; its handling's end arms it again.
         print_line(gen, "self->_aether_base.last_activity_ns = 0;");
     }
     print_line(gen, "aether_reply_slot_set(msg._reply_slot);");
@@ -986,6 +994,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
         print_line(gen, "default: break;");
         print_line(gen, "}");
         print_line(gen, "#endif");
+        emit_timeout_rearm(gen, timeout_arm);
         print_line(gen, "return;  // Unknown message type");
         print_line(gen, "");
         
@@ -1075,6 +1084,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                             }
                             print_line(gen, "aether_free_message(_msg_data);");
                         }
+                        emit_timeout_rearm(gen, timeout_arm);
                         print_line(gen, "return;");
                         unindent(gen);
                         print_line(gen, "");
@@ -1082,12 +1092,15 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                 }
             }
         }
+    } else {
+        /* No arm to run: the message is handled by being taken. */
+        emit_timeout_rearm(gen, timeout_arm);
     }
-    
+
     unindent(gen);
     print_line(gen, "}");
     print_line(gen, "");
-    
+
     print_line(gen, "%s* spawn_%s(int preferred_core) {", actor->value, actor->value);
     indent(gen);
     print_line(gen, "// AETHER_SINGLE_CORE=1 forces all actors to core 0 (eliminates cross-core overhead)");

@@ -966,6 +966,10 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
     if (!c->req) {
         c->req = (HttpRequest*)calloc(1, sizeof(HttpRequest));
         if (!c->req) return -1;
+        /* The connection's peer, which the proxy names in X-Forwarded-For
+         * (#3169). One request per connection, reset by each parse, which
+         * keeps it. */
+        http_request_copy_fd_meta(c->req, c->client_fd);
     }
     /* The arena is emptied before the parse, not after it: the parse takes
      * this request's strings from it, and resetting afterwards would hand the
@@ -1073,9 +1077,9 @@ static int ev_try_direct(EvDriver* d, EvConn* c) {
     if (!c->x.complete || c->x.framing.invalid)              return 0;
     if (c->x.framing.chunked || !c->x.framing.definite)      return 0;
     if (!c->x.buf || c->x.framing.header_bytes == 0)         return 0;
-    /* A transformer is entitled to rewrite the response, and cannot if the
-     * response was never built. */
-    if (http_server_has_response_transformer(d->loop->server)) return 0;
+    /* Response transformers are the route handler's: a proxied response is
+     * not one of theirs on the worker path either (#3213), so the upstream's
+     * own bytes are the answer whether one is registered or not. */
 
     AetherProxyDirect direct;
     if (aether_proxy_direct_take(&c->px, 0, c->x.buf, c->x.len,
@@ -1422,8 +1426,11 @@ static void ev_driver_destroy(EvDriver* d) {
 HttpEvLoop* http_evloop_start(HttpServer* server, int threads) {
     if (!server || threads <= 0) return NULL;
     /* No proxy mounted means nothing for this driver to do, and it says so by
-     * not existing rather than by running empty. */
-    if (!http_server_proxy_opts(server)) return NULL;
+     * not existing rather than by running empty. Nor does a server whose
+     * proxied requests get more than the proxy exchange: middleware before
+     * it, or a request hook, which the driver would skip
+     * (http_server_evloop_serves). */
+    if (!http_server_proxy_opts(server) || !http_server_evloop_serves(server)) return NULL;
 
     HttpEvLoop* loop = (HttpEvLoop*)calloc(1, sizeof(HttpEvLoop));
     if (!loop) return NULL;

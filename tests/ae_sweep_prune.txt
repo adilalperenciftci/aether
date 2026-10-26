@@ -154,6 +154,7 @@ tests/integration/http_serve_and_dial/
 tests/integration/http_server_actor_dispatch/
 tests/integration/http_server_background_quiet/
 tests/integration/http_server_monitor/
+tests/integration/http_server_multi_accept/
 tests/integration/http_server_connect_tunnel/
 tests/integration/http_server_h2_middleware/
 tests/integration/http_server_h2_tls/
@@ -181,8 +182,10 @@ tests/integration/link_directive_build/
 tests/integration/long_long_extern/
 tests/integration/malloc_literal_struct_cast_warn/
 tests/integration/match_arm_unreachable/
+tests/integration/message_field_published/
 tests/integration/message_trace/
 tests/integration/missing_return/
+tests/integration/module_fn_c_symbol/
 tests/integration/module_extern_auto_unwrap/
 tests/integration/module_import_not_transitive/
 tests/integration/module_leaf_collision/
@@ -198,6 +201,7 @@ tests/integration/offsetof_module_field_name/
 tests/integration/optional_reject/
 tests/integration/never_returns/
 tests/integration/or_block_reject/
+tests/integration/os_spawn_stdio_slot/
 tests/integration/render_rule/
 tests/integration/panic_actor_step_drain/
 tests/integration/panic_categories/

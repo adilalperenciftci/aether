@@ -1,0 +1,30 @@
+// A project: aether.toml, src/ for the program, lib/ for its modules.
+//
+// A directory with an aether.toml is a project. Its program is
+// src/main.ae, and `import utils` finds lib/utils/module.ae. `ae run`,
+// `ae build` and `ae check` typed anywhere in the project work from its
+// root, and `ae run` and `ae build` also take the project directory itself
+// (`ae run path/to/project`) from anywhere. aether.toml names the package
+// and its programs (`[[bin]]`); it can also list `[dependencies]`,
+// `[build] defines` and C `extra_sources`. `ae init <name>` writes a new
+// one. The module says what it exports; everything else in it is its own
+// (01-language/14-modules).
+//
+// Run: ae run examples/06-tooling/03-project
+// See: docs/build-system.md
+
+import utils
+
+main() {
+    x = 5
+    println("${x} doubled is ${utils.double_value(x)}")
+    println("${x} tripled is ${utils.triple_value(x)}")
+    println("${x} quadrupled is ${utils.quadruple_value(x)}")
+    println("utils.MULTIPLIER is ${utils.MULTIPLIER}")
+}
+
+// Output:
+// 5 doubled is 10
+// 5 tripled is 15
+// 5 quadrupled is 20
+// utils.MULTIPLIER is 2

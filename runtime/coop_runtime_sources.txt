@@ -1,0 +1,59 @@
+# The runtime a cooperative-scheduler, freestanding build links beside its
+# generated C. ci-wasm (Makefile COOP_RUNTIME_SOURCES) and ci-esp32
+# (tests/esp32/project/main/CMakeLists.txt) both read this one list: each
+# used to keep its own copy, the copies drifted, and neither had
+# runtime/aether_resource_caps.c, which std/string's release path calls
+# (aether_caps_free), so the first program that freed a counted string did
+# not link on either target. The list is closed under reference: every
+# runtime function a listed file calls is defined by a listed file (std/string
+# calls std/collections/aether_stringseq.c, std/collections calls
+# std/alloc), so a program links whichever of them it reaches. One path per
+# line, from the repository root; a line that starts with # is a comment.
+runtime/scheduler/aether_scheduler_coop.c
+runtime/scheduler/scheduler_optimizations.c
+runtime/config/aether_optimization_config.c
+runtime/memory/aether_arena.c
+runtime/memory/aether_pool.c
+runtime/memory/aether_memory_stats.c
+runtime/memory/aether_arena_optimized.c
+runtime/utils/aether_bounds_check.c
+runtime/utils/aether_test.c
+runtime/utils/aether_spawn.c
+runtime/utils/aether_cpu_detect.c
+runtime/utils/aether_simd_vectorized.c
+runtime/aether_runtime_types.c
+runtime/aether_locale_num.c
+runtime/aether_runtime.c
+runtime/aether_numa.c
+runtime/aether_host.c
+runtime/aether_resource_caps.c
+runtime/aether_callbacks.c
+runtime/actors/aether_send_buffer.c
+runtime/actors/aether_send_message.c
+runtime/actors/aether_unwind.c
+runtime/actors/aether_panic.c
+runtime/actors/aether_actor_thread.c
+runtime/sandbox/capsicum_autosandbox.c
+std/string/aether_string.c
+std/math/aether_math.c
+std/net/aether_http.c
+std/net/aether_http_server.c
+std/net/aether_http_pool.c
+std/net/aether_http_park.c
+std/net/aether_net.c
+std/net/aether_actor_bridge.c
+std/udp/aether_udp.c
+std/collections/aether_collections.c
+std/collections/aether_set.c
+std/collections/aether_pqueue.c
+std/collections/aether_intarr.c
+std/collections/aether_longarr.c
+std/collections/aether_bits.c
+std/collections/aether_stringseq.c
+std/alloc/aether_alloc.c
+std/json/aether_json.c
+std/fs/aether_fs.c
+std/log/aether_log.c
+std/io/aether_io.c
+std/os/aether_os.c
+std/quote/aether_quote.c

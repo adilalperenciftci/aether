@@ -98,5 +98,5 @@ main() {
 `json_object_has`, `json_object_key_at`, `json_object_value_at`, `array_get`,
 `json_array_size`, `obj`, `arr`, `str`, `num`, `from_int`,
 `boolean`, `null_value`, `set`, `push`, `encode`, `last_error`,
-`last_error_kind`, `last_error_line`, `last_error_col`, and the `KIND_*`
-constants.
+`last_error_kind`, `last_error_line`, `last_error_col`, the `KIND_*`
+constants, and the kinds `json_type` returns, `JSON_NULL` to `JSON_OBJECT`.

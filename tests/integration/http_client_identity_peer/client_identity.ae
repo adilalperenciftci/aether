@@ -1,0 +1,187 @@
+// The rate limiter and the ip_hash balancer know a client by the peer the
+// request reports, never by a header it sends (#3173).
+//
+// Both keyed on X-Forwarded-For, then X-Real-IP: a client that sent a fresh
+// X-Forwarded-For on every request got a fresh token bucket and was never
+// limited, and picked its upstream by what it wrote. They now key on
+// http.request_remote_addr: the connection's peer, or, behind
+// middleware.use_real_ip, the client it resolved (#3169), which is how two
+// clients behind one trusted edge get two buckets.
+//
+// Everything listens on 127.0.0.1 and a port the kernel picks.
+
+import std.http
+import std.http.client
+import std.http.middleware
+import std.http.proxy
+
+extern exit(code: int)
+
+handle_ok(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_body(res, "ok")
+}
+
+handle_a(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_body(res, "a")
+}
+
+handle_b(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_body(res, "b")
+}
+
+start(server: ptr) -> int {
+    if http.server_bind(server, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    err = http.server_start_background(server)
+    if err != "" {
+        println("FAIL: ${err}")
+        exit(1)
+    }
+    return http.server_port(server)
+}
+
+// GET /x on a port with an X-Forwarded-For header; "<status> <body>".
+get(port: int, xff: string) -> string {
+    req = client.request("GET", "http://127.0.0.1:${port}/x")
+    client.set_header(req, "X-Forwarded-For", xff)
+    resp, err = client.send_request(req)
+    client.request_free(req)
+    if err != "" {
+        println("FAIL: GET :${port}: ${err}")
+        exit(1)
+    }
+    out = "${client.response_status(resp)} ${client.response_body(resp)}"
+    client.response_free(resp)
+    return out
+}
+
+check(label: string, got: string, want: string) -> int {
+    if got != want {
+        println("  FAIL ${label}: got '${got}', expected '${want}'")
+        return 1
+    }
+    println("  PASS ${label}")
+    return 0
+}
+
+main() {
+    println("=== a client is the request's peer, not a header it sends (#3173) ===")
+
+    limited = http.server_create(0)
+    http.server_set_host(limited, "127.0.0.1")
+    lerr = middleware.use_rate_limit(limited, 3, 60000)
+    if lerr != "" {
+        println("FAIL: use_rate_limit: ${lerr}")
+        exit(1)
+    }
+    http.server_get(limited, "/x", handle_ok, 0)
+    lp = start(limited)
+
+    // This program's requests come from 127.0.0.1, the edge `behind`
+    // trusts, as a proxy's would (#3212).
+    behind = http.server_create(0)
+    http.server_set_host(behind, "127.0.0.1")
+    rerr = middleware.use_real_ip(behind, "", "127.0.0.1")
+    berr = middleware.use_rate_limit(behind, 2, 60000)
+    if rerr != "" || berr != "" {
+        println("FAIL: use_real_ip / use_rate_limit: ${rerr} ${berr}")
+        exit(1)
+    }
+    http.server_get(behind, "/x", handle_ok, 0)
+    bp = start(behind)
+
+    // A server whose trusted proxies the peer is not among believes no
+    // forwarding header: the peer is the client.
+    distrust = http.server_create(0)
+    http.server_set_host(distrust, "127.0.0.1")
+    derr = middleware.use_real_ip(distrust, "", "10.0.0.0/8")
+    dlerr = middleware.use_rate_limit(distrust, 1, 60000)
+    if derr != "" || dlerr != "" {
+        println("FAIL: use_real_ip / use_rate_limit: ${derr} ${dlerr}")
+        exit(1)
+    }
+    http.server_get(distrust, "/x", handle_ok, 0)
+    dp = start(distrust)
+
+    up_a = http.server_create(0)
+    http.server_set_host(up_a, "127.0.0.1")
+    http.server_get(up_a, "/x", handle_a, 0)
+    pa = start(up_a)
+    up_b = http.server_create(0)
+    http.server_set_host(up_b, "127.0.0.1")
+    http.server_get(up_b, "/x", handle_b, 0)
+    pb = start(up_b)
+    pool = proxy.upstream_pool_new("ip_hash", 5, 1000, 0)
+    e1 = proxy.upstream_add(pool, "http://127.0.0.1:${pa}", 1)
+    e2 = proxy.upstream_add(pool, "http://127.0.0.1:${pb}", 1)
+    gateway = http.server_create(0)
+    http.server_set_host(gateway, "127.0.0.1")
+    opts = proxy.opts_new()
+    e3 = proxy.mount(gateway, "/", pool, opts)
+    if e1 != "" || e2 != "" || e3 != "" {
+        println("FAIL: pool: '${e1}' '${e2}' '${e3}'")
+        exit(1)
+    }
+    gp = start(gateway)
+    sleep(200)
+
+    bad = 0
+    // One peer, a new forged X-Forwarded-For each time: one bucket of 3.
+    seen = ""
+    i = 1
+    while i <= 5 {
+        seen = "${seen}${get(lp, "198.51.100.${i}")}|"
+        i = i + 1
+    }
+    bad = bad + check("forged X-Forwarded-For values share the peer's bucket",
+        seen, "200 ok|200 ok|200 ok|429 Too Many Requests|429 Too Many Requests|")
+
+    // Behind use_real_ip the resolved clients are the peers: two buckets of 2.
+    a1 = get(bp, "203.0.113.1")
+    a2 = get(bp, "203.0.113.1")
+    a3 = get(bp, "203.0.113.1")
+    b1 = get(bp, "203.0.113.2")
+    bad = bad + check("behind use_real_ip each resolved client has a bucket of its own",
+        "${a1}|${a2}|${a3}|${b1}", "200 ok|200 ok|429 Too Many Requests|200 ok")
+    // The edge appends what it saw to what the client wrote: entries to the
+    // left of it are the client's own, and change nothing (#3212).
+    b2 = get(bp, "6.6.6.1, 203.0.113.2")
+    b3 = get(bp, "6.6.6.2, 203.0.113.2")
+    bad = bad + check("forged entries left of the edge's keep the client's bucket",
+        "${b2}|${b3}", "200 ok|429 Too Many Requests")
+    // From a peer that is not trusted the header is ignored: one bucket.
+    d1 = get(dp, "203.0.113.7")
+    d2 = get(dp, "203.0.113.8")
+    bad = bad + check("a peer that is not trusted is the client, whatever it forwards",
+        "${d1}|${d2}", "200 ok|429 Too Many Requests")
+
+    // ip_hash: one peer reaches one upstream, whatever it forges.
+    first = get(gp, "192.0.2.1")
+    same = 1
+    j = 2
+    while j <= 8 {
+        if get(gp, "192.0.2.${j}") != first {
+            same = 0
+        }
+        j = j + 1
+    }
+    bad = bad + check("ip_hash sends one peer to one upstream, whatever X-Forwarded-For says",
+        "${same}", "1")
+
+    http.server_stop(gateway)
+    http.server_stop(up_b)
+    http.server_stop(up_a)
+    http.server_stop(distrust)
+    http.server_stop(behind)
+    http.server_stop(limited)
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

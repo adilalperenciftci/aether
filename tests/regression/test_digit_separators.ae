@@ -1,0 +1,45 @@
+// Regression (#3155): an underscore separates digits in every number
+// literal, decimal ones included.
+//
+// The bug: the 0x, 0o and 0b literals skipped `_`, but a decimal literal
+// stopped at one, so `1_000` was the number 1 followed by the name `_000`
+// and the program failed with "Undefined variable '_000'"; the language
+// reference's own `1_000_000` and `int[1_024]` did not compile. Before the
+// fix this file did not build.
+//
+// What it exercises: separators in a decimal integer, a 64-bit one, the
+// fraction and the exponent of a float, a duration's digits, an array
+// length, a `const`, and the three prefixed bases, each equal to the same
+// literal written without them. A misplaced `_` (at the end, doubled,
+// beside `.` or `e`, after `0x`) is an error, checked with its message by
+// tests/integration/digit_separators.
+
+const BLOCK = 1_024
+
+check(name: string, ok: bool) -> int {
+    if ok {
+        return 0
+    }
+    println("FAIL: ${name}")
+    return 1
+}
+
+main() {
+    fails = 0
+    fails = fails + check("decimal", 1_000_000 == 1000000)
+    long big = 3_000_000_000
+    fails = fails + check("long", big == 3000000000)
+    fails = fails + check("fraction", 3.141_592 == 3.141592)
+    fails = fails + check("exponent", 1_0e1_0 == 10e10)
+    fails = fails + check("duration", 30_000ms == 30s)
+    int[1_024] buf
+    fails = fails + check("array length", buf.len == 1024)
+    fails = fails + check("const", BLOCK == 1024)
+    fails = fails + check("hex", 0xFF_FF == 65535)
+    fails = fails + check("octal", 0o7_55 == 493)
+    fails = fails + check("binary", 0b1010_0101 == 165)
+    if fails > 0 {
+        exit(1)
+    }
+    println("digit separators: ok")
+}

@@ -42,6 +42,7 @@ typedef struct {
     size_t             reply_size;   // size of reply_data
     volatile int       reply_ready;  // 1 when reply has been set
     volatile int       timed_out;    // 1 when asker has given up
+    volatile int       failed;       // AETHER_ASK_DEAD / _DIED: no reply can come (#3151)
     pthread_mutex_t    mutex;        // protects reply_ready / timed_out / cond
     pthread_cond_t     cond;         // signalled by scheduler_reply()
     atomic_int         refcount;     // starts at 2 (asker + actor); freed when hits 0
@@ -136,10 +137,12 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
      * Set (TAS) by the thread about to call step(); cleared (release) after. \
      * Work-stealing threads that find this set retry next outer iteration. */ \
     atomic_flag step_lock; \
-    /* Timeout support: fire handler if no message within timeout_ns ns. \
-     * 0 = no timeout. */ \
+    /* Receive timeout (#3162): the interval a `receive ... after` names, \
+     * in ns, set at spawn and kept; 0 = the actor has none. */ \
     uint64_t timeout_ns; \
-    /* Timestamp when idle started; 0 = not idle */ \
+    /* When its countdown was armed, 0 while it is not: the spawn and the \
+     * end of each message's handling arm it, a message and the firing \
+     * disarm it (the generated step function does all three). */ \
     uint64_t last_activity_ns; \
     /* Bits (#2517): AETHER_ACTOR_PANICKED once the actor's step() unwound \
      * via aether_panic() or a caught signal, AETHER_ACTOR_RELEASED once it \
@@ -275,6 +278,10 @@ typedef struct {
     pthread_cond_t  park_cond;
     atomic_int      parked;
 
+    // How many asks this core's thread is blocked in (#3220): while one is,
+    // the core runs nothing, so no actor is moved onto it (move_actor).
+    atomic_int      asking;
+
     // Per-core I/O event loop (platform-agnostic: epoll/kqueue/poll)
     AetherIoPoller io_poller;         // Platform I/O poller instance
     AetherIoEntry* io_map;            // fd → actor mapping (heap-allocated, grows on demand)
@@ -386,6 +393,12 @@ void scheduler_actor_thread_exit(ActorBase* actor);
  * nothing to sleep on: the actor is on no core, or no scheduler has been
  * initialized yet. 1 otherwise. */
 int scheduler_actor_thread_park(ActorBase* actor);
+/* One step of `actor` as a core takes it: inside the panic barrier, with a
+ * step context of its own (the ask it handles, answered or failed when the
+ * step ends), and the caller's given back after. What an auto_process
+ * actor's thread steps it with. The caller holds what a core holds to step
+ * it. */
+void scheduler_step_actor(ActorBase* actor);
 /* Puts `msg` in an auto_process actor's inbox and wakes its thread if it
  * sleeps (#2598, #2592). From any thread; the message is counted as sent by
  * the caller. Every send to such an actor ends here. */
@@ -400,8 +413,21 @@ void scheduler_set_actor_park_ms(int ms);
 void scheduler_set_core_park_ms(int ms);
 
 // Ask/reply: send a message and block until a reply arrives or timeout.
-// Returns malloc'd reply payload on success (caller must free), NULL on timeout.
+// Returns malloc'd reply payload on success (caller must free), NULL when
+// there is none.
 void* scheduler_ask_message(ActorBase* target, void* msg_data, size_t msg_size, int timeout_ms);
+
+/* Why an ask got no reply (#3151), the *status scheduler_ask_message_status
+ * gives: `v, err = actor ? Msg {}` turns it into err. An ask to a dead actor
+ * ends at once; one whose actor dies with it in hand ends when it dies. */
+#define AETHER_ASK_REPLIED    0
+#define AETHER_ASK_TIMED_OUT  1   /* no reply within timeout_ms */
+#define AETHER_ASK_DEAD       2   /* the actor was dead, or died before the ask reached it */
+#define AETHER_ASK_DIED       3   /* the actor died handling the ask, before it replied */
+#define AETHER_ASK_NO_MEMORY  4   /* the ask could not be made */
+#define AETHER_ASK_NO_REPLY   5   /* the handler returned without replying */
+void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg_size,
+                                   int timeout_ms, int* status);
 
 // Reply to the pending ask (called from inside an actor's receive handler).
 // data/data_size describe the reply payload; it is copied internally.

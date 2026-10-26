@@ -483,7 +483,7 @@ main() {
     println("LiveView-lite counter — WebSocket on ws://127.0.0.1:8126/live  (Ctrl-C to stop)")
 
     server = tinyweb.web_server_host("127.0.0.1", 8126) {
-        tinyweb.web_socket("/live") |msg: string, sender: ptr, ctx: ptr| {
+        tinyweb.web_socket("/live") | msg: string, sender: ptr, ctx: ptr | {
             // "mount" hits no branch -> the current count (0 on the first frame).
             http.ws_send_text(sender, render(handle_event(ctx, msg)))
         }

@@ -68,7 +68,7 @@ main() {
     print("PASS ftruncate to 55\n")
 
     // Close so the size check sees flushed state.
-    file_close(f)
+    _ = fs.close(f)
 
     sz, _ = fs.size(path)
     if sz != 55 {

@@ -5,10 +5,7 @@
 // logger that drops the wrong side of its threshold either floods a
 // production log or silently discards the errors it exists to record.
 //
-// Levels are DEBUG 0, INFO 1, WARN 2, ERROR 3, FATAL 4. They are
-// documented in the module header but NOT exported as constants, so
-// callers pass bare integers and this suite does the same — see the
-// last case, which pins that gap so it is visible rather than folklore.
+// The levels are the module's LOG_LEVEL_DEBUG to LOG_LEVEL_FATAL (#3149).
 //
 // Timestamps and colours are switched off before each assertion: both
 // are on by default and would make the file content unassertable.
@@ -19,11 +16,6 @@ import std.fs
 import std.os
 import std.string
 
-const DEBUG = 0
-const INFO = 1
-const WARN = 2
-const ERROR = 3
-
 main() {
     fw = spec.init()
 
@@ -32,11 +24,11 @@ main() {
 
     spec.describe(fw, "std.log level filtering") {
         spec.it("writes a message at or above the threshold") callback {
-            spec.assert_ok(log.init(logfile, WARN), "init succeeds")
+            spec.assert_ok(log.init(logfile, log.LOG_LEVEL_WARN), "init succeeds")
             log.set_timestamps(0)
             log.set_colors(0)
-            log.write(WARN, "kept warning")
-            log.write(ERROR, "kept error")
+            log.write(log.LOG_LEVEL_WARN, "kept warning")
+            log.write(log.LOG_LEVEL_ERROR, "kept error")
             log.shutdown()
             body, err = fs.read(logfile)
             spec.assert_ok(err, "log file readable")
@@ -49,11 +41,11 @@ main() {
             // The half that matters most: a filter that let these
             // through would flood the log, and one that dropped the
             // case above would lose the errors.
-            spec.assert_ok(log.init(logfile, WARN), "init succeeds")
+            spec.assert_ok(log.init(logfile, log.LOG_LEVEL_WARN), "init succeeds")
             log.set_timestamps(0)
             log.set_colors(0)
-            log.write(DEBUG, "dropped debug")
-            log.write(INFO, "dropped info")
+            log.write(log.LOG_LEVEL_DEBUG, "dropped debug")
+            log.write(log.LOG_LEVEL_INFO, "dropped info")
             log.shutdown()
             body, err = fs.read(logfile)
             spec.assert_ok(err, "log file readable")
@@ -65,10 +57,10 @@ main() {
         }
 
         spec.it("labels each line with its level") callback {
-            spec.assert_ok(log.init(logfile, DEBUG), "init succeeds")
+            spec.assert_ok(log.init(logfile, log.LOG_LEVEL_DEBUG), "init succeeds")
             log.set_timestamps(0)
             log.set_colors(0)
-            log.write(ERROR, "tagged")
+            log.write(log.LOG_LEVEL_ERROR, "tagged")
             log.shutdown()
             body, err = fs.read(logfile)
             spec.assert_ok(err, "log file readable")
@@ -77,12 +69,12 @@ main() {
         }
 
         spec.it("honours a threshold raised after init") callback {
-            spec.assert_ok(log.init(logfile, DEBUG), "init succeeds")
+            spec.assert_ok(log.init(logfile, log.LOG_LEVEL_DEBUG), "init succeeds")
             log.set_timestamps(0)
             log.set_colors(0)
-            log.write(INFO, "before raise")
-            log.set_level(ERROR)
-            log.write(INFO, "after raise")
+            log.write(log.LOG_LEVEL_INFO, "before raise")
+            log.set_level(log.LOG_LEVEL_ERROR)
+            log.write(log.LOG_LEVEL_INFO, "after raise")
             log.shutdown()
             body, err = fs.read(logfile)
             spec.assert_ok(err, "log file readable")
@@ -95,22 +87,26 @@ main() {
     }
 
     spec.describe(fw, "std.log init") {
-        spec.it("reports a log file it cannot open") callback {
-            err = log.init("/nonexistent-directory-xyz/app.log", DEBUG)
-            spec.assert_err_contains(err, "cannot open log file",
-                "an unopenable path is reported")
+        spec.it("reports a log file it cannot open, naming it") callback {
+            err = log.init("/nonexistent-directory-xyz/app.log", log.LOG_LEVEL_DEBUG)
+            spec.assert_err_contains(err, "cannot open log file /nonexistent-directory-xyz/app.log",
+                "an unopenable path is reported by name")
             log.shutdown()
         }
 
-        spec.it("does not export its level constants") callback {
-            // Pinned as an observation, not an endorsement. The level
-            // numbers are documented only in the module header comment,
-            // so every caller hard-codes 0..4 — including this suite,
-            // which declares its own DEBUG/INFO/WARN/ERROR above. If the
-            // module ever exports them, this case should be replaced by
-            // one asserting the exported values.
-            spec.assert_eq(WARN, 2, "WARN is 2 by the header's table")
-            spec.assert_eq(ERROR, 3, "ERROR is 3 by the header's table")
+        spec.it("takes \"\" and \"-\" for stderr") callback {
+            spec.assert_ok(log.init("", log.LOG_LEVEL_INFO), "\"\" is stderr, not a file")
+            spec.assert_ok(log.init("-", log.LOG_LEVEL_INFO), "\"-\" is stderr, not a file")
+            spec.assert_true(fs.exists("-") == 0, "no file named - was created")
+            log.shutdown()
+        }
+
+        spec.it("exports its levels, lowest first") callback {
+            spec.assert_eq(log.LOG_LEVEL_DEBUG, 0, "DEBUG is aether_log.h's 0")
+            spec.assert_eq(log.LOG_LEVEL_INFO, 1, "INFO is 1")
+            spec.assert_eq(log.LOG_LEVEL_WARN, 2, "WARN is 2")
+            spec.assert_eq(log.LOG_LEVEL_ERROR, 3, "ERROR is 3")
+            spec.assert_eq(log.LOG_LEVEL_FATAL, 4, "FATAL is 4")
         }
     }
 

@@ -1,0 +1,12 @@
+// Imports a module that sits beside it.
+//
+// Run: ae run tests/examples/fixture/modular.ae
+
+import helper
+
+main() {
+    println("${helper.twice(21)}")
+}
+
+// Output:
+// 42

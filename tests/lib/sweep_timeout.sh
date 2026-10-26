@@ -1,5 +1,7 @@
 # The time limit the sweep runners put on each test and stage (#2758):
-# tests/scripts/run_ae_test.sh, run_ae_sh_dir.sh and run_stage.sh.
+# tests/scripts/run_ae_test.sh, run_ae_sh_dir.sh and run_stage.sh. A test
+# that bounds a command of its own uses it too, never timeout(1) directly
+# (#3154; tests/scripts/check_shell_kills.py holds the tests to that).
 #
 #   . "$root/tests/lib/sweep_timeout.sh"
 #   sweep_timeout_bound VAR ROOT SECONDS [KILL_AFTER]
@@ -61,7 +63,11 @@ _sweep_timeout_watchdog() {
         fi
         rm -f "$_stw_tmp" "$_stw_tmp.log"
     fi
-    [ -f "$_stw_out" ] && printf '%s\n' "$_stw_out"
+    # Status 0 either way: the answer is what is printed. A test that binds
+    # its own commands runs under `set -e`, and a false `[ -f ]` here would
+    # end it inside sweep_timeout_bound's assignment, unexplained, instead of
+    # running unbounded with the message below.
+    if [ -f "$_stw_out" ]; then printf '%s\n' "$_stw_out"; fi
 }
 
 sweep_timeout_bound() {

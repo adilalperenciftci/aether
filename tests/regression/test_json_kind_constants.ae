@@ -1,0 +1,44 @@
+// std.json names the kinds json.type returns (#3148). Its header listed
+// JSON_NULL..JSON_OBJECT, but nothing defined them, so callers matched the
+// bare numbers 0 to 5.
+
+import std.json
+
+extern exit(code: int)
+
+kind_of(doc: ptr, key: string) -> int {
+    v, err = json.object_get(doc, key)
+    if err != "" {
+        println("FAIL: no '${key}': ${err}")
+        exit(1)
+    }
+    return json.type(v)
+}
+
+expect(key: string, got: int, want: int) {
+    if got != want {
+        println("FAIL: '${key}' is kind ${got}, want ${want}")
+        exit(1)
+    }
+}
+
+main() {
+    doc, err = json.parse("{\"n\": null, \"b\": true, \"x\": 1.5, \"s\": \"hi\", \"a\": [1], \"o\": {}}")
+    if err != "" {
+        println("FAIL: parse: ${err}")
+        exit(1)
+    }
+    expect("n", kind_of(doc, "n"), json.JSON_NULL)
+    expect("b", kind_of(doc, "b"), json.JSON_BOOL)
+    expect("x", kind_of(doc, "x"), json.JSON_NUMBER)
+    expect("s", kind_of(doc, "s"), json.JSON_STRING)
+    expect("a", kind_of(doc, "a"), json.JSON_ARRAY)
+    expect("doc", json.type(doc), json.JSON_OBJECT)
+    expect("o", kind_of(doc, "o"), json.JSON_OBJECT)
+    // The values are aether_json.h's JsonType, which callers stored before
+    // the names existed.
+    expect("JSON_NULL", json.JSON_NULL, 0)
+    expect("JSON_OBJECT", json.JSON_OBJECT, 5)
+    json.free(doc)
+    println("PASS")
+}

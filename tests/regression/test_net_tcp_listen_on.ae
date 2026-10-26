@@ -10,17 +10,17 @@ import std.net
 extern exit(code: int)
 
 main() {
-    srv = net.tcp_listen_on_raw("127.0.0.1", 0)
+    srv = net.tcp_listen_on_raw("127.0.0.1", 0) // raw-ok: std.net offering this binding is what #2639 checks
     if srv == null {
         println("FAIL: tcp_listen_on_raw(127.0.0.1, 0) returned null")
         exit(1)
     }
-    port = net.tcp_server_port_raw(srv)
+    port = net.tcp_server_port_raw(srv) // raw-ok: as above
     if port <= 0 || port > 65535 {
         println("FAIL: tcp_server_port_raw returned ${port}")
         exit(1)
     }
-    conn = net.tcp_connect_raw("127.0.0.1", port)
+    conn = net.tcp_connect_raw("127.0.0.1", port) // raw-ok: as above
     if conn == null {
         println("FAIL: connect to the loopback listener on ${port}")
         exit(1)
@@ -28,7 +28,7 @@ main() {
     _ = net.tcp_close(conn)
     _ = net.tcp_server_close(srv)
 
-    bad = net.tcp_listen_on_raw("not-an-address", 0) // loopback-ok: refused before any bind
+    bad = net.tcp_listen_on_raw("not-an-address", 0) // raw-ok: as above; loopback-ok: refused before any bind
     if bad != null {
         println("FAIL: tcp_listen_on_raw accepted a host that is not an address")
         exit(1)

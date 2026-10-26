@@ -1,0 +1,110 @@
+// Ownership: what the compiler frees, and what the program frees.
+//
+// Aether has no garbage collector, and it does not ask you to free
+// everything either. Two kinds of value, two rules:
+//
+// Values the program owns are counted by the compiler: strings, closures,
+// string sequences, and the structs, tuples, optionals and arrays built
+// from them. Every place that holds one (a local, a field, an element, a
+// module `var`, a closure's capture) owns one reference. A store takes the
+// new value and releases the one it replaces; leaving a scope releases
+// what it held; a parameter is borrowed for the call; a return hands the
+// caller one reference. The program writes no free for these, and
+// freeing a parameter it only borrows is refused (E0901).
+//
+// Handles are `ptr`s, and a `ptr` owns nothing: a list or a map, a
+// `heap.new` box, a `make` buffer, a C allocation. Whoever makes one
+// frees it, with `defer` right after; a function that returns one hands
+// that duty to its caller. A function that keeps a `ptr` parameter past
+// the call says so with `@keep` (E0902 otherwise). A string goes into a
+// slot that only holds a `ptr` (std.pqueue's items, a C struct) through
+// `string.keep(s)`, which hands over a reference that `string.release_kept`
+// gives back. Those annotations are only needed where values cross into
+// pointers or C.
+//
+// Run: ae run examples/01-language/17-ownership.ae
+// See: docs/memory-management.md and docs/design/ownership-model.md
+
+import std.list
+import std.pqueue
+import std.string
+
+struct Contact {
+    name: string
+    email: string
+}
+
+label(n: int) -> string {
+    return "item-${n}" // a fresh string; the caller's place owns it
+}
+
+show(c: Contact) -> string {
+    return "${c.name} <${c.email}>" // `c` is borrowed for the call
+}
+
+// Makes a handle and hands it to the caller, which frees it.
+labels(n: int) -> ptr {
+    l = list.new()
+    for i in 0..n {
+        list.add(l, label(i)) // the list takes its own reference
+    }
+    return l
+}
+
+var watched: ptr = null
+
+// Keeps the pointer after it returns, so the parameter says `@keep`.
+watch(handle: @keep ptr) {
+    watched = handle
+}
+
+main() {
+    // Counted values: no free anywhere.
+    s = ""
+    for i in 0..1000 {
+        s = label(i) // each store releases the string it replaces
+    }
+    println(s)
+
+    a = Contact { name: "Ada", email: "ada@example.org" }
+    b = a // a copy that owns its own references
+    b.name = "Grace" // releases b's old name; a keeps its own
+    println("${show(a)} / ${show(b)}")
+
+    greet = | who: string | -> "hello, ${who}" // a closure is counted too
+    println(greet(a.name))
+
+    // Handles: made, used, freed.
+    items = labels(3)
+    defer list.free(items) // releases the strings it holds, then the list
+    watch(items)
+    first, _ = list.get_string(items, 0)
+    println("${list.size(watched)} labels, the first ${first}")
+
+    box = heap.new(Contact) // a struct on the heap is a handle
+    defer heap.free(box) // releases its fields, then the box
+    box.name = "Linus"
+    box.email = "linus@example.org"
+    println("${box.name} <${box.email}>")
+
+    // A string in a queue that holds bare pointers.
+    queue = pqueue.new()
+    defer pqueue.free(queue)
+    pqueue.push(queue, 2, string.keep(label(2)))
+    pqueue.push(queue, 1, string.keep(label(1)))
+    while pqueue.size(queue) > 0 {
+        p = pqueue.pop(queue)
+        text, _ = string.from_ptr(p)
+        println("next: ${text}")
+        string.release_kept(p) // the reference keep handed over
+    }
+}
+
+// Output:
+// item-999
+// Ada <ada@example.org> / Grace <ada@example.org>
+// hello, Ada
+// 3 labels, the first item-0
+// Linus <linus@example.org>
+// next: item-1
+// next: item-2

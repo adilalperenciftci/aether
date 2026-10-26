@@ -14,13 +14,6 @@ import std.http.middleware
 import std.os
 
 extern exit(code: int)
-// Use raw form: actor receive handlers can't cleanly discard the
-// wrapper's string return without an unused-result warning.
-extern http_server_start_raw(server: ptr) -> int
-extern aether_rewrite_opts_new() -> ptr
-extern aether_error_pages_opts_new() -> ptr
-extern http_server_bind_raw(server: ptr, host: string, port: int) -> int
-extern http_server_port(server: ptr) -> int
 
 handle_api(req: ptr, res: ptr, ud: ptr) {
     http.response_set_status(res, 200)
@@ -39,7 +32,7 @@ handle_kaboom(req: ptr, res: ptr, ud: ptr) {
 message StartSrv { raw: ptr }
 actor SrvActor {
     state s = 0
-    receive { StartSrv(raw) -> { s = raw; http_server_start_raw(raw) } }
+    receive { StartSrv(raw) -> { s = raw; _ = http.server_start(raw) } }
 }
 
 main() {
@@ -48,7 +41,7 @@ main() {
     if raw == 0 { println("FAIL: server_create"); exit(1) }
 
     // 1. rewrite — /old/* -> /api/*
-    rw_opts = aether_rewrite_opts_new()
+    rw_opts = middleware.rewrite_new()
     middleware.rewrite_add_rule(rw_opts, "/old/", "/api/")
     middleware.use_rewrite(raw, rw_opts)
 
@@ -65,7 +58,7 @@ main() {
     middleware.use_gzip(raw, 64, 6)
 
     // 4. error_pages — custom 404 + 500
-    ep_opts = aether_error_pages_opts_new()
+    ep_opts = middleware.error_pages_new()
     middleware.error_pages_register(ep_opts, 404,
         "<html><body><h1>Custom Not Found</h1></body></html>",
         "text/html; charset=utf-8")
@@ -77,11 +70,11 @@ main() {
     // server_start reuses a socket the caller already bound, so this also
     // means READY is printed AFTER the listen socket exists rather than
     // before it, which is what the fixed sleep in the runner was covering.
-    if http_server_bind_raw(raw, "127.0.0.1", 0) < 0 {
+    if http.server_bind(raw, "127.0.0.1", 0) != "" {
         println("FAIL: bind")
         exit(1)
     }
-    println("READY ${http_server_port(raw)}")
+    println("READY ${http.server_port(raw)}")
 
     http.server_get(raw, "/api/data", handle_api, 0)
     http.server_get(raw, "/kaboom", handle_kaboom, 0)

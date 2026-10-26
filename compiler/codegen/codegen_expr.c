@@ -580,10 +580,11 @@ static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
          * it takes its own). */
         int literal_arg = arg->type == AST_CLOSURE &&
                           !(arg->value && strcmp(arg->value, "trailing") == 0);
-        if (arg->type != AST_FUNCTION_CALL &&
-            arg->type != AST_STRING_INTERP &&
-            arg->type != AST_OR_ELSE && !literal_arg &&
-            !is_owned_string_unwrap(gen, arg)) continue;
+        /* A call (it may hand over a closure too), or a fresh string
+         * temporary of any kind is_fresh_heap_string_temp names, the one
+         * list (#3165: an ask's reply, passed straight on, leaked). */
+        if (arg->type != AST_FUNCTION_CALL && !literal_arg &&
+            !is_fresh_heap_string_temp(gen, arg)) continue;
         if (arg_drain_lookup(arg)) continue;
         /* #2507: a closure a call hands over (call_returns_owned_closure),
          * passed on as an argument anywhere in an expression: dead after
@@ -769,11 +770,12 @@ int interp_segment_is_heap_call(CodeGenerator* gen, ASTNode* ch) {
      * node's own type is not reliably stamped; is_heap_string_expr reads the
      * fallible's value slot. */
     if (ch->type == AST_OR_ELSE) return is_heap_string_expr(gen, ch);
-    if (ch->type != AST_FUNCTION_CALL && ch->type != AST_STRING_INTERP &&
-        !is_owned_string_unwrap(gen, ch)) return 0;   /* #2750 */
     TypeKind tk = ch->node_type ? ch->node_type->kind : TYPE_UNKNOWN;
     if (tk != TYPE_STRING && tk != TYPE_PTR) return 0;
-    return is_heap_string_expr(gen, ch);
+    /* The kinds that make a fresh string are is_fresh_heap_string_temp's
+     * one list: a call, an interpolation, an unwrap (#2750), an ask's
+     * reply (#3165, which a segment read without freeing). */
+    return is_fresh_heap_string_temp(gen, ch);
 }
 
 /* --- Variables bound to a closure literal (#2513) -----------------------
@@ -5398,17 +5400,44 @@ void emit_message_array_hoists(CodeGenerator* gen, ASTNode* message, MessageDef*
  * was filled from: when it is an owned temporary (a call or interpolation
  * result held by nothing else), the temporary is freed once it is copied.
  * Nothing else frees it, so every such send leaked one string. */
+/* Whether a string field's initializer is a fresh heap string the copy
+ * takes the place of: the one list of such temporaries,
+ * is_fresh_heap_string_temp. A list of its own here lacked an ask's string
+ * reply and a fallible's `or`, and each such field leaked its temporary. */
+static int message_string_init_owned(CodeGenerator* gen, ASTNode* init) {
+    return is_fresh_heap_string_temp(gen, init);
+}
+
 void emit_message_string_copy(CodeGenerator* gen, const char* lv, ASTNode* init) {
-    int owned_temp = init &&
-        (init->type == AST_FUNCTION_CALL || init->type == AST_STRING_INTERP ||
-         is_owned_string_unwrap(gen, init)) &&
-        is_heap_string_expr(gen, init);
-    fprintf(gen->output,
-            "if (%s) { const char* _mt = %s; size_t _ml = aether_string_length(_mt); "
-            "%s = (const char*)string_new_with_length((void*)aether_string_data(_mt), (int64_t)_ml); ",
-            lv, lv, lv);
-    if (owned_temp) fprintf(gen->output, "aether_heap_str_free(_mt); ");
-    fprintf(gen->output, "} ");
+    fprintf(gen->output, "%s = _aether_msg_str(%s, %d); ", lv, lv,
+            message_string_init_owned(gen, init));
+}
+
+/* The fields of message `lv`, built from the literal `message`, that its
+ * sender still holds: every owning one but a string, which is a copy of its
+ * own (#466). Each is published (#2919) before the message can reach the
+ * receiving actor's thread, so both threads count what it holds atomically:
+ * a tuple's string taken with a plain increment and released on two threads
+ * at once lost a count, and the sender's last release freed it a second
+ * time. As emit_message_array_fills does: parts of the sequence `s`, or
+ * statements when it is NULL. A closure's environment is counted
+ * atomically already. */
+void emit_message_publishes(CodeGenerator* gen, ASTNode* message, const char* lv, TempSeq* s) {
+    for (int i = 0; i < message->child_count; i++) {
+        ASTNode* fi = message->children[i];
+        if (!fi || fi->type != AST_FIELD_INIT || !fi->value || fi->child_count == 0) continue;
+        Type* ft = message_field_type(gen->program, message->value, fi->value);
+        if (!ft || ft->kind == TYPE_STRING || ft->kind == TYPE_FUNCTION ||
+            !own_type_owns(gen, ft)) continue;
+        const char* call = own_publish_call(gen, ft, cg_internf("%s.%s", lv, fi->value));
+        if (!call) continue;
+        if (s) {
+            seq_next(gen, s);
+            fprintf(gen->output, "%s", call);
+        } else {
+            fprintf(gen->output, "%s; ", call);
+        }
+    }
 }
 
 /* The expression a message constructor gives field `name`, or NULL. */
@@ -5588,7 +5617,8 @@ int message_has_array_fields(CodeGenerator* gen, ASTNode* message) {
 /* The initializers of message literal `message` after its `._message_id`.
  * A fixed-size array is left out: C initializes no array from an array
  * value, so emit_message_array_fills fills it once the message exists. */
-void emit_message_field_inits(CodeGenerator* gen, ASTNode* message, MessageDef* msg_def) {
+void emit_message_field_inits(CodeGenerator* gen, ASTNode* message, MessageDef* msg_def,
+                              int copy_strings) {
     for (int i = 0; i < message->child_count; i++) {
         ASTNode* fi = message->children[i];
         if (!fi || fi->type != AST_FIELD_INIT || msg_array_field(gen, message->value, fi->value))
@@ -5598,14 +5628,33 @@ void emit_message_field_inits(CodeGenerator* gen, ASTNode* message, MessageDef* 
         /* A struct, an optional or a tuple that owns is taken as any place
          * of its type takes it; an optional's bare value is wrapped. */
         Type* ft = message_field_type(gen->program, message->value, fi->value);
+        MessageFieldDef* fdef = find_msg_field(msg_def, fi->value);
         if (ft && ft->kind != TYPE_STRING && ft->kind != TYPE_FUNCTION && own_type_owns(gen, ft)) {
             emit_value_take(gen, fi->children[0], ft);
         } else if (ft && ft->kind == TYPE_OPTIONAL) {
             emit_optional_coerced(gen, fi->children[0], ft);
+        } else if (copy_strings && fdef && fdef->type_kind == TYPE_STRING) {
+            fprintf(gen->output, "_aether_msg_str(");
+            emit_message_field_init(gen, fdef, fi->children[0]);
+            fprintf(gen->output, ", %d)", message_string_init_owned(gen, fi->children[0]));
         } else {
-            emit_message_field_init(gen, find_msg_field(msg_def, fi->value), fi->children[0]);
+            emit_message_field_init(gen, fdef, fi->children[0]);
         }
     }
+}
+
+/* Does message literal `message` share a field with its sender that
+ * emit_message_publishes publishes? */
+int message_needs_publish(CodeGenerator* gen, ASTNode* message) {
+    for (int i = 0; i < message->child_count; i++) {
+        ASTNode* fi = message->children[i];
+        if (!fi || fi->type != AST_FIELD_INIT || !fi->value || fi->child_count == 0) continue;
+        Type* ft = message_field_type(gen->program, message->value, fi->value);
+        if (ft && ft->kind != TYPE_STRING && ft->kind != TYPE_FUNCTION && own_type_owns(gen, ft) &&
+            own_publish_call(gen, ft, "x"))
+            return 1;
+    }
+    return 0;
 }
 
 /* Each fixed-size array field of message literal `message` filled into the
@@ -5680,16 +5729,30 @@ void emit_message_field_init(CodeGenerator* gen, MessageFieldDef* fdef, ASTNode*
 }
 
 // Emit a send target expression with the correct C cast.
+int ask_timeout_ms(ASTNode* ask) {
+    if (ask && ask->child_count >= 3 && ask->children[2] && ask->children[2]->value)
+        return atoi(ask->children[2]->value);
+    return 5000;
+}
+
 // Actor refs produce (ActorBase*)(expr) directly.
 // Int/int64 values (actor refs stored in int message fields or state) need
 // (ActorBase*)(intptr_t)(expr) to avoid pointer-width conversion warnings.
-static void emit_send_target(CodeGenerator* gen, ASTNode* target, const char* cast_type) {
+// #3172: the target goes through _aether_send_target, which panics, by name
+// and place, on a null reference (`op` is "send" or "ask"), as #3098's check
+// does for a call through a null function pointer: the send read the null
+// actor's fields and the process died of an access violation, past the
+// barrier that catches an actor's panic.
+static void emit_send_target(CodeGenerator* gen, ASTNode* target, const char* cast_type,
+                             const char* op) {
     int needs_intptr = target->node_type &&
         (target->node_type->kind == TYPE_INT || target->node_type->kind == TYPE_INT64);
-    fprintf(gen->output, "(%s)(", cast_type);
+    fprintf(gen->output, "(%s)_aether_send_target((void*)(", cast_type);
     if (needs_intptr) fprintf(gen->output, "(intptr_t)");
     generate_expression(gen, target);
-    fprintf(gen->output, ")");
+    fprintf(gen->output, "), \"null_actor_%s: %s to a null actor reference at \" ", op, op);
+    emit_slice_diag_file(gen, target);
+    fprintf(gen->output, " \":%d:%d\")", target->line, target->column);
 }
 
 /* Length of the valid UTF-8 sequence starting at `s`, or 1 if the
@@ -6000,15 +6063,20 @@ static void emit_text_nul_args(CodeGenerator* gen, const ASTNode* text) {
     }
 }
 
-/* True when `n` spells the null pointer in a comparison: the identifier
- * `NULL`, or a bare literal `0` — but NOT the one-character string
- * literal `"0"`. Both literals carry the text `0` in `value`; only the
+/* True when `n` spells the null pointer in a comparison: the `null` keyword,
+ * the identifier `NULL`, or a bare literal `0`, but NOT the one-character
+ * string literal `"0"`. Both literals carry the text `0` in `value`; only the
  * string one is TYPE_STRING at parse time (create_literal_node), so
  * that is what tells them apart. Pre-#2206 `s != "0"` was taken for a
  * null check and emitted a bare pointer compare against a `.rodata`
  * literal, which was never equal (and drew clang's -Wstring-compare). */
 static int is_null_compare_operand(const ASTNode* n) {
-    if (!n || !n->value) return 0;
+    if (!n) return 0;
+    /* #3129: the `null` keyword. `s == null` asks whether there is a string
+     * at all, a pointer test; it went to string_equals, which happened to
+     * answer it only while a null string compared unequal to everything. */
+    if (n->type == AST_NULL_LITERAL) return 1;
+    if (!n->value) return 0;
     if (n->type == AST_IDENTIFIER) return strcmp(n->value, "NULL") == 0;
     if (n->type != AST_LITERAL) return 0;
     if (n->node_type && n->node_type->kind == TYPE_STRING) return 0;
@@ -7463,15 +7531,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
      * field or an element, which the call reads through its hold rather
      * than evaluating the place again. An `if` giving a fresh value is
      * taken into one (#3006). */
-    if (expr->type == AST_FUNCTION_CALL ||
-        expr->type == AST_STRING_INTERP ||
-        expr->type == AST_CLOSURE ||
-        expr->type == AST_OR_ELSE ||
-        expr->type == AST_TUPLE_UNWRAP ||
-        expr->type == AST_NULL_COALESCE ||
-        (expr->type == AST_IF_EXPRESSION && g_arg_drain_count > 0) ||
-        ((expr->type == AST_IDENTIFIER || expr->type == AST_MEMBER_ACCESS ||
-          expr->type == AST_ARRAY_ACCESS) && g_arg_drain_count > 0)) {
+    /* Any node the wrap took, whatever its kind: the table holds only the
+     * arguments it chose, filled before they were bound. A list of kinds
+     * here missed an ask's reply, which was then asked for a second time
+     * and leaked (#3165). */
+    if (g_arg_drain_count > 0) {
         const char* sub = arg_drain_lookup(expr);
         if (sub) {
             fprintf(gen->output, "%s", sub);
@@ -8079,8 +8143,21 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             // sizeof(TypeName) → C sizeof(struct TypeName). Extern/struct
             // types emit as `struct <Name>` (same convention as
             // `as *StructName`), so the value always tracks the real C
-            // layout.
-            fprintf(gen->output, "((int)sizeof(%s %s))", aether_c_tag(expr->value), expr->value);
+            // layout. #3174: any other type is the C type it lowers to,
+            // an array its element type and length.
+            if (expr->child_count > 0 && expr->children[0] &&
+                expr->children[0]->type == AST_TYPE_ANNOTATION && expr->children[0]->node_type &&
+                !(expr->value && expr->children[0]->node_type->kind == TYPE_STRUCT)) {
+                Type* t = expr->children[0]->node_type;
+                if (type_is_sized_array(t) && t->element_type) {
+                    fprintf(gen->output, "((int)sizeof(%s[%d]))", get_c_type(t->element_type),
+                            t->array_size);
+                } else {
+                    fprintf(gen->output, "((int)sizeof(%s))", get_c_type(t));
+                }
+            } else {
+                fprintf(gen->output, "((int)sizeof(%s %s))", aether_c_tag(expr->value), expr->value);
+            }
             break;
 
         case AST_SCHEMA_OF:
@@ -8091,7 +8168,13 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
 
         case AST_OFFSETOF:
             // offsetof(TypeName, field) → C offsetof(struct TypeName, field).
-            if (expr->child_count >= 1 && expr->children[0]->value) {
+            // #3174: a qualified struct (`gpu.Shader`) rides in a type
+            // child, the field after it.
+            if (expr->child_count >= 2 && expr->children[0]->type == AST_TYPE_ANNOTATION &&
+                expr->children[0]->node_type && expr->children[1]->value) {
+                fprintf(gen->output, "((int)offsetof(%s, %s))",
+                        get_c_type(expr->children[0]->node_type), expr->children[1]->value);
+            } else if (expr->child_count >= 1 && expr->children[0]->value) {
                 fprintf(gen->output, "((int)offsetof(%s %s, %s))", aether_c_tag(expr->value),
                         expr->value, expr->children[0]->value);
             } else {
@@ -9884,10 +9967,26 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 else if (strcmp(func_name, "free") == 0 && expr->child_count == 1 &&
                          type_is_slice(expr->children[0]->node_type)) {
                     /* #3072: a slice is freed by aether_slice_free, which
-                     * refuses a view (it owns nothing) by name. */
-                    fprintf(gen->output, "aether_slice_free(");
-                    generate_expression(gen, expr->children[0]);
-                    fprintf(gen->output, ", ");
+                     * refuses a view (it owns nothing) by name. #3159: its
+                     * elements are places where a store into them takes the
+                     * value (emit_slice_element_store's rule: an owning
+                     * element type, the slice no view of C memory), so a
+                     * `make` buffer's give back what they hold first. */
+                    ASTNode* sl = expr->children[0];
+                    Type* et = sl->node_type->element_type;
+                    int elems_own = et && et->kind != TYPE_ARRAY && own_type_owns(gen, et) &&
+                                    sl->type != AST_PTR_AS_ARRAY_CAST &&
+                                    !expr_is_c_view_of_slice(gen, sl);
+                    if (elems_own) {
+                        fprintf(gen->output, "aether_slice_free_elems(");
+                        generate_expression(gen, sl);
+                        fprintf(gen->output, ", sizeof(%s), %s, ", get_c_type(et),
+                                own_unwind_fn(gen, et));
+                    } else {
+                        fprintf(gen->output, "aether_slice_free(");
+                        generate_expression(gen, sl);
+                        fprintf(gen->output, ", ");
+                    }
                     emit_slice_diag_file(gen, expr);
                     fprintf(gen->output, ", %d)", expr->line);
                 }
@@ -11785,15 +11884,15 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
 
                             if (gen->in_main_loop) {
                                 fprintf(gen->output, "scheduler_send_batch_add(");
-                                emit_send_target(gen, target, "ActorBase*");
+                                emit_send_target(gen, target, "ActorBase*", "send");
                                 fprintf(gen->output, ", _imsg); }");
                             } else if (gen->current_actor == NULL) {
                                 fprintf(gen->output, "scheduler_send_remote(");
-                                emit_send_target(gen, target, "ActorBase*");
+                                emit_send_target(gen, target, "ActorBase*", "send");
                                 fprintf(gen->output, ", _imsg, aether_core_id_get()); }");
                             } else {
                                 fprintf(gen->output, "ActorBase* _send_target = ");
-                                emit_send_target(gen, target, "ActorBase*");
+                                emit_send_target(gen, target, "ActorBase*", "send");
                                 fprintf(gen->output, "; ");
                                 fprintf(gen->output, "{ int _cid = aether_core_id_get(); if (_cid >= 0 && _cid == _send_target->assigned_core) { ");
                                 fprintf(gen->output, "scheduler_send_local(_send_target, _imsg); } else { ");
@@ -11807,7 +11906,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             emit_message_array_hoists(gen, message, msg_def);
                             fprintf(gen->output, "%s _msg = { ._message_id = %d",
                                     message->value, msg_def->message_id);
-                            emit_message_field_inits(gen, message, msg_def);
+                            emit_message_field_inits(gen, message, msg_def, 0);
                             fprintf(gen->output, " }; ");
                             emit_message_array_fills(gen, message, "_msg", NULL);
                             /* Deep-copy heap-string fields (#466).
@@ -11843,12 +11942,13 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                     }
                                 }
                             }
+                            emit_message_publishes(gen, message, "_msg", NULL);
                             /* #3117: in a batched loop every send joins the
                              * batch, so a payload message keeps its place
                              * among the loop's one-int ones. */
                             fprintf(gen->output, gen->in_main_loop ? "aether_send_message_batch("
                                                                    : "aether_send_message(");
-                            emit_send_target(gen, target, "void*");
+                            emit_send_target(gen, target, "void*", "send");
                             fprintf(gen->output, ", &_msg, sizeof(%s)); }", message->value);
                         }
                     } else {
@@ -11862,6 +11962,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             if (expr->child_count >= 2) {
                 ASTNode* target = expr->children[0];
                 ASTNode* message = expr->children[1];
+                /* #3151: where `v, err = actor ? Msg {}` wants this ask's
+                 * status, as `&var`; an ask inside the message's fields is
+                 * not this one. */
+                const char* ask_status = gen->ask_status_var
+                    ? cg_internf("&%s", gen->ask_status_var) : "NULL";
+                gen->ask_status_var = NULL;
                 
                 if (message && message->type == AST_MESSAGE_CONSTRUCTOR) {
                     MessageDef* msg_def = lookup_message(gen->message_registry, message->value);
@@ -11912,11 +12018,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             }
                         }
 
-                        int timeout_ms = 5000;
-                        if (expr->child_count >= 3 && expr->children[2] &&
-                            expr->children[2]->value) {
-                            timeout_ms = atoi(expr->children[2]->value);
-                        }
+                        int timeout_ms = ask_timeout_ms(expr);
 
                         /* #2528: the reply's release, one rule for both
                          * paths: a reply message that owns strings or
@@ -11941,7 +12043,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         fprintf(gen->output, "({ %s _msg = { ._message_id = %d",
                                 message->value, msg_def->message_id);
 
-                        emit_message_field_inits(gen, message, msg_def);
+                        emit_message_field_inits(gen, message, msg_def, 0);
                         fprintf(gen->output, " }; ");
                         emit_message_array_fills(gen, message, "_msg", NULL);
 
@@ -11959,10 +12061,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                     message_field_init_expr(message, f->name));
                             }
                         }
+                        emit_message_publishes(gen, message, "_msg", NULL);
 
-                        fprintf(gen->output, "void* _ask_r = scheduler_ask_message(");
-                        emit_send_target(gen, target, "ActorBase*");
-                        fprintf(gen->output, ", &_msg, sizeof(%s), %d); ", message->value, timeout_ms);
+                        fprintf(gen->output, "void* _ask_r = scheduler_ask_message_status(");
+                        emit_send_target(gen, target, "ActorBase*", "ask");
+                        fprintf(gen->output, ", &_msg, sizeof(%s), %d, %s); ", message->value, timeout_ms,
+                                ask_status);
 
                         if (reply_msg_name && reply_field) {
                             fprintf(gen->output, "%s _ask_val = _ask_r ? ((%s*)_ask_r)->%s : %s; ",
@@ -12001,34 +12105,39 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                          * path (#2528). */
                         gen->ask_temp_counter++;
                         fprintf(gen->output, "(*(%s*)_aether_ask_helper(", c_type);
-                        emit_send_target(gen, target, "ActorBase*");
-                        if (message_has_array_fields(gen, message)) {
-                            /* Its arrays are filled once it exists, so the
-                             * message is a temporary, not a literal. */
+                        emit_send_target(gen, target, "ActorBase*", "ask");
+                        /* Its strings are copies of its own, made in the
+                         * literal (#466): no statement follows it here. */
+                        if (message_has_array_fields(gen, message) || message_needs_publish(gen, message)) {
+                            /* Its arrays are filled and its shared fields
+                             * published once it exists, so the message is a
+                             * temporary, not a literal. */
                             TempSeq s;
                             fprintf(gen->output, ", ");
                             seq_open(gen, &s);
                             const char* mv = seq_let(gen, &s, message->value, "_ae_am");
                             fprintf(gen->output, "(%s){ ._message_id = %d", message->value,
                                     msg_def->message_id);
-                            emit_message_field_inits(gen, message, msg_def);
+                            emit_message_field_inits(gen, message, msg_def, 1);
                             fprintf(gen->output, " }");
                             emit_message_array_fills(gen, message, mv, &s);
+                            emit_message_publishes(gen, message, mv, &s);
                             seq_next(gen, &s);
                             fprintf(gen->output, "&%s", mv);
                             seq_close(gen, &s);
                         } else {
                             fprintf(gen->output, ", &(%s){ ._message_id = %d",
                                     message->value, msg_def->message_id);
-                            emit_message_field_inits(gen, message, msg_def);
+                            emit_message_field_inits(gen, message, msg_def, 1);
                             fprintf(gen->output, " }");
                         }
                         fprintf(gen->output, ", sizeof(%s), %d, ", message->value, timeout_ms);
                         if (reply_msg_name && reply_field) {
-                            fprintf(gen->output, "offsetof(%s, %s), sizeof(%s), %s, (void*)&(%s){0}))",
-                                    reply_msg_name, reply_field, c_type, reply_release, c_type);
+                            fprintf(gen->output, "offsetof(%s, %s), sizeof(%s), %s, (void*)&(%s){0}, %s))",
+                                    reply_msg_name, reply_field, c_type, reply_release, c_type, ask_status);
                         } else {
-                            fprintf(gen->output, "0, sizeof(%s), NULL, (void*)&(%s){0}))", c_type, c_type);
+                            fprintf(gen->output, "0, sizeof(%s), NULL, (void*)&(%s){0}, %s))", c_type, c_type,
+                                    ask_status);
                         }
                         fprintf(gen->output, "\n#endif\n");
                     } else {

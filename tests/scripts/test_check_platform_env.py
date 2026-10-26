@@ -36,5 +36,29 @@ class PlatformFromEnvTest(unittest.TestCase):
         self.assertEqual(cpe.check_source(src), [])
 
 
+class ShellPlatformFromEnvTest(unittest.TestCase):
+    def test_the_environments_os_is_flagged(self):
+        src = ('set -e\n'
+               'if [ "$OS" = "Windows_NT" ]; then\n'
+               '    exit 0\n'
+               'fi\n'
+               'case "${OS:-}" in Windows_NT) EXE=.exe ;; esac\n')
+        self.assertEqual(cpe.check_shell_source(src), [2, 5])
+
+    def test_uname_is_clean(self):
+        src = 'case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*|Windows_NT) EXE=.exe ;; esac\n'
+        self.assertEqual(cpe.check_shell_source(src), [])
+
+    def test_a_script_that_sets_its_own_os_is_clean(self):
+        src = 'OS="$(uname -s 2>/dev/null)"\nif [ "$OS" = Linux ]; then :; fi\n'
+        self.assertEqual(cpe.check_shell_source(src), [])
+        src = 'ARCH="$(uname -m)"; OS="$(uname -s)"\ncase "$OS-$ARCH" in *) ;; esac\n'
+        self.assertEqual(cpe.check_shell_source(src), [])
+
+    def test_a_comment_and_another_variable_are_clean(self):
+        src = '# was [ "$OS" = "Windows_NT" ]\necho "$OSTYPE" "${OSX_SDK:-}"\n'
+        self.assertEqual(cpe.check_shell_source(src), [])
+
+
 if __name__ == '__main__':
     unittest.main()

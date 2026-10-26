@@ -1,0 +1,55 @@
+// Callbacks: an Aether function that C calls back.
+//
+// Many C APIs take a function to call: a sort's comparison, a library's
+// event handler. `@c_callback` gives an Aether function a stable C symbol,
+// and the function's name is then its address wherever C wants a function
+// pointer. Here the C library's `qsort` sorts an array of the program's
+// own, calling `by_value` to compare two elements. The elements reach the
+// callback as untyped pointers; `p as int[]` views one as ints. A closure
+// cannot be a C function pointer (it carries the variables it captured);
+// a C API that takes a context pointer beside its callback is how C hands
+// state back.
+//
+// Run: ae run examples/04-interop/03-callbacks.ae
+// See: docs/c-interop.md
+
+extern qsort(base: ptr, count: size_t, size: size_t, compare: ptr)
+
+@c_callback
+by_value(a: ptr, b: ptr) -> int {
+    x = (a as int[])[0]
+    y = (b as int[])[0]
+    if x < y {
+        return -1
+    }
+    if x > y {
+        return 1
+    }
+    return 0
+}
+
+// Descending: the same comparison, reversed.
+@c_callback
+by_value_desc(a: ptr, b: ptr) -> int {
+    return by_value(b, a)
+}
+
+show(xs: int[]) -> string {
+    out = ""
+    for i in 0..xs.len {
+        out = "${out} ${xs[i]}"
+    }
+    return out
+}
+
+main() {
+    nums = [42, 7, 19, 3, 88, 21]
+    qsort(nums, nums.len, sizeof(int), by_value)
+    println("ascending:${show(nums)}")
+    qsort(nums, nums.len, sizeof(int), by_value_desc)
+    println("descending:${show(nums)}")
+}
+
+// Output:
+// ascending: 3 7 19 21 42 88
+// descending: 88 42 21 19 7 3

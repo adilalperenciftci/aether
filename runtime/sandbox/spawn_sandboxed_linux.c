@@ -34,34 +34,57 @@ extern void* list_get_raw(void*, int);
 // C-string. Required for argv / grant-pattern reads — see issue #688.
 extern const char* aether_string_data(const void*);
 
-// Find libaether_sandbox.so next to the running binary
-static int find_preload_path(char* buf, int bufsize) {
-    // Try /proc/self/exe to find our binary's directory
-    // Leave room for suffix ("build/libaether_sandbox.so" = 26 chars)
-    char exe[512];
-    ssize_t len = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
-    if (len <= 0) {
-        // Fallback: look in current directory
-        snprintf(buf, bufsize, "./libaether_sandbox.so");
-        return access(buf, F_OK) == 0;
+// The preload library's lookup, shared with the contrib process hosts.
+#include "aether_sandbox_preload_path.h"
+// The close-on-exec pipe, the fork, and what a child execs with.
+#include "../utils/aether_spawn.h"
+
+// What a child that could not run its program tells the parent, on a
+// close-on-exec pipe the exec closes unwritten: the step that failed and its
+// errno. The parent prints the reason. The child itself calls nothing
+// between fork and exec that is not async-signal-safe (#3200): it used to
+// setenv the sandbox's variables, execlp the program and print with perror
+// or fprintf there, and a child of a threaded parent may do none of that,
+// since another thread may have held malloc's lock or the environment's at
+// the fork. The env, the resolved program and both argvs are made in the
+// parent instead (runtime/utils/aether_spawn.h).
+enum { SANDBOX_STEP_FENCE = 1, SANDBOX_STEP_EXEC = 2 };
+
+static void sandbox_child_failed(int fd, int step, int code) {
+    int msg[2] = { step, errno };
+    ssize_t w;
+    do { w = write(fd, msg, sizeof msg); } while (w < 0 && errno == EINTR);
+    _exit(code);
+}
+
+// In the child: exec the program with its env. A file with no #! line,
+// which execve refuses with ENOEXEC, runs under /bin/sh, as execlp ran it.
+static void sandbox_child_exec(const char* path, char** argv, char** sh_argv, char** env) {
+    execve(path, argv, env);
+    if (errno != ENOEXEC) return;
+    execve("/bin/sh", sh_argv, env);
+    errno = ENOEXEC;
+}
+
+// In the parent: what the child reported, printed as the child used to.
+// 1 when it reported a failure: the program never started.
+static int sandbox_report(int errfd) {
+    int msg[2] = { 0, 0 };
+    ssize_t n;
+    do { n = read(errfd, msg, sizeof msg); } while (n < 0 && errno == EINTR);
+    close(errfd);
+    if (n != (ssize_t)sizeof msg) return 0;
+    if (msg[0] == SANDBOX_STEP_FENCE) {
+        fprintf(stderr,
+            "[aether] cannot install seccomp clone fence: %s\n"
+            "  spawn_sandboxed requires a kernel that supports\n"
+            "  PR_SET_NO_NEW_PRIVS + PR_SET_SECCOMP "
+            "(Linux 3.5+); or grant 'fork:*' to opt out.\n",
+            strerror(msg[1]));
+    } else {
+        fprintf(stderr, "exec: %s\n", strerror(msg[1]));
     }
-    exe[len] = '\0';
-
-    // Strip binary name, keep directory
-    char* slash = strrchr(exe, '/');
-    if (slash) *(slash + 1) = '\0';
-
-    snprintf(buf, bufsize, "%slibaether_sandbox.so", exe);
-    if (access(buf, F_OK) == 0) return 1;
-
-    // Try ../build/
-    if (slash) *slash = '\0';
-    slash = strrchr(exe, '/');
-    if (slash) *(slash + 1) = '\0';
-    snprintf(buf, bufsize, "%sbuild/libaether_sandbox.so", exe);
-    if (access(buf, F_OK) == 0) return 1;
-
-    return 0;
+    return 1;
 }
 
 // Serialize grants from a list to shared memory
@@ -130,11 +153,21 @@ static int is_fork_granted(void* grant_list) {
     return 0;
 }
 
-// Install a seccomp-bpf filter that traps clone/clone3/fork/vfork with
-// EPERM. Must run AFTER prctl(PR_SET_NO_NEW_PRIVS, 1) (required for
-// unprivileged seccomp) and BEFORE execve. Returns 0 on success, -1 on
-// failure, and on an architecture this filter does not know (the caller
-// fail-closes: the child exits 126 rather than running unfenced).
+// Install a seccomp-bpf filter that refuses the child a new process: fork,
+// vfork and a clone that is not a thread get EPERM. Must run AFTER
+// prctl(PR_SET_NO_NEW_PRIVS, 1) (required for unprivileged seccomp) and
+// BEFORE execve. Returns 0 on success, -1 on failure, and on an
+// architecture this filter does not know (the caller fail-closes: the child
+// exits 126 rather than running unfenced).
+//
+// A thread is no new process (#3178): it shares the address space, the
+// filter and the preload, and cannot leave them. The fence used to refuse
+// every clone, so a child that starts a thread (an Aether program with
+// actors, Python with threads, a JVM) failed in pthread_create. Now a clone
+// with CLONE_THREAD in its flags (its first argument, on every ABI here)
+// passes. clone3 keeps its flags in a struct in memory, which a filter
+// cannot read, so it gets ENOSYS, the answer of a kernel without clone3,
+// and libc falls back to clone, whose flags the filter can read.
 //
 // A seccomp filter sees the syscall's ABI (seccomp_data.arch) and its number
 // in that ABI, and a process can enter the kernel through more than one ABI.
@@ -152,6 +185,7 @@ static int is_fork_granted(void* grant_list) {
 // build host's ABI, and the generic table (arm64, riscv64, loongarch64) has
 // no fork/vfork at all. tests/integration/sandbox_clone_fence checks every
 // literal below against the kernel headers zig ships for that architecture.
+// Each list is clone first, clone3 last, and the plain refusals between.
 //   x86_64:  clone 56, fork 57, vfork 58, clone3 435
 //   i386 and 32-bit ARM: clone 120, fork 2, vfork 190, clone3 435
 //   generic (aarch64, riscv64, loongarch64): clone 220, clone3 435
@@ -174,19 +208,57 @@ static int is_fork_granted(void* grant_list) {
 #define FENCE_MAX 48
 #define X32_SYSCALL_BIT 0x40000000u
 
-// One arch's block: load the number (masked when `mask`), deny on a match,
-// otherwise allow.
+#define FENCE_CLONE_THREAD 0x00010000u   /* CLONE_THREAD, the same on every ABI */
+
+/* The low 32 bits of a syscall's first argument, where CLONE_THREAD is. */
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#define FENCE_ARG0_LOW ((uint32_t)offsetof(struct seccomp_data, args) + 4u)
+#else
+#define FENCE_ARG0_LOW ((uint32_t)offsetof(struct seccomp_data, args))
+#endif
+
+static struct sock_filter fence_jeq(uint32_t k, int pc, int target) {
+    /* A jump is relative to the instruction after it. */
+    return (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, k,
+                                        (uint8_t)(target - (pc + 1)), 0);
+}
+
+// One arch's block, from `nums` (clone first, clone3 last, plain refusals
+// between): load the number (masked when `mask`); a clone goes on to the
+// CLONE_THREAD test, clone3 gets ENOSYS, a plain refusal EPERM, anything
+// else is allowed.
 static int fence_block(struct sock_filter* f, int n, const uint32_t* nums, int count,
                        uint32_t mask) {
+    int deny_count = count - 2;
     f[n++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
                                           (uint32_t)offsetof(struct seccomp_data, nr));
     if (mask) f[n++] = (struct sock_filter)BPF_STMT(BPF_ALU | BPF_AND | BPF_K, mask);
-    for (int i = 0; i < count; i++)
-        f[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, nums[i],
-                                              (uint8_t)(count - i), 0);
+    int p = n;                               /* the first comparison */
+    int allow = p + 2 + deny_count;          /* RET ALLOW */
+    int check = allow + 1;                   /* LD the clone's flags */
+    int jset = check + 1;                    /* JSET CLONE_THREAD */
+    int allow_thread = jset + 1;             /* RET ALLOW */
+    int deny = allow_thread + 1;             /* RET EPERM */
+    int enosys = deny + 1;                   /* RET ENOSYS */
+    f[n] = fence_jeq(nums[0], n, check);
+    n++;
+    f[n] = fence_jeq(nums[count - 1], n, enosys);
+    n++;
+    for (int i = 1; i <= deny_count; i++) {
+        f[n] = fence_jeq(nums[i], n, deny);
+        n++;
+    }
+    f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+    f[n++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, FENCE_ARG0_LOW);
+    f[n] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, FENCE_CLONE_THREAD,
+                                        (uint8_t)(allow_thread - (n + 1)),
+                                        (uint8_t)(deny - (n + 1)));
+    n++;
     f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
     f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K,
                                           SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA));
+    f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K,
+                                          SECCOMP_RET_ERRNO | (ENOSYS & SECCOMP_RET_DATA));
     return n;
 }
 
@@ -259,8 +331,9 @@ static int install_clone_fence_seccomp(void) {
 int aether_spawn_sandboxed(void* grant_list, const char* program, const char* arg) {
     // Find the preload library
     char preload_path[1024];
-    if (!find_preload_path(preload_path, sizeof(preload_path))) {
-        fprintf(stderr, "[aether] cannot find libaether_sandbox.so\n");
+    char tried[2048];
+    if (!aether_sandbox_find_preload(preload_path, sizeof(preload_path), tried, sizeof(tried))) {
+        aether_sandbox_preload_missing("[aether]", tried);
         return -1;
     }
 
@@ -276,18 +349,47 @@ int aether_spawn_sandboxed(void* grant_list, const char* program, const char* ar
     // doing it once here keeps the contract obvious.)
     int fork_granted = is_fork_granted(grant_list);
 
-    pid_t pid = fork();
+    // What the child execs with, made here (#3200): the program on this
+    // process's PATH, its argv, the /bin/sh argv for a file with no #!
+    // line, and the env with LD_PRELOAD and the grant source in it.
+    // A program that cannot start is an error (-1), as for std.os (#3170),
+    // never an exit of 127, which a program that ran can give.
+    char* path = aether_spawn_resolve(program);
+    if (!path) {
+        fprintf(stderr, "exec: %s\n", strerror(errno));
+        shm_unlink(shm_name);
+        return -1;
+    }
+    char* argv[] = { (char*)program, (char*)arg, NULL };
+    char* sh_argv[] = { (char*)"/bin/sh", path, (char*)arg, NULL };
+    char preload_var[sizeof preload_path + 16];
+    char shm_var[sizeof shm_name + 32];
+    snprintf(preload_var, sizeof preload_var, "LD_PRELOAD=%s", preload_path);
+    snprintf(shm_var, sizeof shm_var, "AETHER_SANDBOX_SHM=%s", shm_name);
+    const char* set[3] = { preload_var, shm_var, NULL };
+    int nset = 2;
+    if (!getenv("AETHER_SANDBOX_VERBOSE")) set[nset++] = "AETHER_SANDBOX_VERBOSE=0";
+    char** env = aether_spawn_env(aether_spawn_environ(), set, nset);
+    int errp[2];
+    if (!env || aether_pipe_cloexec(errp) != 0) {
+        free(env);
+        free(path);
+        shm_unlink(shm_name);
+        return -1;
+    }
+
+    pid_t pid = aether_fork();
     if (pid < 0) {
+        close(errp[0]);
+        close(errp[1]);
+        free(env);
+        free(path);
         shm_unlink(shm_name);
         return -1;
     }
 
     if (pid == 0) {
-        // Child: set up LD_PRELOAD and grant source, then exec
-        setenv("LD_PRELOAD", preload_path, 1);
-        setenv("AETHER_SANDBOX_SHM", shm_name, 1);
-        setenv("AETHER_SANDBOX_VERBOSE", "0", 0);
-
+        close(errp[0]);
         // Kernel-level clone fence: when fork:* is not granted, install
         // a seccomp filter that traps clone/clone3/fork/vfork with
         // EPERM regardless of how they're invoked. Closes the gap
@@ -295,35 +397,27 @@ int aether_spawn_sandboxed(void* grant_list, const char* program, const char* ar
         // raw `syscall(SYS_clone3,…)` would otherwise bypass the
         // LD_PRELOAD libc-symbol fence. Fail-closed: if seccomp setup
         // fails (kernel too old, etc.), refuse to exec — the caller
-        // asked for containment and we cannot deliver.
-        if (!fork_granted) {
-            if (install_clone_fence_seccomp() != 0) {
-                fprintf(stderr,
-                    "[aether] cannot install seccomp clone fence: %s\n"
-                    "  spawn_sandboxed requires a kernel that supports\n"
-                    "  PR_SET_NO_NEW_PRIVS + PR_SET_SECCOMP "
-                    "(Linux 3.5+); or grant 'fork:*' to opt out.\n",
-                    strerror(errno));
-                _exit(126);
-            }
-        }
-
-        if (arg) {
-            execlp(program, program, arg, NULL);
-        } else {
-            execlp(program, program, NULL);
-        }
-        perror("exec");
-        _exit(127);
+        // asked for containment and we cannot deliver. Building the
+        // filter is arithmetic on the stack, and installing it is two
+        // prctl calls.
+        if (!fork_granted && install_clone_fence_seccomp() != 0)
+            sandbox_child_failed(errp[1], SANDBOX_STEP_FENCE, 126);
+        sandbox_child_exec(path, argv, sh_argv, env);
+        sandbox_child_failed(errp[1], SANDBOX_STEP_EXEC, 127);
     }
 
-    // Parent: wait for child
+    // Parent: report what the child could not do, then wait for it.
+    close(errp[1]);
+    free(env);
+    free(path);
+    int not_started = sandbox_report(errp[0]);
     int status = 0;
-    waitpid(pid, &status, 0);
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
 
     // Cleanup shared memory
     shm_unlink(shm_name);
 
+    if (not_started) return -1;
     if (WIFEXITED(status)) return WEXITSTATUS(status);
     return -1;
 }

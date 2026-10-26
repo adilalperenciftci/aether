@@ -27,7 +27,7 @@ main() {
     print("PASS: os.args_count agrees with the C function (${n})\n")
 
     // The bare exported name, reached qualified (#1035).
-    if os.aether_argv_raw() == null {
+    if os.aether_argv_raw() == null { // raw-ok: the qualified escape hatch under test (#1035)
         print("FAIL: os.aether_argv_raw() is null with argv initialised\n")
         exit(1)
     }

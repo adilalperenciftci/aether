@@ -5,7 +5,7 @@
 import std.intarr
 
 main() {
-    a = intarr.intarr_new_raw(4)
+    a, _err = intarr.new(4)
     intarr.intarr_set_unchecked(a, 0, 7)
     x = a[0] // bare `ptr` index — the diagnostic under test
     println("${x}")

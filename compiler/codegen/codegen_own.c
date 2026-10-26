@@ -184,6 +184,26 @@ static const char* own_ptr_type(Type* t) {
     return cg_internf("%s*", get_c_type(t));
 }
 
+/* OWN_PUBLISH of the part of type `pt` at lvalue `lv` as one call, for an
+ * expression as well as a statement, or NULL when it has nothing to publish
+ * (a closure's environment is counted atomically already; a string
+ * sequence's cells are not published, as own_emit_part does not). */
+const char* own_publish_call(CodeGenerator* gen, Type* pt, const char* lv) {
+    if (!own_type_owns(gen, pt)) return NULL;
+    switch (pt->kind) {
+    case TYPE_STRING:
+        return cg_internf("aether_string_publish(%s)", lv);
+    case TYPE_FUNCTION:
+    case TYPE_PTR:
+        return NULL;
+    case TYPE_STRUCT:
+        return cg_internf("%s_publish(&%s)", struct_owning_strings(gen, pt), lv);
+    default:
+        return cg_internf("_ae_publish_%s(%s%s)", own_find(gen, pt)->mangled,
+                          pt->kind == TYPE_ARRAY ? "" : "&", lv);
+    }
+}
+
 /* One statement on the part of type `pt` at lvalue `lv`: OWN_RETAIN takes a
  * reference to it, OWN_DROP releases it and empties the part, OWN_ZERO
  * empties it without a release (what a move leaves behind), OWN_PUBLISH
@@ -351,6 +371,7 @@ const char* own_place_lvalue(Type* t, const char* name) {
 
 /* The drop the unwind journal runs on a place of owning type `t` (#2923). */
 const char* own_unwind_fn(CodeGenerator* gen, Type* t) {
+    if (t->kind == TYPE_STRING) return "_aether_string_drop_unwind";
     if (t->kind == TYPE_FUNCTION) return "_aether_closure_drop_unwind";
     if (t->kind == TYPE_PTR) return "_aether_seq_drop_unwind";
     const char* s = struct_owning_strings(gen, t);

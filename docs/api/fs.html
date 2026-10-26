@@ -16,7 +16,7 @@
   <h2>Exports</h2>
   <ul class="function-nav">
     <li><a href="#file_open_raw">file_open_raw</a></li>
-    <li><a href="#file_close">file_close</a></li>
+    <li><a href="#file_close_raw">file_close_raw</a></li>
     <li><a href="#file_read_all_raw">file_read_all_raw</a></li>
     <li><a href="#file_write_raw">file_write_raw</a></li>
     <li><a href="#file_exists">file_exists</a></li>
@@ -110,6 +110,8 @@
     <li><a href="#walk_raw">walk_raw</a></li>
     <li><a href="#watch_open_raw">watch_open_raw</a></li>
     <li><a href="#open">open</a></li>
+    <li><a href="#close">close</a></li>
+    <li><a href="#read_all">read_all</a></li>
     <li><a href="#read">read</a></li>
     <li><a href="#write">write</a></li>
     <li><a href="#delete">delete</a></li>
@@ -270,9 +272,9 @@
       <p class="signature"><span class="sig-params">path: string, mode: string</span></p>
       <p class="doc">File operations - raw externs</p>
     </div>
-    <div class="function" id="file_close" data-name="file_close">
-      <h3 class="function-name">file_close <span class="kind">extern</span></h3>
-      <pre class="usage"><code>file_close(file) <span class="arrow">-&gt;</span> int</code></pre>
+    <div class="function" id="file_close_raw" data-name="file_close_raw">
+      <h3 class="function-name">file_close_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>file_close_raw(file) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">file: ptr</span></p>
     </div>
     <div class="function" id="file_read_all_raw" data-name="file_read_all_raw">
@@ -720,7 +722,7 @@
       <h3 class="function-name">fd <span class="kind">fn</span></h3>
       <pre class="usage"><code>fd(file) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">file: ptr</span></p>
-      <p class="doc">The OS-level file descriptor inside an open handle, or -1 on a null handle (#1003). Exists for capability plumbing: open through the stdlib, then narrow the descriptor with capsicum.rights_limit(fs.fd(handle), ...) before capsicum.enter(). The fd is owned by the handle — do not close it directly; it is released by file_close, which also frees the handle itself, so never call fd() on a handle that has been closed.</p>
+      <p class="doc">The OS-level file descriptor inside an open handle, or -1 on a null handle (#1003). Exists for capability plumbing: open through the stdlib, then narrow the descriptor with capsicum.rights_limit(fs.fd(handle), ...) before capsicum.enter(). The fd is owned by the handle — do not close it directly; it is released by close, which also frees the handle itself, so never call fd() on a handle that has been closed.</p>
     </div>
     <div class="function" id="glob_raw" data-name="glob_raw">
       <h3 class="function-name">glob_raw <span class="kind">extern</span></h3>
@@ -750,11 +752,23 @@
       <p class="signature"><span class="sig-params">path: string, mode: string</span></p>
       <p class="doc">Open a file. Returns (handle, &quot;&quot;) on success, (null, error) on failure. `mode` is fopen's (&quot;r&quot;, &quot;w&quot;, &quot;a&quot;, &quot;r+&quot;, ...); the handle carries bytes verbatim on every platform — on Windows it is opened binary whether or not the mode says 'b', like every other std.fs entry point, so a '\n' written through it is one byte on disk and pread/pwrite are byte-exact. A mode with an explicit 't' (&quot;wt&quot;) asks for C's text mode and gets it.</p>
     </div>
+    <div class="function" id="close" data-name="close">
+      <h3 class="function-name">close <span class="kind">fn</span></h3>
+      <pre class="usage"><code>close(handle) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">handle: ptr</span></p>
+      <p class="doc">Close a handle `open` gave, and free it. Returns &quot;&quot; on success, or the reason: a write the close flushes can fail (a full disk, a lost network mount), and the data is then not on disk. `defer fs.close(h)` after a successful open is the usual shape (#3179).</p>
+    </div>
+    <div class="function" id="read_all" data-name="read_all">
+      <h3 class="function-name">read_all <span class="kind">fn</span></h3>
+      <pre class="usage"><code>read_all(handle) <span class="arrow">-&gt;</span> (string, string)</code></pre>
+      <p class="signature"><span class="sig-params">handle: ptr</span></p>
+      <p class="doc">Read the whole of an open handle, from its start. Returns (text, &quot;&quot;) on success, (&quot;&quot;, error) on failure; the handle stays open (#3179).</p>
+    </div>
     <div class="function" id="read" data-name="read">
       <h3 class="function-name">read <span class="kind">fn</span></h3>
       <pre class="usage"><code>read(path) <span class="arrow">-&gt;</span> (string, _1, string)</code></pre>
       <p class="signature"><span class="sig-params">path: string</span></p>
-      <p class="doc">Read the entire contents of a file at `path`. Opens, reads, closes. Returns (content, &quot;&quot;) on success, (&quot;&quot;, error) on failure. The error names the path and the cause — &quot;&lt;path&gt;: No such file or directory&quot;, &quot;&lt;path&gt;: Is a directory&quot;, &quot;&lt;path&gt;: Permission denied&quot; — rather than the single &quot;cannot open file&quot; this used to return for every cause. LIFETIME: the error string is BORROWED from thread-local storage and is only valid until this thread's next failed read. Print it, or copy it with `string.concat(err, &quot;&quot;)`, before issuing another read — do NOT hold it across one. Do not free it. (The success value IS owned and must be freed.)</p>
+      <p class="doc">Read the entire contents of a file at `path`. Opens, reads, closes. Returns (content, &quot;&quot;) on success, (&quot;&quot;, error) on failure. The error names the path and the cause — &quot;&lt;path&gt;: No such file or directory&quot;, &quot;&lt;path&gt;: Is a directory&quot;, &quot;&lt;path&gt;: Permission denied&quot; — rather than the single &quot;cannot open file&quot; this used to return for every cause. LIFETIME: the error string is BORROWED from thread-local storage and is only valid until this thread's next failed read. Print it, or copy it with `string.concat(err, &quot;&quot;)`, before issuing another read — do NOT hold it across one. Do not free it. The text read is the caller's string, released like any other when its place lets it go (#3168).</p>
     </div>
     <div class="function" id="write" data-name="write">
       <h3 class="function-name">write <span class="kind">fn</span></h3>
@@ -904,7 +918,7 @@
       <h3 class="function-name">read_binary <span class="kind">fn</span></h3>
       <pre class="usage"><code>read_binary(path) <span class="arrow">-&gt;</span> (string, int, string)</code></pre>
       <p class="signature"><span class="sig-params">path: string</span></p>
-      <p class="doc">Binary-safe file read. Preserves embedded NULs and reports the exact byte length. Returns (content, length, &quot;&quot;) on success, (&quot;&quot;, 0, error) on failure. The returned string is a length-aware copy: `string.length(content)` equals the returned `length` even when the payload contains NULs. Under the hood the copy goes through `string_new_with_length` rather than `string_concat`, which is strlen-based and would silently truncate at the first embedded NUL. The TLS buffer inside the runtime is released after the copy completes, so the caller doesn't have to manage lifetime. On failure the error names the path and the cause — &quot;&lt;path&gt;: No such file or directory&quot;, &quot;&lt;path&gt;: Permission denied&quot;, or, for a sandbox refusal, &quot;&lt;path&gt;: blocked by sandbox policy (no fs_read grant for this path)&quot;. That last one is deliberately distinct: a policy refusal is not a filesystem failure, and reporting it as one sends people looking at the disk instead of at their grants. LIFETIME: the error string is BORROWED from thread-local storage, valid only until this thread's next failed read. Print it, or copy it with `string.concat(err, &quot;&quot;)`, before issuing another read. Do not free it. The bytes value IS owned and must be freed.</p>
+      <p class="doc">Binary-safe file read. Preserves embedded NULs and reports the exact byte length. Returns (content, length, &quot;&quot;) on success, (&quot;&quot;, 0, error) on failure. The returned string is a length-aware copy: `string.length(content)` equals the returned `length` even when the payload contains NULs. Under the hood the copy goes through `string_new_with_length` rather than `string_concat`, which is strlen-based and would silently truncate at the first embedded NUL. The TLS buffer inside the runtime is released after the copy completes, so the caller doesn't have to manage lifetime. On failure the error names the path and the cause — &quot;&lt;path&gt;: No such file or directory&quot;, &quot;&lt;path&gt;: Permission denied&quot;, or, for a sandbox refusal, &quot;&lt;path&gt;: blocked by sandbox policy (no fs_read grant for this path)&quot;. That last one is deliberately distinct: a policy refusal is not a filesystem failure, and reporting it as one sends people looking at the disk instead of at their grants. LIFETIME: the error string is BORROWED from thread-local storage, valid only until this thread's next failed read. Print it, or copy it with `string.concat(err, &quot;&quot;)`, before issuing another read. Do not free it. The bytes are the caller's, released like any other string (#3168).</p>
     </div>
     <div class="function" id="copy_raw" data-name="copy_raw">
       <h3 class="function-name">copy_raw <span class="kind">extern</span></h3>

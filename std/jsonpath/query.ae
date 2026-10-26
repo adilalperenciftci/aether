@@ -333,7 +333,7 @@ _collect_descendants(value: @keep ptr, path: string, out: ptr) {
     _push(out, value, path)
     t = json.type(value)
 
-    if t == 4 { // array
+    if t == json.JSON_ARRAY {
         n = json.array_size(value)
         i = 0
         while i < n {
@@ -346,7 +346,7 @@ _collect_descendants(value: @keep ptr, path: string, out: ptr) {
         return
     }
 
-    if t == 5 { // object
+    if t == json.JSON_OBJECT {
         n = json.object_size_raw(value)
         i = 0
         while i < n {
@@ -368,7 +368,7 @@ _apply_selector(sel: ptr, value: ptr, path: string, out: ptr, root: @keep ptr) {
     s = sel as *Selector
 
     if s.kind == model.SEL_NAME {
-        if json.type(value) != 5 { return }
+        if json.type(value) != json.JSON_OBJECT { return }
         if json.object_has(value, s.name) == 0 { return }
         child = json.object_get_raw(value, s.name)
         _push(out, child, normalize_name_segment(path, s.name))
@@ -377,7 +377,7 @@ _apply_selector(sel: ptr, value: ptr, path: string, out: ptr, root: @keep ptr) {
 
     if s.kind == model.SEL_WILDCARD {
         t = json.type(value)
-        if t == 4 {
+        if t == json.JSON_ARRAY {
             n = json.array_size(value)
             i = 0
             while i < n {
@@ -386,7 +386,7 @@ _apply_selector(sel: ptr, value: ptr, path: string, out: ptr, root: @keep ptr) {
             }
             return
         }
-        if t == 5 {
+        if t == json.JSON_OBJECT {
             n = json.object_size_raw(value)
             i = 0
             while i < n {
@@ -399,7 +399,7 @@ _apply_selector(sel: ptr, value: ptr, path: string, out: ptr, root: @keep ptr) {
     }
 
     if s.kind == model.SEL_INDEX {
-        if json.type(value) != 4 { return }
+        if json.type(value) != json.JSON_ARRAY { return }
         n = json.array_size(value)
         idx = _resolve_index(s.index, n)
         if idx < 0 { return }
@@ -437,7 +437,7 @@ _resolve_index(idx: long, n: int) -> int {
 // After clamping, i stays within [-1, len] and moves by at most 2^53-1, so
 // i + step cannot overflow a long.
 _apply_slice(sl: *Slice, value: ptr, path: string, out: ptr) {
-    if json.type(value) != 4 { return }
+    if json.type(value) != json.JSON_ARRAY { return }
     var len: long = json.array_size(value)
 
     var step: long = 1
@@ -493,7 +493,7 @@ _clamp(v: long, lo: long, hi: long) -> long {
 _apply_filter(f: ptr, value: ptr, path: string, out: ptr, root: @keep ptr) {
     t = json.type(value)
 
-    if t == 4 {
+    if t == json.JSON_ARRAY {
         n = json.array_size(value)
         i = 0
         while i < n {
@@ -506,7 +506,7 @@ _apply_filter(f: ptr, value: ptr, path: string, out: ptr, root: @keep ptr) {
         return
     }
 
-    if t == 5 {
+    if t == json.JSON_OBJECT {
         n = json.object_size_raw(value)
         i = 0
         while i < n {
@@ -762,11 +762,11 @@ _eval_singular(sq: ptr, current: @keep ptr, root: @keep ptr) -> ptr {
         seg = list.get_raw(segs, i) as *SingularSeg
 
         if seg.is_name == 1 {
-            if json.type(node) != 5 { return null }
+            if json.type(node) != json.JSON_OBJECT { return null }
             if json.object_has(node, seg.name) == 0 { return null }
             node = json.object_get_raw(node, seg.name)
         } else {
-            if json.type(node) != 4 { return null }
+            if json.type(node) != json.JSON_ARRAY { return null }
             len = json.array_size(node)
             idx = _resolve_index(seg.index, len)
             if idx < 0 { return null }
@@ -791,8 +791,8 @@ _json_eq(a: ptr, b: ptr) -> int {
     tb = json.type(b)
 
     // Numbers compare numerically regardless of int/float spelling.
-    if ta == 2 {
-        if tb == 2 {
+    if ta == json.JSON_NUMBER {
+        if tb == json.JSON_NUMBER {
             if json.get_number(a) == json.get_number(b) { return 1 }
             return 0
         }
@@ -801,16 +801,16 @@ _json_eq(a: ptr, b: ptr) -> int {
 
     if ta != tb { return 0 }
 
-    if ta == 0 { return 1 } // null == null
-    if ta == 1 { // bool
+    if ta == json.JSON_NULL { return 1 } // null == null
+    if ta == json.JSON_BOOL {
         if json.get_bool(a) == json.get_bool(b) { return 1 }
         return 0
     }
-    if ta == 3 { // string
+    if ta == json.JSON_STRING {
         return string.equals(json.get_string_raw(a), json.get_string_raw(b))
     }
 
-    if ta == 4 { // array — element-wise, order-sensitive
+    if ta == json.JSON_ARRAY { // element-wise, order-sensitive
         n = json.array_size(a)
         if n != json.array_size(b) { return 0 }
         i = 0
@@ -821,7 +821,7 @@ _json_eq(a: ptr, b: ptr) -> int {
         return 1
     }
 
-    if ta == 5 { // object — same keys, same values, order-INsensitive
+    if ta == json.JSON_OBJECT { // same keys, same values, in any order
         n = json.object_size_raw(a)
         if n != json.object_size_raw(b) { return 0 }
         i = 0
@@ -854,8 +854,8 @@ _json_cmp(a: ptr, b: ptr) -> int {
     ta = json.type(a)
     tb = json.type(b)
 
-    if ta == 2 {
-        if tb != 2 { return CMP_UNORDERED }
+    if ta == json.JSON_NUMBER {
+        if tb != json.JSON_NUMBER { return CMP_UNORDERED }
         x = json.get_number(a)
         y = json.get_number(b)
         if x < y { return -1 }
@@ -863,8 +863,8 @@ _json_cmp(a: ptr, b: ptr) -> int {
         return 0
     }
 
-    if ta == 3 {
-        if tb != 3 { return CMP_UNORDERED }
+    if ta == json.JSON_STRING {
+        if tb != json.JSON_STRING { return CMP_UNORDERED }
         // Byte-wise ordering, which matches the RFC's codepoint
         // ordering (UTF-8 sorts byte-wise in codepoint order).
         // NORMALIZED to -1/0/1: string.compare hands back the raw byte
@@ -892,13 +892,13 @@ _eval_value_fn(fp: *TestFn, current: @keep ptr, root: @keep ptr) -> ptr {
         if v == null { return null }
         out = null
         t = json.type(v)
-        if t == 3 {
+        if t == json.JSON_STRING {
             // Length of a string is its CODEPOINT count, not its byte
             // count (RFC 9535 §2.4.4).
             out = json.from_int(_utf8_length(json.get_string_raw(v)) as long)
         }
-        if t == 4 { out = json.from_int(json.array_size(v) as long) }
-        if t == 5 { out = json.from_int(json.object_size_raw(v) as long) }
+        if t == json.JSON_ARRAY { out = json.from_int(json.array_size(v) as long) }
+        if t == json.JSON_OBJECT { out = json.from_int(json.object_size_raw(v) as long) }
         _release_arg_value(arg, v)
         return out
     }
@@ -1021,7 +1021,7 @@ _eval_regex_fn(fp: *TestFn, current: @keep ptr, root: @keep ptr, substring: int)
     lhs_arg = list.get_raw(fp.args, 0)
     lhs = _arg_to_value(lhs_arg, current, root)
     if lhs == null { return 0 }
-    if json.type(lhs) != 3 {
+    if json.type(lhs) != json.JSON_STRING {
         _release_arg_value(lhs_arg, lhs)
         return 0
     }
@@ -1033,7 +1033,7 @@ _eval_regex_fn(fp: *TestFn, current: @keep ptr, root: @keep ptr, substring: int)
         _release_arg_value(lhs_arg, lhs)
         return 0
     }
-    if json.type(rhs) != 3 {
+    if json.type(rhs) != json.JSON_STRING {
         _release_arg_value(lhs_arg, lhs)
         _release_arg_value(rhs_arg, rhs)
         return 0
@@ -1156,10 +1156,10 @@ _utf8_length(s: string) -> int {
 // A deep copy of a json value, so value() can hand back an owned result.
 _json_copy(v: ptr) -> ptr {
     t = json.type(v)
-    if t == 0 { return json.null_value() }
-    if t == 1 { return json.boolean(json.get_bool(v)) }
-    if t == 2 { return json.num(json.get_number(v)) }
-    if t == 3 { return json.str(json.get_string_raw(v)) }
+    if t == json.JSON_NULL { return json.null_value() }
+    if t == json.JSON_BOOL { return json.boolean(json.get_bool(v)) }
+    if t == json.JSON_NUMBER { return json.num(json.get_number(v)) }
+    if t == json.JSON_STRING { return json.str(json.get_string_raw(v)) }
     if t == 4 {
         a = json.arr()
         n = json.array_size(v)

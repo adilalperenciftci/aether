@@ -12,10 +12,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AE="$ROOT/build/ae"
 
-if [ "$OS" = "Windows_NT" ]; then
-    echo "  [SKIP] std_ipc_bash_chain: std.ipc is POSIX-only in v1"
-    exit 0
-fi
+# The platform from uname, never from the environment's OS, which an MSYS2
+# login shell started from another shell does not carry (check_platform_env.py).
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+        echo "  [SKIP] std_ipc_bash_chain: std.ipc is POSIX-only in v1"
+        exit 0 ;;
+esac
 
 if [ ! -x "$AE" ]; then
     echo "  [SKIP] std_ipc_bash_chain: ae not built"

@@ -7,7 +7,7 @@ is a **killed** mutant (good). A change that slips through is a **survivor**:
 proof your tests have a gap.
 
 `std.mutation` is a small library (one entry point, `mutation.run`) with a
-runnable front-end at `examples/mutation-testing/mutate.ae`. It was adopted
+runnable front-end at `examples/06-tooling/02-mutation/mutate.ae`. It was adopted
 from the sunsetting aeocha repo's `contrib/mutate` and uses `std.spec` purely
 as an **oracle**, through the structured-report contract (`AE_SPEC_FORMAT` /
 `AE_SPEC_REPORT`, docs/testing.md).
@@ -41,7 +41,7 @@ never inflates the score by masquerading as a kill.
 ## Usage
 
 ```bash
-ae run examples/mutation-testing/mutate.ae -- <sut.ae> <test.ae> [lib_dir]
+ae run examples/06-tooling/02-mutation/mutate.ae -- <sut.ae> <test.ae> [lib_dir]
 ```
 
 `lib_dir` is a module search dir handed to the per-mutant sub-builds via
@@ -63,57 +63,57 @@ survivors = mutation.run(sut_path, test_path, "")
 Worked example (from the repo root):
 
 ```bash
-ae run examples/mutation-testing/mutate.ae -- \
-    examples/mutation-testing/lib/calc.ae \
-    examples/mutation-testing/lib/calc_test.ae
+ae run examples/06-tooling/02-mutation/mutate.ae -- \
+    examples/06-tooling/01-testing/discount.ae \
+    examples/06-tooling/01-testing/discount_test.ae
 ```
 
-`examples/mutation-testing/lib/` holds `calc.ae` (the code under test) plus
-`calc_test.ae` (its `std.spec` suite). Mutation testing asks how well that
+`examples/06-tooling/01-testing/` holds `discount.ae` (the code under test:
+`clamp_percent` and `apply`, a price after a discount) and
+`discount_test.ae` (its `std.spec` suite). Mutation testing asks how well that
 suite tests that code. Output:
 
 ```
 Aether mutation testing (std.mutation)
-  SUT:  examples/mutation-testing/lib/calc.ae
-  test: examples/mutation-testing/lib/calc_test.ae
+  SUT:  examples/06-tooling/01-testing/discount.ae
+  test: examples/06-tooling/01-testing/discount_test.ae
 
   baseline: suite passes on unmutated SUT ✓
 
-  killed     calc.ae:8  ADD->SUB
-  killed     calc.ae:11  SUB->ADD
-  killed     calc.ae:11  LT->GT
+  killed     discount.ae:23  SUB->ADD
+  killed     discount.ae:23  MUL->DIV
+  killed     discount.ae:14  GT->LT
+  killed     discount.ae:11  LT->GT
 
-  3/3 mutants killed, mutation score 100%
+  4/4 mutants killed, mutation score 100%
 ```
 
-100%: every single-operator change to `calc.ae` was caught by `calc_test.ae`.
-Each line is one mutant, anchored to its source location: `ADD->SUB` flips the
-`+` in `add`; `SUB->ADD` flips the `0 - n` in `abs`; `LT->GT` flips the
-`n < 0` guard. The suite asserts both branches of `abs` and an addition with a
-negative, so all three are killed.
+100%: every single-operator change to `discount.ae` was caught by
+`discount_test.ae`. Each line is one mutant, anchored to its source location:
+`SUB->ADD` and `MUL->DIV` change `cents - cents * p / 100` in `apply`;
+`GT->LT` and `LT->GT` flip the two guards in `clamp_percent`.
 
 ### What a survivor looks like
 
-A survivor is the interesting case: it's a *test gap*. Delete the
-negative-input case from `calc_test.ae` (the `abs(-7)` assertion), and the
-`SUB->ADD` mutant suddenly survives:
+A survivor is the interesting case: it's a *test gap*. Delete the `apply`
+cases from `discount_test.ae` (its second `describe`), and both mutants in
+`apply` survive:
 
 ```
-  killed     calc.ae:8  ADD->SUB
-  SURVIVED   calc.ae:11  SUB->ADD
-  killed     calc.ae:11  LT->GT
+  SURVIVED   discount.ae:23  SUB->ADD
+  SURVIVED   discount.ae:23  MUL->DIV
+  killed     discount.ae:14  GT->LT
+  killed     discount.ae:11  LT->GT
 
-  2/3 mutants killed, mutation score 66%
-  1 survived (test gaps):
-    - calc.ae:11  SUB->ADD
+  2/4 mutants killed, mutation score 50%
+  2 survived (test gaps):
+    - discount.ae:23  SUB->ADD
+    - discount.ae:23  MUL->DIV
 ```
 
-`SUB->ADD` flips the `0 - n` in `abs` to `0 + n`, which only changes the
-result for a *negative* input. With `abs(-7)` removed, nothing feeds `abs` a
-negative, so the mutant goes unnoticed. (Note `LT->GT` is still killed:
-flipping the `n < 0` guard sends the positive `abs(7)` down the negation
-branch, and that case is still tested.) Add the negative-input assertion back
-and `SUB->ADD` returns to killed. That is the whole point: survivors are your
+Nothing calls `apply` any more, so any change to it goes unnoticed, while the
+`clamp_percent` cases still kill the guards' mutants. Put the `apply` cases
+back and both return to killed. That is the whole point: survivors are your
 missing tests.
 
 ## Mutation operators (core set)

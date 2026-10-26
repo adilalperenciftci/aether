@@ -48,7 +48,7 @@ if ! "$TMPDIR/probe" >"$TMPDIR/run.log" 2>&1; then
 fi
 
 if ! grep -q "http_actor_mode_release passed" "$TMPDIR/run.log"; then
-    echo "  [FAIL] http_actor_mode_release: workers not released"
+    echo "  [FAIL] http_actor_mode_release: workers not released, or a waiting connection left open at stop"
     sed 's/^/    /' "$TMPDIR/run.log" | head -30
     exit 1
 fi

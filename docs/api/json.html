@@ -60,6 +60,12 @@
     <li><a href="#KIND_PARSE_ERROR">KIND_PARSE_ERROR</a></li>
     <li><a href="#KIND_OUT_OF_MEMORY">KIND_OUT_OF_MEMORY</a></li>
     <li><a href="#KIND_INVALID_INPUT">KIND_INVALID_INPUT</a></li>
+    <li><a href="#JSON_NULL">JSON_NULL</a></li>
+    <li><a href="#JSON_BOOL">JSON_BOOL</a></li>
+    <li><a href="#JSON_NUMBER">JSON_NUMBER</a></li>
+    <li><a href="#JSON_STRING">JSON_STRING</a></li>
+    <li><a href="#JSON_ARRAY">JSON_ARRAY</a></li>
+    <li><a href="#JSON_OBJECT">JSON_OBJECT</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -275,13 +281,13 @@
       <h3 class="function-name">parse <span class="kind">fn</span></h3>
       <pre class="usage"><code>parse(json_str) <span class="arrow">-&gt;</span> ptr!</code></pre>
       <p class="signature"><span class="sig-params">json_str: string</span></p>
-      <p class="doc">Parse a JSON string. Returns (value, &quot;&quot;) on success, (null, error) on failure. The error is a position-qualified message like &quot;expected ':' at 3:17&quot;. Caller owns the returned value and must free with json.free. Heap-classification shape: position 1 (the error message) is heap on both return paths so the destructure wrapper at the call site fires uniformly. The failure path uses string_concat(json_last_error(), &quot;&quot;) for an owned copy; the success path uses string_concat(&quot;&quot;, &quot;&quot;) for a (tiny) empty heap string. Without both paths returning heap, function_def_returns_heap_at's AND-fold would mark position 1 non-heap and every destructure of `_, err = json.parse(...)` would leak the success-path &quot;&quot; allocation — except the success &quot;&quot; was already a literal so there'd be nothing TO leak, only an over-free risk on the failure path. The uniform-heap shape sidesteps the classifier's mixed-path conservatism. See # further-bug-fix4 for the wider context.</p>
+      <p class="doc">Parse a JSON string. Returns (value, &quot;&quot;) on success, (null, error) on failure. The error is a position-qualified message like &quot;expected ':' at 3:17&quot;. Caller owns the returned value and must free with json.free. The error is a copy of the parser's last message, which the next parse overwrites, so it outlives that parse; the caller holds it like any other string (#3168).</p>
     </div>
     <div class="function" id="get_string" data-name="get_string">
       <h3 class="function-name">get_string <span class="kind">fn</span></h3>
       <pre class="usage"><code>get_string(value) <span class="arrow">-&gt;</span> string!</code></pre>
       <p class="signature"><span class="sig-params">value: ptr</span></p>
-      <p class="doc">Read the string payload out of a JSON value. Returns (string, &quot;&quot;) on success, (&quot;&quot;, error) if `value` is not a JSON_STRING. The returned string is an owned copy — safe to hold past a json.free of the value. Uniform-heap shape on both positions. This is the high-volume avn hot-path identified in `further-bug-fix4.md`: every `b64, _ = json.get_string(jcontent)` in a commit loop is a ~133 KB allocation per call. Pre-refactor the failure-path literal `&quot;&quot;` at position 0 made `function_def_returns_heap_at` AND-fold to non-heap, so the destructure wrapper at the call site never set `_heap_b64 = 1` and the function-exit defer-free never ran. avn's 5000-commit bench retained ~666 MB just from this site.</p>
+      <p class="doc">Read the string payload out of a JSON value. Returns (string, &quot;&quot;) on success, (&quot;&quot;, error) if `value` is not a JSON_STRING. The returned string is an owned copy — safe to hold past a json.free of the value.</p>
     </div>
     <div class="function" id="object_get" data-name="object_get">
       <h3 class="function-name">object_get <span class="kind">fn</span></h3>
@@ -299,7 +305,7 @@
       <h3 class="function-name">object_entry <span class="kind">fn</span></h3>
       <pre class="usage"><code>object_entry(obj, i) <span class="arrow">-&gt;</span> (string, ptr, string)</code></pre>
       <p class="signature"><span class="sig-params">obj: ptr, i: int</span></p>
-      <p class="doc">Read the (key, value) pair at index `i` in iteration order. Keys are yielded in insertion order — the order they appeared in parsed JSON input, or the order `object_set` was called for a built object. - (key, value, &quot;&quot;)                  : index in range - (&quot;&quot;, null, &quot;index out of range&quot;)  : i &lt; 0 or i &gt;= object_size(obj) - (&quot;&quot;, null, &quot;not an object&quot;)       : `obj` is not a JSON_OBJECT The key is an owned string; the value is borrowed from `obj` and must not be json.free'd separately, nor used after `obj` is freed. Mutating `obj` during iteration is not supported: order becomes unpredictable and entries may be skipped or revisited. Uniform-heap shape on positions 0 (key) and 2 (error message): all return paths use string_concat so the per-position structural analyzer marks both as heap. The success path's `owned_key` is the big one — iterating a large object via object_entry without this would leak a key allocation per iteration. See `parse` for the wider rationale.</p>
+      <p class="doc">Read the (key, value) pair at index `i` in iteration order. Keys are yielded in insertion order — the order they appeared in parsed JSON input, or the order `object_set` was called for a built object. - (key, value, &quot;&quot;)                  : index in range - (&quot;&quot;, null, &quot;index out of range&quot;)  : i &lt; 0 or i &gt;= object_size(obj) - (&quot;&quot;, null, &quot;not an object&quot;)       : `obj` is not a JSON_OBJECT The key is an owned string; the value is borrowed from `obj` and must not be json.free'd separately, nor used after `obj` is freed. Mutating `obj` during iteration is not supported: order becomes unpredictable and entries may be skipped or revisited.</p>
     </div>
     <div class="function" id="array_get" data-name="array_get">
       <h3 class="function-name">array_get <span class="kind">fn</span></h3>
@@ -393,6 +399,31 @@
     <div class="function" id="KIND_INVALID_INPUT" data-name="KIND_INVALID_INPUT">
       <h3 class="function-name">KIND_INVALID_INPUT <span class="kind">const</span></h3>
       <pre class="usage"><code>KIND_INVALID_INPUT = 3</code></pre>
+    </div>
+    <div class="function" id="JSON_NULL" data-name="JSON_NULL">
+      <h3 class="function-name">JSON_NULL <span class="kind">const</span></h3>
+      <pre class="usage"><code>JSON_NULL = 0</code></pre>
+      <p class="doc">The kind of a value, as json.type returns it (aether_json.h's JsonType).</p>
+    </div>
+    <div class="function" id="JSON_BOOL" data-name="JSON_BOOL">
+      <h3 class="function-name">JSON_BOOL <span class="kind">const</span></h3>
+      <pre class="usage"><code>JSON_BOOL = 1</code></pre>
+    </div>
+    <div class="function" id="JSON_NUMBER" data-name="JSON_NUMBER">
+      <h3 class="function-name">JSON_NUMBER <span class="kind">const</span></h3>
+      <pre class="usage"><code>JSON_NUMBER = 2</code></pre>
+    </div>
+    <div class="function" id="JSON_STRING" data-name="JSON_STRING">
+      <h3 class="function-name">JSON_STRING <span class="kind">const</span></h3>
+      <pre class="usage"><code>JSON_STRING = 3</code></pre>
+    </div>
+    <div class="function" id="JSON_ARRAY" data-name="JSON_ARRAY">
+      <h3 class="function-name">JSON_ARRAY <span class="kind">const</span></h3>
+      <pre class="usage"><code>JSON_ARRAY = 4</code></pre>
+    </div>
+    <div class="function" id="JSON_OBJECT" data-name="JSON_OBJECT">
+      <h3 class="function-name">JSON_OBJECT <span class="kind">const</span></h3>
+      <pre class="usage"><code>JSON_OBJECT = 5</code></pre>
     </div>
   </div>
 </main>

@@ -1,0 +1,10 @@
+// Is run by another tool.
+//
+// Run: python tests/examples/fixture/badrun.ae
+
+main() {
+    println("hi")
+}
+
+// Output:
+// hi

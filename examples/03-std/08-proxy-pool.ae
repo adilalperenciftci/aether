@@ -1,0 +1,122 @@
+// A proxy pool: several upstreams, weighted, configured as code.
+//
+// `proxy.pool(...) { ... }` makes a pool of upstreams and its block
+// configures it, one setter per line: each `upstream(url, weight)`, and
+// where wanted `health(...)` probes, a `breaker(...)` that stops sending
+// to a failing upstream and a `rate_limit(...)`. The block is ordinary
+// Aether, so a weight can be computed and a line can sit in an `if`.
+// `proxy.mount` puts the pool behind a path prefix with the per-mount
+// options (`proxy.opts_new`: forwarded headers, a body cap, retries, a
+// cache). Here three upstreams in the same program answer with their
+// names and weights 3, 2 and 1 share six requests three, two and one.
+// docs/http-reverse-proxy.md describes every option.
+//
+// Run: ae run examples/03-std/08-proxy-pool.ae
+// See: docs/http-reverse-proxy.md
+
+import std.http
+import std.http.proxy
+import std.map
+import std.string
+
+answer_a(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_body(res, "a")
+}
+
+answer_b(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_body(res, "b")
+}
+
+answer_c(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_body(res, "c")
+}
+
+// A server on 127.0.0.1 with a port the system picks; null when it
+// cannot listen.
+listen() -> ptr {
+    s = http.server_create(0)
+    if http.server_bind(s, "127.0.0.1", 0) != "" {
+        http.server_free(s)
+        return null
+    }
+    return s
+}
+
+url_of(s: ptr) -> string {
+    return "http://127.0.0.1:${http.server_port(s)}"
+}
+
+main() {
+    a = listen()
+    b = listen()
+    c = listen()
+    if a == null || b == null || c == null {
+        println("cannot listen")
+        exit(1)
+    }
+    defer http.server_free(a)
+    defer http.server_free(b)
+    defer http.server_free(c)
+    http.server_get(a, "/api/who", answer_a, null)
+    http.server_get(b, "/api/who", answer_b, null)
+    http.server_get(c, "/api/who", answer_c, null)
+
+    // The pool and the options are handles the gateway uses while it
+    // serves: their defers come before the gateway's, so they run after
+    // it is freed.
+    pool = proxy.pool("weighted_rr", 5, 0, 0) {
+        upstream(url_of(a), 3)
+        upstream(url_of(b), 2)
+        upstream(url_of(c), 1)
+        breaker(5, 30000, 1)
+    }
+    defer proxy.upstream_pool_free(pool)
+    opts = proxy.opts_new()
+    defer proxy.opts_free(opts)
+    proxy.opts_set_xforwarded(opts, 1, 1, 1)
+
+    gateway = listen()
+    if gateway == null {
+        println("cannot listen")
+        exit(1)
+    }
+    defer http.server_free(gateway)
+    err = proxy.mount(gateway, "/api", pool, opts)
+    if err != "" {
+        println("mount: ${err}")
+        exit(1)
+    }
+    http.server_start_background(a)
+    http.server_start_background(b)
+    http.server_start_background(c)
+    http.server_start_background(gateway)
+
+    counts = map.new()
+    defer map.free(counts)
+    for i in 0..6 {
+        who, gerr = http.get("${url_of(gateway)}/api/who")
+        if gerr != "" {
+            println("request ${i}: ${gerr}")
+        }
+        seen, _ = map.get_string(counts, who)
+        map.put(counts, who, "${seen}+")
+    }
+    names = ["a", "b", "c"]
+    for i in 0..names.len {
+        tally, _ = map.get_string(counts, names[i])
+        println("upstream ${names[i]} answered ${string.length(tally)} of 6")
+    }
+
+    http.server_stop(gateway)
+    http.server_stop(a)
+    http.server_stop(b)
+    http.server_stop(c)
+}
+
+// Output:
+// upstream a answered 3 of 6
+// upstream b answered 2 of 6
+// upstream c answered 1 of 6

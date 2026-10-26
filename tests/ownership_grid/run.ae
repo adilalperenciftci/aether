@@ -2551,7 +2551,7 @@ write_results_json(results: ptr, modes: ptr, wall_ms: long, jobs: int, check_tex
 
 jfield_text(o: ptr, key: string) -> string {
     v, err = json.object_get(o, key)
-    if err != "" || v == null || json.type(v) != 3 {
+    if err != "" || v == null || json.type(v) != json.JSON_STRING {
         return ""
     }
     s, _e = json.get_string(v)
@@ -2560,7 +2560,7 @@ jfield_text(o: ptr, key: string) -> string {
 
 jfield_number(o: ptr, key: string) -> float {
     v, err = json.object_get(o, key)
-    if err != "" || v == null || json.type(v) != 2 {
+    if err != "" || v == null || json.type(v) != json.JSON_NUMBER {
         return 0.0
     }
     return json.get_number(v)
@@ -2627,7 +2627,7 @@ read_results_json(results: ptr, modes: ptr) -> (long, int, string, bool) {
     has_check = false
     check = ""
     ca, _g = json.object_get(root, "check")
-    if ca != null && json.type(ca) == 4 && json.array_size(ca) > 0 {
+    if ca != null && json.type(ca) == json.JSON_ARRAY && json.array_size(ca) > 0 {
         has_check = true
         cb = strbuilder.new(0)
         k = 0

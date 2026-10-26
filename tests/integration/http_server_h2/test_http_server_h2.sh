@@ -19,6 +19,8 @@
 #      frame fragmentation + flow-control window updates.
 #   8. HEAD method response carries no body bytes (RFC 7230 §4.3.2)
 #      even though the handler wrote one.
+#   9. An h2 request carries its connection's metadata: the peer, its
+#      port, the local address and the TLS state (#3175).
 #
 # Skips cleanly when curl is missing or doesn't link libnghttp2.
 
@@ -100,6 +102,21 @@ HTTPVER=$(curl --silent --show-error --max-time 5 \
 }
 [ "$HTTPVER" = "2" ] || { echo "  [FAIL] expected http_version=2, got '$HTTPVER'"; exit 1; }
 grep -q '^h2-ok$' "$RESP" || { echo "  [FAIL] GET body mismatch"; cat "$RESP"; exit 1; }
+
+# ----------------------------------------------------------------
+# Test 1b — the connection's metadata on an h2 request (#3175). It used
+# to read peer="" port 0 local="" on every h2 stream.
+# ----------------------------------------------------------------
+PEER=$(curl --silent --show-error --max-time 5 \
+            --http2-prior-knowledge \
+            -w ' version=%{http_version}' \
+            "$URL_BASE/peer" 2>"$TMPDIR/peer.err") || {
+    echo "  [FAIL] curl --http2-prior-knowledge GET /peer failed:"; cat "$TMPDIR/peer.err"; exit 1
+}
+PEER_WANT="peer=127.0.0.1 port_set=1 local=127.0.0.1 tls=0 scheme=http version=2"
+[ "$PEER" = "$PEER_WANT" ] || {
+    echo "  [FAIL] h2 request metadata: got '$PEER', expected '$PEER_WANT'"; exit 1
+}
 
 # ----------------------------------------------------------------
 # Test 2 — POST /echo with a small body. Exercises HEADERS + DATA

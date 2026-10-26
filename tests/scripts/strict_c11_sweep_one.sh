@@ -19,7 +19,8 @@ root="$3"
 aetherc="$4"
 flags="$5"
 
-name=$(echo "$f" | sed "s|tests/||;s|/|_|g;s|\.ae$||")
+. "$root/tests/scripts/sweep_name.sh"
+name=$(echo "$f" | sed "$SWEEP_NAME_SED")
 c="$root/build/test_$name.c"
 if [ ! -f "$c" ]; then
     dir=$(dirname "$f")

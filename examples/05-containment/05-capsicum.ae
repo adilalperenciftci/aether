@@ -1,0 +1,61 @@
+// Capsicum: the FreeBSD kernel locks the process down.
+//
+// The sandbox of 01-sandbox.ae is std checking its own calls; code that
+// makes a raw system call goes around it. FreeBSD's Capsicum is enforced
+// by the kernel. `capsicum.enter()` puts the process in capability mode,
+// irreversibly: from then on it cannot open a path, bind a socket or name
+// another process, and may only use the descriptors it already holds.
+// So a program opens what it needs first, narrows each descriptor to the
+// rights it needs with `capsicum.rights_limit(fd, rights)` (`fs.fd(h)` is
+// a handle's descriptor), and then enters. Nothing that needs a path
+// works after that, cleaning up included, so this example only reads.
+// Off FreeBSD every call reports CAP_UNSUPPORTED and
+// `capsicum.available()` is 0, so portable code asks first. A spawned
+// Aether child can be entered for you (docs/aether_compared_to_capsicum.md).
+//
+// Run: ae run examples/05-containment/05-capsicum.ae
+// Needs: FreeBSD; elsewhere it says Capsicum is not available. CI builds
+//   it.
+// See: docs/aether_compared_to_capsicum.md
+
+import std.capsicum
+import std.fs
+import std.string
+
+main() {
+    if capsicum.available() == 0 {
+        println("Capsicum is not available here: it is a FreeBSD kernel feature.")
+        return
+    }
+
+    // Open what the program will need, while it still can, and narrow it.
+    h, err = fs.open("/etc/hosts", "r")
+    if err != "" {
+        println("cannot open /etc/hosts: ${err}")
+        exit(1)
+    }
+    defer fs.close(h)
+    capsicum.rights_limit(fs.fd(h), capsicum.R_READ | capsicum.R_SEEK)
+
+    if capsicum.enter() != capsicum.CAP_OK {
+        println("capsicum.enter() failed")
+        exit(1)
+    }
+    println("in capability mode: ${capsicum.in_mode() == 1}")
+
+    // The descriptor held from before still reads.
+    text, rerr = fs.read_all(h)
+    if rerr == "" {
+        println("the held /etc/hosts: read ${string.length(text)} bytes")
+    } else {
+        println("the held /etc/hosts: ${rerr}")
+    }
+
+    // Any new path is refused by the kernel.
+    _, perr = fs.read("/etc/passwd")
+    if perr == "" {
+        println("opened /etc/passwd: the kernel should have refused it")
+    } else {
+        println("opening /etc/passwd: refused")
+    }
+}
