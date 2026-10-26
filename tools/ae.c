@@ -12937,12 +12937,25 @@ static int cmd_fmt(int argc, char** argv) {
     return (check_mode && n_changed > 0) ? 1 : 0;
 }
 
+#ifdef _WIN32
+/* The console's code pages as they were: it is the shell's, and ae gives
+ * them back at exit, as a program does (runtime/aether_runtime.c). */
+static UINT g_ae_console_out_cp, g_ae_console_in_cp;
+static void ae_console_restore(void) {
+    if (g_ae_console_out_cp) SetConsoleOutputCP(g_ae_console_out_cp);
+    if (g_ae_console_in_cp) SetConsoleCP(g_ae_console_in_cp);
+}
+#endif
+
 int main(int argc, char** argv) {
 #ifdef _WIN32
     // Set UTF-8 console codepage so Aether programs can print Unicode correctly
     // on Windows CMD and PowerShell (default CP1252/OEM is not UTF-8).
+    g_ae_console_out_cp = GetConsoleOutputCP();   // 0 with no console
+    g_ae_console_in_cp = GetConsoleCP();
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
+    atexit(ae_console_restore);
 #endif
 
     if (argc < 2) {
