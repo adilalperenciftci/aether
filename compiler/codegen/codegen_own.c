@@ -351,6 +351,7 @@ const char* own_place_lvalue(Type* t, const char* name) {
 
 /* The drop the unwind journal runs on a place of owning type `t` (#2923). */
 const char* own_unwind_fn(CodeGenerator* gen, Type* t) {
+    if (t->kind == TYPE_STRING) return "_aether_string_drop_unwind";
     if (t->kind == TYPE_FUNCTION) return "_aether_closure_drop_unwind";
     if (t->kind == TYPE_PTR) return "_aether_seq_drop_unwind";
     const char* s = struct_owning_strings(gen, t);

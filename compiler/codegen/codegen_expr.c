@@ -9889,10 +9889,26 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 else if (strcmp(func_name, "free") == 0 && expr->child_count == 1 &&
                          type_is_slice(expr->children[0]->node_type)) {
                     /* #3072: a slice is freed by aether_slice_free, which
-                     * refuses a view (it owns nothing) by name. */
-                    fprintf(gen->output, "aether_slice_free(");
-                    generate_expression(gen, expr->children[0]);
-                    fprintf(gen->output, ", ");
+                     * refuses a view (it owns nothing) by name. #3159: its
+                     * elements are places where a store into them takes the
+                     * value (emit_slice_element_store's rule: an owning
+                     * element type, the slice no view of C memory), so a
+                     * `make` buffer's give back what they hold first. */
+                    ASTNode* sl = expr->children[0];
+                    Type* et = sl->node_type->element_type;
+                    int elems_own = et && et->kind != TYPE_ARRAY && own_type_owns(gen, et) &&
+                                    sl->type != AST_PTR_AS_ARRAY_CAST &&
+                                    !expr_is_c_view_of_slice(gen, sl);
+                    if (elems_own) {
+                        fprintf(gen->output, "aether_slice_free_elems(");
+                        generate_expression(gen, sl);
+                        fprintf(gen->output, ", sizeof(%s), %s, ", get_c_type(et),
+                                own_unwind_fn(gen, et));
+                    } else {
+                        fprintf(gen->output, "aether_slice_free(");
+                        generate_expression(gen, sl);
+                        fprintf(gen->output, ", ");
+                    }
                     emit_slice_diag_file(gen, expr);
                     fprintf(gen->output, ", %d)", expr->line);
                 }

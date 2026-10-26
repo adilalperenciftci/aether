@@ -1,0 +1,81 @@
+// Regression (#3159): `free` of a `make([]T, n)` buffer gives back what its
+// elements hold. A store into an element takes the value (#2921), so each
+// element is a place, and the buffer going away is that place going away
+// (ownership-model R2, R3); only the buffer was freed, so every string,
+// closure or string-holding struct stored into one leaked.
+//
+// Strings are built from a parameter, because interpolation of literals
+// alone folds to a literal, which is pinned and never counted. The check runs
+// where the heap count is exact (mem.heap_in_use_exact); elsewhere the macOS
+// leaks gate covers this program.
+
+import std.mem
+
+extern exit(code: int)
+
+struct Tag {
+    label: string
+    weight: int
+}
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+strings_round(n: int) {
+    xs = make([]string, 3)
+    xs[0] = "built ${n}"
+    xs[1] = "literal"
+    xs[2] = "and ${n + 1}"
+    xs[2] = "replaced ${n}"    // the store releases the one it replaces
+    check(xs[0] == "built ${n}", "an element keeps its string until the free")
+    free(xs)
+}
+
+deferred_round(n: int) {
+    xs = make([]string, 2)
+    defer free(xs)
+    xs[0] = "deferred ${n}"
+}
+
+closures_round(n: int) {
+    fs = make([]fn, 2)
+    fs[0] = || { return n + 1 }
+    fs[1] = || { return n * 2 }
+    free(fs)
+}
+
+structs_round(n: int) {
+    ts = make([]Tag, 2)
+    ts[0] = Tag { label: "first ${n}", weight: 1 }
+    ts[1] = Tag { label: "second ${n}", weight: 2 }
+    free(ts)
+}
+
+// Never stored: the zeroed elements give back nothing.
+empty_round(n: int) {
+    xs = make([]string, n)
+    free(xs)
+}
+
+main() {
+    strings_round(1)
+    if !mem.heap_in_use_exact() {
+        println("OK") // count not exact here: the macOS leaks gate checks this program
+        return
+    }
+    grown = mem.steady_growth(|| { strings_round(7) }, 8)
+    check(grown == 0, "free of a string buffer grew the heap by ${grown} bytes a round")
+    grown = mem.steady_growth(|| { deferred_round(7) }, 8)
+    check(grown == 0, "defer free of a string buffer grew the heap by ${grown} bytes a round")
+    grown = mem.steady_growth(|| { closures_round(7) }, 8)
+    check(grown == 0, "free of a closure buffer grew the heap by ${grown} bytes a round")
+    grown = mem.steady_growth(|| { structs_round(7) }, 8)
+    check(grown == 0, "free of a struct buffer grew the heap by ${grown} bytes a round")
+    grown = mem.steady_growth(|| { empty_round(4) }, 8)
+    check(grown == 0, "free of an untouched buffer grew the heap by ${grown} bytes a round")
+    println("OK")
+}

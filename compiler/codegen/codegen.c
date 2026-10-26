@@ -9220,6 +9220,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     /* #2921: the journal's drop of a closure place a panic leaves. */
     print_line(gen, "static AETHER_MAYBE_UNUSED void _aether_closure_drop_unwind(const void* p) { _AeClosure* c = (_AeClosure*)p; _aether_closure_env_release(c->env); c->env = (void*)0; }");
     print_line(gen, "static AETHER_MAYBE_UNUSED void _aether_seq_drop_unwind(const void* p) { StringSeq** s = (StringSeq**)p; string_seq_free(*s); *s = (StringSeq*)0; }");
+    /* #3159: the drop of a string place by its address, as own_emit_part
+     * drops one (a `make` buffer's elements, freed with the buffer). */
+    print_line(gen, "static AETHER_MAYBE_UNUSED void _aether_string_drop_unwind(const void* p) { const char** s = (const char**)p; aether_heap_str_free(*s); *s = (const char*)0; }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED void _aether_seq_free_place(StringSeq** p) { string_seq_free(*p); *p = (StringSeq*)0; }");
     /* #2755: a closure cell (a `fn` variable a closure writes) holds a
      * reference of its own to the closure in it, as a string cell owns its
