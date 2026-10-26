@@ -6141,24 +6141,32 @@ static int http_server_serve(HttpServer* server) {
          * its own, and http_server_port reported none of them. */
         char where[300];
         char why[128];
-        if (server->socket_fd >= 0) {
+        /* Taken under live_lock, as a stop takes it to close it: one of the
+         * two has it. A stop that came as the server started closed it
+         * between this read and the clear, and the release closed it a
+         * second time. */
+        pthread_mutex_lock(&server->live_lock);
+        int bound_fd = server->socket_fd;
+        server->socket_fd = -1;
+        pthread_mutex_unlock(&server->live_lock);
+        if (bound_fd >= 0) {
 #ifdef AETHER_REUSEPORT_LB
             /* Where the kernel does not spread connections,
              * http_server_set_multi_accept_raw refuses, so this mode never
              * starts there, but the file still builds. */
             int opt = 1;
-            if (setsockopt(server->socket_fd, SOL_SOCKET, AETHER_REUSEPORT_LB, &opt, sizeof opt) != 0) {
+            if (setsockopt(bound_fd, SOL_SOCKET, AETHER_REUSEPORT_LB, &opt, sizeof opt) != 0) {
                 server_fail(server, "cannot set SO_REUSEPORT on the socket bound to %s: %s",
                             aether_addr_authority(where, sizeof where, server->host, server->port),
                             socket_error_text(why, sizeof why));
                 multi_accept_release(server, n_threads, 0);
+                server->socket_fd = bound_fd;   /* still the server's, as server_bind left it */
                 return -1;
             }
 #endif
-            int fl = fcntl(server->socket_fd, F_GETFL, 0);
-            if (fl >= 0) fcntl(server->socket_fd, F_SETFL, fl | O_NONBLOCK);
-            server->accept_listen_fds[0] = server->socket_fd;
-            server->socket_fd = -1;   /* listener 0's now: closed with the rest */
+            int fl = fcntl(bound_fd, F_GETFL, 0);
+            if (fl >= 0) fcntl(bound_fd, F_SETFL, fl | O_NONBLOCK);
+            server->accept_listen_fds[0] = bound_fd;   /* closed with the rest */
         } else {
             server->accept_listen_fds[0] = create_reuseport_socket(
                 server->host, server->port, server->max_connections);
@@ -6441,17 +6449,23 @@ void http_server_stop(HttpServer* server) {
     /* Winsock stays up: http_server_init starts it once for the process,
      * and a client, another server or the background thread still use it.
      * A WSACleanup here ran under the server's own threads, which were still
-     * returning from accept or closing a connection. */
-    if (server->socket_fd >= 0) {
+     * returning from accept or closing a connection.
+     *
+     * The socket is taken under live_lock, as multi-accept takes it to make
+     * it a listener: one of the two closes it. */
+    pthread_mutex_lock(&server->live_lock);
+    int listen_fd = server->socket_fd;
+    server->socket_fd = -1;
+    pthread_mutex_unlock(&server->live_lock);
+    if (listen_fd >= 0) {
 #ifdef _WIN32
-        closesocket(server->socket_fd);
+        closesocket(listen_fd);
 #else
         /* Wakes a poll() on it at once where the platform does (Linux);
          * close() alone leaves the loop to its one-second timeout. */
-        shutdown(server->socket_fd, SHUT_RDWR);
-        close(server->socket_fd);
+        shutdown(listen_fd, SHUT_RDWR);
+        close(listen_fd);
 #endif
-        server->socket_fd = -1;
     }
 
     /* Wake every worker waiting for a client's next request: that read
