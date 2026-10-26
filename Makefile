@@ -1961,8 +1961,34 @@ endif
 endif
 endif
 
+# Sandbox preload library (libaether_sandbox.so): the LD_PRELOAD
+# interception layer spawn_sandboxed starts a child with, for cross-process
+# containment. Built on Linux and FreeBSD; both have an rtld that honours
+# LD_PRELOAD + dlsym(RTLD_NEXT, ...). Link flags differ: glibc needs -ldl
+# -lrt; FreeBSD folds dlopen/shm_open into libc. Other platforms (macOS
+# hardened runtime, Windows) have no preload path: spawn_sandboxed there is
+# a stub. Its own rule (#3177), with its source and the two headers that
+# source includes as prerequisites, so an edit to any of them or a deleted
+# library rebuilds it. It was built inside the MANIFEST recipe, so only a
+# change to the Makefile did, and a stale preload was tested and installed.
+SANDBOX_PRELOAD :=
+SANDBOX_PRELOAD_LIBS :=
+ifeq ($(shell uname -s),Linux)
+SANDBOX_PRELOAD := $(BUILD_DIR)/libaether_sandbox.so
+SANDBOX_PRELOAD_LIBS := -ldl -lrt
+else ifeq ($(shell uname -s),FreeBSD)
+SANDBOX_PRELOAD := $(BUILD_DIR)/libaether_sandbox.so
+endif
+ifneq ($(SANDBOX_PRELOAD),)
+$(SANDBOX_PRELOAD): runtime/libaether_sandbox_preload.c runtime/aether_sandbox_path.h runtime/aether_sandbox_match.h
+	@echo "Building sandbox preload library..."
+	@mkdir -p $(dir $@)
+	@$(CC) -shared -fPIC -o $@ runtime/libaether_sandbox_preload.c $(SANDBOX_PRELOAD_LIBS) 2>/dev/null || true
+	@test -f $@ && echo "✓ Sandbox preload: $@" || echo "⚠ Sandbox preload: build failed (spawn_sandboxed will be unavailable)"
+endif
+
 # Precompiled stdlib archive — runtime + std for user programs.
-stdlib: $(BUILD_DIR)/libaether.a $(MANIFEST_OBJ) $(LIB_MAIN_ARCHIVE) $(BUILD_TARGET_STAMP) $(SHARED_RT)
+stdlib: $(BUILD_DIR)/libaether.a $(MANIFEST_OBJ) $(LIB_MAIN_ARCHIVE) $(BUILD_TARGET_STAMP) $(SHARED_RT) $(SANDBOX_PRELOAD)
 
 ifneq ($(SHARED_RT),)
 $(SHARED_RT): $(BUILD_DIR)/libaether.a
@@ -2045,22 +2071,6 @@ $(BUILD_DIR)/MANIFEST: Makefile | $(BUILD_DIR)
 	  for f in $(STD_REACTOR_SRC); do echo "$$f"; done; \
 	) > $(BUILD_DIR)/MANIFEST
 	@echo "✓ MANIFEST: $$(grep -c -v -E '^(#|$$)' $(BUILD_DIR)/MANIFEST) link-suitable files"
-# Sandbox preload library (libaether_sandbox.so) — the LD_PRELOAD
-# interception layer used by spawn_sandboxed for cross-process
-# containment. Built on Linux and FreeBSD; both have an rtld that
-# honours LD_PRELOAD + dlsym(RTLD_NEXT, ...). Link flags differ:
-# glibc needs -ldl -lrt; FreeBSD folds dlopen/shm_open into libc.
-# Other platforms (macOS hardened runtime, Windows) have no preload
-# path — spawn_sandboxed there is a stub.
-ifeq ($(shell uname -s),Linux)
-	@echo "Building sandbox preload library..."
-	@$(CC) -shared -fPIC -o $(BUILD_DIR)/libaether_sandbox.so runtime/libaether_sandbox_preload.c -ldl -lrt 2>/dev/null || true
-	@test -f $(BUILD_DIR)/libaether_sandbox.so && echo "✓ Sandbox preload: $(BUILD_DIR)/libaether_sandbox.so" || echo "⚠ Sandbox preload: build failed (spawn_sandboxed will be unavailable)"
-else ifeq ($(shell uname -s),FreeBSD)
-	@echo "Building sandbox preload library..."
-	@$(CC) -shared -fPIC -o $(BUILD_DIR)/libaether_sandbox.so runtime/libaether_sandbox_preload.c 2>/dev/null || true
-	@test -f $(BUILD_DIR)/libaether_sandbox.so && echo "✓ Sandbox preload: $(BUILD_DIR)/libaether_sandbox.so" || echo "⚠ Sandbox preload: build failed (spawn_sandboxed will be unavailable)"
-endif
 
 # Compiler-as-library archive — COMPILER_LIB_SRC without aetherc.c's main().
 # Consumed by the LSP server and the sanitizer test runners. Kept separate
@@ -2319,6 +2329,11 @@ install: $(VERSION_HEADER) release-build ae stdlib
 	@if [ -d $(BUILD_DIR)/shared ]; then \
 		install -d $(PREFIX)/lib/aether/shared && \
 		cp $(BUILD_DIR)/shared/* $(PREFIX)/lib/aether/shared/; \
+	fi
+	@# Linux and FreeBSD: the sandbox's preload library, which spawn_sandboxed
+	@# starts a child with; it looks for it here, under AETHER_HOME (#3177).
+	@if [ -f $(BUILD_DIR)/libaether_sandbox.so ]; then \
+		install -m 755 $(BUILD_DIR)/libaether_sandbox.so $(PREFIX)/lib/aether/; \
 	fi
 	@# Version stamp next to libaether.a. `ae build` reads this and
 	@# compares it to the compiler's own version; a mismatch (the

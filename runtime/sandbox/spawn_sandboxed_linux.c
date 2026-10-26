@@ -34,35 +34,8 @@ extern void* list_get_raw(void*, int);
 // C-string. Required for argv / grant-pattern reads — see issue #688.
 extern const char* aether_string_data(const void*);
 
-// Find libaether_sandbox.so next to the running binary
-static int find_preload_path(char* buf, int bufsize) {
-    // Try /proc/self/exe to find our binary's directory
-    // Leave room for suffix ("build/libaether_sandbox.so" = 26 chars)
-    char exe[512];
-    ssize_t len = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
-    if (len <= 0) {
-        // Fallback: look in current directory
-        snprintf(buf, bufsize, "./libaether_sandbox.so");
-        return access(buf, F_OK) == 0;
-    }
-    exe[len] = '\0';
-
-    // Strip binary name, keep directory
-    char* slash = strrchr(exe, '/');
-    if (slash) *(slash + 1) = '\0';
-
-    snprintf(buf, bufsize, "%slibaether_sandbox.so", exe);
-    if (access(buf, F_OK) == 0) return 1;
-
-    // Try ../build/
-    if (slash) *slash = '\0';
-    slash = strrchr(exe, '/');
-    if (slash) *(slash + 1) = '\0';
-    snprintf(buf, bufsize, "%sbuild/libaether_sandbox.so", exe);
-    if (access(buf, F_OK) == 0) return 1;
-
-    return 0;
-}
+// The preload library's lookup, shared with the contrib process hosts.
+#include "aether_sandbox_preload_path.h"
 
 // Serialize grants from a list to shared memory
 // Format: "category:pattern\n" lines, null-terminated
@@ -259,8 +232,9 @@ static int install_clone_fence_seccomp(void) {
 int aether_spawn_sandboxed(void* grant_list, const char* program, const char* arg) {
     // Find the preload library
     char preload_path[1024];
-    if (!find_preload_path(preload_path, sizeof(preload_path))) {
-        fprintf(stderr, "[aether] cannot find libaether_sandbox.so\n");
+    char tried[2048];
+    if (!aether_sandbox_find_preload(preload_path, sizeof(preload_path), tried, sizeof(tried))) {
+        aether_sandbox_preload_missing("[aether]", tried);
         return -1;
     }
 

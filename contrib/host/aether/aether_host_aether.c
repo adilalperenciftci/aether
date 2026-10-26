@@ -46,30 +46,9 @@ extern const char* aether_string_data(const void*);
 // Helpers
 // ---------------------------------------------------------------
 
-// Find libaether_sandbox.so next to the running binary
-static int find_preload_path(char* buf, int bufsize) {
-  char exe[512];
-  ssize_t len = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
-  if (len <= 0) {
-    snprintf(buf, bufsize, "./libaether_sandbox.so");
-    return access(buf, F_OK) == 0;
-  }
-  exe[len] = '\0';
-
-  char* slash = strrchr(exe, '/');
-  if (slash) *(slash + 1) = '\0';
-
-  snprintf(buf, bufsize, "%slibaether_sandbox.so", exe);
-  if (access(buf, F_OK) == 0) return 1;
-
-  if (slash) *slash = '\0';
-  slash = strrchr(exe, '/');
-  if (slash) *(slash + 1) = '\0';
-  snprintf(buf, bufsize, "%sbuild/libaether_sandbox.so", exe);
-  if (access(buf, F_OK) == 0) return 1;
-
-  return 0;
-}
+// Where libaether_sandbox.so is: the runtime's lookup, shared with
+// spawn_sandboxed (#3177).
+#include "../../../runtime/sandbox/aether_sandbox_preload_path.h"
 
 // Serialize grants to POSIX shared memory
 // Format: "category:pattern\n" lines, null-terminated
@@ -141,9 +120,9 @@ static int spawn_sandboxed_full(
   // 1. Find preload library
   char preload_path[1024];
   if (perms) {
-    if (!find_preload_path(preload_path, sizeof(preload_path))) {
-      fprintf(stderr,
-              "[aether-host] cannot find libaether_sandbox.so\n");
+    char tried[2048];
+    if (!aether_sandbox_find_preload(preload_path, sizeof(preload_path), tried, sizeof(tried))) {
+        aether_sandbox_preload_missing("[aether-host]", tried);
       return -1;
     }
   }

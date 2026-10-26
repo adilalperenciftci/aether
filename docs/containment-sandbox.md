@@ -511,13 +511,33 @@ interception model requires.
 
 | Platform | Runtime sandbox | Notes |
 |----------|----------------|-------|
-| **Linux** | LD_PRELOAD (`libaether_sandbox.so`) | Preload locates itself via `/proc/self/exe`. Intercepts the glibc large-file (`open64`/`fopen64`/`mmap64`) and `clone3` entry points in addition to the common surface. |
-| **FreeBSD** | LD_PRELOAD + **Capsicum self-sandbox** + **Casper** | LD_PRELOAD works as on Linux (preload locates itself via `sysctl(KERN_PROC_PATHNAME)` no `/proc`; no `*64`/`clone3`). An Aether process launched with `AETHER_CAPSICUM=1` enters FreeBSD capability mode at startup, kernel-enforced, unbypassable containment; `spawn_sandboxed` sets that for Aether children automatically. `std.casper` lets a capability-mode process still resolve DNS / read passwd / read sysctl by delegating to the Casper daemon. See [`aether_compared_to_capsicum.md`](aether_compared_to_capsicum.md). |
+| **Linux** | LD_PRELOAD (`libaether_sandbox.so`) | `spawn_sandboxed` finds the library as described below, the program's own path from `/proc/self/exe`. Intercepts the glibc large-file (`open64`/`fopen64`/`mmap64`) and `clone3` entry points in addition to the common surface. |
+| **FreeBSD** | LD_PRELOAD + **Capsicum self-sandbox** + **Casper** | LD_PRELOAD works as on Linux (the program's own path comes from `sysctl(KERN_PROC_PATHNAME)`, no `/proc`; no `*64`/`clone3`). An Aether process launched with `AETHER_CAPSICUM=1` enters FreeBSD capability mode at startup, kernel-enforced, unbypassable containment; `spawn_sandboxed` sets that for Aether children automatically. `std.casper` lets a capability-mode process still resolve DNS / read passwd / read sysctl by delegating to the Casper daemon. See [`aether_compared_to_capsicum.md`](aether_compared_to_capsicum.md). |
 | **macOS** | Not supported | `DYLD_INSERT_LIBRARIES` exists but the hardened runtime ignores it for system binaries. `spawn_sandboxed` is a stub that fails loudly. |
 | **Windows** | Not supported | No `LD_PRELOAD` equivalent. `spawn_sandboxed` is a stub. |
 
 The in-process layer (module boundary, scope boundary, and the stdlib
 grant checks) is pure C and works on every platform regardless.
+
+### Where `spawn_sandboxed` finds the preload library
+
+The child starts with `libaether_sandbox.so` in `LD_PRELOAD`, so the
+parent has to find it wherever the parent program runs: in `ae run`'s
+build cache, in a directory `ae build -o` wrote to, or installed beside
+other programs (#3177). `spawn_sandboxed` and the contrib process hosts
+(`contrib/host/aether`, `contrib/host/go`) look in this order:
+
+1. `AETHER_SANDBOX_PRELOAD`, the library's own path, when it is set;
+2. beside the running program, where a deployment can ship it;
+3. under `AETHER_HOME`, which `ae` sets for every program it runs:
+   `lib/aether/` (what `install.sh` and `make install` install),
+   `lib/` (a release archive's layout), then `build/` (a source tree,
+   where `make` builds it);
+4. the same three under the program's directory's parent: a program
+   installed in `<prefix>/bin`, or one in a source tree's directory.
+
+When none has it, the call says where it looked and returns -1 without
+starting the child.
 
 **Windows is out by construction, not by backlog.** The interception model
 *is* `LD_PRELOAD` + `dlsym(RTLD_NEXT, ...)`; Windows has no equivalent, so

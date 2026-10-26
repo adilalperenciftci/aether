@@ -411,6 +411,11 @@ if [ "$EDITOR_ONLY" -eq 0 ]; then
         mkdir -p "$LIB_DIR/shared"
         cp build/shared/* "$LIB_DIR/shared/"
     fi
+    # Linux and FreeBSD: the sandbox's preload library, which spawn_sandboxed
+    # starts a child with. It looks for it here, under AETHER_HOME (#3177).
+    if [ -f build/libaether_sandbox.so ]; then
+        cp build/libaether_sandbox.so "$LIB_DIR/libaether_sandbox.so"
+    fi
     # Windows: the --emit=obj entry point (runtime/windows/aether_lib_main.c),
     # which `ae cflags --libs` names from beside libaether.a.
     if [ -f build/libaether_main.a ]; then
