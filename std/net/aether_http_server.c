@@ -5953,12 +5953,51 @@ static inline void dispatch_to_worker(HttpServer* server, int fd) {
     }
 }
 
+/* The connections an accept loop took before their first bytes, which wait
+ * in its poller until those arrive, marked by descriptor. A poller cannot
+ * list what it holds, and the ones still waiting when the server stopped
+ * were left open with no owner: a descriptor lost per connection, and a
+ * client that never saw the server go. Only the loop's own thread uses it. */
+typedef struct {
+    unsigned char* fds;
+    int cap;
+} AcceptWaiting;
+
+static int accept_waiting_mark(AcceptWaiting* w, int fd) {
+    if (fd >= w->cap) {
+        int cap = w->cap ? w->cap : 64;
+        while (cap <= fd) cap *= 2;
+        unsigned char* grown = realloc(w->fds, (size_t)cap);
+        if (!grown) return -1;
+        memset(grown + w->cap, 0, (size_t)(cap - w->cap));
+        w->fds = grown;
+        w->cap = cap;
+    }
+    w->fds[fd] = 1;
+    return 0;
+}
+
+static void accept_waiting_clear(AcceptWaiting* w, int fd) {
+    if (fd >= 0 && fd < w->cap) w->fds[fd] = 0;
+}
+
+/* Closes the connections still waiting, and frees the marks. */
+static void accept_waiting_close(AcceptWaiting* w) {
+    for (int fd = 0; fd < w->cap; fd++) {
+        if (w->fds[fd]) close(fd);
+    }
+    free(w->fds);
+    w->fds = NULL;
+    w->cap = 0;
+}
+
 // Per-core accept + I/O poller loop with optimistic recv
 // Strategy: try MSG_PEEK on accept() — if data is already there (common for
 // short-lived HTTP), dispatch immediately without touching the poller (saves syscalls).
 // Only register with the poller if the client hasn't sent data yet.
 static void accept_poller_loop(HttpServer* server, int listen_fd, AetherIoPoller* poller) {
     AetherIoEvent events[256];
+    AcceptWaiting waiting = { NULL, 0 };
 
     while (server->is_running) {
         int n = aether_io_poller_poll(poller, events, 256, 100);
@@ -5993,16 +6032,21 @@ static void accept_poller_loop(HttpServer* server, int listen_fd, AetherIoPoller
                     int cflags = fcntl(client_fd, F_GETFL, 0);
                     if (cflags >= 0) fcntl(client_fd, F_SETFL, cflags | O_NONBLOCK);
 
-                    if (aether_io_poller_add(poller, client_fd, NULL, AETHER_IO_READ) != 0) {
+                    if (accept_waiting_mark(&waiting, client_fd) != 0 ||
+                        aether_io_poller_add(poller, client_fd, NULL, AETHER_IO_READ) != 0) {
+                        accept_waiting_clear(&waiting, client_fd);
                         close(client_fd);
                     }
                 }
             } else {
                 // Data ready (from poller, one-shot already removed) — dispatch
+                accept_waiting_clear(&waiting, fd);
                 dispatch_to_worker(server, fd);
             }
         }
     }
+
+    accept_waiting_close(&waiting);
 }
 
 static void* accept_thread_fn(void* arg) {
