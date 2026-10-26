@@ -6077,6 +6077,9 @@ static int http_server_serve(HttpServer* server) {
         char where[300];
         char why[128];
         if (server->socket_fd >= 0) {
+#ifdef SO_REUSEPORT
+            /* Without SO_REUSEPORT http_server_set_multi_accept_raw refuses,
+             * so this mode never starts there, but the file still builds. */
             int opt = 1;
             if (setsockopt(server->socket_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof opt) != 0) {
                 server_fail(server, "cannot set SO_REUSEPORT on the socket bound to %s: %s",
@@ -6085,6 +6088,7 @@ static int http_server_serve(HttpServer* server) {
                 multi_accept_release(server, n_threads, 0);
                 return -1;
             }
+#endif
             int fl = fcntl(server->socket_fd, F_GETFL, 0);
             if (fl >= 0) fcntl(server->socket_fd, F_SETFL, fl | O_NONBLOCK);
             server->accept_listen_fds[0] = server->socket_fd;
