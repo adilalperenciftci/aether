@@ -1,0 +1,76 @@
+// A sandboxed child process: grants held at the child's own libc calls.
+//
+// `spawn_sandboxed(grants, program, arg)` starts `program` with one
+// argument as a child held to `grants`, and returns its exit code. The
+// grants go to the child through shared memory, and the child starts with
+// the Aether preload library (libaether_sandbox.so), which checks the libc
+// calls it makes (open, connect, execve, getenv, dlopen) against them,
+// whatever language the child is written in. A kernel filter (seccomp)
+// also refuses the child every new process or thread unless the grants
+// allow fork. In-process enforce (01-sandbox.ae) checks std's calls; this
+// checks a whole other program, with no change to it.
+//
+// Here the child is this program again: `program` is `os.argv0()`, and
+// the one argument is `child:` and the directory to look in. It may read
+// one of the two files the parent made, and nothing else: the other file,
+// an environment variable and a shell command are refused.
+//
+// Run: ae run examples/05-containment/04-spawn-sandboxed.ae
+// Needs: Linux (the preload and the kernel filter are Linux and FreeBSD
+//   only; elsewhere spawn_sandboxed fails and says so). CI builds it.
+// See: docs/containment-sandbox.md
+
+import std.fs
+import std.os
+import std.sandbox
+import std.string
+
+// The child: plain std calls, run under the parent's grants.
+try_read(dir: string, name: string) {
+    text, err = fs.read(fs.join_clean(dir, name))
+    if err == "" {
+        println("  child: read ${name}: ${text}")
+    } else {
+        println("  child: read ${name}: refused")
+    }
+}
+
+child(dir: string) {
+    try_read(dir, "allowed.txt")
+    try_read(dir, "secret.txt")
+    token = os.getenv("DEMO_TOKEN")
+    seen = if token != "" { token } else { "not set" }
+    println("  child: env DEMO_TOKEN: ${seen}")
+    _, xerr = os.exec("echo hello")
+    ran = if xerr == "" { "ran" } else { "refused" }
+    println("  child: run echo: ${ran}")
+}
+
+main() {
+    if os.args_count() > 1 {
+        arg_dir, is_child = string.strip_prefix(os.args_get(1), "child:")
+        if is_child == 1 {
+            child(arg_dir)
+            return
+        }
+    }
+
+    dir, err = fs.make_temp_dir("", "aether-spawn-")
+    if err != "" {
+        println("no temp dir: ${err}")
+        exit(1)
+    }
+    defer fs.remove_tree(dir)
+    fs.write(fs.join_clean(dir, "allowed.txt"), "public data")
+    fs.write(fs.join_clean(dir, "secret.txt"), "hunter2")
+    os.setenv("DEMO_TOKEN", "s3cr3t")
+
+    worker = sandbox.new("child") {
+        grant_fs_read("${dir}/allowed.txt")
+    }
+    defer sandbox.free(worker)
+
+    println("starting the child under its grants:")
+    code = spawn_sandboxed(worker, os.argv0(), "child:${dir}")
+    println("the child exited with ${code}")
+}

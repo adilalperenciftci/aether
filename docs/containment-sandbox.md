@@ -500,7 +500,7 @@ audit.clear()                            // scope the next query
 
 This is the programmatic face of the audit trail: counting denials,
 asserting an expected access pattern in a test, building a "why was
-this blocked" report. Worked example: `examples/audit-demo.ae`.
+this blocked" report. Worked example: `examples/05-containment/03-audit.ae`.
 
 ## Platform support
 
@@ -1639,7 +1639,7 @@ Active work listed in [`../contrib/host/TODO.md`](../contrib/host/TODO.md):
 
 - `examples/04-interop/06-java-host/` direction 1 (Aether as
   guest, Java host).
-- `examples/sandbox-spawn.ae`, `examples/sandbox-demo.ae`,
+- `examples/05-containment/04-spawn-sandboxed.ae`, `examples/05-containment/01-sandbox.ae`,
   direction 2 (Aether as host).
 - `tests/integration/namespace_{python,ruby,java}/`,
   `tests/integration/embedded_java_trading_e2e/` per-SDK

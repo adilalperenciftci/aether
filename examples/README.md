@@ -87,6 +87,20 @@ builds and runs them.
 | [05-hosts/tinygo.ae](04-interop/05-hosts/tinygo.ae) | a Go c-shared library loaded and called in-process | [contrib/host/tinygo](../contrib/host/tinygo/README.md) |
 | [06-java-host/aether/manifest.ae](04-interop/06-java-host/aether/manifest.ae) | a namespace with a generated Java SDK, called from Java | [Embedded namespaces](../docs/embedded-namespaces-and-host-bindings.md) |
 
+## 5. Containing code
+
+Code you run does not have to be code you trust. The first three work
+on every platform; the others need the operating system they name.
+
+| Example | What it teaches | Reference |
+|---|---|---|
+| [01-sandbox.ae](05-containment/01-sandbox.ae) | grant lists, `sandbox.enforce`, what a refusal looks like | [Containment sandbox](../docs/containment-sandbox.md) |
+| [02-trusted-calls.ae](05-containment/02-trusted-calls.ae) | a function the sandboxed block may call with your authority | [Containment sandbox](../docs/containment-sandbox.md) |
+| [03-audit.ae](05-containment/03-audit.ae) | std.audit: every check, allowed or refused, read back | [Audit trail](../docs/containment-sandbox.md#audit-trail) |
+| [04-spawn-sandboxed.ae](05-containment/04-spawn-sandboxed.ae) | a child process held to grants at its libc calls (Linux) | [Platform support](../docs/containment-sandbox.md#platform-support) |
+| [05-capsicum.ae](05-containment/05-capsicum.ae) | FreeBSD Capsicum: open first, `enter`, then only what is held | [Capsicum](../docs/aether_compared_to_capsicum.md) |
+| [06-casper.ae](05-containment/06-casper.ae) | Casper: DNS and sysctl from capability mode (FreeBSD) | [Capsicum](../docs/aether_compared_to_capsicum.md) |
+
 ## Writing an example
 
 An example is one `.ae` file, or a directory when it needs more than one

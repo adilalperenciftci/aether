@@ -39,8 +39,8 @@ work that follows it.
 The strings from `entry` are Aether-owned copies, safe to keep after further
 audit activity: the ring buffer's own slots are overwritten as it wraps.
 
-`examples/audit-demo.ae` is a worked example that grants one environment
-variable and shows the allowed and denied reads side by side.
+`examples/05-containment/03-audit.ae` is a worked example that grants one environment
+variable and lists the allowed and refused checks a plugin made.
 
 ## Exports
 
