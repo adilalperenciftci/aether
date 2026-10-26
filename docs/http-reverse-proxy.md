@@ -348,10 +348,11 @@ it can continue. A thread only waits when nothing it holds can make progress,
 so an upstream that is slow to answer occupies a descriptor and some state
 rather than a thread.
 
-The driver serves plain HTTP proxying. These keep the per-connection worker
-path, and need no configuration to do so:
+The driver serves HTTP/1.1 proxying, on a TLS-terminating server too: it
+carries the client's TLS handshake without waiting and reads and writes
+through the session. These keep the per-connection worker path, and need no
+configuration to do so:
 
-- TLS-terminating servers
 - HTTP/2
 - connection upgrades and tunnels
 - streaming request bodies
