@@ -2842,9 +2842,8 @@ help:
 	@echo "  make check-standalone - Compile every standalone C main (benches, demos)"
 	@echo "  make check-docs       - Compile the documentation's complete examples"
 	@echo "  make check-tests      - The test suite can fail: verdicts reach the exit code, prune list is consistent, every std module has tests, listeners bind loopback, shell tests end background programs through server_jobs.sh and compare files with same_bytes, test programs write temp files under names of their own and ask the build for the platform"
-	@echo "  make check-extern-widths - Every extern bound to C in this tree agrees with the C definition on each width; no plain C long in a bound signature"
+	@echo "  make check-extern-widths - Every extern bound to C in this tree agrees with the C definition on each width; no plain C long in a bound signature; no shared C function defined twice"
 	@echo "  make check-raw-calls     - No file calls or re-declares a raw C binding another module declares"
-	@echo "  make check-extern-abi    - Every extern binds its C function with the widths that function takes"
 	@echo "  make check-warnings      - Every .ae file under std and contrib type-checks without a warning"
 	@echo "  make check-examples      - Every example builds clean and prints the output it says it prints"
 	@echo "  make check-contrib-modules - Type-check every non-host contrib module"
@@ -3040,7 +3039,6 @@ ci: clean
 	@$(CI_STAGE) 900 check-tests $(MAKE) check-tests
 	@$(CI_STAGE) 900 check-extern-widths $(MAKE) check-extern-widths
 	@$(CI_STAGE) 600 check-raw-calls $(MAKE) check-raw-calls
-	@$(CI_STAGE) 300 check-extern-abi $(MAKE) check-extern-abi
 	@$(CI_STAGE) 900 check-warnings $(MAKE) check-warnings
 	@echo ""
 	@echo "[5/11] Running .ae integration tests..."
@@ -3107,11 +3105,14 @@ ownership-grid ownership-grid-check: compiler ae stdlib
 # Extern widths (#3097): every extern bound to a C function of this tree
 # agrees with the C definition on the width of each argument and of the
 # result, and no bound C signature uses a plain `long` (32 bits on Windows,
-# 64 elsewhere). No C compiler sees an extern's prototype beside the C
+# 64 elsewhere). A size_t is pointer-sized, which a `long` is not on wasm32
+# and ESP32 (#3185). No C compiler sees an extern's prototype beside the C
 # definition, so nothing else catches a disagreement: the call is made with
-# the wrong width. The checker is Aether (tests/extern_widths/check.ae). Its
-# self-test first: the fixture holds exactly 11 mismatches, one of each
-# kind, among definitions that agree.
+# the wrong width, or on wasm32 replaced by a trap. Nor is a C function the
+# shared runtime, std and contrib define in two directories, which a program
+# that links both has twice. The checker is Aether
+# (tests/extern_widths/check.ae). Its self-test first: the fixture holds
+# exactly 13 findings, one of each kind, among definitions that agree.
 # -----------------------------------------------------------------
 EXTERN_WIDTHS_CHECKER := $(BUILD_DIR)/extern_widths/check$(EXE_EXT)
 EXTERN_WIDTHS_DIRS := std contrib runtime tests examples tools lsp benchmarks
@@ -3119,7 +3120,7 @@ EXTERN_WIDTHS_DIRS := std contrib runtime tests examples tools lsp benchmarks
 check-extern-widths: compiler ae stdlib
 	@mkdir -p $(BUILD_DIR)/extern_widths
 	@./$(BUILD_DIR)/ae$(EXE_EXT) build tests/extern_widths/check.ae -o $(EXTERN_WIDTHS_CHECKER)
-	@./$(EXTERN_WIDTHS_CHECKER) --expect 11 tests/extern_widths/fixture \
+	@./$(EXTERN_WIDTHS_CHECKER) --root tests/extern_widths/fixture --expect 13 tests/extern_widths/fixture \
 	    > $(BUILD_DIR)/extern_widths/self_test.log 2>&1 || \
 	    { cat $(BUILD_DIR)/extern_widths/self_test.log; exit 1; }
 	@./$(EXTERN_WIDTHS_CHECKER) --exclude tests/extern_widths/fixture $(EXTERN_WIDTHS_DIRS)
@@ -3155,22 +3156,6 @@ check-raw-calls: compiler ae stdlib
 	    > $(BUILD_DIR)/raw_calls/self_test.log 2>&1 || \
 	    { cat $(BUILD_DIR)/raw_calls/self_test.log; exit 1; }
 	@./$(RAW_CALLS_CHECKER) --exclude tests/raw_calls/fixture std contrib tests examples
-
-# Extern ABI (#3185): an extern's Aether types lower to fixed C types, and
-# a C definition of another width links on a 64-bit host and traps on a
-# 32-bit one (wasm32, ESP32). Every extern binds its C function with that
-# function's widths, and no C function is defined in two directories. The
-# checker is Aether (tests/extern_abi/check.ae). Its self-test first: the
-# fixture holds exactly 6 findings among declarations that match.
-EXTERN_ABI_CHECKER := $(BUILD_DIR)/extern_abi/check$(EXE_EXT)
-.PHONY: check-extern-abi
-check-extern-abi: compiler ae stdlib
-	@mkdir -p $(BUILD_DIR)/extern_abi
-	@./$(BUILD_DIR)/ae$(EXE_EXT) build tests/extern_abi/check.ae -o $(EXTERN_ABI_CHECKER)
-	@./$(EXTERN_ABI_CHECKER) --expect 6 tests/extern_abi/fixture \
-	    > $(BUILD_DIR)/extern_abi/self_test.log 2>&1 || \
-	    { cat $(BUILD_DIR)/extern_abi/self_test.log; exit 1; }
-	@./$(EXTERN_ABI_CHECKER) runtime std contrib
 
 # -----------------------------------------------------------------
 # Examples (#3105): examples/ is the path a learner follows, so each example

@@ -38,6 +38,7 @@ long ew_bad_long_result(void) { return 0; }
 void ew_bad_long_param(long v) { (void)v; }
 void ew_bad_int_to_int64(int64_t v) { (void)v; }
 void ew_bad_int_to_size(size_t n) { (void)n; }
+size_t ew_bad_long_to_size(size_t n) { return n; }
 float ew_bad_float(float x) { return x; }
 void* ew_bad_pointer_as_int(void) { return 0; }
 int ew_bad_arity(int a, int b) { return a + b; }

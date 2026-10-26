@@ -12,7 +12,7 @@
 import std.host
 import std.string
 
-extern aether_set_caller(identity: string, keys: ptr, vals: ptr, n: long, deadline: long) -> int
+extern aether_set_caller(identity: string, keys: ptr, vals: ptr, n: size_t, deadline: long) -> int
 extern aether_clear_caller()
 
 main() {

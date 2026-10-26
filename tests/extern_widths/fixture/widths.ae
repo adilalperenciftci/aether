@@ -1,10 +1,11 @@
 // The Aether side of the extern-width self-test (tests/extern_widths/check.ae,
 // #3097). Never built: the check only reads it. widths.c defines these;
-// `make check-extern-widths` expects exactly 11 mismatches here.
+// `make check-extern-widths` expects exactly 13 mismatches: 12 here, and a C
+// function std/ew_one and contrib/ew_two both define.
 
 // Agree with their C definitions.
 extern ew_ok_long(v: long) -> long
-extern ew_ok_size(n: long) -> long
+extern ew_ok_size(n: size_t) -> size_t
 extern ew_ok_bool(flag: bool) -> bool
 extern ew_ok_double(x: float) -> float
 extern ew_ok_string(s: string) -> string
@@ -22,6 +23,7 @@ extern ew_bad_long_result() -> long
 extern ew_bad_long_param(v: long)
 extern ew_bad_int_to_int64(v: int)
 extern ew_bad_int_to_size(n: int)
+extern ew_bad_long_to_size(n: long) -> long
 extern ew_bad_float(x: float) -> float
 extern ew_bad_pointer_as_int() -> int
 extern ew_bad_arity(a: int) -> int
