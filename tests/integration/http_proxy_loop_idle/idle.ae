@@ -1,0 +1,140 @@
+// The proxy event loop closes a connection whose client goes quiet, as the
+// worker path does (#3243).
+//
+// The worker path reads a request with the server's keep-alive idle timeout
+// as its receive timeout: a client that sends nothing for that long, before
+// its first request, between requests or partway through one, has its
+// connection closed. The event loop on Linux and macOS had no timeout on
+// the client at all and held such a connection for as long as the client
+// kept it open, which a client can do with as many connections as the
+// server will take.
+//
+// A bare proxy (the event loop on Linux and macOS) and one behind a
+// program's middleware (the worker path) both with a one second idle
+// timeout: a connection that sends nothing, one that sends a request and
+// then nothing, and one that stops halfway through a request must each be
+// closed within five seconds. Every server listens on 127.0.0.1 and a port
+// the kernel picks.
+
+import std.http
+import std.http.proxy
+import std.string
+import std.tcp
+
+extern exit(code: int)
+
+handle_up(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "up")
+}
+
+@c_callback mw_pass(req: ptr, res: ptr, ud: ptr) -> int {
+    return 1
+}
+
+start(server: ptr) -> int {
+    if http.server_bind(server, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    err = http.server_start_background(server)
+    if err != "" {
+        println("FAIL: ${err}")
+        exit(1)
+    }
+    return http.server_port(server)
+}
+
+need(label: string, err: string) {
+    if err != "" {
+        println("FAIL: ${label}: ${err}")
+        exit(1)
+    }
+}
+
+gateway(up_url: string, worker: int) -> ptr {
+    s = http.server_create(0)
+    http.server_set_host(s, "127.0.0.1")
+    if worker == 1 {
+        http.server_use_middleware(s, mw_pass, 0)
+    }
+    need("keepalive", http.server_set_keepalive(s, 1, 0, 1s))
+    need("mount", proxy.mount_simple(s, "/", up_url, 5))
+    return s
+}
+
+// `raw` written (nothing when it is ""), then whether the server closed the
+// connection within five seconds: "answered" when a response came first,
+// then "closed" or "open".
+probe(port: int, raw: string) -> string {
+    sock, cerr = tcp.connect("127.0.0.1", port)
+    if cerr != "" {
+        return "connect failed"
+    }
+    if raw != "" {
+        tcp.write(sock, raw)
+    }
+    wire = ""
+    state = "open"
+    waited = 0
+    while state == "open" && waited < 50 {
+        ready, _perr = tcp.poll(sock, 100)
+        if ready {
+            chunk, rerr = tcp.read(sock, 4096)
+            if rerr != "" || string.length(chunk) == 0 {
+                state = "closed"
+            } else {
+                wire = string.concat(wire, chunk)
+            }
+        }
+        waited = waited + 1
+    }
+    tcp.close(sock)
+    if string.starts_with(wire, "HTTP/1.1 200") == 1 {
+        return "answered, ${state}"
+    }
+    return state
+}
+
+main() {
+    println("=== the event loop closes a connection whose client goes quiet (#3243) ===")
+    upstream = http.server_create(0)
+    http.server_set_host(upstream, "127.0.0.1")
+    http.server_get(upstream, "/p", handle_up, 0)
+    up_url = "http://127.0.0.1:${start(upstream)}"
+    servers = [gateway(up_url, 0), gateway(up_url, 1)]
+    ports = [start(servers[0]), start(servers[1])]
+    names = ["event loop", "worker path"]
+    sleep(200)
+
+    bad = 0
+    g = 0
+    while g < 2 {
+        cases = ["a connection that sends nothing", "a request, then nothing",
+            "half a request, then nothing"]
+        sends = ["", "GET /p HTTP/1.1\r\nHost: x\r\n\r\n", "GET /p HTTP/1.1\r\nHo"]
+        wants = ["closed", "answered, closed", "closed"]
+        i = 0
+        while i < 3 {
+            got = probe(ports[g], sends[i])
+            if got != wants[i] {
+                println("  FAIL ${cases[i]} (${names[g]}): got '${got}', expected '${wants[i]}'")
+                bad = bad + 1
+            } else {
+                println("  PASS ${cases[i]} (${names[g]})")
+            }
+            i = i + 1
+        }
+        g = g + 1
+    }
+
+    http.server_stop(servers[1])
+    http.server_stop(servers[0])
+    http.server_stop(upstream)
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

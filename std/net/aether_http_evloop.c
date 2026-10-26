@@ -1093,12 +1093,30 @@ static void ev_arm_deadline(EvDriver* d, EvConn* c) {
     ev_timer_set(d, c, aether_proxy_now_ms() + (int64_t)secs * 1000);
 }
 
+/* How long this driver waits on a quiet client: the worker path's receive
+ * timeout (conn_apply_recv_timeout), the server's keep-alive idle timeout,
+ * 30 seconds unless set. Armed while the driver waits on the client for a
+ * request, and moved each time bytes of it arrive, as a receive timeout
+ * restarts with each receive; a TLS handshake has it once, start to finish,
+ * and the request after it starts afresh. With no timeout at all, a client held
+ * a connection for as long as it kept it open, idle or halfway through a
+ * request (#3243). */
+static void ev_arm_idle(EvDriver* d, EvConn* c) {
+    int ms = d->loop->server->keep_alive_idle_ms > 0
+           ? d->loop->server->keep_alive_idle_ms : 30000;
+    ev_timer_set(d, c, aether_proxy_now_ms() + ms);
+}
+
 /* The upstream did not answer in time. The client is owed an answer anyway,
  * and it is the same one the blocking path gives. */
 static int ev_expire(EvDriver* d, EvConn* c) {
     ev_timer_set(d, c, 0);
     /* Not a timeout: the backoff before a retry is over (#3232). */
     if (c->state == EV_BACKOFF) return ev_begin_retry_ex(d, c, 0);
+    /* The client went quiet for the idle timeout while this driver waited on
+     * it (ev_arm_idle): closed, as the worker path closes on its receive
+     * timeout (#3243). */
+    if (c->state == EV_READ_REQUEST || c->state == EV_TLS_HANDSHAKE) return -1;
     if (c->up.t.sockfd >= 0) {
         aether_io_poller_remove(&d->poller, c->up.t.sockfd);
         ev_untrack(d, c->up.t.sockfd);
@@ -1463,8 +1481,13 @@ static int ev_advance(EvDriver* d, EvConn* c) {
     for (;;) {
         switch (c->state) {
         case EV_READ_REQUEST: {
+            size_t had = c->in_len;
             int r = ev_step_read_request(d, c);
+            /* Waiting on the client: no longer than the idle timeout since
+             * its last byte (#3243). */
+            if (r == 0 && (c->in_len != had || c->deadline_ms == 0)) ev_arm_idle(d, c);
             if (r <= 0) return r;
+            ev_timer_set(d, c, 0);   /* the request is here */
             r = ev_begin_upstream(d, c);
             if (r <= 0) return r;
             continue;
@@ -1472,7 +1495,9 @@ static int ev_advance(EvDriver* d, EvConn* c) {
 #ifdef AETHER_HAS_OPENSSL
         case EV_TLS_HANDSHAKE: {
             int r = ev_step_tls_handshake(d, c);
+            if (r == 0 && c->deadline_ms == 0) ev_arm_idle(d, c);   /* #3243 */
             if (r <= 0) return r;
+            ev_timer_set(d, c, 0);
             continue;
         }
 #endif
