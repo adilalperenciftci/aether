@@ -73,7 +73,7 @@ fail(msg: string) {
 }
 
 new_counters() -> *ParseCounters {
-    c = malloc(32) as *ParseCounters // 5 int fields, 32 bytes is comfortable
+    c = malloc(sizeof(ParseCounters)) as *ParseCounters
     c.start_count = 0
     c.end_count = 0
     c.text_count = 0
@@ -248,7 +248,7 @@ main() {
                 xml_expat.set_user_data(p2, c2)
                 xml_expat.on_start(p2, count_start as fn(ptr, string, ptr) -> void)
 
-                d1 = "<a/><b/>" // not well-formed standalone — single root needed
+                // "<a/><b/>" alone is not well-formed: a document needs one root.
                 d1_root = "<r><a/><b/></r>"
                 d2_root = "<r><x/></r>"
                 if xml_expat.parse(p1, d1_root, string.length(d1_root), 1) != 1 {

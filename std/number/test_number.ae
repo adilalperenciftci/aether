@@ -133,7 +133,8 @@ fn check_float_currency(locale: string, currency: string, val: float, expected: 
 }
 
 fn leak_check_helper() {
-    f1, err_f1 = number.format_decimal_string("fr-FR", "9876543.21", number.default_options())
+    // The values are not read: the call is what the leak check measures.
+    _f1, _err_f1 = number.format_decimal_string("fr-FR", "9876543.21", number.default_options())
 }
 
 main() {

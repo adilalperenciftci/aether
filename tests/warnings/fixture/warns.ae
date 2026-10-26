@@ -1,0 +1,36 @@
+// Fixture for tests/warnings/check.ae: three warnings the gate must report
+// (an unused value, W1001; code after a panic, W1002; and an uncoded one, a
+// malloc sized by a literal), and a clean function beside them.
+
+import std.string
+
+extern malloc(n: int) -> ptr
+extern free(p: ptr)
+
+struct Pair {
+    a: int
+    b: int
+}
+
+clean(s: string) -> int {
+    return string.length(s)
+}
+
+unused() {
+    left = 1
+}
+
+after_panic() -> int {
+    panic("stop")
+    return 0
+}
+
+sized_by_hand() {
+    p = malloc(16) as *Pair
+    p.a = 1
+    free(p as ptr)
+}
+
+main() {
+    println("${clean("x")}")
+}
