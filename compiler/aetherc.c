@@ -2703,6 +2703,33 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
+    /* #3182: the input, and then the output, are the last arguments; options
+     * come before them. An argument after them was dropped without a word,
+     * so `aetherc in.ae out.c --lib vendor` compiled without vendor and its
+     * caller never knew (`ae help` passed every --lib that way, #3183). It
+     * is refused, with the command as it should be. A mode that writes no
+     * output still takes one in that place (callers pass the null device);
+     * `aetherc in.ae -o out.c` keeps its own message below. */
+    {
+        int input_only = dump_ast_mode || diagnose_ownership_mode || emit_c_mode ||
+                         check_only_mode || emit_ast_mode || emit_inspect_mode ||
+                         emit_short_names_mode;
+        int dash_output = arg_offset + 1 < argc && argv[arg_offset + 1][0] == '-' &&
+                          argv[arg_offset + 1][1] != '\0';
+        for (int i = arg_offset + 1; i < argc && !(dash_output && !input_only); i++) {
+            int is_flag = argv[i][0] == '-' && argv[i][1] != '\0';
+            if (i == arg_offset + 1 && !is_flag) continue;          /* the output */
+            fprintf(stderr, "Error: unexpected argument '%s' after the %s; options go before the input:\n",
+                    argv[i], i == arg_offset + 1 ? "input" : "output");
+            fprintf(stderr, "    %s", argv[0]);
+            for (int j = 1; j < arg_offset; j++) fprintf(stderr, " %s", argv[j]);
+            for (int j = i; j < argc; j++) fprintf(stderr, " %s", argv[j]);
+            for (int j = arg_offset; j < i; j++) fprintf(stderr, " %s", argv[j]);
+            fprintf(stderr, "\n");
+            return 1;
+        }
+    }
+
     // --dump-ast only needs the input file
     if (dump_ast_mode) {
         if (!compile_source(argv[arg_offset], "/dev/null")) {

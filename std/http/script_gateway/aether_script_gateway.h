@@ -3,7 +3,7 @@
 
 /* In-process script gateway (issue #384).
  *
- * Mounts a pre-compiled `aetherc --emit=lib script.ae -o script.so`
+ * Mounts a pre-compiled `ae build --emit=lib script.ae -o script.so`
  * shared library as an HTTP request handler — gives `.ae` scripts
  * the dispatch ergonomics of CGI without paying the per-request
  * fork/exec cost. The script's exported `aether_script_handle(req,

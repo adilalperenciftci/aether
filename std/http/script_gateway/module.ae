@@ -3,7 +3,7 @@
 //
 // CGI-style ergonomics (each route handled by a separate `.ae`
 // script file) without the per-request fork/exec cost. The script
-// is pre-compiled with `aetherc --emit=lib` to a shared library;
+// is pre-compiled with `ae build --emit=lib` to a shared library;
 // the host server `dlopen()`s it once and dispatches via a direct
 // indirect-call per request. Empirically ~50× faster than the
 // subprocess-spawn approach.
@@ -28,7 +28,7 @@
 // Build it as a shared library:
 //
 // ```sh
-// aetherc --emit=lib greeting.ae -o /var/aether/scripts/greeting.so
+// ae build --emit=lib greeting.ae -o /var/aether/scripts/greeting.so
 // ```
 //
 // And mount in the host:
