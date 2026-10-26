@@ -14,7 +14,6 @@
 // and register the middleware with the server.
 #include "aether_middleware.h"
 #include "../../../runtime/aether_resource_caps.h"
-#include "../../net/aether_net_addr.h"   /* inet_pton, inet_ntop: use_real_ip */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -998,26 +997,110 @@ struct AetherRealIpOpts {
     int trusted_count;
 };
 
+/* Addresses are read and written here, not with inet_pton and inet_ntop:
+ * this is text, and the socket headers those come with are not on every
+ * target std builds for (WASI has none). The rules are inet_pton's. */
+
+/* An IPv4 address, the `len` bytes at `s`: 1, its four bytes in `out`.
+ * Four decimal parts of 0 to 255, none with a leading zero. */
+static int real_ip_parse_v4(const char* s, size_t len, unsigned char out[4]) {
+    size_t i = 0;
+    for (int part = 0; part < 4; part++) {
+        if (part > 0) {
+            if (i >= len || s[i] != '.') return 0;
+            i++;
+        }
+        if (i >= len || !isdigit((unsigned char)s[i])) return 0;
+        int v = 0, digits = 0;
+        while (i < len && isdigit((unsigned char)s[i])) {
+            if (digits > 0 && v == 0) return 0;   /* a leading zero */
+            v = v * 10 + (s[i] - '0');
+            digits++;
+            i++;
+            if (v > 255) return 0;
+        }
+        out[part] = (unsigned char)v;
+    }
+    return i == len;
+}
+
+static int real_ip_hex(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* An IPv6 address: 1, its sixteen bytes. Groups of up to four hex digits,
+ * one `::` standing for one or more zero groups, and an IPv4 address in
+ * the last 32 bits. */
+static int real_ip_parse_v6(const char* s, size_t len, unsigned char out[16]) {
+    unsigned char buf[16] = { 0 };
+    int n = 0;      /* bytes read so far */
+    int gap = -1;   /* where the `::` stands, in bytes */
+    size_t i = 0;
+    if (len >= 1 && s[0] == ':') {
+        if (len < 2 || s[1] != ':') return 0;
+        gap = 0;
+        i = 2;
+    }
+    while (i < len) {
+        if (n >= 16) return 0;
+        size_t j = i;
+        int dotted = 0;
+        while (j < len && s[j] != ':') {
+            if (s[j] == '.') dotted = 1;
+            j++;
+        }
+        if (dotted) {
+            if (j != len || n > 12 || !real_ip_parse_v4(s + i, len - i, buf + n)) return 0;
+            n += 4;
+            break;
+        }
+        int v = 0, digits = 0;
+        while (i < len && real_ip_hex(s[i]) >= 0) {
+            if (++digits > 4) return 0;
+            v = v * 16 + real_ip_hex(s[i]);
+            i++;
+        }
+        if (digits == 0) return 0;
+        buf[n++] = (unsigned char)(v >> 8);
+        buf[n++] = (unsigned char)(v & 0xff);
+        if (i == len) break;
+        if (s[i] != ':') return 0;
+        i++;
+        if (i < len && s[i] == ':') {
+            if (gap >= 0) return 0;   /* a second `::` */
+            gap = n;
+            i++;
+        } else if (i == len) {
+            return 0;                 /* a trailing single `:` */
+        }
+    }
+    if (gap >= 0) {
+        if (n > 14) return 0;         /* `::` stands for at least one group */
+        memmove(buf + 16 - (n - gap), buf + gap, (size_t)(n - gap));
+        memset(buf + gap, 0, (size_t)(16 - n));
+    } else if (n != 16) {
+        return 0;
+    }
+    memcpy(out, buf, 16);
+    return 1;
+}
+
 /* The `len` bytes at `text` as an address: 1, with its 16 bytes in `out`
- * (an IPv4 address mapped) and *is_v4 saying which it was written as; 0
- * when it is none. */
+ * (an IPv4 address mapped, ::ffff:a.b.c.d) and *is_v4 saying which it was
+ * written as; 0 when it is none. */
 static int real_ip_parse(const char* text, size_t len, unsigned char out[16], int* is_v4) {
-    char buf[64];
-    if (len == 0 || len >= sizeof buf) return 0;
-    memcpy(buf, text, len);
-    buf[len] = '\0';
-    struct in_addr a4;
-    struct in6_addr a6;
-    if (inet_pton(AF_INET, buf, &a4) == 1) {
+    if (len == 0) return 0;
+    if (real_ip_parse_v4(text, len, out + 12)) {
         memset(out, 0, 10);
         out[10] = 0xff;
         out[11] = 0xff;
-        memcpy(out + 12, &a4, 4);
         if (is_v4) *is_v4 = 1;
         return 1;
     }
-    if (inet_pton(AF_INET6, buf, &a6) == 1) {
-        memcpy(out, &a6, 16);
+    if (real_ip_parse_v6(text, len, out)) {
         if (is_v4) *is_v4 = 0;
         return 1;
     }
@@ -1163,12 +1246,36 @@ static int real_ip_entry(const AetherRealIpOpts* o, const char* s, const char* e
     return real_ip_parse(s, (size_t)(e - s), out, NULL);
 }
 
-/* `a` as text: dotted for an IPv4 address, else IPv6. */
+/* `a` as text: dotted for an IPv4 address, else IPv6 as RFC 5952 writes it
+ * (lowercase, no leading zeros, the longest run of two or more zero groups
+ * as `::`, the first of equal ones). */
 static void real_ip_text(const unsigned char a[16], char* buf, size_t cap) {
     static const unsigned char mapped[12] = { 0,0,0,0,0,0,0,0,0,0,0xff,0xff };
+    if (memcmp(a, mapped, 12) == 0) {
+        snprintf(buf, cap, "%u.%u.%u.%u", a[12], a[13], a[14], a[15]);
+        return;
+    }
+    unsigned g[8];
+    for (int k = 0; k < 8; k++) g[k] = ((unsigned)a[2 * k] << 8) | a[2 * k + 1];
+    int best = -1, best_len = 0;
+    for (int k = 0; k < 8;) {
+        if (g[k] != 0) { k++; continue; }
+        int run = k;
+        while (run < 8 && g[run] == 0) run++;
+        if (run - k > best_len && run - k >= 2) { best = k; best_len = run - k; }
+        k = run;
+    }
+    size_t used = 0;
     buf[0] = '\0';
-    if (memcmp(a, mapped, 12) == 0) inet_ntop(AF_INET, a + 12, buf, (socklen_t)cap);
-    else inet_ntop(AF_INET6, a, buf, (socklen_t)cap);
+    for (int k = 0; k < 8 && used < cap; k++) {
+        if (k == best) {
+            used += (size_t)snprintf(buf + used, cap - used, "::");
+            k += best_len - 1;
+            continue;
+        }
+        int sep = k > 0 && k != best + best_len;
+        used += (size_t)snprintf(buf + used, cap - used, "%s%x", sep ? ":" : "", g[k]);
+    }
 }
 
 /* X-Real-IP is `ip`, the client resolved here, or gone when there is none:
