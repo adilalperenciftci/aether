@@ -4587,9 +4587,8 @@ static int finish_response(HttpServer* server, HttpConn* conn,
  * when the server caps requests per connection. finish_response's decision,
  * and the proxy event loop's for a response a middleware answered (#3214),
  * where `holds_worker` is 0: a connection on the loop costs no worker. */
-static int response_settle_keep_alive(HttpServer* server, HttpRequest* req,
-                                      HttpServerResponse* res, int requests_served,
-                                      int max_requests, int holds_worker) {
+static int keep_alive_decision(HttpServer* server, HttpRequest* req, int status,
+                               int requests_served, int max_requests, int holds_worker) {
     /* Decide whether this response keeps the connection open.
      * Three things can force close:
      *   - keep-alive disabled on the server,
@@ -4601,8 +4600,8 @@ static int response_settle_keep_alive(HttpServer* server, HttpRequest* req,
                        && http_request_wants_keepalive(req)
                        && (max_requests == 0 ||
                            requests_served + 1 < max_requests)
-                       && res->status_code != 408
-                       && res->status_code != 426;
+                       && status != 408
+                       && status != 426;
 
     /* Without somewhere to park it, a kept connection holds its worker for
      * its whole life, so keeping one while others wait in the accept queue
@@ -4619,6 +4618,25 @@ static int response_settle_keep_alive(HttpServer* server, HttpRequest* req,
     if (will_keep_alive && holds_worker && !server->park_lot && http_pool_pending() > 0) {
         will_keep_alive = 0;
     }
+    return will_keep_alive;
+}
+
+/* The Keep-Alive header's value when the server caps requests per
+ * connection: how long an idle connection is kept and how many requests it
+ * has left. */
+static void keep_alive_value(HttpServer* server, int requests_served, int max_requests,
+                             char* out, size_t cap) {
+    int remaining = max_requests - requests_served - 1;
+    int idle_sec = server->keep_alive_idle_ms > 0
+        ? server->keep_alive_idle_ms / 1000 : 30;
+    snprintf(out, cap, "timeout=%d, max=%d", idle_sec, remaining);
+}
+
+static int response_settle_keep_alive(HttpServer* server, HttpRequest* req,
+                                      HttpServerResponse* res, int requests_served,
+                                      int max_requests, int holds_worker) {
+    int will_keep_alive = keep_alive_decision(server, req, res->status_code, requests_served,
+                                              max_requests, holds_worker);
 
     /* A persistent connection needs a definite body length, or the client
      * cannot tell where this response ends and the next begins. Responses
@@ -4648,16 +4666,44 @@ static int response_settle_keep_alive(HttpServer* server, HttpRequest* req,
         http_response_set_header(res, "Connection", "keep-alive");
         if (max_requests > 0) {
             char ka[64];
-            int remaining = max_requests - requests_served - 1;
-            int idle_sec = server->keep_alive_idle_ms > 0
-                ? server->keep_alive_idle_ms / 1000 : 30;
-            snprintf(ka, sizeof(ka), "timeout=%d, max=%d", idle_sec, remaining);
+            keep_alive_value(server, requests_served, max_requests, ka, sizeof(ka));
             http_response_set_header(res, "Keep-Alive", ka);
         }
     } else {
         http_response_set_header(res, "Connection", "close");
     }
     return will_keep_alive;
+}
+
+/* The same decision for a proxied response on the proxy event loop
+ * (#3229), which answered every one with the connection kept and no
+ * Connection header, whatever the client or the server's policy said. */
+int http_server_settle_keep_alive(HttpServer* server, HttpRequest* req,
+                                  HttpServerResponse* res, int requests_served) {
+    if (!server || !req || !res) return 0;
+    return response_settle_keep_alive(server, req, res, requests_served,
+                                      server->keep_alive_max, 0);
+}
+
+/* For a response head the loop writes from the upstream's own bytes (its
+ * direct path), the decision and the header lines that state it, which the
+ * copying path's response gets in the same place: last, after every other
+ * header. */
+int http_server_keep_alive_lines(HttpServer* server, HttpRequest* req, int status,
+                                 int requests_served, char* out, size_t cap) {
+    if (!server || !req || !out || cap == 0) return 0;
+    int max_requests = server->keep_alive_max;
+    int keep = keep_alive_decision(server, req, status, requests_served, max_requests, 0);
+    if (!keep) {
+        snprintf(out, cap, "Connection: close\r\n");
+    } else if (max_requests > 0) {
+        char ka[64];
+        keep_alive_value(server, requests_served, max_requests, ka, sizeof(ka));
+        snprintf(out, cap, "Connection: keep-alive\r\nKeep-Alive: %s\r\n", ka);
+    } else {
+        snprintf(out, cap, "Connection: keep-alive\r\n");
+    }
+    return keep;
 }
 
 /* handle_one_request's third answer, alongside 1 (keep going) and 0 (close):
@@ -6113,15 +6159,19 @@ int http_server_adopt_request(HttpServer* server, int client_fd, void* ssl,
                               HttpRequest* req, HttpServerResponse* res,
                               int64_t t_start_us, int requests_served,
                               const char* prebuffered, int prebuffered_len) {
-    if (!server || client_fd < 0 || !req || !res) return -1;
+    if (!server || client_fd < 0 || (!req) != (!res)) return -1;
     HttpMiddlewareNode* proxy = server_proxy_node(server);
     HttpConn* conn = adopt_conn_new(client_fd, ssl, prebuffered, prebuffered_len);
     if (!conn) return -1;
+    /* The responses already sent on the connection count against the
+     * server's keep_alive_max wherever the next one is served (#3229). */
     conn->requests_served = requests_served;
-    conn->pending_req = req;
-    conn->pending_res = res;
-    conn->pending_from = proxy ? proxy->next : NULL;
-    conn->pending_t_start = t_start_us;
+    if (req) {
+        conn->pending_req = req;
+        conn->pending_res = res;
+        conn->pending_from = proxy ? proxy->next : NULL;
+        conn->pending_t_start = t_start_us;
+    }
     adopt_conn_serve(server, conn);
     return 0;
 }

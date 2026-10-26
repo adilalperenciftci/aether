@@ -1,0 +1,213 @@
+// A proxied response on the event loop keeps or closes its connection as the
+// worker path decides (#3229).
+//
+// On Linux and macOS the proxy event loop answered every proxied request
+// with no Connection header and kept the connection, whatever the request
+// or the server's keep-alive policy said: a client that sent Connection:
+// close, or an HTTP/1.0 one reading to the end of the connection, waited on
+// a connection that never closed. The worker path decides in
+// finish_response, and the loop now does the same, on its direct path (the
+// response written from the upstream's bytes) and its copying path alike.
+//
+// Each policy (the default, keep-alive off, two requests per connection) is
+// set on three gateways in front of one upstream: a bare proxy (the loop's
+// direct path), one with metrics (a request hook, so the loop's copying
+// path), and one behind a program's middleware (the worker path). Each
+// gets the same requests on connections of their own and must answer them
+// alike. Every server listens on 127.0.0.1 and a port the kernel picks.
+
+import std.http
+import std.http.proxy
+import std.string
+import std.tcp
+
+extern exit(code: int)
+
+handle_up(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "up")
+}
+
+@c_callback mw_pass(req: ptr, res: ptr, ud: ptr) -> int {
+    return 1
+}
+
+start(server: ptr) -> int {
+    if http.server_bind(server, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    err = http.server_start_background(server)
+    if err != "" {
+        println("FAIL: ${err}")
+        exit(1)
+    }
+    return http.server_port(server)
+}
+
+need(label: string, err: string) {
+    if err != "" {
+        println("FAIL: ${label}: ${err}")
+        exit(1)
+    }
+}
+
+// `kind` 0 bare, 1 with metrics, 2 behind a program's middleware; `policy`
+// 0 the default, 1 keep-alive off, 2 two requests per connection.
+gateway(up_url: string, kind: int, policy: int) -> ptr {
+    s = http.server_create(0)
+    http.server_set_host(s, "127.0.0.1")
+    if kind == 1 {
+        need("metrics", http.server_set_metrics(s, "/metrics"))
+    }
+    if kind == 2 {
+        http.server_use_middleware(s, mw_pass, 0)
+    }
+    if policy == 1 {
+        need("keepalive", http.server_set_keepalive(s, 0, 0, 30s))
+    }
+    if policy == 2 {
+        need("keepalive", http.server_set_keepalive(s, 1, 2, 30s))
+    }
+    need("mount", proxy.mount_simple(s, "/", up_url, 5))
+    return s
+}
+
+head_value(head: string, name: string) -> string {
+    at = string.index_of(head, "\r\n${name}: ")
+    if at < 0 {
+        return ""
+    }
+    from = at + string.length(name) + 4
+    end = string.index_of_from(head, "\r\n", from)
+    if end < 0 {
+        return ""
+    }
+    return string.substring(head, from, end)
+}
+
+// The responses at the front of `wire`, each "<status> (<Connection>)" or
+// "<status> (<Connection>; <Keep-Alive>)", joined with " | ", and how many.
+summarize(wire: string, want: int) -> (string, int) {
+    out = ""
+    pos = 0
+    got = 0
+    while got < want {
+        hdr_end = string.index_of_from(wire, "\r\n\r\n", pos)
+        if hdr_end < 0 {
+            return out, got
+        }
+        head = string.substring(wire, pos, hdr_end + 2)
+        n = string.get_int(head_value(head, "Content-Length"))
+        if hdr_end + 4 + n > string.length(wire) {
+            return out, got
+        }
+        item = "${string.substring(head, 9, 12)} (${head_value(head, "Connection")}"
+        ka = head_value(head, "Keep-Alive")
+        if ka != "" {
+            item = "${item}; ${ka}"
+        }
+        item = "${item})"
+        if got > 0 {
+            out = "${out} | "
+        }
+        out = "${out}${item}"
+        pos = hdr_end + 4 + n
+        got = got + 1
+    }
+    return out, got
+}
+
+// `raw` on a connection of its own; the first `want` responses, then
+// "closed" when the server closed the connection, "open" when it had not a
+// second after the last response.
+probe(port: int, raw: string, want: int) -> string {
+    sock, cerr = tcp.connect("127.0.0.1", port)
+    if cerr != "" {
+        return "connect failed"
+    }
+    tcp.write(sock, raw)
+    wire = ""
+    state = "open"
+    idle = 0
+    waited = 0
+    summary, got = summarize(wire, want)
+    while state == "open" && waited < 50 && (got < want || idle < 10) {
+        ready, _perr = tcp.poll(sock, 100)
+        if ready {
+            chunk, rerr = tcp.read(sock, 65536)
+            if rerr != "" || string.length(chunk) == 0 {
+                state = "closed"
+            } else {
+                wire = string.concat(wire, chunk)
+                idle = 0
+            }
+        } else {
+            idle = idle + 1
+        }
+        waited = waited + 1
+        summary, got = summarize(wire, want)
+    }
+    tcp.close(sock)
+    return "${summary} ${state}"
+}
+
+check(label: string, got: string, want: string) -> int {
+    if got != want {
+        println("  FAIL ${label}: got '${got}', expected '${want}'")
+        return 1
+    }
+    println("  PASS ${label}")
+    return 0
+}
+
+main() {
+    println("=== a proxied response on the event loop follows the keep-alive policy (#3229) ===")
+    upstream = http.server_create(0)
+    http.server_set_host(upstream, "127.0.0.1")
+    http.server_get(upstream, "/p", handle_up, 0)
+    up_url = "http://127.0.0.1:${start(upstream)}"
+    kinds = ["a bare proxy", "a proxy with a hook", "a proxy behind a program's middleware"]
+    servers = [gateway(up_url, 0, 0), gateway(up_url, 1, 0), gateway(up_url, 2, 0),
+        gateway(up_url, 0, 1), gateway(up_url, 1, 1), gateway(up_url, 2, 1),
+        gateway(up_url, 0, 2), gateway(up_url, 1, 2), gateway(up_url, 2, 2)]
+    ports = [start(servers[0]), start(servers[1]), start(servers[2]),
+        start(servers[3]), start(servers[4]), start(servers[5]),
+        start(servers[6]), start(servers[7]), start(servers[8])]
+    sleep(200)
+
+    bad = 0
+    k = 0
+    while k < 3 {
+        name = kinds[k]
+        p = ports[k]
+        bad = bad + check("${name}: HTTP/1.1", probe(p, "GET /p HTTP/1.1\r\nHost: x\r\n\r\n", 1),
+            "200 (keep-alive) open")
+        bad = bad + check("${name}: Connection: close",
+            probe(p, "GET /p HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", 1), "200 (close) closed")
+        bad = bad + check("${name}: HTTP/1.0", probe(p, "GET /p HTTP/1.0\r\nHost: x\r\n\r\n", 1),
+            "200 (close) closed")
+        bad = bad + check("${name}: HTTP/1.0 with Connection: keep-alive",
+            probe(p, "GET /p HTTP/1.0\r\nHost: x\r\nConnection: keep-alive\r\n\r\n", 1),
+            "200 (keep-alive) open")
+        bad = bad + check("${name}, keep-alive off", probe(ports[k + 3], "GET /p HTTP/1.1\r\nHost: x\r\n\r\n", 1),
+            "200 (close) closed")
+        bad = bad + check("${name}, two requests a connection",
+            probe(ports[k + 6], "GET /p HTTP/1.1\r\nHost: x\r\n\r\nGET /p HTTP/1.1\r\nHost: x\r\n\r\n", 2),
+            "200 (keep-alive; timeout=30, max=1) | 200 (close) closed")
+        k = k + 1
+    }
+
+    i = 0
+    while i < 9 {
+        http.server_stop(servers[i])
+        i = i + 1
+    }
+    http.server_stop(upstream)
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

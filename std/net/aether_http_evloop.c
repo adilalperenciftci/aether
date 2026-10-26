@@ -863,6 +863,12 @@ static int ev_step_upstream_recv(EvDriver* d, EvConn* c) {
 static int ev_respond_from(EvDriver* d, EvConn* c) {
     if (c->hooked)
         http_server_run_request_hooks(d->loop->server, c->req, c->res, c->t_start_us);
+    /* Then the keep-alive decision and the headers stating it, as
+     * finish_response makes them (#3229): every proxied response kept the
+     * connection, with no Connection header, whatever the client asked or the
+     * server's policy said. */
+    c->close_after = !http_server_settle_keep_alive(d->loop->server, c->req, c->res,
+                                                    c->requests_served);
     size_t len = 0;
     if (!http_response_serialize_into(c->res, &c->out, &c->out_cap, &len))
         return -1;
@@ -1010,9 +1016,11 @@ static int ev_hand_back(EvDriver* d, EvConn* c) {
     int fd = ev_release_client(d, c, &ssl);
     /* Every buffered byte goes with it, not just this request's: a client
      * may have pipelined the next one into the same segment, and the worker
-     * taking over is the only thing that will ever read it. */
-    if (http_server_adopt_tls_connection(d->loop->server, fd, ssl,
-                                         c->in, (int)c->in_len) != 0)
+     * taking over is the only thing that will ever read it. So does the
+     * count of responses this driver sent on it, which the server's
+     * keep_alive_max goes on counting from (#3229). */
+    if (http_server_adopt_request(d->loop->server, fd, ssl, NULL, NULL, 0,
+                                  c->requests_served, c->in, (int)c->in_len) != 0)
         ev_release_failed(fd, ssl);
     return -1;                   /* finished with, as far as this driver goes */
 }
@@ -1255,6 +1263,23 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
     return ev_track(d, fd, c) == 0 ? 1 : -1;
 }
 
+/* Append to the response head being built in `out`, growing it as the
+ * proxy's direct head does. */
+static int ev_out_put(EvConn* c, size_t* len, const char* s, size_t n) {
+    if (*len + n + 1 > c->out_cap) {
+        size_t want = c->out_cap ? c->out_cap : 1024;
+        while (want < *len + n + 1) want *= 2;
+        char* grown = (char*)realloc(c->out, want);
+        if (!grown) return -1;
+        c->out = grown;
+        c->out_cap = want;
+    }
+    memcpy(c->out + *len, s, n);
+    *len += n;
+    c->out[*len] = '\0';
+    return 0;
+}
+
 /* The upstream has answered. Hand the reply back to the proxy exchange, which
  * decides whether it is the one to keep, and turn what it produced into bytes
  * for the client. */
@@ -1271,10 +1296,10 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
  * a copy again. Everything else falls back, so this narrows what it handles
  * rather than changing what the proxy means.
  *
- * Returns 1 when it answered, 0 when the caller should take the copying path.
+ * Returns 1 when it answered, 0 when the caller should take the copying path,
+ * -1 when the head could not be finished and the connection has to close.
  */
 static int ev_try_direct(EvDriver* d, EvConn* c) {
-    (void)d;
     if (!aether_proxy_direct_ok(&c->px))                     return 0;
     if (!c->x.complete || c->x.framing.invalid)              return 0;
     if (c->x.framing.chunked || !c->x.framing.definite)      return 0;
@@ -1295,6 +1320,19 @@ static int ev_try_direct(EvDriver* d, EvConn* c) {
     size_t head_len = 0;
     if (aether_proxy_direct_head(&direct, c->x.buf, c->x.framing.header_bytes,
                                  &c->out, &c->out_cap, &head_len) != 0) return 0;
+
+    /* The keep-alive decision and the lines stating it, which the copying
+     * path's response carries after every other header (#3229): they go
+     * before the blank line that ends the head. The upstream's bookkeeping is
+     * done by now, so a failure here closes rather than falling back to the
+     * copying path, which would count the response twice. */
+    char lines[160];
+    int keep = http_server_keep_alive_lines(d->loop->server, c->req, direct.status,
+                                            c->requests_served, lines, sizeof(lines));
+    head_len -= 2;
+    if (ev_out_put(c, &head_len, lines, strlen(lines)) != 0 ||
+        ev_out_put(c, &head_len, "\r\n", 2) != 0) return -1;
+    c->close_after = !keep;
 
     c->out_len       = head_len;
     c->out_sent      = 0;
@@ -1352,7 +1390,8 @@ static int ev_finish_upstream(EvDriver* d, EvConn* c) {
      * object. Tried before it is built, because building it is the copy this
      * avoids. The receive buffer stays with the connection until the response
      * has been written, so the body can be sent from where it landed. */
-    if (ev_try_direct(d, c)) return 1;
+    int answered = ev_try_direct(d, c);
+    if (answered) return answered;      /* 1 to write it, -1 to close */
 
     HttpResponse* resp = http_response_alloc_empty();
     if (!resp) return -1;

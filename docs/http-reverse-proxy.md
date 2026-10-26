@@ -348,7 +348,10 @@ read request -> dial or reuse upstream -> write upstream
 Every step either makes progress or names the descriptor it needs ready before
 it can continue. A thread only waits when nothing it holds can make progress,
 so an upstream that is slow to answer occupies a descriptor and some state
-rather than a thread.
+rather than a thread. Each response it writes keeps or closes the connection
+as the server's keep-alive policy says (`http.server_set_keepalive`, the
+client's `Connection` header, HTTP/1.0), and says so in its `Connection`
+header, as on the per-connection path (#3229).
 
 The driver serves HTTP/1.1 proxying, on a TLS-terminating server too: it
 carries the client's TLS handshake without waiting and reads and writes

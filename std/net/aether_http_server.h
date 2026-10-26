@@ -1077,13 +1077,30 @@ int http_server_answer_bytes(HttpServer* server, HttpRequest* req,
                              HttpServerResponse* res, int64_t t_start_us,
                              int requests_served, char** buf, size_t* cap,
                              size_t* out_len);
+// A proxied response the loop sends, settled as finish_response settles one
+// (#3229): whether the connection carries another request after it, stated
+// in its headers (Connection, and Keep-Alive when the server caps requests
+// per connection, a definite length). 1 keeps the connection, 0 closes it
+// once the response is out. `requests_served` counts the responses already
+// sent on the connection.
+int http_server_settle_keep_alive(HttpServer* server, HttpRequest* req,
+                                  HttpServerResponse* res, int requests_served);
+// The same decision for a response head the loop writes itself (its direct
+// path, from the upstream's bytes): the header lines that state it, ending
+// in CRLF, go into `out`, to follow every other header.
+int http_server_keep_alive_lines(HttpServer* server, HttpRequest* req, int status,
+                                 int requests_served, char* out, size_t cap);
 // Take a connection whose current request has been through the middleware
 // ahead of the first proxy mount, which then did not take it (another path,
 // another method): the worker path goes on from the middleware after that
 // mount, as if the chain had never stopped, then serves the connection's
 // next requests. The server takes `req` and `res` when this returns 0 and
 // leaves them with the caller otherwise; `prebuffered` is what was read past
-// the request. `ssl` as for http_server_adopt_tls_connection.
+// the request. `ssl` as for http_server_adopt_tls_connection. With `req` and
+// `res` NULL it takes the connection with nothing of a request run, the
+// bytes read being all of `prebuffered`. `requests_served` is the responses
+// the loop sent on the connection, which the keep-alive policy goes on
+// counting from (#3229).
 int http_server_adopt_request(HttpServer* server, int client_fd, void* ssl,
                               HttpRequest* req, HttpServerResponse* res,
                               int64_t t_start_us, int requests_served,
