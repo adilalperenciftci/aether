@@ -1,0 +1,144 @@
+// std.http.proxy forwards a request body larger than the server's
+// connection buffer whole (#3238).
+//
+// The server streams a body over 16 KiB: the request reaches a middleware
+// with no buffered body and the rest still on the socket (#626). The proxy
+// forwarded only the buffered body, so the upstream got the client's
+// Content-Length and nothing after it, waited, and the client got 504 when
+// the proxy gave up. That is every proxied upload over 16 KiB on Windows,
+// and on Linux and macOS on a gateway the event loop does not serve.
+//
+// Two gateways in front of one upstream that reports the length and the
+// last bytes of what it received: one with nothing ahead of its proxy (the
+// event loop on Linux and macOS), one with a program's middleware ahead of
+// it (the worker path everywhere). Each takes bodies of 100 bytes, 20 KB
+// and 100 KB, and one over its 64 KB body cap, which is refused unread.
+// Every server listens on 127.0.0.1 and a port the kernel picks.
+
+import std.http
+import std.http.client
+import std.http.proxy
+import std.string
+
+extern exit(code: int)
+
+// The length of the body that arrived and its last eight bytes.
+handle_echo(req: ptr, res: ptr, ud: ptr) {
+    body = http.request_body(req)
+    n = string.length(body)
+    tail = ""
+    if n >= 8 {
+        tail = string.substring(body, n - 8, n)
+    }
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "up body=${n} tail=${tail}")
+}
+
+@c_callback mw_pass(req: ptr, res: ptr, ud: ptr) -> int {
+    return 1
+}
+
+start(server: ptr) -> int {
+    if http.server_bind(server, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    err = http.server_start_background(server)
+    if err != "" {
+        println("FAIL: ${err}")
+        exit(1)
+    }
+    return http.server_port(server)
+}
+
+need(label: string, err: string) {
+    if err != "" {
+        println("FAIL: ${label}: ${err}")
+        exit(1)
+    }
+}
+
+// A gateway proxying "/" to `up_url` with a 64 KB body cap and a 3 second
+// upstream timeout; `worker` 1 puts a program's middleware ahead of it.
+gateway(up_url: string, worker: int) -> ptr {
+    s = http.server_create(0)
+    http.server_set_host(s, "127.0.0.1")
+    if worker == 1 {
+        http.server_use_middleware(s, mw_pass, 0)
+    }
+    pool = proxy.upstream_pool_new("round_robin", 3, 0, 0)
+    if pool == 0 {
+        println("FAIL: upstream_pool_new")
+        exit(1)
+    }
+    need("upstream_add", proxy.upstream_add(pool, up_url, 1))
+    opts = proxy.opts_new()
+    need("opts_set_body_cap", proxy.opts_set_body_cap(opts, 65536))
+    need("mount", proxy.mount(s, "/", pool, opts))
+    return s
+}
+
+// POST `size` bytes, ending in "<tail-of>", through the gateway on `port`:
+// "<status> <body>", and the proxy's error header when it set one.
+post(port: int, size: int) -> string {
+    body = string.concat(string.pad_end("", size - 8, 120), "<END-OF>")
+    req = client.request("POST", "http://127.0.0.1:${port}/up")
+    client.set_timeout(req, 15s)
+    client.set_body(req, string.bytes(body), "text/plain")
+    resp, err = client.send_request(req)
+    client.request_free(req)
+    if err != "" {
+        return "error ${err}"
+    }
+    out = "${client.response_status(resp)} ${client.response_body(resp)}"
+    perr = client.response_header(resp, "X-Aether-Proxy-Error")
+    if perr != "" {
+        out = "${out} [${perr}]"
+    }
+    client.response_free(resp)
+    return out
+}
+
+expect(label: string, got: string, want: string) -> int {
+    if got != want {
+        println("  FAIL ${label}: got '${got}', expected '${want}'")
+        return 1
+    }
+    println("  PASS ${label}")
+    return 0
+}
+
+main() {
+    println("=== std.http.proxy forwards a body over 16 KiB whole (#3238) ===")
+    upstream = http.server_create(0)
+    http.server_set_host(upstream, "127.0.0.1")
+    http.server_post(upstream, "/up", handle_echo, 0)
+    up_url = "http://127.0.0.1:${start(upstream)}"
+    bare = gateway(up_url, 0)
+    guarded = gateway(up_url, 1)
+    ports = [start(bare), start(guarded)]
+    names = ["a bare proxy", "a proxy behind a program's middleware"]
+    sleep(200)
+
+    bad = 0
+    g = 0
+    while g < 2 {
+        p = ports[g]
+        bad = bad + expect("${names[g]}: 100 bytes", post(p, 100), "200 up body=100 tail=<END-OF>")
+        bad = bad + expect("${names[g]}: 20000 bytes", post(p, 20000), "200 up body=20000 tail=<END-OF>")
+        bad = bad + expect("${names[g]}: 60000 bytes", post(p, 60000), "200 up body=60000 tail=<END-OF>")
+        bad = bad + expect("${names[g]}: 70000 bytes, over the cap",
+            post(p, 70000), "502 request body exceeds proxy cap\n [request_body_too_large]")
+        g = g + 1
+    }
+
+    http.server_stop(guarded)
+    http.server_stop(bare)
+    http.server_stop(upstream)
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

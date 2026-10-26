@@ -471,6 +471,24 @@ int aether_proxy_exchange_begin(AetherProxyExchange* px,
         return 0;
     }
 
+    /* A body larger than the connection buffer reaches a middleware streamed
+     * (#626): `body` is NULL and the rest is still on the socket. The
+     * upstream is owed the whole of it, so it is read now, bounded by the cap
+     * just checked; forwarding `body` alone sent the client's Content-Length
+     * with no bytes after it, and the upstream waited until the proxy gave up
+     * with 504 (#3238). A client that stops short is refused rather than
+     * having part of its body forwarded as if it were all of it. */
+    if (req->stream_conn && !req->body) {
+        http_request_body(req);
+        if (!http_request_body_complete(req)) {
+            http_response_set_status(res, 400);
+            http_response_set_header(res, "X-Aether-Proxy-Error", "request_body_incomplete");
+            http_response_set_header(res, "Content-Type", "text/plain");
+            http_response_set_body(res, "request body ended before its Content-Length\n");
+            return 0;
+        }
+    }
+
     /* Strip the configured prefix from the path before forwarding.
      * "/api/users" with strip "/api" becomes "/users". When
      * path_prefix matches but strip is unset, the full path is
