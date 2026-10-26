@@ -19,7 +19,9 @@
  *     parent: 0;
  *   - the Go host runs a script with no #! line, which runs under /bin/sh as
  *     execvp ran it, and exits 6;
- *   - the Go host runs a program that is not there: 127, as before. */
+ *   - the Go host runs a program that is not there: -1, an error, as std.os
+ *     reports a program that cannot start (#3170), never an exit of 127;
+ *   - the Aether host runs a binary that is not there: -1 too. */
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -110,7 +112,9 @@ int main(int argc, char** argv) {
     fails += expect("the Go host runs a script with no #! line under /bin/sh",
                     go_run_sandboxed(all, plain_script), 6);
     fails += expect("the Go host's program that is not there",
-                    go_run_sandboxed(all, "aether_no_such_program_3200"), 127);
+                    go_run_sandboxed(all, "aether_no_such_program_3200"), -1);
+    fails += expect("the Aether host's binary that is not there",
+                    aether_host_run_sandboxed(all, "/no/such/aether_binary_3170"), -1);
 
     if (fails) return 1;
     printf("PASS: the process hosts' children call only async-signal-safe functions\n");

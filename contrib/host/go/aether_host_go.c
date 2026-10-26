@@ -179,16 +179,19 @@ static int spawn_go_sandboxed(void* perms,
     char* path = aether_spawn_resolve(program);
     char** env = aether_spawn_env(aether_spawn_environ(), set, nset);
     char** sh_argv = (char**)malloc((argc + 2) * sizeof(char*));
-    if (!path || !env || !sh_argv) {
-        /* A program on no PATH entry ends as the child's failed execvp
-         * did: 127. */
-        int rc = (!path && errno != ENOMEM) ? 127 : -1;
+    /* A program that cannot start is an error, -1, as std.os reports one
+     * (#3170), never an exit of 127, which a program that ran can give: one
+     * on no PATH entry here, and one whose exec fails through this
+     * close-on-exec pipe, where the child writes its errno and an exec that
+     * succeeds closes it unwritten. */
+    int errp[2] = { -1, -1 };
+    if (!path || !env || !sh_argv || aether_pipe_cloexec(errp) != 0) {
         free(path); free(env); free(sh_argv);
         if (grants_shm) { shm_unlink(grants_shm); free(grants_shm); }
         if (map_shm) {
             aether_shared_map_unlink_shm(map_shm); free(map_shm);
         }
-        return rc;
+        return -1;
     }
     sh_argv[0] = (char*)"/bin/sh";
     sh_argv[1] = path;
@@ -197,6 +200,7 @@ static int spawn_go_sandboxed(void* perms,
     pid_t pid = aether_fork();
     if (pid < 0) {
         free(path); free(env); free(sh_argv);
+        close(errp[0]); close(errp[1]);
         if (grants_shm) { shm_unlink(grants_shm); free(grants_shm); }
         if (map_shm) {
             aether_shared_map_unlink_shm(map_shm); free(map_shm);
@@ -205,12 +209,25 @@ static int spawn_go_sandboxed(void* perms,
     }
 
     if (pid == 0) {
-        // Child: only execve from here (#3200).
+        // Child: only async-signal-safe calls from here (#3200).
+        close(errp[0]);
         execve(path, argv, env);
-        if (errno == ENOEXEC) execve("/bin/sh", sh_argv, env);
+        if (errno == ENOEXEC) {
+            execve("/bin/sh", sh_argv, env);
+            errno = ENOEXEC;
+        }
+        int e = errno;
+        ssize_t w;
+        do { w = write(errp[1], &e, sizeof e); } while (w < 0 && errno == EINTR);
         _exit(127);
     }
     free(path); free(env); free(sh_argv);
+    close(errp[1]);
+    int exec_errno = 0;
+    ssize_t got;
+    do { got = read(errp[0], &exec_errno, sizeof exec_errno); } while (got < 0 && errno == EINTR);
+    close(errp[0]);
+    int not_started = got == (ssize_t)sizeof exec_errno;
 
     int status = 0;
     waitpid(pid, &status, 0);
@@ -223,6 +240,7 @@ static int spawn_go_sandboxed(void* perms,
         aether_shared_map_unlink_shm(map_shm); free(map_shm);
     }
 
+    if (not_started) return -1;
     if (WIFEXITED(status)) return WEXITSTATUS(status);
     return -1;
 }

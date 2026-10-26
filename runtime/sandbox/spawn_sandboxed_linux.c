@@ -67,12 +67,13 @@ static void sandbox_child_exec(const char* path, char** argv, char** sh_argv, ch
 }
 
 // In the parent: what the child reported, printed as the child used to.
-static void sandbox_report(int errfd) {
+// 1 when it reported a failure: the program never started.
+static int sandbox_report(int errfd) {
     int msg[2] = { 0, 0 };
     ssize_t n;
     do { n = read(errfd, msg, sizeof msg); } while (n < 0 && errno == EINTR);
     close(errfd);
-    if (n != (ssize_t)sizeof msg) return;
+    if (n != (ssize_t)sizeof msg) return 0;
     if (msg[0] == SANDBOX_STEP_FENCE) {
         fprintf(stderr,
             "[aether] cannot install seccomp clone fence: %s\n"
@@ -83,6 +84,7 @@ static void sandbox_report(int errfd) {
     } else {
         fprintf(stderr, "exec: %s\n", strerror(msg[1]));
     }
+    return 1;
 }
 
 // Serialize grants from a list to shared memory
@@ -350,11 +352,13 @@ int aether_spawn_sandboxed(void* grant_list, const char* program, const char* ar
     // What the child execs with, made here (#3200): the program on this
     // process's PATH, its argv, the /bin/sh argv for a file with no #!
     // line, and the env with LD_PRELOAD and the grant source in it.
+    // A program that cannot start is an error (-1), as for std.os (#3170),
+    // never an exit of 127, which a program that ran can give.
     char* path = aether_spawn_resolve(program);
     if (!path) {
         fprintf(stderr, "exec: %s\n", strerror(errno));
         shm_unlink(shm_name);
-        return 127;
+        return -1;
     }
     char* argv[] = { (char*)program, (char*)arg, NULL };
     char* sh_argv[] = { (char*)"/bin/sh", path, (char*)arg, NULL };
@@ -406,13 +410,14 @@ int aether_spawn_sandboxed(void* grant_list, const char* program, const char* ar
     close(errp[1]);
     free(env);
     free(path);
-    sandbox_report(errp[0]);
+    int not_started = sandbox_report(errp[0]);
     int status = 0;
     while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
 
     // Cleanup shared memory
     shm_unlink(shm_name);
 
+    if (not_started) return -1;
     if (WIFEXITED(status)) return WEXITSTATUS(status);
     return -1;
 }

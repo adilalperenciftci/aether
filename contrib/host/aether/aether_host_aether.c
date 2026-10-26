@@ -32,6 +32,7 @@ static const char* get_ae_path(void) {
 #include <sys/wait.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <errno.h>
 #include <fcntl.h>
 
 // List operations (from libaether.a)
@@ -193,10 +194,13 @@ static int spawn_sandboxed_full(
     }
     return -1;
   }
-
-  // 6. Fork
-  pid_t pid = aether_fork();
-  if (pid < 0) {
+  // A program that cannot start is an error, -1, as std.os reports one
+  // (#3170), never an exit of 127, which a program that ran can give: the
+  // child writes its exec errno to this close-on-exec pipe, and an exec that
+  // succeeds closes it unwritten. Made after the capture pipe, which so
+  // holds the lowest free descriptors.
+  int errp[2];
+  if (aether_pipe_cloexec(errp) != 0) {
     free(env);
     if (capture) { close(pipefd[0]); close(pipefd[1]); }
     if (grants_shm) {
@@ -208,21 +212,51 @@ static int spawn_sandboxed_full(
     return -1;
   }
 
+  // 6. Fork
+  pid_t pid = aether_fork();
+  if (pid < 0) {
+    free(env);
+    if (capture) { close(pipefd[0]); close(pipefd[1]); }
+    close(errp[0]); close(errp[1]);
+    if (grants_shm) {
+      shm_unlink(grants_shm); free(grants_shm);
+    }
+    if (map_shm) {
+      aether_shared_map_unlink_shm(map_shm); free(map_shm);
+    }
+    return -1;
+  }
+
   if (pid == 0) {
     // ---- Child process ----
+    // Only async-signal-safe calls from here to the exec (#3200).
+    close(errp[0]);
     if (capture) {
       close(pipefd[0]);
-      dup2(pipefd[1], STDOUT_FILENO);
-      close(pipefd[1]);
+      // Already stdout when the parent had stdout closed (#3199): dup2
+      // onto itself does nothing, and the close after it closed stdout.
+      if (pipefd[1] == STDOUT_FILENO) {
+        fcntl(STDOUT_FILENO, F_SETFD, 0);   // kept across the exec
+      } else {
+        dup2(pipefd[1], STDOUT_FILENO);
+        close(pipefd[1]);
+      }
     }
-
-    // Only async-signal-safe calls from here to the exec (#3200).
     execve(binary_path, child_argv, env);
+    int e = errno;
+    ssize_t w;
+    do { w = write(errp[1], &e, sizeof e); } while (w < 0 && errno == EINTR);
     _exit(127);
   }
 
   // ---- Parent process ----
   free(env);
+  close(errp[1]);
+  int exec_errno = 0;
+  ssize_t got;
+  do { got = read(errp[0], &exec_errno, sizeof exec_errno); } while (got < 0 && errno == EINTR);
+  close(errp[0]);
+  int not_started = got == (ssize_t)sizeof exec_errno;
   if (capture) {
     close(pipefd[1]);
 
@@ -264,6 +298,7 @@ static int spawn_sandboxed_full(
     aether_shared_map_unlink_shm(map_shm); free(map_shm);
   }
 
+  if (not_started) return -1;
   if (WIFEXITED(status)) return WEXITSTATUS(status);
   return -1;
 }

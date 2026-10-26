@@ -19,7 +19,8 @@
  *     FreeBSD AETHER_CAPSICUM=1);
  *   - a script with no #! line, which runs under /bin/sh as execlp ran it,
  *     and exits with its argument;
- *   - a program that is not there: 127, as before. */
+ *   - a program that is not there: -1, an error, as std.os reports a
+ *     program that cannot start (#3170), never an exit of 127. */
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -105,7 +106,7 @@ int main(int argc, char** argv) {
                     aether_spawn_sandboxed(all, plain_script, "6"), 6);
 
     fails += expect("a program that is not there",
-                    aether_spawn_sandboxed(all, "aether_no_such_program_3200", NULL), 127);
+                    aether_spawn_sandboxed(all, "aether_no_such_program_3200", NULL), -1);
 
     if (fails) return 1;
     printf("PASS: spawn_sandboxed's children call only async-signal-safe functions\n");

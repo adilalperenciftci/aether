@@ -71,13 +71,15 @@ static void sandbox_child_exec(const char* path, char** argv, char** sh_argv, ch
 }
 
 // In the parent: what the child reported, printed as the child used to.
-static void sandbox_report(int errfd) {
+// 1 when it reported a failure: the program never started.
+static int sandbox_report(int errfd) {
     int msg[2] = { 0, 0 };
     ssize_t n;
     do { n = read(errfd, msg, sizeof msg); } while (n < 0 && errno == EINTR);
     close(errfd);
-    if (n != (ssize_t)sizeof msg) return;
+    if (n != (ssize_t)sizeof msg) return 0;
     fprintf(stderr, "exec: %s\n", strerror(msg[1]));
+    return 1;
 }
 
 // Serialize grants from a list to shared memory
@@ -153,11 +155,13 @@ int aether_spawn_sandboxed(void* grant_list, const char* program, const char* ar
     // cap_enter() forbids the runtime linker, so a dynamically
     // linked child would fail to exec. Self-sandboxing after exec is
     // the only model that works — see capsicum_autosandbox.c.
+    // A program that cannot start is an error (-1), as for std.os (#3170),
+    // never an exit of 127, which a program that ran can give.
     char* path = aether_spawn_resolve(program);
     if (!path) {
         fprintf(stderr, "exec: %s\n", strerror(errno));
         shm_unlink(shm_name);
-        return 127;
+        return -1;
     }
     char* argv[] = { (char*)program, (char*)arg, NULL };
     char* sh_argv[] = { (char*)"/bin/sh", path, (char*)arg, NULL };
@@ -197,13 +201,14 @@ int aether_spawn_sandboxed(void* grant_list, const char* program, const char* ar
     close(errp[1]);
     free(env);
     free(path);
-    sandbox_report(errp[0]);
+    int not_started = sandbox_report(errp[0]);
     int status = 0;
     while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
 
     // Cleanup shared memory
     shm_unlink(shm_name);
 
+    if (not_started) return -1;
     if (WIFEXITED(status)) return WEXITSTATUS(status);
     return -1;
 }
