@@ -192,6 +192,28 @@ main() {
     bad = bad + both("a coding other than chunked", ports,
         "POST /p HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: gzip\r\n\r\nxyz", framing)
 
+    // #3236: the head's shape, before its framing is trusted.
+    bad = bad + both("whitespace between a header's name and its colon", ports,
+        "POST /p HTTP/1.1\r\nHost: x\r\nContent-Length : 2\r\n\r\nab", framing)
+    bad = bad + both("an obs-fold continuation line", ports,
+        "GET /p HTTP/1.1\r\nHost: x\r\nX-A: a\r\n b\r\n\r\n", framing)
+    bad = bad + both("a Content-Length with a sign", ports,
+        "POST /p HTTP/1.1\r\nHost: x\r\nContent-Length: +2\r\n\r\nab", framing)
+    many = "GET /p HTTP/1.1\r\nHost: x\r\n"
+    i = 0
+    while i < 50 {
+        many = string.concat(many, "X-H${i}: v\r\n")
+        i = i + 1
+    }
+    too_large = "431 header line is too long\n closed"
+    bad = bad + both("51 headers", ports, string.concat(many, "\r\n"), too_large)
+    long_value = string.pad_end("", 1100, 118)
+    bad = bad + both("a header line over 1 KiB", ports,
+        "GET /p HTTP/1.1\r\nHost: x\r\nX-Long: ${long_value}\r\n\r\n", too_large)
+    long_path = string.pad_end("/", 2100, 112)
+    bad = bad + both("a request line over 2 KiB", ports,
+        "GET ${long_path} HTTP/1.1\r\nHost: x\r\n\r\n", "414 request line is too long\r\n closed")
+
     http.server_stop(worker_gw)
     http.server_stop(loop_gw)
     http.server_stop(upstream)

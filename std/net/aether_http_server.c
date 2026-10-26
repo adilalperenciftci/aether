@@ -4898,6 +4898,67 @@ static int conn_parse_content_length(const char* text, long* out) {
     return 0;
 }
 
+/* What the worker path checks in a request head before it trusts the head's
+ * framing, in one place, which the proxy event loop asks too (#3236): the
+ * loop read Content-Length alone and forwarded heads this path refuses, a
+ * "Content-Length : 5" among them, which a front end may read as a length
+ * where this server sees none. `head` is the request line's first byte and
+ * `hdr_end` the blank line's "\r\n\r\n". HTTP_HEAD_OK fills *content_length
+ * (0 when there is none) and *chunked; anything else is the status the
+ * request is refused with. */
+int http_request_head_check(const char* head, const char* hdr_end,
+                            long* content_length, int* chunked) {
+    *content_length = 0;
+    *chunked = 0;
+    /* A request line longer than the parser's line buffer is answered rather
+     * than dropped, and it is checked here so the parser's own bound is never
+     * the thing a client reaches. */
+    const char* rl_end = (const char*)memchr(head, '\n', (size_t)(hdr_end - head));
+    size_t rl_len = rl_end ? (size_t)(rl_end - head) : (size_t)(hdr_end - head);
+    if (rl_len >= HTTP_MAX_REQUEST_LINE) return HTTP_HEAD_URI_TOO_LONG;
+    /* Headers first: a line this server would read differently from the peer
+     * that sent it is refused before its framing is trusted. */
+    if (rl_end) {
+        int hdr_ok = conn_headers_well_formed(rl_end + 1, hdr_end);
+        if (hdr_ok < 0) return HTTP_HEAD_TOO_LARGE;
+        if (!hdr_ok)    return HTTP_HEAD_BAD_FRAMING;
+    }
+    char cl_value[64];
+    int cl_differing = 0;
+    int cl_count = http_find_header_in_block(head, hdr_end, "Content-Length",
+                                             cl_value, sizeof(cl_value), &cl_differing);
+    if (cl_count > 0) {
+        /* Two lengths that disagree leave no single answer about where this
+         * message ends, and a value that is not a count of bytes leaves none
+         * either. Both are unrecoverable rather than something to pick from
+         * (RFC 9112 6.3): guessing is what lets a front end and this server
+         * disagree about where one request stops and the next begins. */
+        if (cl_differing || conn_parse_content_length(cl_value, content_length) != 0)
+            return HTTP_HEAD_BAD_FRAMING;
+    }
+
+    /* Transfer-Encoding decides where the body ends, and when it is present
+     * Content-Length does not (RFC 9112 6.3). Ignoring it read a chunked
+     * upload as having no body at all: the payload was dropped, and the chunk
+     * bytes stayed in the stream to be parsed as the beginning of the next
+     * request. Against a front end that does honour the header, that
+     * disagreement about where one request ends is request smuggling.
+     *
+     * A message carrying both is refused rather than resolved, because the
+     * two lengths are exactly what a smuggling pair is built from and no
+     * legitimate sender emits both. */
+    char te_value[128];
+    int te_count = http_find_header_in_block(head, hdr_end, "Transfer-Encoding",
+                                             te_value, sizeof(te_value), NULL);
+    if (te_count > 0) {
+        *chunked = http_strcasestr(te_value, "chunked") != NULL;
+        /* Both lengths present, or a coding this server cannot decode: refuse
+         * the message rather than pick one of the two answers. */
+        if (cl_count > 0 || !*chunked) return HTTP_HEAD_BAD_FRAMING;
+    }
+    return HTTP_HEAD_OK;
+}
+
 /* The largest chunked request body this server will buffer. A chunked body
  * declares no length in advance, so nothing else bounds it. */
 #define HTTP_MAX_CHUNKED_BODY (8 * 1024 * 1024)
@@ -5122,71 +5183,16 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
     int header_size = (int)(hdr_end - conn->buf) + 4 - conn->read_pos;
     int request_total = header_size;
 
-    /* Resolve Content-Length and ensure the full body is buffered. */
+    /* Resolve Content-Length and ensure the full body is buffered, once the
+     * head has passed the checks the proxy event loop makes too (#3236). */
     const char* head_start = conn->buf + conn->read_pos;
-    /* A request line longer than the parser's line buffer is answered rather
-     * than dropped, and it is checked here so the parser's own bound is never
-     * the thing a client reaches. */
-    {
-        const char* rl_end = (const char*)memchr(head_start, '\n',
-                                                 (size_t)(hdr_end - head_start));
-        size_t rl_len = rl_end ? (size_t)(rl_end - head_start)
-                               : (size_t)(hdr_end - head_start);
-        if (rl_len >= HTTP_MAX_REQUEST_LINE) {
-            conn_send_uri_too_long(conn);
-            return 0;
-        }
-    }
-    /* Headers first: a line this server would read differently from the peer
-     * that sent it is refused before its framing is trusted. */
-    {
-        const char* first_header = (const char*)memchr(head_start, '\n',
-                                                       (size_t)(hdr_end - head_start));
-        if (first_header) {
-            int hdr_ok = conn_headers_well_formed(first_header + 1, hdr_end);
-            if (hdr_ok < 0) { conn_send_headers_too_large(conn); return 0; }
-            if (!hdr_ok)    { conn_send_bad_framing(conn);       return 0; }
-        }
-    }
-    char cl_value[64];
-    int cl_differing = 0;
-    int cl_count = http_find_header_in_block(head_start, hdr_end, "Content-Length",
-                                    cl_value, sizeof(cl_value), &cl_differing);
     long content_length = 0;
-    if (cl_count > 0) {
-        /* Two lengths that disagree leave no single answer about where this
-         * message ends, and a value that is not a count of bytes leaves none
-         * either. Both are unrecoverable rather than something to pick from
-         * (RFC 9112 6.3): guessing is what lets a front end and this server
-         * disagree about where one request stops and the next begins. */
-        if (cl_differing || conn_parse_content_length(cl_value, &content_length) != 0) {
-            conn_send_bad_framing(conn);
-            return 0;
-        }
-    }
-
-    /* Transfer-Encoding decides where the body ends, and when it is present
-     * Content-Length does not (RFC 9112 6.3). Ignoring it read a chunked
-     * upload as having no body at all: the payload was dropped, and the chunk
-     * bytes stayed in the stream to be parsed as the beginning of the next
-     * request. Against a front end that does honour the header, that
-     * disagreement about where one request ends is request smuggling.
-     *
-     * A message carrying both is refused rather than resolved, because the
-     * two lengths are exactly what a smuggling pair is built from and no
-     * legitimate sender emits both. */
-    char te_value[128];
-    int te_count = http_find_header_in_block(head_start, hdr_end, "Transfer-Encoding",
-                                    te_value, sizeof(te_value), NULL);
     int te_chunked = 0;
-    if (te_count > 0) {
-        te_chunked = http_strcasestr(te_value, "chunked") != NULL;
-        /* Both lengths present, or a coding this server cannot decode: refuse
-         * the message rather than pick one of the two answers. */
-        if (cl_count > 0 || !te_chunked) {
-            conn_send_bad_framing(conn);
-            return 0;
-        }
+    switch (http_request_head_check(head_start, hdr_end, &content_length, &te_chunked)) {
+    case HTTP_HEAD_URI_TOO_LONG: conn_send_uri_too_long(conn);      return 0;
+    case HTTP_HEAD_TOO_LARGE:    conn_send_headers_too_large(conn); return 0;
+    case HTTP_HEAD_BAD_FRAMING:  conn_send_bad_framing(conn);       return 0;
+    default: break;
     }
     /* #626 (upload half) — streaming-body decision. A body whose
      * declared Content-Length exceeds one connection buffer (16 KiB)

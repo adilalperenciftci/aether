@@ -1033,6 +1033,21 @@ int http_server_evloop_serves(HttpServer* server);
 // What the proxy event loop runs of the worker path, here so the two paths
 // share it and cannot disagree about what a request gets (#3214).
 //
+// The checks on a request head before its framing is trusted (#3236): the
+// request line's length, each header line's shape and count, Content-Length
+// and Transfer-Encoding. `head` is the request line's first byte, `hdr_end`
+// the blank line's "\r\n\r\n". HTTP_HEAD_OK fills *content_length (0 when
+// absent) and *chunked; anything else is the status the request is refused
+// with, which the worker path answers.
+enum {
+    HTTP_HEAD_OK           = 0,
+    HTTP_HEAD_BAD_FRAMING  = 400,
+    HTTP_HEAD_URI_TOO_LONG = 414,
+    HTTP_HEAD_TOO_LARGE    = 431
+};
+int http_request_head_check(const char* head, const char* hdr_end,
+                            long* content_length, int* chunked);
+//
 // 1 when a middleware is registered ahead of the first proxy mount.
 int http_server_has_before_proxy(HttpServer* server);
 // Run the middleware ahead of the first proxy mount on `req`, in order, as

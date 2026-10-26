@@ -399,31 +399,20 @@ static int ev_request_complete(EvConn* c, size_t* out_total) {
 
     size_t header_bytes = c->in_hdr_end;
     char* hdr_end = c->in + header_bytes - 4;
-    /* Transfer-Encoding decides where a body ends, and when it is present
-     * Content-Length does not (RFC 9112 6.3). This driver read the length
-     * alone: a chunked body was dropped and its chunks parsed as the next
-     * request, and one with both headers had Content-Length bytes taken as
-     * its body, the disagreement request smuggling is built from (#3228).
-     * The worker path decodes a chunked body, bounds it, and refuses both
-     * headers together or any other coding; the connection goes there,
-     * which keeps one decoder rather than two for a framing proxied clients
-     * rarely use. */
-    char te[16];
-    if (http_find_header_in_block(c->in, hdr_end, "Transfer-Encoding", te, sizeof(te), NULL) > 0)
+    /* The worker path's own checks on the head (#3236): the request line's
+     * length, each header line's shape, Content-Length and
+     * Transfer-Encoding. This driver read Content-Length alone, so it
+     * forwarded heads the worker refuses ("Content-Length : 5", an obs-fold
+     * line, more headers than the parser holds), and a refusal is the
+     * worker path's to answer. So is a chunked body: Transfer-Encoding
+     * decides where a body ends, and this driver dropped a chunked one and
+     * took Content-Length bytes as the body of a request with both (#3228);
+     * the worker path decodes it and bounds it, which keeps one decoder
+     * rather than two for a framing proxied clients rarely use. */
+    long declared = 0;
+    int chunked = 0;
+    if (http_request_head_check(c->in, hdr_end, &declared, &chunked) != HTTP_HEAD_OK || chunked)
         return -1;
-    char cl[64];
-    int differing = 0;
-    int count = http_find_header_in_block(c->in, hdr_end, "Content-Length",
-                                          cl, sizeof(cl), &differing);
-    if (count == 0) { *out_total = header_bytes; return 1; }
-    if (differing) return -1;
-    char* endp = NULL;
-    /* strtoll, as the client side's parse: strtol into a `long`, 32 bits on
-     * Windows, turned a length past 2 GiB into 2147483647 and read the body
-     * short of what the client declared (#3096). */
-    errno = 0;
-    long long declared = strtoll(cl, &endp, 10);
-    if (!endp || *endp != '\0' || endp == cl || declared < 0 || errno == ERANGE) return -1;
     if (c->in_len < header_bytes + (size_t)declared) return 0;
     *out_total = header_bytes + (size_t)declared;
     return 1;
