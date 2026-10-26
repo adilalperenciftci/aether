@@ -51,9 +51,10 @@ extern "C" {
 //     save unconditionally. This is the fast path.
 //   - mingw-w64 x86_64: _setjmp(buf, NULL), the non-unwinding form (see
 //     its arm below for why the default SEH-unwinding setjmp is wrong here).
-//   - Other Windows / Emscripten / freestanding: plain setjmp/longjmp.
-//     Win32 has no POSIX signal semantics so setjmp is already fast;
-//     wasm and bare-metal have no sigjmp_buf at all.
+//   - Other Windows / Emscripten / newlib and picolibc (ESP-IDF) /
+//     freestanding: plain setjmp/longjmp. Win32 has no POSIX signal
+//     semantics so setjmp is already fast; wasm and the embedded libcs
+//     have no sigjmp_buf at all, and the embedded ones no _longjmp.
 //
 // What we lose: signal-mask preservation during the opt-in
 // AETHER_CATCH_SIGNALS=1 SIGSEGV-recovery path. That path is already
@@ -108,7 +109,11 @@ typedef jmp_buf aether_sigjmp_buf;
    * restore, the same semantics _setjmp/_longjmp give on POSIX. */
   #define AETHER_SIGSETJMP(buf, savemask) _setjmp((buf), NULL)
   #define AETHER_SIGLONGJMP(buf, val)     longjmp((buf), (val))
-#elif defined(_WIN32) || defined(__EMSCRIPTEN__) || (defined(__STDC_HOSTED__) && __STDC_HOSTED__ == 0)
+#elif defined(_WIN32) || defined(__EMSCRIPTEN__) || defined(__NEWLIB__) || defined(__PICOLIBC__) || \
+      (defined(__STDC_HOSTED__) && __STDC_HOSTED__ == 0)
+  /* newlib and picolibc (ESP-IDF, most embedded toolchains) are hosted but
+   * declare no _longjmp, and their setjmp saves no signal mask: there is
+   * no mask to save. */
   #define AETHER_SIGSETJMP(buf, savemask) setjmp(buf)
   #define AETHER_SIGLONGJMP(buf, val)     longjmp((buf), (val))
 #else
