@@ -1,0 +1,156 @@
+// An upstream timeout on the proxy event loop counts against the upstream
+// as it does on the worker path (#3250).
+//
+// The worker path's proxy takes a timed out call back into its exchange: the
+// upstream's in-flight count goes down, its breaker hears of the failure, and
+// a retry policy may send the request elsewhere. The event loop on Linux and
+// macOS answered 504 itself and told the exchange nothing, so an upstream
+// with an in-flight cap stayed full for good after its first timeout and a
+// breaker never opened on timeouts.
+//
+// A slow route that outlasts the proxy's one second timeout, then a fast
+// one, through a bare proxy (the event loop on Linux and macOS) and through
+// one behind a program's middleware (the worker path), each twice: on a pool
+// that admits one request at a time, the fast route must answer 200 after
+// the timeout; on a pool whose breaker opens after one failure, it must
+// answer 503. Every server listens on 127.0.0.1 and a port the kernel picks.
+
+import std.http
+import std.http.proxy
+import std.string
+import std.tcp
+
+extern exit(code: int)
+
+handle_slow(req: ptr, res: ptr, ud: ptr) {
+    sleep(3000)
+    http.response_set_status(res, 200)
+    http.response_set_body(res, "slow")
+}
+
+handle_fast(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_body(res, "fast")
+}
+
+@c_callback mw_pass(req: ptr, res: ptr, ud: ptr) -> int {
+    return 1
+}
+
+start(server: ptr) -> int {
+    if http.server_bind(server, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    err = http.server_start_background(server)
+    if err != "" {
+        println("FAIL: ${err}")
+        exit(1)
+    }
+    return http.server_port(server)
+}
+
+need(label: string, err: string) {
+    if err != "" {
+        println("FAIL: ${label}: ${err}")
+        exit(1)
+    }
+}
+
+// A proxy of "/" to `up_url` with a one second timeout. `breaker` 1 opens
+// the upstream's breaker after one failure; 0 admits one request at a time
+// instead. `worker` 1 puts a program's middleware ahead of it.
+gateway(up_url: string, breaker: int, worker: int) -> ptr {
+    s = http.server_create(0)
+    http.server_set_host(s, "127.0.0.1")
+    if worker == 1 {
+        http.server_use_middleware(s, mw_pass, 0)
+    }
+    inflight = 1
+    if breaker == 1 {
+        inflight = 0
+    }
+    pool = proxy.upstream_pool_new("round_robin", 1, 0, inflight)
+    if pool == 0 {
+        println("FAIL: upstream_pool_new")
+        exit(1)
+    }
+    need("upstream_add", proxy.upstream_add(pool, up_url, 1))
+    if breaker == 1 {
+        need("breaker_configure", proxy.breaker_configure(pool, 1, 30000, 1))
+    }
+    need("mount", proxy.mount(s, "/", pool, proxy.opts_new()))
+    return s
+}
+
+// One GET on a connection of its own; the status code, "none" when nothing
+// came back within eight seconds.
+status_of(port: int, path: string) -> string {
+    sock, cerr = tcp.connect("127.0.0.1", port)
+    if cerr != "" {
+        return "connect failed"
+    }
+    tcp.write(sock, "GET ${path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    wire = ""
+    tries = 0
+    while tries < 80 {
+        ready, _perr = tcp.poll(sock, 100)
+        if ready {
+            chunk, rerr = tcp.read(sock, 4096)
+            if rerr != "" || string.length(chunk) == 0 {
+                tries = 80
+            } else {
+                wire = string.concat(wire, chunk)
+            }
+        }
+        tries = tries + 1
+    }
+    tcp.close(sock)
+    if string.length(wire) < 12 {
+        return "none"
+    }
+    return string.substring(wire, 9, 12)
+}
+
+main() {
+    println("=== an upstream timeout on the event loop counts against the upstream (#3250) ===")
+    upstream = http.server_create(0)
+    http.server_set_host(upstream, "127.0.0.1")
+    http.server_get(upstream, "/slow", handle_slow, 0)
+    http.server_get(upstream, "/fast", handle_fast, 0)
+    up_url = "http://127.0.0.1:${start(upstream)}"
+
+    labels = ["one request at a time", "a breaker that opens on one failure"]
+    after = ["200", "503"]
+    names = ["event loop", "worker path"]
+    bad = 0
+    k = 0
+    while k < 2 {
+        g = 0
+        while g < 2 {
+            s = gateway(up_url, k, g)
+            port = start(s)
+            sleep(200)
+            first = status_of(port, "/slow")
+            then = status_of(port, "/fast")
+            got = "${first} then ${then}"
+            want = "504 then ${after[k]}"
+            if got != want {
+                println("  FAIL ${labels[k]} (${names[g]}): got '${got}', expected '${want}'")
+                bad = bad + 1
+            } else {
+                println("  PASS ${labels[k]} (${names[g]})")
+            }
+            http.server_stop(s)
+            g = g + 1
+        }
+        k = k + 1
+    }
+
+    http.server_stop(upstream)
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

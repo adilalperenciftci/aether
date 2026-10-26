@@ -1122,19 +1122,17 @@ static int ev_expire(EvDriver* d, EvConn* c) {
      * it (ev_arm_idle): closed, as the worker path closes on its receive
      * timeout (#3243). */
     if (c->state == EV_READ_REQUEST || c->state == EV_TLS_HANDSHAKE) return -1;
-    if (c->up.t.sockfd >= 0) {
-        aether_io_poller_remove(&d->poller, c->up.t.sockfd);
-        ev_untrack(d, c->up.t.sockfd);
-        c->up_in_poller = 0;
-        http_upstream_release(&c->up, 0);   /* never pool a connection mid-answer */
-    }
-    ev_release_attempt(c);                  /* the attempt is over (#3242) */
-    if (!c->res) return -1;
-    http_response_set_status(c->res, 504);
-    http_response_set_header(c->res, "X-Aether-Proxy-Error", "upstream_timeout");
-    http_response_set_header(c->res, "Content-Type", "text/plain");
-    http_response_set_body(c->res, "upstream timed out\n");
-    return ev_respond_from(d, c);
+    /* The upstream did not answer in time: a failed call, which goes back to
+     * the proxy exchange as the worker path's driver sends its own (#3250).
+     * The exchange decrements the upstream's in-flight count, tells its
+     * breaker, counts the timeout and retries where it may, else answers
+     * 504. Answered here instead, an upstream with an in-flight cap stayed
+     * full after its first timeout and a breaker never opened on timeouts.
+     * The words are the blocking client's for a deadline, which the exchange
+     * reads as a timeout. The connection is dropped, never pooled mid-answer. */
+    return ev_upstream_failed(d, c, c->x.framing.header_bytes
+                                    ? "request timed out before the response ended"
+                                    : "request timed out before the response arrived", 1);
 }
 
 /* ---- the bridge to the proxy ----

@@ -446,7 +446,9 @@ per-connection path.
 The upstream timeout (`proxy.pool_set_request_timeout`) applies as it always
 has. The driver keeps the deadline itself rather than taking it from the
 socket, and an upstream that does not answer within it produces the same `504`
-with `X-Aether-Proxy-Error: upstream_timeout`.
+with `X-Aether-Proxy-Error: upstream_timeout`. The timeout counts against the
+upstream the same way too: its in-flight count goes down, its breaker records
+the failure, and a retry policy retries it (#3250).
 
 ## Hop-by-Hop headers (RFC 7230 §6.1)
 
