@@ -358,6 +358,8 @@ configuration to do so:
 - HTTP/2
 - connection upgrades and tunnels
 - streaming request bodies
+- a chunked request body, which the worker path decodes (#3228), and any
+  request the worker path refuses (#3233)
 
 A request the proxy does not own, a health endpoint, an admin route, or
 anything another middleware answers, is handed to the general server path

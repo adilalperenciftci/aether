@@ -372,7 +372,8 @@ static void ev_conn_close(EvDriver* d, EvConn* c) {
  * Deliberately the same question the worker path asks, and the answer has to
  * match it: a driver that decided differently would accept a request the
  * other rejects. Headers end at a blank line, then exactly the body the
- * framing declares.
+ * framing declares. 1: a whole request is here; 0: more is needed; -1: its
+ * framing is the worker path's to answer or decode (#3228, #3233).
  */
 static int ev_request_complete(EvConn* c, size_t* out_total) {
     if (c->in_len == 0) return 0;
@@ -398,6 +399,18 @@ static int ev_request_complete(EvConn* c, size_t* out_total) {
 
     size_t header_bytes = c->in_hdr_end;
     char* hdr_end = c->in + header_bytes - 4;
+    /* Transfer-Encoding decides where a body ends, and when it is present
+     * Content-Length does not (RFC 9112 6.3). This driver read the length
+     * alone: a chunked body was dropped and its chunks parsed as the next
+     * request, and one with both headers had Content-Length bytes taken as
+     * its body, the disagreement request smuggling is built from (#3228).
+     * The worker path decodes a chunked body, bounds it, and refuses both
+     * headers together or any other coding; the connection goes there,
+     * which keeps one decoder rather than two for a framing proxied clients
+     * rarely use. */
+    char te[16];
+    if (http_find_header_in_block(c->in, hdr_end, "Transfer-Encoding", te, sizeof(te), NULL) > 0)
+        return -1;
     char cl[64];
     int differing = 0;
     int count = http_find_header_in_block(c->in, hdr_end, "Content-Length",

@@ -178,6 +178,20 @@ main() {
     bad = bad + both("a Content-Length that is not a number", ports,
         "POST /p HTTP/1.1\r\nHost: x\r\nContent-Length: 12abc\r\n\r\nab", framing)
 
+    // #3228: Transfer-Encoding frames the body, and with Content-Length too
+    // the request is refused.
+    bad = bad + both("a chunked body", ports,
+        "POST /p HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+        "200 up POST body=5 tail=hello open")
+    bad = bad + both("a chunked body in three chunks", ports,
+        "POST /p HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n4\r\ndefg\r\n2\r\nhi\r\n0\r\n\r\n",
+        "200 up POST body=9 tail=bcdefghi open")
+    bad = bad + both("Content-Length with Transfer-Encoding", ports,
+        "POST /p HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+        framing)
+    bad = bad + both("a coding other than chunked", ports,
+        "POST /p HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: gzip\r\n\r\nxyz", framing)
+
     http.server_stop(worker_gw)
     http.server_stop(loop_gw)
     http.server_stop(upstream)
