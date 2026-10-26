@@ -109,6 +109,19 @@ static inline int queue_dequeue_batch(LockFreeQueue* q, void** actors, Message* 
     return count;
 }
 
+// The next item, left in the queue for the consumer to look at first; NULL
+// when the queue is empty. queue_pop() takes it (#3197).
+static inline QueueItem* queue_peek(LockFreeQueue* q) {
+    int head = atomic_load_explicit(&q->head, memory_order_relaxed);
+    int tail = atomic_load_explicit(&q->tail, memory_order_acquire);
+    return head == tail ? NULL : &q->items[head];
+}
+
+static inline void queue_pop(LockFreeQueue* q) {
+    int head = atomic_load_explicit(&q->head, memory_order_relaxed);
+    atomic_store_explicit(&q->head, (head + 1) & QUEUE_MASK, memory_order_release);
+}
+
 // Get current queue size (approximate - may change between read of head/tail)
 static inline int queue_size(LockFreeQueue* q) {
     int head = atomic_load_explicit(&q->head, memory_order_relaxed);

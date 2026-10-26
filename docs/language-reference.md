@@ -3498,9 +3498,15 @@ core's own (an actor the handler spawned starts there) is stepped by the
 waiting thread itself, as a send steps an idle actor of the core, so it
 answers, and one that asks another of the core's actors in turn has it
 stepped the same way: a chain of asks among one core's actors answers
-(#3196, #3220). The core's other actors wait for the reply, so an asked
-actor on another core that asks one of them in turn waits with it, to the
-timeout (#3197).
+(#3196, #3220). The core's other actors keep running (#3197): a millisecond
+into the wait, and every millisecond after, the waiting thread delivers what
+is queued for them and hands each one with work to a core that runs it, the
+core waiting on that very actor when there is one, else an idle one. It is
+moved there, or, while messages of it are still queued, stepped there for
+the core that keeps it, so its messages keep their order. So an
+asked actor on another core that asks one of them in turn gets its answer.
+Nothing else is run inside the waiting handler: an actor of the core that
+asks the waiting actor waits until its handler is done, as it would have.
 
 ### Reply Statement
 

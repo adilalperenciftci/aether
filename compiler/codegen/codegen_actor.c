@@ -1085,8 +1085,13 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                             unindent(gen);
                             print_line(gen, "}");
                         } else {
-                            // Two-field inline: reconstruct from payload_int + payload_ptr
-                            emit_handler_on_payload(gen, actor->value, pattern->value);
+                            // Two-field inline: reconstruct from payload_int + payload_ptr.
+                            // A message with no fields travels with no payload:
+                            // nothing to record for a panic.
+                            if (msg_def && msg_def->fields)
+                                emit_handler_on_payload(gen, actor->value, pattern->value);
+                            else
+                                print_line(gen, "%s_handle_%s(self, _msg_data);", actor->value, pattern->value);
                             /* Same release-fields call as the single-
                              * int branch above (#466). */
                             if (msg_def) {

@@ -24,6 +24,10 @@
 #ifndef MAX_CORES
 #define MAX_CORES 16
 #endif
+// Actors a core can step for other cores waiting in asks at once (#3197).
+#ifndef AETHER_LEND_MAX
+#define AETHER_LEND_MAX 64
+#endif
 #define BATCH_SIZE 64  // Process up to 64 messages per batch for better throughput
 #ifndef SCHEDULER_DRAIN_BATCH
 #define SCHEDULER_DRAIN_BATCH 512  // Drain this many messages at once for high throughput
@@ -194,7 +198,10 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
      * (#3090, #3093). The actor moves to another core only while this is \
      * 0, with AETHER_INFLIGHT_MOVING set for the move, so no message is \
      * left behind on the core it leaves. */ \
-    atomic_int inflight;
+    atomic_int inflight; \
+    /* The core stepping this actor for its own, which waits in an ask, \
+     * while it cannot be moved there (#3197); -1 when not lent. */ \
+    atomic_int lent_to;
 
 typedef struct {
     AETHER_ACTOR_BASE_FIELDS
@@ -279,6 +286,11 @@ typedef struct {
         void* actors[SCHEDULER_DRAIN_BATCH];
         Message messages[SCHEDULER_DRAIN_BATCH];
         int count;
+        /* While a step runs from the batch, the first message not yet in a
+         * mailbox: [next, count) is older than anything still queued, and a
+         * relief delivers nothing for an actor with a message there
+         * (#3197). `count` once the batch is through. */
+        int next;
     } coalesce_buffer;
 
     AdaptiveBatchState batch_state;   // Adaptive batching (small, embedded)
@@ -293,8 +305,25 @@ typedef struct {
     atomic_int      parked;
 
     // How many asks this core's thread is blocked in (#3220): while one is,
-    // the core runs nothing, so no actor is moved onto it (move_actor).
+    // the core's loop does not run, so no actor is moved onto it
+    // (move_actor), but the one it waits on, by a relief (#3197).
     atomic_int      asking;
+    // The innermost of those asks: the actor it waits on and its reply
+    // slot, set and put back under actor_lock with `asking`. Another core's
+    // relief moves that actor here, where the waiting thread steps it, and
+    // wakes the wait through the slot (#3197).
+    _Atomic(ActorBase*)      ask_target;
+    _Atomic(ActorReplySlot*) ask_slot;
+    // Where this core's next relief scan of its table starts (#3197).
+    int             relief_cursor;
+    // Actors other cores lent this one while they wait in an ask (#3197):
+    // its loop steps them until each lend ends. Slots are taken by CAS from
+    // NULL by the lender and cleared by this core.
+    _Atomic(ActorBase*) lent[AETHER_LEND_MAX];
+    atomic_int      lent_count;
+    // The cores this one has lent actors to, woken when a relief delivers
+    // more; read and written by this core's thread only.
+    unsigned char   lent_out[MAX_CORES];
 
     // Per-core I/O event loop (platform-agnostic: epoll/kqueue/poll)
     AetherIoPoller io_poller;         // Platform I/O poller instance

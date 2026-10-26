@@ -198,6 +198,17 @@ The ask a handler holds is part of its thread's step context, with the actor ste
 
 `v, err = actor ? Msg {}` reads the reason (the language reference's Ask Pattern lists them); `v = actor ? Msg {}` gives the reply type's zero value for any of them, as it does at a timeout.
 
+An ask made in a handler blocks its core's scheduler thread. The core is marked as asking, with the actor it waits on (`Scheduler.ask_target`) and the reply slot (`ask_slot`), and no actor is moved onto it but that one. The waiting thread steps its target itself when the target is the core's (#3220), and relieves the core (#3197): once the wait has lasted `ASK_RELIEF_NS` (1 ms), and every 1 ms after, it does the part of its loop that steps nothing.
+
+- Its deferred sends to other cores go out.
+- The messages queued for its actors go into their mailboxes. A sender's queue is taken in order up to the first message that cannot be placed now, which the loop delivers once it runs again. That message cannot be placed when its actor's mailbox is full, when the loop's current batch still holds a message for it (`coalesce_buffer.next` marks how far the batch got), or when its actor is another core's or has a thread of its own.
+- Its actors with work (a message, or a receive timeout that is due) go to a core that runs them. That is the core waiting on that very actor, whose waiting thread is woken through its slot and steps it. When no core waits on it, it goes to a parked core, or else to the least loaded core that is not asking.
+  - An actor with no message in flight is moved there by `move_actor`, the one move path.
+  - An actor with a message still queued here (behind its full mailbox, say) cannot be moved without that message being overtaken, so it is lent instead. Its `lent_to` names the core, and that core's `lent` slots hold it. That core steps it under its step lock while it stays this core's, and this core's reliefs go on delivering its messages: the mailbox keeps one producer and one consumer.
+  - A later relief moves a lent actor once nothing of it is in flight. A lend ends when this core's loop runs again.
+
+A relief that did something is followed by the next 50 µs later (`ASK_RELIEF_BUSY_NS`), so a lent actor's messages keep coming. An actor stepping on this thread (the asker, and any actor below it on the stack) holds its step lock and stays. Nothing is stepped inside the waiting handler: an actor run there that asked the asker could never be answered. Moved to another core, it runs on that core's thread, and an ask of the asker waits there until the asker's handler is done. `tests/runtime/test_ask_relief.c` places the actors on chosen cores and covers both cases: a chain of asks back to the waiting core, and the waiting core's other actors.
+
 ## Actor Timeouts
 
 The `after` clause on a `receive` block fires a handler if no message arrives within a given number of milliseconds:
