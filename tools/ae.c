@@ -3691,7 +3691,40 @@ static const char* walkup_rebase(const char* path) {
     return out;
 }
 
-/* Remember where the command was typed, before a chdir into a project. */
+static void ae_set_env(const char* name, const char* value);
+
+/* An environment variable holding a path, or a list of them, with each
+ * relative entry re-based onto where the command was typed: the user set
+ * it there. A relative AETHER_CACHE_DIR became a cache inside the project
+ * once the command entered it, and a relative AETHER_LIB_DIR searched the
+ * project's directories instead of the ones named. */
+static void rebase_env_paths(const char* var, int is_list) {
+    const char* v = getenv(var);
+    if (!v || !v[0] || !g_entered_from[0]) return;
+    char sep[2] = { AETHER_LIB_PATH_SEP_CHAR, '\0' };
+    char* out = ae_path_printf("%s", "");
+    int changed = 0;
+    const char* cur = v;
+    while (1) {
+        const char* next = is_list ? strchr(cur, AETHER_LIB_PATH_SEP_CHAR) : NULL;
+        size_t len = next ? (size_t)(next - cur) : strlen(cur);
+        char* entry = ae_path_printf("%.*s", (int)len, cur);
+        if (entry[0] && !path_is_absolute_any(entry)) {
+            ae_path_appendf(&out, "%s%s/%s", out[0] ? sep : "", g_entered_from, entry);
+            changed = 1;
+        } else if (entry[0]) {
+            ae_path_appendf(&out, "%s%s", out[0] ? sep : "", entry);
+        }
+        free(entry);
+        if (!next) break;
+        cur = next + 1;
+    }
+    if (changed) ae_set_env(var, out);
+    free(out);
+}
+
+/* Remember where the command was typed, before a chdir into a project, and
+ * keep the environment's relative paths meaning what they meant there. */
 static void remember_entered_from(void) {
     if (g_entered_from[0]) return;
     if (!getcwd(g_entered_from, sizeof(g_entered_from))) {
@@ -3699,6 +3732,8 @@ static void remember_entered_from(void) {
         return;
     }
     for (char* q = g_entered_from; *q; q++) if (*q == '\\') *q = '/';
+    rebase_env_paths("AETHER_CACHE_DIR", 0);
+    rebase_env_paths("AETHER_LIB_DIR", 1);
 }
 
 /* #3181: enter the project directory named on the command line (`ae run

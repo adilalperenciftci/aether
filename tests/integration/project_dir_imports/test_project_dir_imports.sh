@@ -11,7 +11,8 @@
 # compiles from the project root, and `ae run` still starts the program in
 # the directory the command was typed in (#2148): the program reads
 # ./where.txt from there. An import that really is missing names every
-# directory searched.
+# directory searched, and a relative AETHER_CACHE_DIR or AETHER_LIB_DIR
+# keeps meaning a directory where the command was typed.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -106,6 +107,42 @@ else
     sed 's/^/        /' "$TMP/check.log" | head -12
     fail=1
 fi
+
+# The environment's relative paths mean what they mean where the command
+# was typed. Entering the project made a relative AETHER_CACHE_DIR a cache
+# inside it, and a relative AETHER_LIB_DIR a directory of the project's.
+rm -rf "$TMP/elsewhere/relcache" "$TMP/app/relcache"
+expect "a relative AETHER_CACHE_DIR, from another directory" \
+    "hello, app (run in elsewhere)" "$TMP/elsewhere" env AETHER_CACHE_DIR=relcache "$AE" run ../app
+if [ -d "$TMP/elsewhere/relcache" ] && [ ! -d "$TMP/app/relcache" ]; then
+    echo "  [PASS] the cache is where the command was typed, not in the project"
+else
+    echo "  [FAIL] a relative AETHER_CACHE_DIR: elsewhere/relcache $( [ -d "$TMP/elsewhere/relcache" ] && echo exists || echo missing ), app/relcache $( [ -d "$TMP/app/relcache" ] && echo exists || echo absent )"
+    fail=1
+fi
+
+mkdir -p "$TMP/plain/src" "$TMP/elsewhere/vendor/shout"
+cat > "$TMP/plain/aether.toml" <<'EOF'
+[package]
+name = "plain"
+version = "0.1.0"
+EOF
+cat > "$TMP/plain/src/main.ae" <<'EOF'
+import shout
+
+main() {
+    println(shout.loud("vendor"))
+}
+EOF
+cat > "$TMP/elsewhere/vendor/shout/module.ae" <<'EOF'
+exports(loud)
+
+loud(s: string) -> string {
+    return "${s}!"
+}
+EOF
+expect "a relative AETHER_LIB_DIR names a directory where the command was typed" \
+    "vendor!" "$TMP/elsewhere" env AETHER_LIB_DIR=vendor "$AE" run ../plain
 
 # A module that is nowhere: the error names the project's own directories.
 mkdir -p "$TMP/bad/src"
