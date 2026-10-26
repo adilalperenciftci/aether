@@ -1,0 +1,97 @@
+// Match: choosing by the shape of a value.
+//
+// `match` tries its arms in order and runs the first that fits. An arm can
+// be a literal, a constant, a range (`..=` takes the end, `..<` leaves it
+// out), several values separated by commas, a string, a list pattern
+// (`[]`, `[x]`, `[a, b]`, `[head | tail]`), a struct pattern, or `_` for
+// everything else. A match is an expression: its value is the arm's.
+// Struct and list patterns bind names for the arm.
+//
+// Run: ae run examples/01-language/08-match.ae
+// See: docs/language-reference.md#match-expressions
+
+const LIMIT = 100
+
+classify(n: int) -> string {
+    return match n {
+        0 -> "zero"
+        LIMIT -> "the limit"
+        1..=9 -> "a digit"
+        10, 20, 30 -> "a round ten"
+        11..<100 -> "two digits"
+        _ -> "big"
+    }
+}
+
+command(word: string) -> string {
+    return match word {
+        "start", "run" -> "starting"
+        "stop" -> "stopping"
+        _ -> "unknown command '${word}'"
+    }
+}
+
+// A list pattern over a slice: `rest` is a slice of what follows `first`.
+summary(xs: int[]) -> string {
+    return match xs {
+        [] -> "nothing"
+        [x] -> "just ${x}"
+        [a, b] -> "${a} and ${b}"
+        [first | rest] -> "${first} and ${rest.len} more"
+    }
+}
+
+// Recursion over a list pattern.
+total(xs: int[]) -> int {
+    return match xs {
+        [] -> 0
+        [h | t] -> h + total(t)
+    }
+}
+
+struct Request {
+    method: string
+    path: string
+}
+
+route(r: Request) -> string {
+    return match r {
+        Request { method: "GET", path: "/" } -> "home page"
+        Request { method: "GET", path: p } -> "file ${p}"
+        Request { method: m } -> "${m} not allowed"
+    }
+}
+
+main() {
+    samples = [0, 7, 20, 42, 100, 512]
+    for i in 0..samples.len {
+        println("${samples[i]}: ${classify(samples[i])}")
+    }
+    println("${command("run")}, ${command("halt")}")
+
+    nums = [4, 8, 15, 16, 23, 42]
+    println(summary(nums[0..0]))
+    println(summary(nums[0..1]))
+    println(summary(nums[0..2]))
+    println("${summary(nums)}, total ${total(nums)}")
+
+    println(route(Request { method: "GET", path: "/" }))
+    println(route(Request { method: "GET", path: "/docs" }))
+    println(route(Request { method: "DELETE", path: "/" }))
+}
+
+// Output:
+// 0: zero
+// 7: a digit
+// 20: a round ten
+// 42: two digits
+// 100: the limit
+// 512: big
+// starting, unknown command 'halt'
+// nothing
+// just 4
+// 4 and 8
+// 4 and 5 more, total 108
+// home page
+// file /docs
+// DELETE not allowed

@@ -1,0 +1,60 @@
+// Values and types: numbers, booleans, strings, constants.
+//
+// A local takes its type from the value it is first given, so most code
+// writes no types at all. Where the value alone does not say what you
+// mean (a 64-bit integer, a byte, an unsigned word), the type is written
+// before the name. A local keeps the type of its first binding: giving
+// `count` a string later is a compile error, not a new variable.
+//
+// `const` names a value fixed at compile time; a module-level `var` is
+// one mutable value every function of the file shares. `as` converts
+// between numeric types.
+//
+// Run: ae run examples/01-language/02-values-and-types.ae
+// See: docs/language-reference.md#types
+
+const MAX_RETRIES = 3
+const GREETING = "hello"
+
+var calls = 0
+
+next_call() -> int {
+    calls = calls + 1
+    return calls
+}
+
+main() {
+    count = 42 // int: 32-bit signed
+    ratio = 0.75 // float: 64-bit
+    ready = true // bool
+    name = "Aether" // string
+    println("${count} ${ratio} ${ready} ${name}")
+
+    long big = 3_000_000_000 // past an int's range: say it is a long
+    byte low = 0xFF // an unsigned 8-bit value
+    uint32 flags = 0b1010_0101
+    println("${big} ${low} ${flags}")
+
+    // Integer division truncates; a float operand makes it a float one.
+    println("${7 / 2} ${7 % 2} ${7.0 / 2.0}")
+    half = (count as float) / 8.0
+    whole = (ratio * 10.0) as int
+    println("${half} ${whole}")
+
+    // Bits and comparison.
+    println("${0xF0 | 0x0F} ${1 << 10} ${count >= 40 && ready}")
+
+    println("${GREETING}, retries=${MAX_RETRIES}")
+    next_call()
+    next_call()
+    println("calls=${calls}")
+}
+
+// Output:
+// 42 0.75 true Aether
+// 3000000000 255 165
+// 3 1 3.5
+// 5.25 7
+// 255 1024 true
+// hello, retries=3
+// calls=2

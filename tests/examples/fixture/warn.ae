@@ -1,0 +1,11 @@
+// Builds with an unused variable.
+//
+// Run: ae run tests/examples/fixture/warn.ae
+
+main() {
+    unused = 1
+    println("ok")
+}
+
+// Output:
+// ok

@@ -23,8 +23,8 @@ AETHERC="$ROOT/build/aetherc"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR" || true' EXIT
 
-CORPUS="examples/basics/hello.ae
-examples/basics/string-processing.ae
+CORPUS="examples/01-language/01-hello.ae
+examples/01-language/03-strings.ae
 examples/actors/ask-pattern.ae
 examples/applications/chat-room.ae
 examples/applications/task-queue.ae

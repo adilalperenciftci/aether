@@ -2676,7 +2676,7 @@ ifndef FILE
 	@echo "  make compile FILE=path/to/script.ae [OUTPUT=name]"
 	@echo ""
 	@echo "Example:"
-	@echo "  make compile FILE=examples/basics/hello.ae"
+	@echo "  make compile FILE=examples/01-language/01-hello.ae"
 	@echo "  make compile FILE=examples/ae-help-demo/fixed_dsl.ae OUTPUT=fixed_dsl"
 	@echo ""
 	@echo "If you wanted to build the toolchain instead, run:"
@@ -2833,6 +2833,7 @@ help:
 	@echo "  make check-tests      - The test suite can fail: verdicts reach the exit code, prune list is consistent, every std module has tests, listeners bind loopback, shell tests end background programs through server_jobs.sh and compare files with same_bytes, test programs write temp files under names of their own and ask the build for the platform"
 	@echo "  make check-extern-widths - Every extern bound to C in this tree agrees with the C definition on each width; no plain C long in a bound signature"
 	@echo "  make check-raw-calls     - No std or contrib file calls a raw C binding another module declares"
+	@echo "  make check-examples      - Every example builds clean and prints the output it says it prints"
 	@echo "  make check-contrib-modules - Type-check every non-host contrib module"
 	@echo "  make check-changelog  - Validate changelog fragments, catch a release-fold"
 	@echo "  make add-changelog    - Write a new_changelogs/ fragment (SECTION=, SLUG=)"
@@ -3037,7 +3038,7 @@ ci: clean
 	@$(CI_STAGE) 900 test-install $(MAKE) test-install
 	@echo ""
 	@echo "[8/11] ae test smoke check..."
-	@out=$$(AETHER_HOME="" $(CI_STAGE) 300 "ae test smoke" ./$(BUILD_DIR)/ae test examples/basics/hello.ae 2>&1) || { echo "$$out"; exit 1; }; echo "$$out" | tail -1
+	@out=$$(AETHER_HOME="" $(CI_STAGE) 300 "ae test smoke" ./$(BUILD_DIR)/ae test examples/01-language/01-hello.ae 2>&1) || { echo "$$out"; exit 1; }; echo "$$out" | tail -1
 	@echo "  [PASS] ae test runs correctly"
 	@echo ""
 	@echo "[9/11] Differential test (lowering paths agree)..."
@@ -3125,6 +3126,26 @@ check-raw-calls: compiler ae stdlib
 	    > $(BUILD_DIR)/raw_calls/self_test.log 2>&1 || \
 	    { cat $(BUILD_DIR)/raw_calls/self_test.log; exit 1; }
 	@./$(RAW_CALLS_CHECKER) std contrib
+
+# -----------------------------------------------------------------
+# Examples (#3105): examples/ is the path a learner follows, so each example
+# must still be true. Every example builds without a warning; each one that
+# ends in an `// Output:` block runs and prints exactly that block; one that
+# cannot run unattended says what it needs; examples/README.md links every
+# example and each of its links resolves; every file there is source. The
+# checker is Aether (tests/examples/check.ae). Its self-test first: the
+# fixture holds exactly 13 problems, one of each kind.
+# -----------------------------------------------------------------
+EXAMPLES_CHECKER := $(BUILD_DIR)/examples_check/check$(EXE_EXT)
+EXAMPLES_TIMEOUT ?= 60
+.PHONY: check-examples
+check-examples: compiler ae stdlib
+	@mkdir -p $(BUILD_DIR)/examples_check
+	@./$(BUILD_DIR)/ae$(EXE_EXT) build tests/examples/check.ae -o $(BUILD_DIR)/examples_check/check
+	@./$(EXAMPLES_CHECKER) --ae ./$(BUILD_DIR)/ae$(EXE_EXT) --timeout 2 --expect 13 tests/examples/fixture \
+	    > $(BUILD_DIR)/examples_check/self_test.log 2>&1 || \
+	    { cat $(BUILD_DIR)/examples_check/self_test.log; exit 1; }
+	@./$(EXAMPLES_CHECKER) --ae ./$(BUILD_DIR)/ae$(EXE_EXT) --timeout $(EXAMPLES_TIMEOUT) examples
 
 # The C a program gets when the C compiler is not GCC-compatible
 # (AETHER_GCC_COMPAT 0, which is what MSVC compiles): strict C11 under gcc,
@@ -3561,7 +3582,7 @@ ci-coop: clean compiler ae
 	           examples/actors/ping-pong.ae \
 	           examples/actors/ask-pattern.ae \
 	           examples/actors/cooperative-demo.ae \
-	           examples/basics/hello.ae; do \
+	           examples/01-language/01-hello.ae; do \
 		printf "  %-50s " "$$src"; \
 		if AETHER_HOME="" ./$(BUILD_DIR)/ae run "$$src" >/tmp/ae_coop_out.txt 2>&1; then \
 			echo "PASS"; \
@@ -3579,7 +3600,7 @@ ci-coop: clean compiler ae
 	@echo "[3/4] Testing no-filesystem + no-networking stubs..."
 	@$(MAKE) stdlib EXTRA_CFLAGS="-DAETHER_NO_FILESYSTEM -DAETHER_NO_NETWORKING"
 	@printf "  %-50s " "hello.ae (no-fs/no-net)"; \
-	if AETHER_HOME="" ./$(BUILD_DIR)/ae run examples/basics/hello.ae >/dev/null 2>&1; then \
+	if AETHER_HOME="" ./$(BUILD_DIR)/ae run examples/01-language/01-hello.ae >/dev/null 2>&1; then \
 		echo "PASS"; \
 	else \
 		echo "FAIL"; \
@@ -3603,7 +3624,7 @@ ci-wasm: clean compiler ae
 	@echo "[1/3] Generating C from test programs..."
 	@mkdir -p $(BUILD_DIR)/wasm
 	@pass=0; fail=0; \
-	for src in examples/basics/hello.ae \
+	for src in examples/01-language/01-hello.ae \
 	           examples/actors/counter.ae \
 	           tests/syntax/test_platform_caps.ae \
 	           tests/syntax/test_coop_chain.ae; do \
@@ -3735,7 +3756,7 @@ ci-embedded: clean compiler
 	@echo "[2/2] Generating and syntax-checking example programs..."
 	@mkdir -p $(BUILD_DIR)/embedded
 	@pass=0; fail=0; \
-	for src in examples/basics/hello.ae examples/actors/counter.ae; do \
+	for src in examples/01-language/01-hello.ae examples/actors/counter.ae; do \
 		name=$$(basename $$src .ae); \
 		printf "  %-55s " "$$name → syntax-check"; \
 		./$(BUILD_DIR)/aetherc "$$src" "$(BUILD_DIR)/embedded/$$name.c" 2>/dev/null && \

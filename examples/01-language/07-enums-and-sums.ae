@@ -1,0 +1,81 @@
+// Enums and sum types: a value that is one of a fixed set.
+//
+// An enum is a set of named integer constants, written `Enum.Member`. A
+// sum type is a value that is exactly one of several structs, its
+// variants: `type Shape = Circle | Rect`. A variant goes into a Shape slot
+// as it is, with no wrapping call. `match` over either must cover every
+// case (or say `_`): add a variant and every match that forgot it stops
+// compiling. Inside a sum's arm the value is that variant, so its fields
+// read directly.
+//
+// Run: ae run examples/01-language/07-enums-and-sums.ae
+// See: docs/language-reference.md#sum--variant-types
+
+enum Direction { North, East, South, West }
+
+turn_right(d: Direction) -> Direction {
+    return match d {
+        North -> Direction.East
+        East -> Direction.South
+        South -> Direction.West
+        West -> Direction.North
+    }
+}
+
+name(d: Direction) -> string {
+    return match d {
+        North -> "north"
+        East -> "east"
+        South -> "south"
+        West -> "west"
+    }
+}
+
+struct Circle { r: float }
+struct Rect { w: float h: float }
+struct Empty {}
+
+type Shape = Circle | Rect | Empty
+
+area(s: Shape) -> float {
+    return match s {
+        Circle -> 3.14159 * s.r * s.r // here s is a Circle
+        Rect -> s.w * s.h // and here a Rect
+        Empty -> 0.0
+    }
+}
+
+describe(s: Shape) -> string {
+    kind = match s {
+        Circle -> "circle"
+        Rect -> "rect"
+        Empty -> "empty"
+    }
+    return "${kind}, area ${area(s)}"
+}
+
+main() {
+    d = Direction.North
+    route = ""
+    for i in 0..5 {
+        route = "${route}${name(d)} "
+        d = turn_right(d)
+    }
+    println(route)
+    int code = Direction.West // an enum is an int underneath
+    println("${code} ${d == Direction.East}")
+
+    let shapes: Shape[3] = [Circle { r: 1.0 }, Rect { w: 2.0, h: 3.5 }, Empty {}]
+    for i in 0..shapes.len {
+        println(describe(shapes[i]))
+    }
+    println(describe(Circle { r: 2.0 })) // a variant passed where a Shape goes
+}
+
+// Output:
+// north east south west north
+// 3 true
+// circle, area 3.14159
+// rect, area 7
+// empty, area 0
+// circle, area 12.5664

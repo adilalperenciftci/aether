@@ -1,0 +1,649 @@
+// Every example builds, and every example that can run prints what it
+// says it prints (#3105).
+//
+// An example is an .ae file under the examples directory whose header
+// comment carries a `// Run:` line: the command a reader types, relative to
+// the repository root. A file that only supports one (a module, a C file's
+// companion, a test) says `// Part of: <entry>` instead. This reads every
+// file under the directory and reports:
+//
+//   - an .ae file with neither line, or a Part of naming no entry;
+//   - a file that is not source (a binary, a build output);
+//   - an entry the directory's README.md does not link, and a link in the
+//     README to a file that does not exist;
+//   - a Run line that does not name its own file (or a directory or a
+//     script beside it), or starts with anything but `ae` or `sh`;
+//   - for `ae run`: the build failing, or printing a warning;
+//   - an entry ending in an `// Output:` block whose command exits non-zero,
+//     runs past the time bound, or prints anything else (trailing spaces
+//     and line endings aside);
+//   - an entry with no Output block and no `// Needs:` line saying what it
+//     needs to run (a server, a terminal, a platform, a library), since CI
+//     only builds those.
+//
+// `ae run P [options] [-- args]` is built with `ae build P [options]` into
+// build/examples/ and the binary runs with the args. Any other `ae ...` and
+// `sh ...` command runs as written. The output compared is what the command
+// writes, stdout and stderr together: an example writes nothing to stderr
+// that its Output block does not show.
+//
+//     check [--ae PATH] [--timeout SECS] [--expect N] DIR
+//
+// Exits 1 on a problem; with --expect, unless exactly N were found (the
+// self-test over tests/examples/fixture). `make check-examples` runs both.
+
+import std.fs
+import std.os
+import std.io
+import std.list
+import std.string
+import std.collections
+
+extern exit(code: int)
+
+say(s: string) {
+    _w = io.stdout_write("${s}\n")
+}
+
+// The lines of a text, without their line breaks ("\r\n" or "\n").
+split_lines(text: string) -> ptr {
+    out = collections.string_list_new()
+    n = string.length(text)
+    start = 0
+    while start < n {
+        cut = string.index_of_from(text, "\n", start)
+        stop = cut
+        if cut < 0 {
+            stop = n
+        }
+        line_end = stop
+        if line_end > start && string.char_at_n(text, n, line_end - 1) == 13 {
+            line_end = line_end - 1
+        }
+        collections.string_list_add(out, string.substring(text, start, line_end))
+        start = stop + 1
+    }
+    return out
+}
+
+// A command's log, each line indented under the problem it explains.
+say_indented(text: string) {
+    lines = split_lines(text)
+    n = collections.string_list_size(lines)
+    i = 0
+    while i < n {
+        say("    ${collections.string_list_get(lines, i)}")
+        i = i + 1
+    }
+    collections.string_list_free(lines)
+}
+
+// The words of a command line, split on spaces.
+split_words(line: string) -> ptr {
+    out = collections.string_list_new()
+    n = string.length(line)
+    i = 0
+    while i < n {
+        while i < n && string.char_at_n(line, n, i) == 32 {
+            i = i + 1
+        }
+        start = i
+        while i < n && string.char_at_n(line, n, i) != 32 {
+            i = i + 1
+        }
+        if i > start {
+            collections.string_list_add(out, string.substring(line, start, i))
+        }
+    }
+    return out
+}
+
+// `s` without the spaces and tabs at its end.
+rtrim(s: string) -> string {
+    n = string.length(s)
+    end = n
+    while end > 0 {
+        c = string.char_at_n(s, n, end - 1)
+        if c != 32 && c != 9 {
+            break
+        }
+        end = end - 1
+    }
+    return string.substring(s, 0, end)
+}
+
+last_index_of_char(s: string, c: int) -> int {
+    n = string.length(s)
+    i = n - 1
+    while i >= 0 {
+        if string.char_at_n(s, n, i) == c {
+            return i
+        }
+        i = i - 1
+    }
+    return -1
+}
+
+dir_of(p: string) -> string {
+    slash = last_index_of_char(p, 47)
+    if slash < 0 {
+        return "."
+    }
+    return string.substring(p, 0, slash)
+}
+
+base_of(p: string) -> string {
+    slash = last_index_of_char(p, 47)
+    return string.substring(p, slash + 1, string.length(p))
+}
+
+list_has(l: ptr, s: string) -> int {
+    n = collections.string_list_size(l)
+    i = 0
+    while i < n {
+        if collections.string_list_get(l, i) == s {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// Is the file one an example is made of? Source and its documentation,
+// nothing a build leaves behind.
+is_source(p: string) -> int {
+    b = base_of(p)
+    if b == ".gitignore" {
+        return 1
+    }
+    dot = last_index_of_char(b, 46)
+    if dot < 0 {
+        return 0
+    }
+    ext = string.substring(b, dot, string.length(b))
+    return match ext {
+        ".ae", ".md", ".c", ".h", ".toml", ".sh", ".java" -> 1
+        _ -> 0
+    }
+}
+
+// `a/./b`, `a/b/../c`: the path with its `.` and `..` segments resolved.
+normalize(p: string) -> string {
+    parts = string.split_to_seq(p, "/")
+    kept = collections.string_list_new()
+    walk_parts(parts, kept)
+    string.seq_free(parts)
+    out = ""
+    n = collections.string_list_size(kept)
+    i = 0
+    while i < n {
+        part = collections.string_list_get(kept, i)
+        if i == 0 {
+            out = part
+        } else {
+            out = "${out}/${part}"
+        }
+        i = i + 1
+    }
+    collections.string_list_free(kept)
+    return out
+}
+
+walk_parts(s: *StringSeq, kept: ptr) {
+    match s {
+        [] -> {}
+        [h | t] -> {
+            if h == ".." && collections.string_list_size(kept) > 0 {
+                collections.string_list_remove(kept, collections.string_list_size(kept) - 1)
+            } else if h != "." && h != "" {
+                collections.string_list_add(kept, h)
+            }
+            walk_parts(t, kept)
+        }
+    }
+}
+
+// The targets of the markdown links `](target)` in a README, those that
+// are relative paths (no scheme, no anchor-only link), anchors cut off.
+readme_links(text: string) -> ptr {
+    out = collections.string_list_new()
+    at = string.index_of_from(text, "](", 0)
+    while at >= 0 {
+        close = string.index_of_from(text, ")", at + 2)
+        if close < 0 {
+            break
+        }
+        target = string.substring(text, at + 2, close)
+        hash = string.index_of(target, "#")
+        if hash >= 0 {
+            target = string.substring(target, 0, hash)
+        }
+        if target != "" && string.contains(target, "://") == 0 && string.starts_with(target, "mailto:") == 0 {
+            collections.string_list_add(out, target)
+        }
+        at = string.index_of_from(text, "](", close)
+    }
+    return out
+}
+
+// One example file, as its header and its Output block describe it.
+struct Example {
+    path: string
+    run: string
+    run_line: int
+    part_of: string
+    needs: string
+    has_output: bool
+    output: string
+    problem: string
+}
+
+// The comment text of a `//` line, "" for a bare `//`, and null for a line
+// that is not a comment.
+comment_text(line: string) -> string? {
+    t = string.trim(line)
+    if string.starts_with(t, "//") == 0 {
+        return none
+    }
+    rest = string.substring(t, 2, string.length(t))
+    if string.starts_with(rest, " ") == 1 {
+        rest = string.substring(rest, 1, string.length(rest))
+    }
+    return rest
+}
+
+read_example(p: string, text: string) -> Example {
+    ex = Example { path: p, run: "", run_line: 0, part_of: "", needs: "", has_output: false, output: "", problem: "" }
+    lines = split_lines(text)
+    defer collections.string_list_free(lines)
+    n = collections.string_list_size(lines)
+
+    // The header: the comment lines the file starts with.
+    i = 0
+    while i < n {
+        c = comment_text(collections.string_list_get(lines, i))
+        if c == none {
+            break
+        }
+        h = c ?? ""
+        if string.starts_with(h, "Run: ") == 1 {
+            ex.run = string.trim(string.substring(h, 5, string.length(h)))
+            ex.run_line = i + 1
+        } else if string.starts_with(h, "Part of: ") == 1 {
+            ex.part_of = string.trim(string.substring(h, 9, string.length(h)))
+        } else if string.starts_with(h, "Needs: ") == 1 {
+            ex.needs = string.trim(string.substring(h, 7, string.length(h)))
+        }
+        i = i + 1
+    }
+
+    // The Output block: from the last `// Output:` line to the end, every
+    // line a comment. Blank lines at the very end are no part of it.
+    last = n
+    while last > 0 && string.trim(collections.string_list_get(lines, last - 1)) == "" {
+        last = last - 1
+    }
+    start = -1
+    k = last - 1
+    while k >= 0 {
+        if string.trim(collections.string_list_get(lines, k)) == "// Output:" {
+            start = k
+            break
+        }
+        if comment_text(collections.string_list_get(lines, k)) == none {
+            break
+        }
+        k = k - 1
+    }
+    if start < 0 {
+        // A `// Output:` line followed by code is a block that does not end
+        // the file.
+        j = 0
+        while j < n {
+            if string.trim(collections.string_list_get(lines, j)) == "// Output:" {
+                ex.problem = "${p}:${j + 1}: the Output block must end the file"
+            }
+            j = j + 1
+        }
+        return ex
+    }
+    ex.has_output = true
+    out = ""
+    j = start + 1
+    while j < last {
+        body = comment_text(collections.string_list_get(lines, j)) ?? ""
+        if j == start + 1 {
+            out = rtrim(body)
+        } else {
+            out = "${out}\n${rtrim(body)}"
+        }
+        j = j + 1
+    }
+    ex.output = out
+    return ex
+}
+
+// A program's output as the lines an Output block holds: "\r\n" read as
+// "\n", trailing spaces off each line, and no final empty line.
+as_block(raw: string) -> string {
+    lines = split_lines(raw)
+    defer collections.string_list_free(lines)
+    n = collections.string_list_size(lines)
+    out = ""
+    i = 0
+    while i < n {
+        line = rtrim(collections.string_list_get(lines, i))
+        if i == 0 {
+            out = line
+        } else {
+            out = "${out}\n${line}"
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// The output in the form an Output block takes, to show what a program
+// printed.
+show_block(output: string) {
+    say("    // Output:")
+    lines = split_lines(output)
+    n = collections.string_list_size(lines)
+    i = 0
+    while i < n {
+        line = collections.string_list_get(lines, i)
+        if line == "" {
+            say("    //")
+        } else {
+            say("    // ${line}")
+        }
+        i = i + 1
+    }
+    collections.string_list_free(lines)
+}
+
+// The first line two texts differ on, 1-based, for the report.
+first_difference(a: string, b: string) -> int {
+    la = split_lines(a)
+    lb = split_lines(b)
+    na = collections.string_list_size(la)
+    nb = collections.string_list_size(lb)
+    i = 0
+    found = 0
+    while i < na && i < nb {
+        if collections.string_list_get(la, i) != collections.string_list_get(lb, i) {
+            found = i + 1
+            break
+        }
+        i = i + 1
+    }
+    if found == 0 {
+        found = i + 1
+    }
+    collections.string_list_free(la)
+    collections.string_list_free(lb)
+    return found
+}
+
+// Run a program with the time bound; (output, status, timed_out, err).
+run_bounded(prog: string, args: ptr, out_path: string, timeout: int) -> (string, int, int, string) {
+    token, serr = os.spawn_proc_to(prog, args, null, out_path)
+    if serr != "" {
+        return "", -1, 0, serr
+    }
+    status, timed_out, werr = os.wait_pid_timeout(token, timeout)
+    if timed_out == 1 {
+        _k = os.kill(token, 9)
+        _s, _t, _e = os.wait_pid_timeout(token, 10)
+    }
+    text, _rerr = fs.read(out_path)
+    _d = fs.delete(out_path)
+    return text, status, timed_out, werr
+}
+
+// Does the Run command name the file, a directory holding it, or a file
+// beside it?
+names_itself(ex: Example, words: ptr) -> int {
+    n = collections.string_list_size(words)
+    i = 1
+    while i < n {
+        w = normalize(collections.string_list_get(words, i))
+        if w == ex.path || string.starts_with(ex.path, "${w}/") == 1 || dir_of(w) == dir_of(ex.path) {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+main() {
+    ae = "build/ae"
+    timeout = 60
+    expect = -1
+    root = ""
+    argc = os.args_count()
+    i = 1
+    while i < argc {
+        a = os.args_get(i)
+        if a == "--ae" && i + 1 < argc {
+            i = i + 1
+            ae = os.args_get(i)
+        } else if a == "--timeout" && i + 1 < argc {
+            i = i + 1
+            timeout = string.get_int(os.args_get(i))
+        } else if a == "--expect" && i + 1 < argc {
+            i = i + 1
+            expect = string.get_int(os.args_get(i))
+        } else {
+            root = normalize(string.replace_all(a, "\\", "/"))
+        }
+        i = i + 1
+    }
+    if root == "" {
+        say("usage: check [--ae PATH] [--timeout SECS] [--expect N] DIR")
+        exit(2)
+    }
+    exe_ext = ""
+    if os.platform() == "windows" {
+        exe_ext = ".exe"
+    }
+    out_dir = "build/examples"
+    _m = fs.mkdir_p(out_dir)
+
+    files = collections.string_list_new()
+    _n, werr = fs.walk(root) | path: string, kind: int, depth: int | {
+        p = normalize(string.replace_all(path, "\\", "/"))
+        if kind == 1 {
+            collections.string_list_add(files, p)
+        }
+        return 0
+    }
+    if werr != "" {
+        say("examples: cannot walk ${root}: ${werr}")
+        exit(2)
+    }
+    collections.string_list_sort_lex(files)
+
+    problems = 0
+    readme_text, rerr = fs.read("${root}/README.md")
+    if rerr != "" {
+        say("${root}/README.md: cannot read it: ${rerr}")
+        problems = problems + 1
+    }
+    links = readme_links(readme_text)
+    linked = collections.string_list_new()
+    nl = collections.string_list_size(links)
+    i = 0
+    while i < nl {
+        target = normalize("${root}/${collections.string_list_get(links, i)}")
+        collections.string_list_add(linked, target)
+        if list_has(files, target) == 0 && fs.exists(target) == 0 {
+            say("${root}/README.md: links ${collections.string_list_get(links, i)}, which does not exist")
+            problems = problems + 1
+        }
+        i = i + 1
+    }
+
+    // Pass 1: every file is source; the .ae files with a Run line are the
+    // entries.
+    sources = collections.string_list_new()
+    entries = collections.string_list_new()
+    nf = collections.string_list_size(files)
+    i = 0
+    while i < nf {
+        p = collections.string_list_get(files, i)
+        if is_source(p) == 0 {
+            say("${p}: not source; an example directory holds no build output (remove it)")
+            problems = problems + 1
+        } else if string.ends_with(p, ".ae") == 1 {
+            text, ferr = fs.read(p)
+            if ferr != "" {
+                say("${p}: cannot read it: ${ferr}")
+                problems = problems + 1
+            } else {
+                collections.string_list_add(sources, p)
+                if read_example(p, text).run != "" {
+                    collections.string_list_add(entries, p)
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    // Pass 2: check each one, build the entries and run those that say
+    // what they print.
+    ran = 0
+    built = 0
+    ne = collections.string_list_size(sources)
+    i = 0
+    while i < ne {
+        p = collections.string_list_get(sources, i)
+        text, _ferr = fs.read(p)
+        ex = read_example(p, text)
+        if ex.problem != "" {
+            say(ex.problem)
+            problems = problems + 1
+        }
+        if ex.run == "" {
+            if ex.part_of == "" {
+                say("${p}:1: no `// Run:` line, and no `// Part of:` naming the example it belongs to")
+                problems = problems + 1
+            } else if list_has(entries, ex.part_of) == 0 {
+                say("${p}:1: Part of ${ex.part_of}, which is no example (no file with a Run line)")
+                problems = problems + 1
+            }
+            i = i + 1
+            continue
+        }
+        if list_has(linked, p) == 0 {
+            say("${p}: not linked from ${root}/README.md, the path a reader follows")
+            problems = problems + 1
+        }
+        if ex.has_output == false && ex.needs == "" {
+            say("${p}: no Output block, and no `// Needs:` line saying why it does not run in CI")
+            problems = problems + 1
+        }
+        words = split_words(ex.run)
+        nw = collections.string_list_size(words)
+        tool = collections.string_list_get(words, 0)
+        if string.contains(ex.run, "\"") == 1 || string.contains(ex.run, "'") == 1 || (tool != "ae" && tool != "sh") || nw < 2 {
+            say("${p}:${ex.run_line}: Run must be `ae ...` or `sh ...`, with no quoting: ${ex.run}")
+            problems = problems + 1
+            i = i + 1
+            continue
+        }
+        if names_itself(ex, words) == 0 {
+            say("${p}:${ex.run_line}: Run does not name this file: ${ex.run}")
+            problems = problems + 1
+            i = i + 1
+            continue
+        }
+
+        // What runs, and with what: a built binary or the command itself.
+        prog = ""
+        args = list.new()
+        failed = 0
+        if tool == "ae" && collections.string_list_get(words, 1) == "run" {
+            name = string.replace_all(string.substring(p, string.length(root) + 1, string.length(p) - 3), "/", "_")
+            bin = "${out_dir}/${name}"
+            bargs = list.new()
+            _b = list.add(bargs, "build")
+            k = 2
+            while k < nw && collections.string_list_get(words, k) != "--" {
+                _w = list.add(bargs, collections.string_list_get(words, k))
+                k = k + 1
+            }
+            _o1 = list.add(bargs, "-o")
+            _o2 = list.add(bargs, bin)
+            bout, berr, bcode, bspawn = os.run_full(ae, bargs, null, "")
+            list.free(bargs)
+            log = "${bout}${berr}"
+            if bspawn != "" || bcode != 0 {
+                say("${p}: the build failed (${ae} build, exit ${bcode}${bspawn}):")
+                say_indented(log)
+                problems = problems + 1
+                failed = 1
+            } else if string.contains(log, "warning[") == 1 {
+                say("${p}: the build prints a warning; an example builds clean:")
+                say_indented(log)
+                problems = problems + 1
+                failed = 1
+            }
+            built = built + 1
+            prog = "${bin}${exe_ext}"
+            k = k + 1
+            while k < nw {
+                _w = list.add(args, collections.string_list_get(words, k))
+                k = k + 1
+            }
+        } else {
+            prog = tool
+            if tool == "ae" {
+                prog = ae
+            }
+            k = 1
+            while k < nw {
+                _w = list.add(args, collections.string_list_get(words, k))
+                k = k + 1
+            }
+        }
+
+        if failed == 0 && ex.has_output {
+            out_file = "${out_dir}/run_${i}.out"
+            text, status, timed_out, rerr2 = run_bounded(prog, args, out_file, timeout)
+            got = as_block(text)
+            if rerr2 != "" {
+                say("${p}: cannot run ${prog}: ${rerr2}")
+                problems = problems + 1
+            } else if timed_out == 1 {
+                say("${p}: still running after ${timeout} s, stopped")
+                problems = problems + 1
+            } else if status != 0 {
+                say("${p}: `${ex.run}` exits ${status}; it printed:")
+                show_block(got)
+                problems = problems + 1
+            } else if got != ex.output {
+                say("${p}: the output differs from its Output block at line ${first_difference(got, ex.output)}; it printed:")
+                show_block(got)
+                problems = problems + 1
+            } else {
+                ran = ran + 1
+            }
+        }
+        list.free(args)
+        collections.string_list_free(words)
+        i = i + 1
+    }
+
+    say("examples: ${collections.string_list_size(entries)} examples (${built} built, ${ran} run and matched their output): ${problems} problem(s)")
+    if expect >= 0 {
+        if problems != expect {
+            say("examples: the self-test expected ${expect}")
+            exit(1)
+        }
+        exit(0)
+    }
+    if problems > 0 {
+        exit(1)
+    }
+}

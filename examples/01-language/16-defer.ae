@@ -1,0 +1,89 @@
+// Defer: cleanup that runs however a scope ends.
+//
+// `defer stmt` runs `stmt` when the enclosing block ends: at its closing
+// brace, at a `return`, a `break`, or a panic a `try` catches further up.
+// Several defers run last first. The idiom is to write the cleanup right
+// after the acquire, so no early return can skip it. In a function that
+// can fail (`-> T!`), `defer catch` runs only when it returns an error and
+// `defer try` only when it succeeds: a rollback and a commit.
+//
+// Run: ae run examples/01-language/16-defer.ae
+// See: docs/language-reference.md#defer-statement
+
+import std.list
+
+open_door(name: string) -> string {
+    println("  open ${name}")
+    return name
+}
+
+close_door(name: string) {
+    println("  close ${name}")
+}
+
+// Two resources, released in reverse order on every way out.
+visit(rooms: int) -> string {
+    a = open_door("hall")
+    defer close_door(a)
+    if rooms == 1 {
+        return "only the hall"
+    }
+    b = open_door("study")
+    defer close_door(b)
+    return "hall and study"
+}
+
+// A transaction: commit on success, roll back on failure.
+transfer(amount: int) -> int! {
+    defer try println("  commit ${amount}")
+    defer catch println("  roll back ${amount}")
+    if amount > 100 {
+        return 0, "insufficient funds"
+    }
+    return amount
+}
+
+main() {
+    println("visit(2):")
+    println("  -> ${visit(2)}")
+    println("visit(1):")
+    println("  -> ${visit(1)}")
+
+    // A handle freed by defer, however the block ends.
+    names = list.new()
+    defer list.free(names)
+    list.add(names, "kept until main returns")
+
+    // A defer in a loop body runs at the end of each pass.
+    for i in 0..3 {
+        defer println("  end of pass ${i}")
+        if i == 1 {
+            continue
+        }
+        println("  pass ${i}")
+    }
+
+    _, ok = transfer(40)
+    _, err = transfer(500)
+    println("[${ok}] [${err}]")
+}
+
+// Output:
+// visit(2):
+//   open hall
+//   open study
+//   close study
+//   close hall
+//   -> hall and study
+// visit(1):
+//   open hall
+//   close hall
+//   -> only the hall
+//   pass 0
+//   end of pass 0
+//   end of pass 1
+//   pass 2
+//   end of pass 2
+//   commit 40
+//   roll back 500
+// [] [insufficient funds]

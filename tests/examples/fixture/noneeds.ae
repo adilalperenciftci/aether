@@ -1,0 +1,7 @@
+// Has no Output block and does not say why.
+//
+// Run: ae run tests/examples/fixture/noneeds.ae
+
+main() {
+    println("hi")
+}

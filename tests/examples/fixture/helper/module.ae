@@ -1,0 +1,9 @@
+// The module modular.ae imports.
+//
+// Part of: tests/examples/fixture/modular.ae
+
+exports(twice)
+
+twice(n: int) -> int {
+    return n * 2
+}

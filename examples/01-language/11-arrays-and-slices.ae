@@ -1,0 +1,82 @@
+// Arrays and slices: fixed runs of values, and views of them.
+//
+// `[1, 2, 3]` is a fixed-size array, `int[3]`, and like a struct it is a
+// value: assigning or passing one copies its elements. A slice, `int[]`,
+// is a view of elements stored elsewhere, a pointer and a length: a
+// parameter typed `int[]` takes any array or slice without copying, and
+// `xs[lo..hi]` is a slice of the elements from lo up to hi, sharing them.
+// `.len` is the length. Every index is checked: one out of range is a
+// panic naming it. `make([]T, n)` allocates n zeroed elements whose
+// length is known only when the program runs; that buffer is a handle,
+// and `free` gives it back.
+//
+// Run: ae run examples/01-language/11-arrays-and-slices.ae
+// See: docs/language-reference.md#slices-t
+
+sum(xs: int[]) -> int {
+    total = 0
+    for i in 0..xs.len {
+        total = total + xs[i]
+    }
+    return total
+}
+
+// A fixed-size parameter is the callee's own copy.
+bump_copy(xs: int[3]) -> int {
+    xs[0] = 100
+    return xs[0]
+}
+
+// A slice parameter writes through to the caller's elements.
+double_all(xs: int[]) {
+    for i in 0..xs.len {
+        xs[i] = xs[i] * 2
+    }
+}
+
+show(xs: int[]) -> string {
+    out = "["
+    for i in 0..xs.len {
+        if i > 0 {
+            out = "${out}, "
+        }
+        out = "${out}${xs[i]}"
+    }
+    return "${out}]"
+}
+
+main() {
+    a = [1, 2, 3]
+    println("${bump_copy(a)} ${show(a)}") // a is unchanged
+
+    nums = [10, 20, 30, 40, 50]
+    middle = nums[1..4] // shares nums' elements
+    double_all(middle)
+    println("${show(middle)} ${show(nums)} sum=${sum(nums)}")
+    println("${nums[..2].len} ${nums[3..].len} ${show(nums[3..])}")
+
+    names = ["ada", "grace", "linus"]
+    println("${names.len} names, last ${names[names.len - 1]}")
+
+    squares = make([]int, 6)
+    defer free(squares)
+    for i in 0..squares.len {
+        squares[i] = i * i
+    }
+    println(show(squares))
+
+    try {
+        k = 7
+        println(nums[k])
+    } catch e {
+        println("caught: ${e}")
+    }
+}
+
+// Output:
+// 100 [1, 2, 3]
+// [40, 60, 80] [10, 40, 60, 80, 50] sum=240
+// 2 2 [80, 50]
+// 3 names, last linus
+// [0, 1, 4, 9, 16, 25]
+// caught: examples/01-language/11-arrays-and-slices.ae:70: array index 7 out of range for length 5

@@ -1,0 +1,11 @@
+// Its Output block is followed by code.
+//
+// Run: ae run tests/examples/fixture/notlast.ae
+// Needs: nothing; the block is misplaced
+
+// Output:
+// hi
+
+main() {
+    println("hi")
+}

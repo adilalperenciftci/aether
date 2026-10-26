@@ -1,0 +1,10 @@
+// Prints something its Output block does not say.
+//
+// Run: ae run tests/examples/fixture/mismatch.ae
+
+main() {
+    println("actual")
+}
+
+// Output:
+// expected

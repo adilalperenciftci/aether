@@ -100,7 +100,7 @@ without installing:
 
 ```sh
 ./build/ae version
-./build/ae run examples/basics/hello.ae
+./build/ae run examples/01-language/01-hello.ae
 ```
 
 If you want to stay entirely in the source tree (no system install),

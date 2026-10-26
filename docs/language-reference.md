@@ -2203,7 +2203,7 @@ outcomes:
   helper function is not tracked (that would be dataflow analysis).
 - The `--emit=lib` `aether_describe()` metadata doesn't yet surface contracts to FFI consumers; that's the next layer.
 
-See [examples/basics/contracts.ae](../examples/basics/contracts.ae) for runnable demos.
+See [examples/01-language/15-contracts.ae](../examples/01-language/15-contracts.ae) for a runnable example.
 
 ---
 
@@ -2269,7 +2269,7 @@ while i < 1000000 {
 }
 ```
 
-See [examples/basics/string-ownership.ae](../examples/basics/string-ownership.ae) for a runnable demonstration.
+See [examples/01-language/17-ownership.ae](../examples/01-language/17-ownership.ae) for a runnable example.
 
 #### Migrating from 0.835
 

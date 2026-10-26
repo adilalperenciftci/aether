@@ -1,0 +1,18 @@
+// Hello: the first program.
+//
+// A program starts at `main()`. `println` writes its argument and a line
+// break to standard output, and `${...}` inside a string puts a value
+// there. A line ends a statement: there are no semicolons.
+//
+// Run: ae run examples/01-language/01-hello.ae
+// See: docs/language-reference.md#functions
+
+main() {
+    println("Hello, Aether!")
+    name = "world"
+    println("Hello, ${name}.")
+}
+
+// Output:
+// Hello, Aether!
+// Hello, world.

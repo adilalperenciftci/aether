@@ -1,0 +1,40 @@
+// The geometry module imported by main.ae: `import geometry` finds it at
+// lib/geometry/module.ae beside the program.
+//
+// `exports (...)` is the module's public surface. Everything else here is
+// private: `_hypot2` and `UNIT` can be used inside the module and
+// nowhere else.
+//
+// Part of: examples/01-language/14-modules/main.ae
+
+exports(Rect, Point, area, diagonal_squared, unit_square, NAME)
+
+const NAME = "geometry"
+const UNIT = 1
+
+struct Point {
+    x: int
+    y: int
+}
+
+struct Rect {
+    corner: Point
+    w: int
+    h: int
+}
+
+area(r: Rect) -> int {
+    return r.w * r.h
+}
+
+diagonal_squared(r: Rect) -> int {
+    return _hypot2(r.w, r.h)
+}
+
+unit_square() -> Rect {
+    return Rect { corner: Point { x: 0, y: 0 }, w: UNIT, h: UNIT }
+}
+
+_hypot2(a: int, b: int) -> int {
+    return a * a + b * b
+}

@@ -1,0 +1,10 @@
+// Runs a file in another directory.
+//
+// Run: ae run tests/examples/other/wrongname.ae
+
+main() {
+    println("hi")
+}
+
+// Output:
+// hi

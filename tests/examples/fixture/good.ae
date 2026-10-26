@@ -1,0 +1,12 @@
+// Prints two lines.
+//
+// Run: ae run tests/examples/fixture/good.ae
+
+main() {
+    println("one")
+    println("  two")
+}
+
+// Output:
+// one
+//   two

@@ -56,7 +56,7 @@ XB="$_fbtmp/xbuild"; mkdir -p "$XB/lib" "$XB/include"
 # The Tier-2 append is per-lib-probed (ae.c links only libs actually staged),
 # so the fake sysroot must carry the .a files for them to appear on the line.
 for _l in ssl crypto nghttp2 z pcre2-8; do : > "$XB/lib/lib$_l.a"; done
-_HELLO="examples/basics/hello.ae"
+_HELLO="examples/01-language/01-hello.ae"
 
 # (a) base sysroot only → casper libs present, openssl absent.
 PATH="$STUB:$PATH" AETHER_SYSROOT="$FB" \
@@ -154,7 +154,7 @@ fi
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-HELLO="examples/basics/hello.ae"
+HELLO="examples/01-language/01-hello.ae"
 ACTOR="examples/actors/counter.ae"
 HTTP="examples/actors/site-poller.ae"
 
@@ -190,14 +190,22 @@ check_target "x86_64-macos"   "Mach-O 64-bit"       "$mac_run" "$ACTOR"
 # Regression: a program defining a top-level function named like an
 # unreferenced runtime global (e.g. `describe` in aether_host.c) must
 # cross-build, exactly as it builds natively. Guards the archive-based
-# link that gives on-demand object pulling. sum-types.ae defines `describe`.
-if [ -f "examples/basics/sum-types.ae" ]; then
-    if "$AE" build --target=x86_64-linux examples/basics/sum-types.ae -o "$TMP/st" \
-         >/dev/null 2>"$TMP/err"; then
-        ok "symbol-collision program (defines 'describe') cross-builds"
-    else
-        bad "symbol-collision program failed to cross-build"; sed 's/^/        /' "$TMP/err"
-    fi
+# link that gives on-demand object pulling. The program is written here, so
+# the guard does not depend on what an example happens to call its functions.
+cat > "$TMP/describe.ae" <<'AEOF'
+describe(n: int) -> string {
+    return "n=${n}"
+}
+
+main() {
+    println(describe(7))
+}
+AEOF
+if "$AE" build --target=x86_64-linux "$TMP/describe.ae" -o "$TMP/st" \
+     >/dev/null 2>"$TMP/err"; then
+    ok "symbol-collision program (defines 'describe') cross-builds"
+else
+    bad "symbol-collision program failed to cross-build"; sed 's/^/        /' "$TMP/err"
 fi
 
 # Error path: --emit=lib with a cross target is rejected up front.

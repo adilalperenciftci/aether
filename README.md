@@ -108,7 +108,7 @@ ae run
 Or run a single file directly:
 
 ```bash
-ae run examples/basics/hello.ae
+ae run examples/01-language/01-hello.ae
 ```
 
 ### Editor Setup (Optional)
@@ -133,7 +133,7 @@ If you prefer to build without installing:
 ```bash
 make ae
 ./build/ae version
-./build/ae run examples/basics/hello.ae
+./build/ae run examples/01-language/01-hello.ae
 ```
 
 ### The `ae` Command

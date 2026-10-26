@@ -100,7 +100,7 @@ header comment is the authoritative description.
 | `std.zlib` | One-shot zlib and gzip deflate and inflate. | 28 | [full section](#compression-stdzlib) |
 | `std.zstd` | Zstandard compression, streaming and one-shot, for archives and internal transports. | 19 | [guide](../std/zstd/README.md) · [source](../std/zstd/module.ae) |
 
-> **Note:** The standard library follows the canonical module pattern in [stdlib-module-pattern.md](stdlib-module-pattern.md), fallible operations expose a `_raw` extern plus a Go-style `(value, err)` Aether wrapper; pure/infallible operations stay raw without a suffix. See the [error handling example](../examples/basics/error-handling.ae) for how the pattern is used from user code, and [std/fs/module.ae](../std/fs/module.ae) for the reference implementation.
+> **Note:** The standard library follows the canonical module pattern in [stdlib-module-pattern.md](stdlib-module-pattern.md), fallible operations expose a `_raw` extern plus a Go-style `(value, err)` Aether wrapper; pure/infallible operations stay raw without a suffix. See the [error handling example](../examples/01-language/10-errors.ae) for how the pattern is used from user code, and [std/fs/module.ae](../std/fs/module.ae) for the reference implementation.
 
 ## Platform support
 

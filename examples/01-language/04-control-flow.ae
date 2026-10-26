@@ -1,0 +1,72 @@
+// Control flow: if, loops, break and continue.
+//
+// Conditions take no parentheses and every body takes braces. `if` is
+// also an expression: `if c { a } else { b }` is a value, with the type
+// both branches share. `while` loops while its condition holds; `for i in
+// a..b` counts from a up to b, b left out; the C-style `for (init; cond;
+// step)` is there when the step is not one. `break` and `continue` act on
+// the innermost loop, or on the loop a label names.
+//
+// Run: ae run examples/01-language/04-control-flow.ae
+// See: docs/language-reference.md#control-flow
+
+main() {
+    temperature = 31
+    if temperature > 30 {
+        println("hot")
+    } else if temperature > 15 {
+        println("mild")
+    } else {
+        println("cold")
+    }
+
+    // An if-expression picks a value.
+    label = if temperature % 2 == 0 { "even" } else { "odd" }
+    println("${temperature} is ${label}")
+
+    // Count up to, not including, the end.
+    squares = ""
+    for i in 1..6 {
+        squares = "${squares}${i * i} "
+    }
+    println(squares)
+
+    // `while` until the condition fails: the first power of two past 1000.
+    power = 1
+    steps = 0
+    while power <= 1000 {
+        power = power * 2
+        steps = steps + 1
+    }
+    println("2^${steps} = ${power}")
+
+    // A step other than one, and `continue` to skip a pass.
+    odds = ""
+    for (n = 0; n < 20; n += 3) {
+        if n % 2 == 0 {
+            continue
+        }
+        odds = "${odds}${n} "
+    }
+    println(odds)
+
+    // A label lets `break` leave both loops at once.
+    found = ""
+    search: for row in 0..5 {
+        for col in 0..5 {
+            if row * col == 6 {
+                found = "${row} x ${col}"
+                break search
+            }
+        }
+    }
+    println("first product of 6: ${found}")
+}
+
+// Output:
+// hot
+// 31 is odd
+// 1 4 9 16 25
+// 2^10 = 1024
+// 3 9 15
+// first product of 6: 2 x 3

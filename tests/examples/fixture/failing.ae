@@ -1,0 +1,11 @@
+// Exits with status 3.
+//
+// Run: ae run tests/examples/fixture/failing.ae
+
+main() {
+    println("failing")
+    exit(3)
+}
+
+// Output:
+// failing
