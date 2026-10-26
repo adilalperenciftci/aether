@@ -51,6 +51,13 @@ main() {
             println("SKIP https: network unavailable (${err})")
             return
         }
+        // The endpoint answered with a server error (an outage on its side,
+        // a 503 on a CI run): the handshake and the exchange worked, and
+        // what the body would show is not ours to test today.
+        if string.starts_with(err, "HTTP 5") == 1 {
+            println("SKIP https: the endpoint is unavailable (${err})")
+            return
+        }
         println("FAIL: http.get returned error: ${err}")
         exit(1)
     }
