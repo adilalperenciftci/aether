@@ -102,11 +102,28 @@ main() {
     argv = list.new()
     if os.run("true", argv, null) != 0 { fail("PATH-resolved 'true' should return 0") }
 
-    // 9. Spawn failure: a missing program does not return 0.
+    // 9. A program that cannot start is -1, never an exit status, and one
+    // that ran and exited 127 is 127 (#3170). POSIX used to give 127 for
+    // both. The raw capture gives null for the first and the output of the
+    // second.
     argv = list.new()
-    if os.run("/this/program/definitely/does/not/exist", argv, null) == 0 {
-        fail("missing program should not return 0")
+    missing = os.run("/this/program/definitely/does/not/exist", argv, null)
+    if missing != -1 { fail("missing program: os.run returned ${missing}, expected -1") }
+    argv = list.new()
+    _b1 = list.add(argv, "-c")
+    _b2 = list.add(argv, "exit 127")
+    ran127 = os.run("/bin/sh", argv, null)
+    if ran127 != 127 { fail("sh -c 'exit 127': os.run returned ${ran127}, expected 127") }
+    argv = list.new()
+    if os_run_capture_raw("/this/program/definitely/does/not/exist", argv, null) != null {
+        fail("missing program: os_run_capture_raw should return null")
     }
+    argv = list.new()
+    _b3 = list.add(argv, "-c")
+    _b4 = list.add(argv, "echo ran; exit 127")
+    raw = os_run_capture_raw("/bin/sh", argv, null)
+    if raw == null { fail("sh -c 'echo ran; exit 127': os_run_capture_raw returned null") }
+    if raw != "ran\n" { fail("sh -c 'echo ran; exit 127': os_run_capture_raw gave '${raw}'") }
 
     // 10. Large captured output, which forces several reallocs.
     argv = list.new()

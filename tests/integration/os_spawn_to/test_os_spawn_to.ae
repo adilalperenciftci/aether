@@ -60,6 +60,9 @@ child(mode: string) -> int {
         _w = fs.write(os.args_get(2), "the grandchild outlived its parent")
         return 0
     }
+    if mode == "--exit127" {
+        return 127
+    }
     if mode == "--crash" {
         // An access violation on Windows, SIGSEGV elsewhere (crash.c).
         os_spawn_to_crash()
@@ -98,6 +101,21 @@ main() {
     log1 = file_text(out1)
     fails = fails + check("stdout is in the file", string.contains(log1, "out one") == 1)
     fails = fails + check("stderr is in the file", string.contains(log1, "err one") == 1)
+
+    // ---- a program that cannot start fails the spawn (#3170) ----
+    // On every platform: token -1 and the reason. POSIX used to start a
+    // child that exited 127, which a program that ran and exited 127 also
+    // gives; that one starts and reaps 127.
+    tm, em = os.spawn_proc_to("/no/such/program_3170", null, null, "${dir}/missing.log")
+    fails = fails + check("a missing program fails the spawn with its reason",
+        tm == -1 && em == "program not found")
+    eargv = list.new()
+    _e127 = list.add(eargv, "--exit127")
+    t127, e127 = os.spawn_proc_to(os.argv0(), eargv, null, "${dir}/exit127.log")
+    list.free(eargv)
+    fails = fails + check("a program that exits 127 starts", e127 == "")
+    s127, w127 = os.wait(t127)
+    fails = fails + check("and reaps 127 with no err", s127 == 127 && w127 == "")
 
     // ---- a crash ends the child at once ----
     // On Windows the child's job keeps the error-reporting dialog away, so

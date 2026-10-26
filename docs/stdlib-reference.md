@@ -2871,8 +2871,8 @@ main() {
 ```
 
 **Functions:**
-- `os.system(cmd)` - Run shell command, returns exit code (0 = success, POSIX convention)
-- `os.exec(cmd)` → `(string, string)` - Run command and capture stdout, return `(output, err)`
+- `os.system(cmd)` - Run shell command, returns exit code (0 = success, POSIX convention). A command the shell cannot find is the shell's 127; a shell that could not start is -1 (#3170)
+- `os.exec(cmd)` → `(string, string)` - Run command and capture stdout, return `(output, err)`. A shell that could not start is `("", "command failed")`
 - `os.getenv(name)` - Get environment variable (returns string, or null if not set, infallible). The null string reads as `""`, so `os.getenv("X") != ""` asks whether `X` is set to something; `os.getenv("X") == null` tells unset apart from set to the empty string (#3129).
 - `os.setenv(name, value)` → `string` - Set environment variable, returns "" on success or an error string. Same C-side function as `io.setenv` use `os.setenv` when you've already imported `std.os` for `os.getenv`.
 - `os.temp_dir()` → `string` - The directory for scratch files, with no trailing separator. Windows resolves it through `GetTempPathW` (which already does the documented `TMP` → `TEMP` → `USERPROFILE` → Windows-directory cascade); POSIX reads `TMPDIR` and falls back to `/tmp`. Always returns a non-empty path, so `"${os.temp_dir()}/name"` needs no check. **Prefer this to a hardcoded `/tmp`**, which works on POSIX and under an MSYS2 shell but fails on a native Windows build, a bug that passes every local check.
@@ -2949,10 +2949,11 @@ A child that ran and failed and a child that never started are told apart.
 `err` is non-empty only when the child could not be started; `grep` finding
 nothing or `diff` finding a difference comes back with `err == ""` and its
 exit status. A child killed by a signal reports 128 plus the signal number,
-the shell's convention. One platform difference: on POSIX a program that is
-not there fails inside the child after the fork, so it reads as status 127
-with no error, while on Windows it fails before any child exists and comes
-back as status -1 with `err` set to `program not found`.
+the shell's convention. A program that cannot start is status -1 (or token
+-1) with `err` set to the reason, `program not found` for one that is not
+there, on every platform: on POSIX exec fails in the child after the fork,
+and the child reports its errno to the parent before it exits, so an exit
+of 127 is always a program that ran (#3170).
 
 Process execution is native on Windows (`CreateProcessW` and Job Objects),
 with two differences. Windows cannot replace a running process, so
@@ -3013,18 +3014,18 @@ spawned child exited 5
 ```
 
 **Functions:**
-- `os.run_capture(prog, argv, env)` → `(string, int, string)` - Run to completion: stdout, exit status, error
-- `os.run_full(prog, argv, env, stdin_data)` → `(string, string, int, string)` - Feed `stdin_data` to the child's stdin (binary-safe) and capture stdout and stderr separately: stdout, stderr, exit status, error. No pipe can fill and deadlock, whatever the sizes. `""` gives the child an already-closed stdin. Safe to call from several threads at once: each child inherits only its own pipe ends, so a capture never waits for another thread's child (#2917)
+- `os.run_capture(prog, argv, env)` → `(string, int, string)` - Run to completion: stdout, exit status, error. A program that cannot start is status -1 with the reason (`"program not found"`, `"permission denied"`, `"not an executable"`) on every platform, so an exit of 127 is a program that ran (#3170)
+- `os.run_full(prog, argv, env, stdin_data)` → `(string, string, int, string)` - Feed `stdin_data` to the child's stdin (binary-safe) and capture stdout and stderr separately: stdout, stderr, exit status, error. A program that cannot start is exit status -1 with the reason, as for `run_capture` (#3170). No pipe can fill and deadlock, whatever the sizes. `""` gives the child an already-closed stdin. Safe to call from several threads at once: each child inherits only its own pipe ends, so a capture never waits for another thread's child (#2917)
 - `os_run(prog, argv, env)` → `int` - Run to completion with this process's stdio; the exit status, or -1 when it could not start
-- `os.spawn_proc(prog, argv, env)` → `(int, string)` - Start without waiting. The first value is a reap token: the pid on POSIX, a handle-table key on Windows, so pass it back to the calls below rather than treating it as a pid. On Windows a token is never a pid: once reaped, `os.kill` and `os.wait_pid_timeout` report it gone rather than reaching whatever process has that number
-- `os.spawn_proc_to(prog, argv, env, out_path)` → `(int, string)` - Start without waiting, the child's stdout and stderr written to the file `out_path` (created or truncated) and its stdin empty. The token works with every call below. The child runs in a Job Object of its own on Windows and leads a process group of its own on POSIX, so `os.kill(token, sig)` ends its whole tree, the compilers a build tool started included. The file is the only handle it inherits. What the child leaves running when it exits on its own is not ended. A child that crashes ends at once, with its exception code on Windows (its job keeps the error-reporting dialog, and the seconds Windows spends reporting, away whatever error mode the parent has) and 128 plus the signal on POSIX. With `os.wait_any_timeout` this is a parallel runner in one thread: start N, wait for the first, kill whichever passes its deadline, read each one's file
+- `os.spawn_proc(prog, argv, env)` → `(int, string)` - Start without waiting. The first value is a reap token: the pid on POSIX, a handle-table key on Windows, so pass it back to the calls below rather than treating it as a pid. On Windows a token is never a pid: once reaped, `os.kill` and `os.wait_pid_timeout` report it gone rather than reaching whatever process has that number. A program that cannot start fails the spawn: token -1 and the reason
+- `os.spawn_proc_to(prog, argv, env, out_path)` → `(int, string)` - Start without waiting, the child's stdout and stderr written to the file `out_path` (created or truncated) and its stdin empty. The token works with every call below. The child runs in a Job Object of its own on Windows and leads a process group of its own on POSIX, so `os.kill(token, sig)` ends its whole tree, the compilers a build tool started included. The file is the only handle it inherits. What the child leaves running when it exits on its own is not ended. A child that crashes ends at once, with its exception code on Windows (its job keeps the error-reporting dialog, and the seconds Windows spends reporting, away whatever error mode the parent has) and 128 plus the signal on POSIX. With `os.wait_any_timeout` this is a parallel runner in one thread: start N, wait for the first, kill whichever passes its deadline, read each one's file. A program that cannot start fails the spawn, as for `spawn_proc`
 - `os.wait(token)` → `(int, string)` - Wait for one child: exit status, error
 - `os.wait_any(tokens)` → `(int, int, string)` - Wait for whichever of a list finishes first: its token, exit status, error. Box each token into the list with `mem.long_to_ptr(token)`
 - `os.wait_any_timeout(tokens, secs)` → `(int, int, int, string)` - The same with a deadline: token, status, `timed_out`, error. On a timeout the children keep running; `secs <= 0` waits indefinitely
 - `os.kill(pid, sig)` → `int` - Send a signal (numbers from [`std.signal`](#signal-numbers-stdsignal)); 0 on success. A negative pid signals the whole process group, and `sig == 0` only checks that the process exists. Windows has no catchable signals: any non-zero `sig` terminates, and there is no group form
 - `os.wait_pid_timeout(pid, secs)` → `(int, int, string)` - Wait at most `secs` for one child: status, `timed_out`, error. A child that times out is left running
-- `os.run_supervised(prog, argv, env, new_process_group, forward_signals, timeout_secs, reap_group)` → `(int, string)` - The whole job-control pattern in one call: the child in its own process group, Ctrl-C forwarded to it, a deadline (exit status 124, as GNU `timeout` reports), and anything it leaked cleaned up afterwards. The flags are 1 or 0; returns the exit status and an outcome of `"exited"`, `"signalled"`, `"timeout"` or `"error"`
-- `os.run_pipe(prog, argv, env)` → `(int, int, string)`, `os.wait_pid(pid)` → `(int, string)`, `os.run_pipe_drain_and_wait(prog, argv, env)` → `(string, int, string)` - Spawn with the [`std.ipc`](#child-to-parent-reports-stdipc) back-channel (POSIX only)
+- `os.run_supervised(prog, argv, env, new_process_group, forward_signals, timeout_secs, reap_group)` → `(int, string)` - The whole job-control pattern in one call: the child in its own process group, Ctrl-C forwarded to it, a deadline (exit status 124, as GNU `timeout` reports), and anything it leaked cleaned up afterwards. The flags are 1 or 0; returns the exit status and an outcome of `"exited"`, `"signalled"`, `"timeout"` or `"error"`, or -1 and the reason when the child could not start
+- `os.run_pipe(prog, argv, env)` → `(int, int, string)`, `os.wait_pid(pid)` → `(int, string)`, `os.run_pipe_drain_and_wait(prog, argv, env)` → `(string, int, string)` - Spawn with the [`std.ipc`](#child-to-parent-reports-stdipc) back-channel (POSIX only). A program that cannot start is an `err` with no child to reap; on POSIX an explicit `env` is refused with `"explicit env unsupported"`
 - `os_execv(prog, argv_list)` → `int` - Replace this process (on Windows: run it, then exit with its status); listed with the argv accessors above
 - `os.chdir(path)` → `string`, `os.getcwd()` → `string` - The working directory; `chdir` returns `""` or an error
 - `os_which(name)` → `string` - The first match for `name` on `PATH`, or `""`

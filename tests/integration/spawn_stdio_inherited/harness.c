@@ -6,16 +6,60 @@
  *
  * Aether cannot set close-on-exec from the language, so this is a C harness:
  * it marks 0, 1 and 2 close-on-exec, then drives the real os_spawn_raw on a
- * probe that reports which of its own streams are open. */
+ * probe that reports which of its own streams are open.
+ *
+ * Then a parent with 0 and 2 closed (#3170). A spawn reads a failed exec's
+ * errno from a pipe, which takes the lowest free descriptors: here 0 and 2.
+ * The child has to move the write end off 2 and close it there before the
+ * exec. Left open, the child keeps it, and the spawn waits for the child to
+ * end instead of returning once it has started. */
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 typedef struct { int _0; const char* _1; } tuple_int_string;
 extern tuple_int_string os_spawn_raw(const char* prog, void* argv_list, void* env_list);
 extern tuple_int_string os_wait_raw(int token);
+extern int os_kill_raw(int pid, int sig);
+extern void* list_new(void);
+extern int list_add_raw(void* list, void* item);
+
+static double seconds(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+/* A child that sleeps 5 s (its stdout off the caller's pipe, so the kill
+ * ends all of it), spawned with 0 and 2 closed: the spawn returns at once. */
+static int closed_stdio_spawn(void) {
+    void* av = list_new();
+    list_add_raw(av, (void*)"-c");
+    list_add_raw(av, (void*)"exec sleep 5 >/dev/null");
+    int saved0 = fcntl(0, F_DUPFD_CLOEXEC, 10);
+    int saved2 = fcntl(2, F_DUPFD_CLOEXEC, 10);
+    close(0);
+    close(2);
+    double start = seconds();
+    tuple_int_string sp = os_spawn_raw("/bin/sh", av, (void*)0);
+    double took = seconds() - start;
+    dup2(saved0, 0);
+    dup2(saved2, 2);
+    close(saved0);
+    close(saved2);
+    if (sp._0 < 0) { printf("FAIL: spawn with 0 and 2 closed: %s\n", sp._1 ? sp._1 : "?"); return 1; }
+    os_kill_raw(sp._0, 9);
+    (void)os_wait_raw(sp._0);
+    if (took > 2.0) {
+        printf("FAIL: a spawn with 0 and 2 closed took %.1f s: the child kept the exec-error pipe\n", took);
+        return 1;
+    }
+    printf("PASS: a spawn with 0 and 2 closed returns once the child starts (%.2f s)\n", took);
+    return 0;
+}
 
 int main(int argc, char** argv) {
     if (argc < 2) { fprintf(stderr, "usage: %s <probe-script>\n", argv[0]); return 2; }
@@ -34,5 +78,5 @@ int main(int argc, char** argv) {
     tuple_int_string w = os_wait_raw(sp._0);
     if (w._0 != 0) { printf("FAIL: the probe exited %d: a standard stream was closed in the child\n", w._0); return 1; }
     printf("PASS: the spawned child has stdin, stdout and stderr\n");
-    return 0;
+    return closed_stdio_spawn();
 }

@@ -16,6 +16,15 @@
 //      ipc.parent_channel() == -1 and exits 1 with an error
 //      message. Pins the contract that AETHER_IPC_FD only appears
 //      when the parent uses run_pipe.
+//
+//   4-6. A program that cannot start is an err with no child, through
+//      run_pipe and run_pipe_drain_and_wait, and one that ran and
+//      exited 127 is exit 127 with no err (#3170). Both used to read
+//      as exit 127.
+//
+//   7. An explicit env is refused before the fork: the child's
+//      AETHER_IPC_FD would have to be in it. It used to make the child
+//      exit 127 without running the program.
 
 import std.os
 import std.fs
@@ -164,10 +173,66 @@ main() {
         }
     }
 
+    // Case 4 — run_pipe on a program that cannot start (#3170).
+    {
+        argv4 = list.new()
+        fd4, pid4, err4 = os.run_pipe("/no/such/program_3170", argv4, null)
+        if fd4 != -1 || pid4 != -1 || err4 != "program not found" {
+            println("  [4] FAIL run_pipe missing program: (${fd4}, ${pid4}, '${err4}'), expected (-1, -1, 'program not found')")
+            failed = failed + 1
+        } else {
+            println("  [4] PASS run_pipe missing program → (-1, -1, program not found)")
+            passed = passed + 1
+        }
+    }
+
+    // Case 5 — run_pipe_drain_and_wait on a program that cannot start.
+    {
+        argv5 = list.new()
+        _p5, code5, err5 = os.run_pipe_drain_and_wait("/no/such/program_3170", argv5, null)
+        if code5 != -1 || err5 != "program not found" {
+            println("  [5] FAIL run_pipe_drain_and_wait missing program: exit=${code5} err='${err5}', expected -1 'program not found'")
+            failed = failed + 1
+        } else {
+            println("  [5] PASS run_pipe_drain_and_wait missing program → (-1, program not found)")
+            passed = passed + 1
+        }
+    }
+
+    // Case 6 — a program that ran and exited 127 is just that.
+    {
+        argv6 = list.new()
+        list.add(argv6, "-c")
+        list.add(argv6, "exit 127")
+        _p6, code6, err6 = os.run_pipe_drain_and_wait("/bin/sh", argv6, null)
+        if code6 != 127 || err6 != "" {
+            println("  [6] FAIL run_pipe_drain_and_wait sh 'exit 127': exit=${code6} err='${err6}', expected 127 and no err")
+            failed = failed + 1
+        } else {
+            println("  [6] PASS run_pipe_drain_and_wait sh 'exit 127' → 127, no err")
+            passed = passed + 1
+        }
+    }
+
+    // Case 7 — an explicit env is refused before the fork.
+    {
+        argv7 = list.new()
+        env7 = list.new()
+        list.add(env7, "A=1")
+        fd7, pid7, err7 = os.run_pipe(child_bin, argv7, env7)
+        if fd7 != -1 || pid7 != -1 || err7 != "explicit env unsupported" {
+            println("  [7] FAIL run_pipe with env: (${fd7}, ${pid7}, '${err7}'), expected (-1, -1, 'explicit env unsupported')")
+            failed = failed + 1
+        } else {
+            println("  [7] PASS run_pipe with an explicit env → refused, no child")
+            passed = passed + 1
+        }
+    }
+
     fs.delete(child_bin)
 
     println("")
-    println("std_ipc_roundtrip: ${passed} passing, ${failed} failing (of 3)")
+    println("std_ipc_roundtrip: ${passed} passing, ${failed} failing (of 7)")
     if failed > 0 {
         exit(1)
     }

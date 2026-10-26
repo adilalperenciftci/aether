@@ -4,7 +4,7 @@
 //
 // The child is this program: invoked with a first argument it acts as
 // `echo` (stdin to stdout), `split` (OUT on stdout, ERR on stderr),
-// `exit7`, or `echo-done` (stdin to stdout, then "done"). That keeps the
+// `exit7`, `exit127`, or `echo-done` (stdin to stdout, then "done"). That keeps the
 // test off /bin/sh and cat, so the same cases run against the POSIX
 // poll(2) pump and the Windows reader-thread implementation alike; the
 // Windows backend used to be skipped here with a comment calling it
@@ -48,6 +48,7 @@ child(mode: string) -> int {
         return 0
     }
     if mode == "exit7" { return 7 }
+    if mode == "exit127" { return 127 }
     if mode == "echo-done" {
         _ = io.stdout_write(slurp_stdin())
         _ = io.stdout_write("done")
@@ -167,25 +168,29 @@ main() {
     println("  PASS: ${big_len}-byte round-trip, no deadlock")
 
     // --- spawn failure: missing binary -------------------------------
-    // POSIX finds out inside the forked child (exit 127, no err); Windows
-    // looks the program up in the parent (-1, "program not found"). Both are the
-    // platform's documented contract.
+    // (-1, "program not found") on every platform (#3170): POSIX learns of
+    // the failed exec from the child on a close-on-exec pipe, Windows looks
+    // the program up in the parent. It used to be exit 127 and no err on
+    // POSIX, which a program that ran and exited 127 also gives.
     av5 = list.new()
     out5, err5, code5, spawn5 = os.run_full("/no/such/binary", av5, null, "")
-    if os.platform() == "windows" {
-        if code5 != -1 || spawn5 != "program not found" {
-            println("  FAIL: missing binary exit=${code5} spawn=${spawn5}, expected -1 / program not found")
-            exit(1)
-        }
-        println("  PASS: missing binary → (-1, \"program not found\")")
-    } else {
-        if code5 != 127 {
-            println("  FAIL: missing binary exit=${code5}, expected 127 (exec-in-child)")
-            exit(1)
-        }
-        println("  PASS: missing binary → exit 127")
+    if code5 != -1 || spawn5 != "program not found" {
+        println("  FAIL: missing binary exit=${code5} spawn=${spawn5}, expected -1 / program not found")
+        exit(1)
     }
+    println("  PASS: missing binary → (-1, \"program not found\")")
     list.free(av5)
+
+    // --- a program that ran and exited 127 ----------------------------
+    av6 = list.new()
+    list.add(av6, "exit127")
+    out6, err6, code6, spawn6 = os.run_full(me, av6, null, "")
+    if code6 != 127 || spawn6 != "" {
+        println("  FAIL: exit127 exit=${code6} spawn=${spawn6}, expected 127 and no err")
+        exit(1)
+    }
+    println("  PASS: a program that exits 127 → exit 127, no err")
+    list.free(av6)
 
     println("=== All cases passed ===")
 }
