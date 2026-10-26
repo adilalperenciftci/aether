@@ -1,7 +1,7 @@
 #!/bin/sh
 # Regression test for the std.mutation mutation-testing driver
 # (adopted from aeocha contrib/mutate; run via the runnable front-end
-# at examples/mutation-testing/mutate.ae).
+# at examples/06-tooling/02-mutation/mutate.ae).
 #
 # Runs the driver against a deterministic fixture (fixture/sut.ae +
 # sut_test.ae) where exactly two operator sites exist:
@@ -68,7 +68,7 @@ rm -rf "$AETHER_CACHE_DIR"
 # AETHER_HOME resolves std.* (std.mutation, std.spec) from this tree.
 # The lib_dir arg (the fixture dir) is where `import sut` resolves.
 if ! AETHER_HOME="$ROOT" AE_BIN="$AE" \
-        "$AE" run "$ROOT/examples/mutation-testing/mutate.ae" -- \
+        "$AE" run "$ROOT/examples/06-tooling/02-mutation/mutate.ae" -- \
         "$SUT" "$TEST" "$SCRIPT_DIR/fixture" >"$TMPDIR/out.log" 2>&1; then
     fail "driver exited non-zero"
 fi

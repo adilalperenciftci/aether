@@ -1,0 +1,10 @@
+// Part of: examples/06-tooling/04-lib-path/main.ae
+//
+// bar is only in vendor/: each import walks the whole search path, so it
+// is found there whatever comes first.
+
+exports(origin)
+
+origin() -> string {
+    return "vendor/, the only copy"
+}

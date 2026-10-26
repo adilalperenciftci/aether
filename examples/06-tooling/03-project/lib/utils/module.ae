@@ -1,0 +1,25 @@
+// Part of: examples/06-tooling/03-project/src/main.ae
+//
+// A module of the project, in lib/utils/. `exports(...)` is its public
+// surface: `multiply` is not in it, so only this module's own functions
+// can call it.
+
+exports(MULTIPLIER, double_value, triple_value, quadruple_value)
+
+const MULTIPLIER = 2
+
+double_value(x: int) -> int {
+    return multiply(x, MULTIPLIER)
+}
+
+triple_value(x: int) -> int {
+    return multiply(x, 3)
+}
+
+quadruple_value(x: int) -> int {
+    return multiply(double_value(x), MULTIPLIER)
+}
+
+multiply(a: int, b: int) -> int {
+    return a * b
+}

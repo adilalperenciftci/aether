@@ -1,0 +1,10 @@
+// Part of: examples/06-tooling/04-lib-path/main.ae
+//
+// The project's own copy of foo: first on the search path, so it is the
+// one `import foo` gets, as when a vendored module is patched in place.
+
+exports(origin)
+
+origin() -> string {
+    return "lib/, the project's own copy"
+}

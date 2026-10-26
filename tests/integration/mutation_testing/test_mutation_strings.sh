@@ -56,7 +56,7 @@ rm -rf "$AETHER_CACHE_DIR"
 # AE_BIN points the driver's per-mutant sub-builds at the in-tree ae;
 # AETHER_HOME resolves std.*; lib_dir arg is where `import sut` resolves.
 if ! AETHER_HOME="$ROOT" AE_BIN="$AE" \
-        "$AE" run "$ROOT/examples/mutation-testing/mutate.ae" -- \
+        "$AE" run "$ROOT/examples/06-tooling/02-mutation/mutate.ae" -- \
         "$SUT" "$TEST" "$SCRIPT_DIR/fixture_str" >"$TMPDIR/out.log" 2>&1; then
     fail "driver exited non-zero"
 fi

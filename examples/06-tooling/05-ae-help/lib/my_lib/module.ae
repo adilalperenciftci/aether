@@ -1,0 +1,32 @@
+// Part of: examples/06-tooling/05-ae-help/fixed.ae
+//
+// A small configuration DSL for the ae help example: `serve { ... }` takes
+// a block of settings, and each setter prints what it was given. `builder`
+// is what lets serve take the trailing block; a setter's first parameter,
+// `_ctx`, is the context the block passes it without being written
+// (docs/closures-and-builder-dsl.md). serve's body runs after the block,
+// so its line comes last.
+
+import std.map
+
+exports(serve, port, host, superuser_token, repo)
+
+builder serve() {
+    println("serving")
+}
+
+port(_ctx: ptr, p: int) {
+    println("  port = ${p}")
+}
+
+host(_ctx: ptr, h: string) {
+    println("  host = ${h}")
+}
+
+superuser_token(_ctx: ptr, t: string) {
+    println("  superuser_token = ${t}")
+}
+
+repo(_ctx: ptr, name: string, path: string) {
+    println("  repo ${name} at ${path}")
+}

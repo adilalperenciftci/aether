@@ -101,6 +101,19 @@ on every platform; the others need the operating system they name.
 | [05-capsicum.ae](05-containment/05-capsicum.ae) | FreeBSD Capsicum: open first, `enter`, then only what is held | [Capsicum](../docs/aether_compared_to_capsicum.md) |
 | [06-casper.ae](05-containment/06-casper.ae) | Casper: DNS and sysctl from capability mode (FreeBSD) | [Capsicum](../docs/aether_compared_to_capsicum.md) |
 
+## 6. Tools
+
+What comes with `ae` besides `run` and `build`.
+
+| Example | What it teaches | Reference |
+|---|---|---|
+| [01-testing/discount_test.ae](06-tooling/01-testing/discount_test.ae) | std.spec: `describe`, `it`, assertions; `ae test` | [Testing](../docs/testing.md) |
+| [02-mutation/mutate.ae](06-tooling/02-mutation/mutate.ae) | std.mutation: are the tests checking the code? | [Mutation testing](../docs/mutation-testing.md) |
+| [03-project/src/main.ae](06-tooling/03-project/src/main.ae) | a project: aether.toml, src/, lib/, `ae run <dir>` | [Build system](../docs/build-system.md) |
+| [04-lib-path/main.ae](06-tooling/04-lib-path/main.ae) | `--lib`: the module search path and its order | [Module search path](../docs/module-system-design.md) |
+| [05-ae-help/broken.ae](06-tooling/05-ae-help/broken.ae) | `ae help`: what a configuration script got wrong, and the fix | [ae help](../docs/cic-help.md) |
+| [05-ae-help/fixed.ae](06-tooling/05-ae-help/fixed.ae) | the same script with the fixes applied | [Builder DSL](../docs/closures-and-builder-dsl.md) |
+
 ## Writing an example
 
 An example is one `.ae` file, or a directory when it needs more than one

@@ -1,0 +1,26 @@
+// What broken.ae is once ae help's suggestions are applied.
+//
+// Each setting is a call, `port(9990)`, the one form a builder block
+// takes, and the misspelt setter is the one my_lib exports. Compare the
+// two files: the difference is what ae help told the reader to change.
+//
+// Run: ae run examples/06-tooling/05-ae-help/fixed.ae --lib examples/06-tooling/05-ae-help/lib
+// See: docs/cic-help.md
+
+import my_lib
+
+main() {
+    my_lib.serve() {
+        port(9990)
+        host("127.0.0.1")
+        superuser_token("admin-1234")
+        repo("alpha", "/data/alpha")
+    }
+}
+
+// Output:
+//   port = 9990
+//   host = 127.0.0.1
+//   superuser_token = admin-1234
+//   repo alpha at /data/alpha
+// serving

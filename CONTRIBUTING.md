@@ -228,7 +228,7 @@ the test ran, not that it would notice the bug.
   in one line of the PR description: "fails on main with ..., passes with the
   fix."
 - **Logic changes in a std module: run the mutation tester on it.**
-  `ae run examples/mutation-testing/mutate.ae -- <sut.ae> <test.ae>` makes
+  `ae run examples/06-tooling/02-mutation/mutate.ae -- <sut.ae> <test.ae>` makes
   small semantic changes to the subject (`>=` to `<`, `==` to `!=`, a string
   literal to empty) and reruns the suite; see `docs/mutation-testing.md`.
   Add tests that kill the survivors on the lines you changed, or say in the

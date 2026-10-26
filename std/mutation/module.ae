@@ -20,8 +20,8 @@
 // non-compiling mutant never masquerades as a kill. See `_oracle`.
 //
 // Entry point: run(sut_path, test_path, lib_dir) — see the runnable
-// front-end at examples/mutation-testing/mutate.ae:
-//   ae run examples/mutation-testing/mutate.ae -- <sut.ae> <test.ae> [lib_dir]
+// front-end at examples/06-tooling/02-mutation/mutate.ae:
+//   ae run examples/06-tooling/02-mutation/mutate.ae -- <sut.ae> <test.ae> [lib_dir]
 // (lib_dir "" defaults to the SUT's directory.) The `ae` used for the
 // per-mutant sub-builds is `ae` on PATH, overridable via the AE_BIN
 // environment variable (an in-tree harness points it at build/ae).

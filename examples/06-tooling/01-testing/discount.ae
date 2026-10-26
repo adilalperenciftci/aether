@@ -1,0 +1,24 @@
+// Part of: examples/06-tooling/01-testing/discount_test.ae
+//
+// The code under test: a price, in cents, after a discount. Mutation
+// testing (02-mutation) edits this file one operator at a time, so its
+// comments hold no operator between spaces and no quoted text.
+
+exports(clamp_percent, apply)
+
+// The percent, kept between 0 and 100.
+clamp_percent(p: int) -> int {
+    if p < 0 {
+        return 0
+    }
+    if p > 100 {
+        return 100
+    }
+    return p
+}
+
+// The price after `percent` off, rounded down to a whole cent.
+apply(cents: int, percent: int) -> int {
+    p = clamp_percent(percent)
+    return cents - cents * p / 100
+}

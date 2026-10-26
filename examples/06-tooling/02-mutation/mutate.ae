@@ -1,0 +1,53 @@
+// Mutation testing: how much of the code do the tests really check?
+//
+// A suite that passes says the code does what the suite asks; it does not
+// say the suite asks enough. std.mutation finds out. `mutation.run(sut,
+// test, lib_dir)` changes the code under test one operator at a time (`+`
+// to `-`, `<` to `>`, a string to ""), rebuilds and reruns the suite for
+// each change, and reports every mutant: killed when a test failed, which
+// is what a good suite does, or survived, which marks something no test
+// checks. A mutant that does not compile is left out of the score. The
+// source is put back as it was when the run ends. It returns how many
+// survived, or a negative number when the unchanged suite does not pass.
+//
+// This program is a front-end to it: give it the code and its suite.
+// Here they are 01-testing's, and every mutant is killed. Delete the
+// `apply` cases from that suite and run it again: the two mutants in
+// `apply` (SUB->ADD and MUL->DIV) survive, because no test calls it any
+// more. Each mutant is built with the `ae` on PATH (AE_BIN names another),
+// so a run takes a few builds' time.
+//
+// Run: ae run examples/06-tooling/02-mutation/mutate.ae -- examples/06-tooling/01-testing/discount.ae examples/06-tooling/01-testing/discount_test.ae
+// See: docs/mutation-testing.md
+
+import std.mutation
+import std.os
+
+main() {
+    if os.args_count() < 3 {
+        println("usage: mutate <code.ae> <its_test.ae> [lib_dir]")
+        exit(2)
+    }
+    lib_dir = ""
+    if os.args_count() > 3 {
+        lib_dir = os.args_get(3)
+    }
+    survivors = mutation.run(os.args_get(1), os.args_get(2), lib_dir)
+    if survivors < 0 {
+        exit(1)
+    }
+}
+
+// Output:
+// Aether mutation testing (std.mutation)
+//   SUT:  examples/06-tooling/01-testing/discount.ae
+//   test: examples/06-tooling/01-testing/discount_test.ae
+//
+//   baseline: suite passes on unmutated SUT ✓
+//
+//   killed     discount.ae:23  SUB->ADD
+//   killed     discount.ae:23  MUL->DIV
+//   killed     discount.ae:14  GT->LT
+//   killed     discount.ae:11  LT->GT
+//
+//   4/4 mutants killed, mutation score 100%

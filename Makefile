@@ -1823,9 +1823,10 @@ benchmark: benchmark-results
 	@cd benchmarks/cross-language/visualize && ./server
 
 # Builds every example aetherc and the C compiler can build alone. A file
-# that is part of another example, one run by a script, and one that imports
-# a contrib bridge (built only with that bridge) are left to the checker,
-# tests/examples/check.ae.
+# that is part of another example, one run by a script or another ae
+# command, one run as a project directory or with --lib, and one that
+# imports a contrib bridge (built only with that bridge) are left to the
+# checker, tests/examples/check.ae.
 ifdef WINDOWS_NATIVE
 examples: compiler ae
 	@echo ===================================
@@ -1870,9 +1871,8 @@ examples: compiler ae stdlib
 	root=$$(pwd); \
 	find examples -name '*.ae' \
 	    | grep -v '/lib/' | grep -v '/packages/' \
-	    | grep -v '/ae-help-demo/' \
 	    | sort \
-	    | xargs grep -L -e '^// Part of:' -e '^// Run: sh ' -e '^import contrib\.' \
+	    | xargs grep -L -e '^// Part of:' -e '^// Run: sh ' -e '^// Run: ae [^r]' -e '^// Run: ae run [^ ]*[^e] *$$' -e '^// Run: ae run .* --lib ' -e '^import contrib\.' \
 	    | xargs -P $(NPROC) -I{} "$$script" "{}" "$$tmpdir" "$$root"; \
 	pass=$$(ls "$$tmpdir"/PASS_* 2>/dev/null | wc -l | tr -d ' '); \
 	fail=$$(ls "$$tmpdir"/FAIL_* 2>/dev/null | wc -l | tr -d ' '); \
@@ -2922,7 +2922,7 @@ ci-windows: clean compiler
 	@echo "[1/3] Generating C from all examples with native aetherc..."
 	@mkdir -p $(BUILD_DIR)/win
 	@pass=0; fail=0; \
-	for src in $$(find examples -name '*.ae' | grep -v '/lib/' | grep -v '/packages/' | grep -v '/ae-help-demo/' | sort | xargs grep -L -e '^// Part of:' -e '^// Run: sh ' -e '^import contrib\.'); do \
+	for src in $$(find examples -name '*.ae' | grep -v '/lib/' | grep -v '/packages/' | sort | xargs grep -L -e '^// Part of:' -e '^// Run: sh ' -e '^// Run: ae [^r]' -e '^// Run: ae run [^ ]*[^e] *$$' -e '^// Run: ae run .* --lib ' -e '^import contrib\.'); do \
 		name=$$(echo $$src | sed 's|examples/||;s|\.ae$$||'); \
 		printf "  %-30s " "$$name"; \
 		mkdir -p "$(BUILD_DIR)/win/examples/$$(dirname $$name)"; \
@@ -2962,7 +2962,7 @@ ci-windows: clean compiler
 	@echo ""
 	@echo "[3/3] Syntax-checking generated C with MinGW..."
 	@pass=0; fail=0; \
-	for src in $$(find examples -name '*.ae' | grep -v '/lib/' | grep -v '/packages/' | grep -v '/ae-help-demo/' | sort | xargs grep -L -e '^// Part of:' -e '^// Run: sh ' -e '^import contrib\.'); do \
+	for src in $$(find examples -name '*.ae' | grep -v '/lib/' | grep -v '/packages/' | sort | xargs grep -L -e '^// Part of:' -e '^// Run: sh ' -e '^// Run: ae [^r]' -e '^// Run: ae run [^ ]*[^e] *$$' -e '^// Run: ae run .* --lib ' -e '^import contrib\.'); do \
 		name=$$(echo $$src | sed 's|examples/||;s|\.ae$$||'); \
 		out_c="$(BUILD_DIR)/win/examples/$$name.c"; \
 		printf "  %-30s " "$$name"; \
