@@ -44,7 +44,7 @@ actor Holder {
     state nothing: int? = none
     state label: string? = "named"
     state counts: int[3]
-    state step: fn = |x: int| -> x + 1
+    state step: fn = | x: int | -> x + 1
 
     receive {
         Connect(next: n) -> {

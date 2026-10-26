@@ -30,7 +30,7 @@ strings_round(n: int) {
     xs[0] = "built ${n}"
     xs[1] = "literal"
     xs[2] = "and ${n + 1}"
-    xs[2] = "replaced ${n}"    // the store releases the one it replaces
+    xs[2] = "replaced ${n}" // the store releases the one it replaces
     check(xs[0] == "built ${n}", "an element keeps its string until the free")
     free(xs)
 }
