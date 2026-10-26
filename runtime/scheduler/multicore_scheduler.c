@@ -79,11 +79,11 @@ static inline void aether_sched_yield(void) { sched_yield(); }
 extern AETHER_TLS int current_core_id;
 
 // Dropped-message cleanup dependencies, needed from aether_step_safe's
-// death drain onward: the payload free lives in aether_send_message.c,
+// death drain onward: the payload drop lives in aether_send_message.c,
 // the slot decref with the ask/reply machinery below.
-extern void aether_free_message(void* msg_data);
 static void reply_slot_decref(ActorReplySlot* slot);
 static void reply_slot_fail(ActorReplySlot* slot, int why);
+static void release_undelivered(ActorBase* actor, Message* msg);
 /* The reply slot of the ask the stepping actor holds (defined with the
  * ask/reply machinery below), for a death that leaves it unanswered. */
 extern AETHER_TLS void* g_current_reply_slot;
@@ -158,6 +158,17 @@ static inline void aether_step_safe(ActorBase* actor) {
     atomic_fetch_or_explicit(&actor->dead, AETHER_ACTOR_PANICKED, memory_order_release);
     atomic_store_explicit(&actor->active, 0, memory_order_release);
 
+    /* The message its handler was running on (#3142): the release that
+     * follows the handler did not run, so what the message owns and its
+     * payload go here, as a dropped message's do. */
+    if (actor->step_payload) {
+        Message held = {0};
+        held.type = actor->step_type;
+        held.payload_ptr = actor->step_payload;
+        actor->step_payload = NULL;
+        aether_message_drop(actor, &held);
+    }
+
     /* The ask it was handling, if it had not replied (#3151): its asker
      * learns now that no reply is coming, instead of at its timeout. */
     if (g_current_reply_slot) {
@@ -173,9 +184,7 @@ static inline void aether_step_safe(ActorBase* actor) {
     int drained = 0;
     Message _discard;
     while (mailbox_receive(&actor->mailbox, &_discard)) {
-        if (_discard.payload_ptr) aether_free_message(_discard.payload_ptr);
-        if (_discard.zerocopy.owned && _discard.zerocopy.data) free(_discard.zerocopy.data);
-        if (_discard._reply_slot) reply_slot_fail((ActorReplySlot*)_discard._reply_slot, AETHER_ASK_DEAD);
+        release_undelivered(actor, &_discard);
         drained++;
     }
     if (drained > 0) {
@@ -563,9 +572,7 @@ void scheduler_actor_thread_deliver(ActorBase* actor, Message msg) {
         // scheduler_wait() would wait for it forever.
         fprintf(stderr, "aether: out of memory queueing a message for actor %d; "
                         "it is dropped\n", actor->id);
-        if (msg.payload_ptr) aether_free_message(msg.payload_ptr);
-        if (msg.zerocopy.owned && msg.zerocopy.data) free(msg.zerocopy.data);
-        if (msg._reply_slot) reply_slot_fail((ActorReplySlot*)msg._reply_slot, AETHER_ASK_DEAD);
+        release_undelivered(actor, &msg);
         atomic_fetch_add_explicit(&schedulers[0].messages_processed, 1, memory_order_relaxed);
         return;
     }
@@ -624,7 +631,7 @@ static void overflow_append(int target, ActorBase* actor, Message msg) {
 // shutdown. An entry still in one when the thread leaves (its final flush
 // found the target's queue full, with the cores stopping) is dropped and
 // uncounted, as a message for a released actor is.
-static void scheduler_drop_dead_message(Scheduler* sched, Message* msg);
+static void scheduler_drop_dead_message(Scheduler* sched, ActorBase* actor, Message* msg);
 
 static void overflow_release(Scheduler* sched) {
     int dropped = 0;
@@ -633,7 +640,7 @@ static void overflow_release(Scheduler* sched) {
         for (int i = b->head; i < b->head + b->count; i++) {
             ActorBase* actor = b->actors[i];
             if (actor && !actor->auto_process) inflight_leave(actor, 1);
-            scheduler_drop_dead_message(sched, &b->msgs[i]);
+            scheduler_drop_dead_message(sched, actor, &b->msgs[i]);
             dropped++;
         }
         free(b->actors);
@@ -707,7 +714,7 @@ static void overflow_flush(int from_core) {
                     // the mailbox of a released actor, it was never processed,
                     // and scheduler_wait() waited for it.
                     if (!actor->auto_process) inflight_leave(actor, 1);
-                    scheduler_drop_dead_message(&schedulers[from_core], &msg);
+                    scheduler_drop_dead_message(&schedulers[from_core], actor, &msg);
                     flushed++;
                 } else if (ac == from_core && !actor->auto_process) {
                     if (mailbox_send(&actor->mailbox, msg)) {
@@ -1335,18 +1342,19 @@ uint64_t scheduler_released_sends(void) {
     return atomic_load_explicit(&g_released_sends, memory_order_relaxed);
 }
 
-// A message to a dead actor cannot be delivered: release what travels with
-// it (no processed credit: the send is not counted yet on this path). A
-// released target means a send against the release contract.
-static void release_undelivered(Message* msg) {
-    if (msg->payload_ptr) aether_free_message(msg->payload_ptr);
-    if (msg->zerocopy.owned && msg->zerocopy.data) free(msg->zerocopy.data);
+// A message `actor` will not handle: what travels with it is released,
+// what its fields own among it (#3142), and an ask's asker learns that no
+// reply is coming. Any processed credit is the caller's: a message to a dead
+// actor is not counted yet, one taken from its queues is. A released target
+// means a send against the release contract.
+static void release_undelivered(ActorBase* actor, Message* msg) {
+    aether_message_drop(actor, msg);
     if (msg->_reply_slot) reply_slot_fail((ActorReplySlot*)msg->_reply_slot, AETHER_ASK_DEAD);
 }
 
 static void send_to_dead_actor(ActorBase* actor, Message* msg) {
     AETHER_TRACE_EVENT(AE_TRACE_DROP_DEAD, actor ? actor->id : 0, msg->type, msg->sender_id);
-    release_undelivered(msg);
+    release_undelivered(actor, msg);
     if (actor && (atomic_load_explicit(&actor->dead, memory_order_relaxed) & AETHER_ACTOR_RELEASED)) {
         atomic_fetch_add_explicit(&g_released_sends, 1, memory_order_relaxed);
         if (!atomic_flag_test_and_set_explicit(&g_released_send_reported, memory_order_relaxed)) {
@@ -1382,7 +1390,7 @@ static void foreign_send_leave(void) {
 }
 
 static void send_while_stopped(ActorBase* actor, Message* msg) {
-    release_undelivered(msg);
+    release_undelivered(actor, msg);
     atomic_fetch_add_explicit(&g_stopped_sends, 1, memory_order_relaxed);
     if (!atomic_flag_test_and_set_explicit(&g_stopped_send_reported, memory_order_relaxed)) {
         fprintf(stderr, "aether: message type %d sent to actor %d while the scheduler is not "
@@ -1406,8 +1414,9 @@ void scheduler_send_ref(AetherActorRef ref, Message msg) {
         return;
     }
     // The block is another actor's now: the one the reference was taken
-    // from was released.
-    release_undelivered(&msg);
+    // from was released. Its message definitions need not be the
+    // sender's, so the payload alone is freed.
+    release_undelivered(NULL, &msg);
     atomic_fetch_add_explicit(&g_released_sends, 1, memory_order_relaxed);
     if (!atomic_flag_test_and_set_explicit(&g_released_send_reported, memory_order_relaxed)) {
         fprintf(stderr, "aether: message type %d sent to actor %d after its release; "
@@ -1422,9 +1431,7 @@ static void actor_free_now(ActorBase* actor) {
     int drained = 0;
     Message discard;
     while (mailbox_receive(&actor->mailbox, &discard)) {
-        if (discard.payload_ptr) aether_free_message(discard.payload_ptr);
-        if (discard.zerocopy.owned && discard.zerocopy.data) free(discard.zerocopy.data);
-        if (discard._reply_slot) reply_slot_fail((ActorReplySlot*)discard._reply_slot, AETHER_ASK_DEAD);
+        release_undelivered(actor, &discard);
         drained++;
     }
     if (drained > 0) {
@@ -1441,11 +1448,7 @@ static void actor_free_now(ActorBase* actor) {
         Message spill[AETHER_INBOX_RING];
         int got;
         while ((got = actor_inbox_take(ib, spill, AETHER_INBOX_RING)) > 0) {
-            for (int k = 0; k < got; k++) {
-                if (spill[k].payload_ptr) aether_free_message(spill[k].payload_ptr);
-                if (spill[k].zerocopy.owned && spill[k].zerocopy.data) free(spill[k].zerocopy.data);
-                if (spill[k]._reply_slot) reply_slot_fail((ActorReplySlot*)spill[k]._reply_slot, AETHER_ASK_DEAD);
-            }
+            for (int k = 0; k < got; k++) release_undelivered(actor, &spill[k]);
             left += got;
         }
         if (left > 0) {
@@ -1585,15 +1588,13 @@ static inline int has_pending_cross_core(Scheduler* sched) {
 
 // Partitioned scheduler thread with work-stealing fallback for idle cores
 /* A message dropped instead of delivered (its target died mid-flight)
- * still owns its payload and, for asks, a handler-side reply-slot
- * reference. Free both and credit the processed counter: the send was
- * already counted, so without the credit a stream of in-flight
- * messages to a panicking actor leaves sent > processed forever and
- * parks wait_for_idle. */
-static void scheduler_drop_dead_message(Scheduler* sched, Message* msg) {
-    if (msg->payload_ptr) aether_free_message(msg->payload_ptr);
-    if (msg->zerocopy.owned && msg->zerocopy.data) free(msg->zerocopy.data);
-    if (msg->_reply_slot) reply_slot_fail((ActorReplySlot*)msg->_reply_slot, AETHER_ASK_DEAD);
+ * still owns its payload, what its fields own, and, for asks, a
+ * handler-side reply-slot reference. Release them and credit the processed
+ * counter: the send was already counted, so without the credit a stream of
+ * in-flight messages to a panicking actor leaves sent > processed forever
+ * and parks wait_for_idle. */
+static void scheduler_drop_dead_message(Scheduler* sched, ActorBase* actor, Message* msg) {
+    release_undelivered(actor, msg);
     atomic_fetch_add_explicit(&sched->messages_processed, 1, memory_order_relaxed);
 }
 
@@ -1757,7 +1758,7 @@ void* AETHER_HOT scheduler_thread(void* arg) {
             // sent/processed balance never converges (#1301 drain test).
             if (unlikely(atomic_load_explicit(&actor->dead, memory_order_acquire))) {
                 if (!actor->auto_process) inflight_leave(actor, 1);
-                scheduler_drop_dead_message(sched, &msg);
+                scheduler_drop_dead_message(sched, actor, &msg);
                 work_done = 1;
                 continue;
             }
@@ -1841,7 +1842,7 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                 // Dead, or never stepped (no handler): it takes no more
                 // messages, as a send to a dead actor is dropped.
                 inflight_leave(actor, 1);
-                scheduler_drop_dead_message(sched, &sched->coalesce_buffer.messages[k]);
+                scheduler_drop_dead_message(sched, actor, &sched->coalesce_buffer.messages[k]);
             }
             int delivered = placed - i;
             i = run_end - 1;
@@ -2650,6 +2651,8 @@ static int register_actor(ActorBase* actor, int preferred_core);
 // (scheduler_free_core_tables).
 int scheduler_register_actor(ActorBase* actor, int preferred_core) {
     actor->scheduler_owned = 0;
+    actor->release_message = NULL;   // its messages are the caller's (#3142)
+    actor->step_payload = NULL;
     atomic_init(&actor->inbox, NULL);
     atomic_init(&actor->thread_parked, 0);
     return register_actor(actor, preferred_core);
@@ -3342,6 +3345,8 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
 
     actor->alloc_size = actor_size;
     actor->destroy_state = NULL;   // the generated spawn sets it (#2528)
+    actor->release_message = NULL; // and this (#3142)
+    actor->step_payload = NULL;
     /* Published for scheduler_send_ref, which may read a reused block's id
      * from another thread (#2527). */
     __atomic_store_n(&actor->id, atomic_fetch_add(&next_actor_id, 1), __ATOMIC_RELEASE);

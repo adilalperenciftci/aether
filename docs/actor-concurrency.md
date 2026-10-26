@@ -80,7 +80,7 @@ typedef struct {
 } CounterActor;
 ```
 
-The fields, in order: `active`, `id`, `mailbox`, `step`, `thread`, `auto_process`, `assigned_core`, `migrate_to`, `spsc_queue`, `reply_slot`, `step_lock`, `timeout_ns`, `last_activity_ns`, `dead`, `alloc_size`, `destroy_state`, `scheduler_owned`, `inbox`, `thread_parked`, `inflight`. The header comments each one.
+The fields, in order: `active`, `id`, `mailbox`, `step`, `thread`, `auto_process`, `assigned_core`, `migrate_to`, `spsc_queue`, `reply_slot`, `step_lock`, `timeout_ns`, `last_activity_ns`, `step_payload`, `step_type`, `dead`, `alloc_size`, `destroy_state`, `release_message`, `scheduler_owned`, `inbox`, `thread_parked`, `inflight`. The header comments each one.
 
 An actor the compiler generates holds the base as its first member instead, `ActorBase _aether_base;`, followed by its states. So a state can be named like any of these fields (`state id`, `state active`); only a state named `_aether_base` is refused (#3094).
 
@@ -160,13 +160,30 @@ void _aether_step_ActorName(ActorName* self) {
     if (_msg_id >= 0 && _msg_id < 256 && dispatch_table[_msg_id]) {
         goto *dispatch_table[_msg_id];
     }
+    aether_message_drop(&self->_aether_base, &msg);   // no handler for it
     return;
 
     handle_MessageA:
-        // process message
+        self->_aether_base.step_payload = _msg_data;
+        self->_aether_base.step_type = _msg_id;
+        ActorName_handle_MessageA(self, _msg_data);
+        self->_aether_base.step_payload = NULL;
+        _aether_msg_release_MessageA(_msg_data);   // what its fields own
+        aether_free_message(_msg_data);
         return;
 }
 ```
+
+### A message that is not handled
+
+A handled message's fields are released by the step after its handler: `_aether_msg_release_<Msg>` drops what they own (a string the send copied, a closure, a struct that owns), then the payload is freed. A message that is dropped instead is released the same way (#3142). Each program emits one `_aether_release_message(type, payload)`, a switch over its messages that own something, and every spawn stores it in the actor's `release_message`; `aether_message_drop()` calls it and frees the payload. Every drop goes through that function:
+
+- the messages queued to an actor that panicked, or that was released, and the ones sent to it after;
+- a message of a type its receiver has no handler for (its payload was not even freed before);
+- the message a handler panicked on: the step records it in `step_payload` while the handler runs, and the step's panic barrier drops it, since the release after the handler never ran;
+- a message refused because the scheduler is not running, or that could not be queued for lack of memory.
+
+The receiver's own definitions interpret the payload, as its dispatch does, so a message is released as the program that defined it lays it out. A `ptr` field owns nothing (R4), so a buffer sent with `move` and dropped undelivered is not freed: that needs a type that owns a `ptr`, which #3142 tracks. A message sent through a C `AetherActorRef` whose actor was released has only its payload freed, since the block may hold another actor by then, whose definitions need not be the sender's.
 
 ### Asking
 

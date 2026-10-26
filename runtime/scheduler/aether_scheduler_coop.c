@@ -60,19 +60,13 @@ static void coop_free_actor(ActorBase* actor) {
     // Anything still in the mailbox or waiting behind it was sent against the
     // release contract.
     Message discard;
-    while (mailbox_receive(&actor->mailbox, &discard)) {
-        if (discard.payload_ptr) aether_free_message(discard.payload_ptr);
-        if (discard.zerocopy.owned && discard.zerocopy.data) free(discard.zerocopy.data);
-    }
+    while (mailbox_receive(&actor->mailbox, &discard)) aether_message_drop(actor, &discard);
     ActorInbox* ib = atomic_exchange_explicit(&actor->inbox, NULL, memory_order_relaxed);
     if (ib) {
         Message spill[AETHER_INBOX_RING];
         int got;
         while ((got = actor_inbox_take(ib, spill, AETHER_INBOX_RING)) > 0) {
-            for (int k = 0; k < got; k++) {
-                if (spill[k].payload_ptr) aether_free_message(spill[k].payload_ptr);
-                if (spill[k].zerocopy.owned && spill[k].zerocopy.data) free(spill[k].zerocopy.data);
-            }
+            for (int k = 0; k < got; k++) aether_message_drop(actor, &spill[k]);
         }
         free(ib);
     }
@@ -150,8 +144,9 @@ void scheduler_send_ref(AetherActorRef ref, Message msg) {
         scheduler_send_remote(ref.actor, msg, -1);
         return;
     }
-    if (msg.payload_ptr) aether_free_message(msg.payload_ptr);
-    if (msg.zerocopy.owned && msg.zerocopy.data) free(msg.zerocopy.data);
+    // The block is another actor's now, whose message definitions need not
+    // be the sender's: the payload alone is freed.
+    aether_message_drop(NULL, &msg);
     g_coop_released_sends++;
     if (!g_coop_released_send_reported) {
         g_coop_released_send_reported = 1;
@@ -163,8 +158,7 @@ void scheduler_send_ref(AetherActorRef ref, Message msg) {
 static int coop_send_to_dead_actor(ActorBase* actor, Message* msg) {
     int dead = actor ? atomic_load_explicit(&actor->dead, memory_order_relaxed) : 1;
     if (!dead) return 0;
-    if (msg->payload_ptr) aether_free_message(msg->payload_ptr);
-    if (msg->zerocopy.owned && msg->zerocopy.data) free(msg->zerocopy.data);
+    aether_message_drop(actor, msg);
     /* An ask to it gets no reply: its asker learns so at once (#3151). */
     if (msg->_reply_slot) ((ActorReplySlot*)msg->_reply_slot)->failed = AETHER_ASK_DEAD;
     if (dead & AETHER_ACTOR_RELEASED) {
@@ -370,6 +364,8 @@ static int register_actor(ActorBase* actor, int preferred_core);
 // An actor the caller allocated: the scheduler runs it and never frees it.
 int scheduler_register_actor(ActorBase* actor, int preferred_core) {
     actor->scheduler_owned = 0;
+    actor->release_message = NULL;   // its messages are the caller's (#3142)
+    actor->step_payload = NULL;
     return register_actor(actor, preferred_core);
 }
 

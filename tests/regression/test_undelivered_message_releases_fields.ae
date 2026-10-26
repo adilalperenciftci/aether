@@ -1,0 +1,132 @@
+// Regression (#3142): a message dropped instead of handled releases what its
+// fields own, as a handled one does. Its payload was freed and its strings,
+// closures and structs were not: a message queued to an actor that panicked
+// or was released. Neither was freed for one of a type its receiver has no
+// handler for, nor for the one a handler panicked on. Each round below drops
+// messages carrying a fresh string down every such path.
+//
+// The check runs where the heap count is exact (mem.heap_in_use_exact): after
+// a warm-up, a window of rounds must hold the heap exactly steady in some run
+// (mem.steady_growth). Elsewhere the leak gates (valgrind, macOS leaks) cover
+// this program. Strings are built from parameters, because string.concat of
+// two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+extern scheduler_release_actor(a: ptr) @c_import
+extern scheduler_reclaim_released() -> int @c_import
+
+message Note { text: string }
+message Boom {}
+message Ping {}
+message Count {}
+message Total { v: int }
+
+// Dies on Boom: whatever is queued behind it, and whatever is sent after,
+// is dropped.
+actor Fragile {
+    receive {
+        Boom() -> { panic("boom") }
+        Note(text: t) -> { println("unreachable: ${t}") }
+    }
+}
+
+// Dies on the Note it is handling, whose release after the handler never
+// runs: the step barrier drops it.
+actor Brittle {
+    receive {
+        Note(text: t) -> { panic("brittle ${string.length(t)}") }
+    }
+}
+
+// Has no handler for Note.
+actor Deaf {
+    state pings = 0
+    receive {
+        Ping() -> { pings = pings + 1 }
+        Count() -> { reply Total { v: pings } }
+    }
+}
+
+// Takes Notes until it is released with some still queued.
+actor Slow {
+    state seen = 0
+    receive {
+        Note(text: t) -> { seen = seen + string.length(t) }
+    }
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+fn notes(a: ptr, p: string, n: int) {
+    i = 0
+    while i < n {
+        a ! Note { text: string.concat(p, "-note") }
+        i = i + 1
+    }
+}
+
+fn round(p: string) {
+    // Queued behind a panic, and sent after it.
+    f = spawn(Fragile())
+    f ! Boom {}
+    notes(f, p, 10)
+    wait_for_idle()
+    notes(f, p, 10)
+    wait_for_idle()
+    let fp: ptr = f
+    scheduler_release_actor(fp)
+
+    // The one its handler panics on.
+    b = spawn(Brittle())
+    b ! Note { text: string.concat(p, "-last") }
+    wait_for_idle()
+    let bp: ptr = b
+    scheduler_release_actor(bp)
+
+    // A type its receiver has no handler for.
+    d = spawn(Deaf())
+    notes(d, p, 10)
+    d ! Ping {}
+    int pings = d ? Count {}
+    check(pings == 1, "the actor without a Note handler still handles its own messages")
+    let dp: ptr = d
+    scheduler_release_actor(dp)
+
+    // Released with Notes still queued (or handled first: neither leaks).
+    s = spawn(Slow())
+    notes(s, p, 20)
+    let sp: ptr = s
+    scheduler_release_actor(sp)
+    wait_for_idle()
+}
+
+fn window(p: string, n: int) {
+    i = 0
+    while i < n {
+        round(p)
+        i = i + 1
+    }
+}
+
+main() {
+    window("a", 20)
+    check(scheduler_reclaim_released() == 0, "released actors still retired after the warm-up")
+    if !mem.heap_in_use_exact() {
+        println("OK") // count not exact here: the leak gates check this program
+        return
+    }
+    grown = mem.steady_growth(|| {
+            window("a", 20)
+            check(scheduler_reclaim_released() == 0, "released actors still retired after a window")
+        }, 5)
+    check(grown == 0, "dropped messages grew the heap by ${grown} bytes in every run")
+    println("OK")
+}

@@ -96,6 +96,20 @@ void aether_free_message(void* msg_data) {
     free(msg_data);
 }
 
+void aether_message_drop(ActorBase* target, Message* msg) {
+    if (msg->payload_ptr) {
+        if (target && target->release_message)
+            target->release_message(msg->type, msg->payload_ptr);
+        aether_free_message(msg->payload_ptr);
+        msg->payload_ptr = NULL;
+    }
+    if (msg->zerocopy.owned && msg->zerocopy.data) {
+        free(msg->zerocopy.data);
+        msg->zerocopy.data = NULL;
+        msg->zerocopy.owned = 0;
+    }
+}
+
 // The heap copy of a typed message's payload, as the Message a send carries.
 static Message payload_message(ActorBase* actor, void* message_data, size_t message_size) {
     // Always use heap allocation for type-safe messages.
