@@ -59,12 +59,27 @@ void aether_sleep_ms(int ms) {
 /* UTF-8 console code pages, so a program prints Unicode correctly, and
  * stdout and stderr in binary mode, so "\n" is not written as "\r\n": a
  * program's output, redirected to a file or piped on, is byte for byte what
- * it printed. */
+ * it printed. A console stream also gets virtual terminal processing, so
+ * the ANSI colour escapes a program writes to a terminal (std.spec's, when
+ * io.is_terminal says stdout is one, #3180) are rendered rather than shown
+ * as text. A pipe or a file has no console mode and is left as it is. */
+#ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
+#define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x0004
+#endif
+static void aether_console_enable_vt(DWORD which) {
+    HANDLE h = GetStdHandle(which);
+    DWORD mode = 0;
+    if (h == NULL || h == INVALID_HANDLE_VALUE || !GetConsoleMode(h, &mode)) return;
+    SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+}
+
 void aether_console_init(void) {
     SetConsoleOutputCP(65001);   // CP_UTF8
     SetConsoleCP(65001);
     _setmode(_fileno(stdout), _O_BINARY);
     _setmode(_fileno(stderr), _O_BINARY);
+    aether_console_enable_vt(STD_OUTPUT_HANDLE);
+    aether_console_enable_vt(STD_ERROR_HANDLE);
 }
 
 /* The monotonic clock behind clock_ns() and actor timeouts. The generated

@@ -42,7 +42,7 @@ header comment is the authoritative description.
 | `std.http1` | Pure-Aether HTTP/1.1 response reader (RFC 9112). | 14 | [guide](../std/http1/README.md) · [source](../std/http1/module.ae) |
 | `std.intarr` | Fixed-size packed-int buffer. | 15 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
 | `std.intmap` | Hash map from `long` keys to `long` values, for integer-keyed counting and lookup. | 12 | [guide](../std/intmap/README.md) · [source](../std/intmap/module.ae) |
-| `std.io` | Console output, whole-file reads and writes, file descriptors, environment variables. | 44 | [full section](#io-stdio) |
+| `std.io` | Console output, whole-file reads and writes, file descriptors, environment variables. | 46 | [full section](#io-stdio) |
 | `std.ipc` | Child-to-parent back-channel for processes started by `std.os`. | 4 | [guide](../std/ipc/README.md) · [source](../std/ipc/module.ae) |
 | `std.json` | JSON parsing, building and serialisation. | 51 | [full section](#json-stdjson) |
 | `std.jsonpath` | RFC 9535 JSONPath queries over parsed JSON, with a reusable compiled path. | 10 | [guide](../std/jsonpath/README.md) · [source](../std/jsonpath/module.ae) |
@@ -3538,6 +3538,7 @@ main() {
 **Unbuffered fd writes (crash-trace use case):**
 - `io.stderr_write(data)` → `int` - Write `data` to fd 2 directly (length computed internally with `string.length`), bypassing stdio buffering. Returns the byte count actually written, or -1 on error. Loops on partial writes; retries `EINTR` on POSIX. Reach for this when output must reach the terminal / pipe before the process aborts, `println` and `io.print` are line-buffered on tty and block-buffered when piped, so the last few lines reliably get lost during a crash.
 - `io.stdout_write(data)` → `int` - Same shape as `stderr_write` but writes to fd 1. Useful for shell-pipe-friendly tools that need each record flushed before the next stage reads.
+- `io.is_terminal(fd)` → `bool` - Whether `fd` is a terminal a person reads (a console on Windows), not a pipe, a file or the null device. `io.is_terminal(1)` before colouring stdout; honour `NO_COLOR` and `FORCE_COLOR` too, as std.spec does. False for a descriptor that is not open, and in a build without a filesystem.
 
 **File-descriptor lifecycle and bulk fd I/O:**
 - `io.fd_open_read(path)` → `(int, string)` - Open `path` for reading (POSIX `O_RDONLY` / Win `_O_RDONLY | _O_BINARY`). Returns `(fd, "")` on success, `(-1, error)` on failure.

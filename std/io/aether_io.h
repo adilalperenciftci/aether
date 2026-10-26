@@ -45,6 +45,10 @@ int io_unsetenv_raw(const char* name);
 int io_stderr_write_raw(const char* data, int length);
 int io_stdout_write_raw(const char* data, int length);
 
+// 1 when fd is a terminal (a console on Windows), 0 otherwise or for a
+// descriptor that is not open. Used to decide whether to colour output.
+int io_is_terminal_raw(int fd);
+
 // Error reporting off the current errno. Both must be called
 // immediately after the failing libc call. perror prints
 // "name: <message>\n" to stderr; errno_message returns the message

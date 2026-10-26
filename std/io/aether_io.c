@@ -44,6 +44,9 @@ _tuple_ptrintstr_io io_fd_read_n_tuple(int fd, int n) { (void)fd; (void)n; _tupl
 int io_fd_read_into_raw(int fd, void* buf, int length) { (void)fd; (void)buf; (void)length; return -1; }
 _tuple_ptrstr_io   io_fd_read_line_tuple(int fd) { (void)fd; _tuple_ptrstr_io t; t._0 = NULL; t._1 = "filesystem disabled"; return t; }
 _tuple_ptrboolstr_io io_fd_read_line_status_tuple(int fd) { (void)fd; _tuple_ptrboolstr_io t; t._0 = NULL; t._1 = 0; t._2 = "filesystem disabled"; return t; }
+/* No descriptor layer in this build (the fd calls above are stubs too), so
+ * nothing is a terminal (#3180). */
+int io_is_terminal_raw(int fd) { (void)fd; return 0; }
 #else
 
 #include <stdio.h>
@@ -528,5 +531,25 @@ _tuple_ptrstr_io io_fd_read_line_tuple(int fd) {
     return out;
 }
 
-#endif // AETHER_HAS_FILESYSTEM
+/* Whether fd is a terminal (#3180), the test behind coloured output. On
+ * Windows a terminal is a console: _isatty is also true for the NUL device,
+ * which is no terminal, so the test is whether the descriptor's handle has
+ * a console mode. */
+#ifdef _WIN32
+#include <windows.h>
+int io_is_terminal_raw(int fd) {
+    if (fd < 0) return 0;
+    intptr_t h = _get_osfhandle(fd);
+    if (h == -1) return 0;
+    DWORD mode = 0;
+    return GetConsoleMode((HANDLE)h, &mode) ? 1 : 0;
+}
+#else
+#include <unistd.h>
+int io_is_terminal_raw(int fd) {
+    if (fd < 0) return 0;
+    return isatty(fd) ? 1 : 0;
+}
+#endif
 
+#endif // AETHER_HAS_FILESYSTEM
