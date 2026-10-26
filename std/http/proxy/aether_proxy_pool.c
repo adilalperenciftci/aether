@@ -320,9 +320,20 @@ const char* aether_proxy_upstream_add(AetherProxyPool* pool,
     }
 
     pool->upstreams[pool->upstream_count++] = u;
+    if (strncmp(base_url, "https://", 8) == 0) atomic_fetch_add(&pool->tls_upstreams, 1);
 
     pthread_mutex_unlock(&pool->lock);
     return "";
+}
+
+/* Every upstream of the mount plain HTTP, which is what the proxy event loop
+ * can dial: it has no TLS client, and a request it sent to an https upstream
+ * had its connection closed with nothing written (#3231). The loop serves a
+ * mount with an https upstream on the per-connection path instead, whose
+ * blocking client speaks TLS. */
+int aether_proxy_upstreams_all_plain(const AetherProxyOpts* opts) {
+    if (!opts || !opts->pool) return 1;
+    return atomic_load(&opts->pool->tls_upstreams) == 0;
 }
 
 const char* aether_proxy_upstream_remove(AetherProxyPool* pool,
@@ -332,6 +343,7 @@ const char* aether_proxy_upstream_remove(AetherProxyPool* pool,
     pthread_mutex_lock(&pool->lock);
     for (int i = 0; i < pool->upstream_count; i++) {
         if (strcmp(pool->upstreams[i]->base_url, base_url) == 0) {
+            if (strncmp(base_url, "https://", 8) == 0) atomic_fetch_sub(&pool->tls_upstreams, 1);
             upstream_free(pool->upstreams[i]);
             for (int j = i; j < pool->upstream_count - 1; j++) {
                 pool->upstreams[j] = pool->upstreams[j + 1];

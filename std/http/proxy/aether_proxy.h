@@ -83,6 +83,11 @@ const char* aether_proxy_upstream_add(AetherProxyPool* pool,
 const char* aether_proxy_upstream_remove(AetherProxyPool* pool,
                                          const char* base_url);
 
+/* 1 when every upstream of the pool `opts` is mounted with is plain HTTP:
+ * what the proxy event loop dials itself (#3231). A mount with an https
+ * upstream is served on the per-connection path, whose client speaks TLS. */
+int aether_proxy_upstreams_all_plain(const AetherProxyOpts* opts);
+
 /* Active drain mode. After `drain` is called, the LB picker
  * skips the upstream for new requests; in-flight requests
  * complete naturally. `undrain` reverses the flag.

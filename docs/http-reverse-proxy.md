@@ -366,6 +366,10 @@ configuration to do so:
 - a request body larger than the mount's body cap, which the worker path
   streams and the proxy refuses unread, and a head that has not ended in
   16 KiB, which it closes on: the driver never buffers more (#3237)
+- a server whose first proxy mount has an https upstream: the driver dials
+  plain HTTP only, and the worker path's client speaks TLS. An https
+  upstream added while the server runs moves it there from the next
+  request, and a retry that reaches one hands its request over (#3231)
 
 A request the proxy does not own, a health endpoint, an admin route, or
 anything another middleware answers, is handed to the general server path

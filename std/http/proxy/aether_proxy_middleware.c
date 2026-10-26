@@ -694,6 +694,12 @@ int aether_proxy_exchange_resume(AetherProxyExchange* px, int64_t elapsed_ms) {
     return px_classify(px, elapsed_ms);
 }
 
+void aether_proxy_exchange_abandon(AetherProxyExchange* px) {
+    if (!px || !px->u) return;
+    aether_proxy_inflight_dec(px->u);
+    px->u = NULL;
+}
+
 static int px_classify(AetherProxyExchange* px, int64_t elapsed_ms) {
     AetherProxyOpts* opts = px->opts;
     HttpRequest* req = px->req;

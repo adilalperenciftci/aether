@@ -526,6 +526,7 @@ static int ev_next_timeout_ms(EvDriver* d, int cap_ms) {
 static void ev_arm_deadline(EvDriver* d, EvConn* c);
 static int  ev_expire(EvDriver* d, EvConn* c);
 static int  ev_hand_back(EvDriver* d, EvConn* c);
+static int  ev_hand_to_tls(EvDriver* d, EvConn* c);
 static int  ev_watch_upstream(EvDriver* d, EvConn* c);
 static void ev_lend_rxbuf(EvConn* c);
 static int  ev_respond_from(EvDriver* d, EvConn* c);
@@ -941,7 +942,7 @@ static int ev_begin_retry_ex(EvDriver* d, EvConn* c, int next_addr) {
     int port = 0, use_tls = 0;
     if (!url || !parse_url_alloc(url, host, sizeof(host), &port, &path, &use_tls))
         return -1;
-    if (use_tls) { free(path); return -1; }
+    if (use_tls) { free(path); return ev_hand_to_tls(d, c); }   /* #3231 */
 
     int fd = next_addr ? http_upstream_redial(host, port, &c->up)
                        : http_upstream_acquire(host, port, &c->up);
@@ -1035,7 +1036,7 @@ static int ev_hand_back(EvDriver* d, EvConn* c) {
      * count of responses this driver sent on it, which the server's
      * keep_alive_max goes on counting from (#3229). */
     if (http_server_adopt_request(d->loop->server, fd, ssl, NULL, NULL, 0,
-                                  c->requests_served, c->in, (int)c->in_len) != 0)
+                                  c->requests_served, 0, c->in, (int)c->in_len) != 0)
         ev_release_failed(fd, ssl);
     return -1;                   /* finished with, as far as this driver goes */
 }
@@ -1045,12 +1046,13 @@ static int ev_hand_back(EvDriver* d, EvConn* c) {
  * (#3214): the worker path goes on from the middleware after the mount, with
  * the request as the chain left it (http_server_adopt_request). Handing back
  * the bytes instead would run the chain on it twice: a rate limiter would
- * count it twice. What was read past this request goes with it. */
-static int ev_hand_over(EvDriver* d, EvConn* c) {
+ * count it twice. What was read past this request goes with it. With
+ * `at_proxy` 1 the worker path goes on from the mount itself (#3231). */
+static int ev_hand_over_from(EvDriver* d, EvConn* c, int at_proxy) {
     void* ssl = NULL;
     int fd = ev_release_client(d, c, &ssl);
     if (http_server_adopt_request(d->loop->server, fd, ssl, c->req, c->res,
-                                  c->t_start_us, c->requests_served,
+                                  c->t_start_us, c->requests_served, at_proxy,
                                   c->in + c->in_total,
                                   (int)(c->in_len - c->in_total)) == 0) {
         c->req = NULL;           /* the worker path's now, and done with */
@@ -1059,6 +1061,25 @@ static int ev_hand_over(EvDriver* d, EvConn* c) {
         ev_release_failed(fd, ssl);
     }
     return -1;
+}
+
+static int ev_hand_over(EvDriver* d, EvConn* c) {
+    return ev_hand_over_from(d, c, 0);
+}
+
+/* The proxy picked an https upstream, which this driver cannot dial: it has
+ * no TLS client, and it used to close the client's connection with nothing
+ * written (#3231). A server with one is not served here at all
+ * (http_server_evloop_serves); one added while this request was on its way,
+ * or picked by a retry, lands here. The pick goes back, and the request goes
+ * to the worker path, whose client speaks TLS: from the mount itself when
+ * the middleware ahead of it already ran here, else with its bytes, as if
+ * this driver had never read it. */
+static int ev_hand_to_tls(EvDriver* d, EvConn* c) {
+    aether_proxy_exchange_abandon(&c->px);
+    ev_release_attempt(c);
+    if (!c->before_proxy) return ev_hand_back(d, c);
+    return ev_hand_over_from(d, c, 1);
 }
 
 /* The proxy's configured upstream timeout, as a moment to give up. A proxy
@@ -1243,8 +1264,9 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
     int port = 0, use_tls = 0;
     if (!url || !parse_url_alloc(url, host, sizeof(host), &port, &path, &use_tls))
         return -1;
-    /* this driver is only mounted on plain HTTP */
-    if (use_tls) { free(path); return -1; }
+    /* this driver dials plain HTTP only: an https upstream is the worker
+     * path's (#3231) */
+    if (use_tls) { free(path); return ev_hand_to_tls(d, c); }   /* #3231 */
 
     int fd = http_upstream_acquire(host, port, &c->up);
     if (fd < 0) {

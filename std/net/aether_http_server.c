@@ -3122,6 +3122,9 @@ int http_server_evloop_serves(HttpServer* server) {
     if (!server) return 0;
     HttpMiddlewareNode* proxy = server_proxy_node(server);
     if (!proxy) return 0;
+    /* The loop dials plain HTTP only; a mount with an https upstream is the
+     * worker path's, whose client speaks TLS (#3231). */
+    if (!aether_proxy_upstreams_all_plain((const AetherProxyOpts*)proxy->user_data)) return 0;
     for (HttpMiddlewareNode* n = server->middleware_chain; n != proxy; n = n->next)
         if (!n->loop_safe) return 0;
     for (struct HttpRequestHookNode* h = server->request_hook_chain; h; h = h->next)
@@ -6157,7 +6160,7 @@ int http_server_adopt_tls_connection(HttpServer* server, int client_fd, void* ss
  * middleware after the mount instead, with the request as it stands. */
 int http_server_adopt_request(HttpServer* server, int client_fd, void* ssl,
                               HttpRequest* req, HttpServerResponse* res,
-                              int64_t t_start_us, int requests_served,
+                              int64_t t_start_us, int requests_served, int at_proxy,
                               const char* prebuffered, int prebuffered_len) {
     if (!server || client_fd < 0 || (!req) != (!res)) return -1;
     HttpMiddlewareNode* proxy = server_proxy_node(server);
@@ -6169,7 +6172,9 @@ int http_server_adopt_request(HttpServer* server, int client_fd, void* ssl,
     if (req) {
         conn->pending_req = req;
         conn->pending_res = res;
-        conn->pending_from = proxy ? proxy->next : NULL;
+        /* From the mount itself when the loop could not send the request
+         * (an https upstream, #3231), else after it. */
+        conn->pending_from = proxy ? (at_proxy ? proxy : proxy->next) : NULL;
         conn->pending_t_start = t_start_us;
     }
     adopt_conn_serve(server, conn);

@@ -1100,10 +1100,12 @@ int http_server_keep_alive_lines(HttpServer* server, HttpRequest* req, int statu
 // `res` NULL it takes the connection with nothing of a request run, the
 // bytes read being all of `prebuffered`. `requests_served` is the responses
 // the loop sent on the connection, which the keep-alive policy goes on
-// counting from (#3229).
+// counting from (#3229). With `at_proxy` 1 the worker path goes on from the
+// mount itself instead, which then sends the request: the loop could not
+// (an https upstream, #3231).
 int http_server_adopt_request(HttpServer* server, int client_fd, void* ssl,
                               HttpRequest* req, HttpServerResponse* res,
-                              int64_t t_start_us, int requests_served,
+                              int64_t t_start_us, int requests_served, int at_proxy,
                               const char* prebuffered, int prebuffered_len);
 // The connections the proxy event loop has taken since the server started:
 // 0 when it runs none (Windows, wasi, or a server it does not serve). For

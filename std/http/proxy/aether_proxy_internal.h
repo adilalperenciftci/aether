@@ -139,6 +139,10 @@ struct AetherProxyPool {
     int    upstream_count;
     int    upstream_cap;
     _Atomic int rr_cursor;            /* RR doesn't need the lock */
+    /* How many upstreams are https. The proxy event loop dials plain HTTP
+     * only, so it reads this, without the lock, for every request it takes
+     * (aether_proxy_upstreams_all_plain, #3231). */
+    _Atomic int tls_upstreams;
 
     /* Health-check thread (one per pool — see aether_proxy_health.c). */
     int             hc_started;
@@ -338,6 +342,12 @@ int aether_proxy_exchange_begin(AetherProxyExchange* px,
                                 void* user_data,
                                 struct HttpArena* arena);
 int aether_proxy_exchange_resume(AetherProxyExchange* px, int64_t elapsed_ms);
+
+/* An exchange given up before its attempt was sent, by a driver that cannot
+ * send it (the proxy event loop and an https upstream, #3231): the pick's
+ * in-flight count goes back and nothing is charged to the upstream. The
+ * caller frees `outbound` and `upstream_url`, as after a send. */
+void aether_proxy_exchange_abandon(AetherProxyExchange* px);
 
 /* ---- answering without copying the response (#1758) ---------------------
  *

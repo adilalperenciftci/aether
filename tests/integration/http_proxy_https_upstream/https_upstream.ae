@@ -1,0 +1,207 @@
+// A proxy to an https upstream answers on Linux and macOS as it does
+// elsewhere (#3231).
+//
+// The proxy event loop dials plain HTTP only: it has no TLS client. A server
+// whose proxy mount had an https upstream was served by it all the same, and
+// it closed each client connection with nothing written. The worker path
+// proxies to an https upstream with the blocking client and answers what
+// that gives, the proxy's 502 when the upstream cannot be reached.
+//
+// The https upstream here is a port nothing listens on (a listener's, closed
+// before the requests), so the answer is the proxy's 502 on every platform.
+// One gateway has it from the start; another starts with a plain upstream,
+// which the loop serves, and has the https one added while it runs: of its
+// next two requests one reaches each upstream. Every server listens on
+// 127.0.0.1 and a port the kernel picks.
+
+import std.http
+import std.http.proxy
+import std.os
+import std.string
+import std.tcp
+
+extern exit(code: int)
+extern http_server_evloop_connections(server: ptr) -> int
+
+handle_up(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "up")
+}
+
+// An upstream that, while a request is on its way, adds the https upstream
+// the request names (X-Add) to the gateway's pool, `pool`, and answers 503,
+// so the proxy retries with that one in the pool.
+handle_add(req: ptr, res: ptr, pool: ptr) {
+    url = http.get_header(req, "X-Add")
+    if url != null {
+        _err = proxy.upstream_add(pool, url, 1)
+    }
+    http.response_set_status(res, 503)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "busy")
+}
+
+start(server: ptr) -> int {
+    if http.server_bind(server, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    err = http.server_start_background(server)
+    if err != "" {
+        println("FAIL: ${err}")
+        exit(1)
+    }
+    return http.server_port(server)
+}
+
+need(label: string, err: string) {
+    if err != "" {
+        println("FAIL: ${label}: ${err}")
+        exit(1)
+    }
+}
+
+// A port nothing listens on: a listener's, closed.
+closed_port() -> int {
+    server, err = tcp.listen_on("127.0.0.1", 0)
+    need("listen", err)
+    port = tcp.server_port(server)
+    tcp.server_close(server)
+    return port
+}
+
+// The status of `GET /p` through the gateway on `port`, with `extra` header
+// lines, and the proxy's error header when it set one; "(no answer)" when
+// the connection closed with nothing, or nothing came in ten seconds.
+status_with(port: int, extra: string) -> string {
+    sock, cerr = tcp.connect("127.0.0.1", port)
+    if cerr != "" {
+        return "connect failed"
+    }
+    tcp.write(sock, "GET /p HTTP/1.1\r\nHost: x\r\n${extra}Connection: close\r\n\r\n")
+    wire = ""
+    done = 0
+    tries = 0
+    while done == 0 && tries < 100 {
+        ready, _perr = tcp.poll(sock, 100)
+        if ready {
+            chunk, rerr = tcp.read(sock, 4096)
+            if rerr != "" || string.length(chunk) == 0 {
+                done = 1
+            } else {
+                wire = string.concat(wire, chunk)
+            }
+        }
+        tries = tries + 1
+    }
+    tcp.close(sock)
+    if string.starts_with(wire, "HTTP/1.1 ") != 1 {
+        return "(no answer)"
+    }
+    out = string.substring(wire, 9, 12)
+    at = string.index_of(wire, "\r\nX-Aether-Proxy-Error: ")
+    if at >= 0 {
+        end = string.index_of_from(wire, "\r\n", at + 2)
+        out = "${out} [${string.substring(wire, at + 24, end)}]"
+    }
+    return out
+}
+
+status_of(port: int) -> string {
+    return status_with(port, "")
+}
+
+expect(label: string, got: string, want: string) -> int {
+    if got != want {
+        println("  FAIL ${label}: got '${got}', expected '${want}'")
+        return 1
+    }
+    println("  PASS ${label}")
+    return 0
+}
+
+main() {
+    println("=== a proxy to an https upstream answers on the event loop's platforms too (#3231) ===")
+    upstream = http.server_create(0)
+    http.server_set_host(upstream, "127.0.0.1")
+    http.server_get(upstream, "/p", handle_up, 0)
+    plain_url = "http://127.0.0.1:${start(upstream)}"
+    tls_url = "https://127.0.0.1:${closed_port()}"
+
+    tls_only = http.server_create(0)
+    http.server_set_host(tls_only, "127.0.0.1")
+    need("mount", proxy.mount_simple(tls_only, "/", tls_url, 5))
+
+    mixed = http.server_create(0)
+    http.server_set_host(mixed, "127.0.0.1")
+    pool = proxy.upstream_pool_new("round_robin", 5, 0, 0)
+    if pool == 0 {
+        println("FAIL: upstream_pool_new")
+        exit(1)
+    }
+    need("upstream_add", proxy.upstream_add(pool, plain_url, 1))
+    opts = proxy.opts_new()
+    need("mount", proxy.mount(mixed, "/", pool, opts))
+
+    // A gateway whose only upstream answers 503 and adds the https one to
+    // the pool while the request is on its way: the proxy's retries reach it
+    // in the middle of the exchange.
+    busy = http.server_create(0)
+    http.server_set_host(busy, "127.0.0.1")
+    late = http.server_create(0)
+    http.server_set_host(late, "127.0.0.1")
+    late_pool = proxy.upstream_pool_new("round_robin", 5, 0, 0)
+    if late_pool == 0 {
+        println("FAIL: upstream_pool_new")
+        exit(1)
+    }
+    http.server_get(busy, "/p", handle_add, late_pool)
+    need("upstream_add", proxy.upstream_add(late_pool, "http://127.0.0.1:${start(busy)}", 1))
+    late_opts = proxy.opts_new()
+    need("retry policy", proxy.opts_set_retry_policy(late_opts, 3, 1))
+    need("mount", proxy.mount(late, "/", late_pool, late_opts))
+
+    tls_port = start(tls_only)
+    mixed_port = start(mixed)
+    late_port = start(late)
+    sleep(200)
+
+    bad = 0
+    bad = bad + expect("an https upstream that cannot be reached", status_of(tls_port), "502 [upstream_transport]")
+    bad = bad + expect("a plain upstream", status_of(mixed_port), "200")
+    need("upstream_add", proxy.upstream_add(pool, tls_url, 1))
+    first = status_of(mixed_port)
+    second = status_of(mixed_port)
+    both = "${first}, ${second}"
+    if first > second {
+        both = "${second}, ${first}"
+    }
+    bad = bad + expect("with an https upstream added, one request reaches each", both, "200, 502 [upstream_transport]")
+    // Whichever upstream the last retry reaches, the client gets the
+    // proxy's answer, not a closed connection.
+    late_got = status_with(late_port, "X-Add: ${tls_url}\r\n")
+    answered = "no"
+    if string.starts_with(late_got, "5") == 1 {
+        answered = "yes"
+    }
+    if answered != "yes" {
+        println("  (the answer was '${late_got}')")
+    }
+    bad = bad + expect("an https upstream reached by a retry is answered", answered, "yes")
+    if os.platform() != "windows" {
+        bad = bad + expect("the event loop does not serve the https-only gateway",
+            "${http_server_evloop_connections(tls_only)}", "0")
+    }
+
+    http.server_stop(late)
+    http.server_stop(busy)
+    http.server_stop(mixed)
+    http.server_stop(tls_only)
+    http.server_stop(upstream)
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}
