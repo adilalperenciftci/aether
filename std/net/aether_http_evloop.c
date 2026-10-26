@@ -706,7 +706,11 @@ static int ev_step_read_request(EvDriver* d, EvConn* c) {
                 c->t_start_us = http_server_clock_us();
             size_t total = 0;
             int complete = ev_request_complete(c, &total);
-            if (complete < 0) return -1;         /* framing it cannot resolve */
+            /* Framing this driver cannot resolve: the worker path has the
+             * answer for it (a 400 for a length that is no length), so the
+             * connection goes there with the bytes read, rather than being
+             * closed with nothing written (#3233). */
+            if (complete < 0) return ev_hand_back(d, c);
             if (complete) {                      /* a whole request is here */
                 c->in_total = total;
                 return 1;
@@ -1126,20 +1130,24 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
         http_arena_reset(&c->arena);
     }
 
+    /* A request that does not parse goes to the worker path with the bytes
+     * read, which answers it 400 (or 414 for a request line too long to
+     * hold), as it answers every request it cannot parse; closing the
+     * connection here left the client with no status at all (#3233). */
     if (c->before_proxy) {
         /* A middleware may change the request it is given, by the contract
          * the worker path gives it: a request of its own, whose strings are
-         * each a malloc. use_real_ip replaces its peer and its X-Real-IP,
-         * growing the header arrays to fit; use_rewrite frees its path and
-         * sets another. Arena strings handed to free(), arrays shrunk to fit
-         * and then reused by the next parse, or a replaced peer reported by
-         * the connection's next request would each break that, so this
-         * request is parsed outside the arena into an object of its own,
-         * which goes with it (ev_conn_reset_request). */
+         * each a malloc. use_real_ip replaces its peer; a program's middleware
+         * may set any field. A peer replaced on one request and reported by
+         * the connection's next, or a program's edit of an arena string,
+         * would break that, so this request is parsed outside the arena into
+         * an object of its own, which goes with it (ev_conn_reset_request).
+         * std's own edits go through the server's request edits, which keep
+         * an arena-backed or reused request whole (#3234). */
         if (c->req) http_request_free(c->req);
         c->req = (HttpRequest*)calloc(1, sizeof(HttpRequest));
         if (!c->req) return -1;
-        if (!ev_parse_request(c, NULL)) return -1;
+        if (!ev_parse_request(c, NULL)) return ev_hand_back(d, c);
         http_request_set_conn_meta(c->req, &c->meta);
     } else {
         if (!c->req) {
@@ -1149,7 +1157,7 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
              * without touching these. */
             http_request_set_conn_meta(c->req, &c->meta);
         }
-        if (!ev_parse_request(c, c->arena_ready ? &c->arena : NULL)) return -1;
+        if (!ev_parse_request(c, c->arena_ready ? &c->arena : NULL)) return ev_hand_back(d, c);
     }
 
     if (!c->res) {

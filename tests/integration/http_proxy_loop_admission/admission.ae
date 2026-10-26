@@ -1,0 +1,189 @@
+// A request the proxy event loop cannot take as it is gets the worker path's
+// answer (#3233).
+//
+// On Linux and macOS a server whose first middleware is a std.http.proxy
+// mount reads its plain-HTTP requests on the proxy event loop. Whatever the
+// worker path refuses, or frames some other way, has to come out the same
+// on the loop, and the loop leaves such a request to the worker path rather
+// than keep a second copy of its rules. Here each request shape goes, in a
+// write of its own on a connection of its own, to a bare proxy (the event
+// loop on Linux and macOS) and to the same proxy behind a program's
+// middleware (the worker path everywhere), and both answers must be the
+// one expected: the status, the body, and whether the server then closed.
+// Every server listens on 127.0.0.1 and a port the kernel picks.
+
+import std.http
+import std.http.proxy
+import std.string
+import std.tcp
+
+extern exit(code: int)
+
+// What reached the upstream: the method, the path, the body's length and
+// its last bytes.
+handle_echo(req: ptr, res: ptr, ud: ptr) {
+    body = http.request_body(req)
+    n = string.length(body)
+    tail = body
+    if n > 8 {
+        tail = string.substring(body, n - 8, n)
+    }
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "up ${http.request_method(req)} body=${n} tail=${tail}")
+}
+
+@c_callback mw_pass(req: ptr, res: ptr, ud: ptr) -> int {
+    return 1
+}
+
+start(server: ptr) -> int {
+    if http.server_bind(server, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    err = http.server_start_background(server)
+    if err != "" {
+        println("FAIL: ${err}")
+        exit(1)
+    }
+    return http.server_port(server)
+}
+
+need(label: string, err: string) {
+    if err != "" {
+        println("FAIL: ${label}: ${err}")
+        exit(1)
+    }
+}
+
+// A proxy of "/" to `up_url` with a 64 KB body cap; `worker` 1 puts a
+// program's middleware ahead of it.
+gateway(up_url: string, worker: int) -> ptr {
+    s = http.server_create(0)
+    http.server_set_host(s, "127.0.0.1")
+    if worker == 1 {
+        http.server_use_middleware(s, mw_pass, 0)
+    }
+    pool = proxy.upstream_pool_new("round_robin", 5, 0, 0)
+    if pool == 0 {
+        println("FAIL: upstream_pool_new")
+        exit(1)
+    }
+    need("upstream_add", proxy.upstream_add(pool, up_url, 1))
+    opts = proxy.opts_new()
+    need("opts_set_body_cap", proxy.opts_set_body_cap(opts, 65536))
+    need("mount", proxy.mount(s, "/", pool, opts))
+    return s
+}
+
+// The value of `name` in a response head, "" when it has none.
+head_value(head: string, name: string) -> string {
+    at = string.index_of(head, "\r\n${name}: ")
+    if at < 0 {
+        return ""
+    }
+    from = at + string.length(name) + 4
+    end = string.index_of_from(head, "\r\n", from)
+    if end < 0 {
+        return ""
+    }
+    return string.substring(head, from, end)
+}
+
+// `raw`, written on a connection of its own; the first response as
+// "<status> <body>" ("(no answer)" when none came in five seconds), then
+// "closed" when the server closed the connection after it, "open" when it
+// had not a second later.
+probe(port: int, raw: string) -> string {
+    sock, cerr = tcp.connect("127.0.0.1", port)
+    if cerr != "" {
+        return "connect failed"
+    }
+    tcp.write(sock, raw)
+    wire = ""
+    state = "open"
+    answer = "(no answer)"
+    idle = 0
+    waited = 0
+    while state == "open" && waited < 50 && (answer == "(no answer)" || idle < 10) {
+        ready, _perr = tcp.poll(sock, 100)
+        if ready {
+            chunk, rerr = tcp.read(sock, 65536)
+            if rerr != "" || string.length(chunk) == 0 {
+                state = "closed"
+            } else {
+                wire = string.concat(wire, chunk)
+                idle = 0
+            }
+        } else {
+            idle = idle + 1
+        }
+        waited = waited + 1
+        hdr_end = string.index_of(wire, "\r\n\r\n")
+        if answer == "(no answer)" && hdr_end >= 0 {
+            head = string.substring(wire, 0, hdr_end + 2)
+            n = string.get_int(head_value(head, "Content-Length"))
+            if string.length(wire) >= hdr_end + 4 + n {
+                status = string.substring(head, 9, 12)
+                answer = "${status} ${string.substring(wire, hdr_end + 4, hdr_end + 4 + n)}"
+            }
+        }
+    }
+    tcp.close(sock)
+    return "${answer} ${state}"
+}
+
+// The same request to both gateways, and the answer expected of both.
+both(label: string, ports: int[], raw: string, want: string) -> int {
+    bad = 0
+    names = ["event loop", "worker path"]
+    g = 0
+    while g < 2 {
+        got = probe(ports[g], raw)
+        if got != want {
+            println("  FAIL ${label} (${names[g]}): got '${got}', expected '${want}'")
+            bad = bad + 1
+        } else {
+            println("  PASS ${label} (${names[g]})")
+        }
+        g = g + 1
+    }
+    return bad
+}
+
+main() {
+    println("=== the event loop answers what it cannot take as the worker path does ===")
+    upstream = http.server_create(0)
+    http.server_set_host(upstream, "127.0.0.1")
+    http.server_get(upstream, "/p", handle_echo, 0)
+    http.server_post(upstream, "/p", handle_echo, 0)
+    up_url = "http://127.0.0.1:${start(upstream)}"
+    loop_gw = gateway(up_url, 0)
+    worker_gw = gateway(up_url, 1)
+    ports = [start(loop_gw), start(worker_gw)]
+    sleep(200)
+
+    bad = 0
+    bad = bad + both("a plain request", ports, "GET /p HTTP/1.1\r\nHost: x\r\n\r\n",
+        "200 up GET body=0 tail= open")
+
+    // #3233: a request that does not parse, or whose length cannot be read.
+    malformed = "400 malformed HTTP request closed"
+    framing = "400 request framing is ambiguous or unsupported\r\n closed"
+    bad = bad + both("a request line that is not one", ports, "GARBAGE\r\nHost: x\r\n\r\n", malformed)
+    bad = bad + both("an HTTP version that is not 1.x", ports, "GET /p HTTP/2.0\r\nHost: x\r\n\r\n", malformed)
+    bad = bad + both("two Content-Length headers that disagree", ports,
+        "POST /p HTTP/1.1\r\nHost: x\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\nab", framing)
+    bad = bad + both("a Content-Length that is not a number", ports,
+        "POST /p HTTP/1.1\r\nHost: x\r\nContent-Length: 12abc\r\n\r\nab", framing)
+
+    http.server_stop(worker_gw)
+    http.server_stop(loop_gw)
+    http.server_stop(upstream)
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}
