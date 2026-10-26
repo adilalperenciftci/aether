@@ -179,6 +179,7 @@ extern const char* aether_string_data(const void* s);
 #ifndef _WIN32
 #include <unistd.h>
 #include <sys/types.h>
+#include <sys/stat.h>  /* fstat: which descriptors are the standard streams */
 #include <sys/wait.h>
 #include <errno.h>
 #include <fcntl.h>  /* fcntl, F_GETFD — used by ipc_parent_channel_raw */
@@ -1454,12 +1455,40 @@ static void aether_child_reset_signals(void) {
  * start Chrome with stdin closed ("Failed to create Chrome process"), and the
  * first file a child opened took descriptor 0. fork leaves the flag set on the
  * child's copies; clear it on those three, which is what "inherits the
- * parent's streams" means. A stream the parent has closed stays closed. Only
- * fcntl, so it is legal between fork and exec like the reset above. */
+ * parent's streams" means. A stream the parent has closed stays closed.
+ *
+ * Which descriptors are the parent's streams: those that were 0, 1 and 2
+ * when the process started (when this library was loaded), known by the
+ * file they refer to. One the parent closed since gives its number to the
+ * next descriptor opened, a pipe of another thread's spawn among them, and
+ * clearing the flag on that one handed another spawn's pipe end to this
+ * child as its stdout: that spawn then waited for this child to exit (#3209).
+ * A descriptor marked close-on-exec on one of those numbers that is not the
+ * file it was at the start is its owner's, and closes at exec as its owner
+ * asked. */
+static struct { int open; dev_t dev; ino_t ino; } aether_std_stream[3];
+
+__attribute__((constructor))
+static void aether_record_std_streams(void) {
+    for (int fd = 0; fd <= 2; fd++) {
+        struct stat st;
+        if (fstat(fd, &st) != 0) continue;
+        aether_std_stream[fd].open = 1;
+        aether_std_stream[fd].dev = st.st_dev;
+        aether_std_stream[fd].ino = st.st_ino;
+    }
+}
+
+/* fcntl and fstat only: legal between fork and exec. */
 static void aether_child_keep_stdio(void) {
     for (int fd = 0; fd <= 2; fd++) {
         int fl = fcntl(fd, F_GETFD);
-        if (fl >= 0 && (fl & FD_CLOEXEC)) fcntl(fd, F_SETFD, fl & ~FD_CLOEXEC);
+        if (fl < 0 || !(fl & FD_CLOEXEC) || !aether_std_stream[fd].open) continue;
+        struct stat st;
+        if (fstat(fd, &st) != 0 || st.st_dev != aether_std_stream[fd].dev ||
+            st.st_ino != aether_std_stream[fd].ino)
+            continue;
+        fcntl(fd, F_SETFD, fl & ~FD_CLOEXEC);
     }
 }
 

@@ -201,6 +201,7 @@ tests/integration/offsetof_module_field_name/
 tests/integration/optional_reject/
 tests/integration/never_returns/
 tests/integration/or_block_reject/
+tests/integration/os_spawn_stdio_slot/
 tests/integration/render_rule/
 tests/integration/panic_actor_step_drain/
 tests/integration/panic_categories/
