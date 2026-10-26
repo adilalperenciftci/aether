@@ -1,0 +1,68 @@
+// HTTP: a server and a client in one program.
+//
+// std.http serves requests by route: a handler gets the request and fills
+// in the response. Here the server listens on 127.0.0.1 with port 0, so
+// the system picks a free port and `http.server_port` says which, and
+// `http.server_start_background` serves from a thread of its own while
+// main goes on as the client. `http.get` and `http.post` return the body
+// and an error: a response with a status other than 2xx is an error that
+// names it. `http.server_stop` ends the serving thread before main frees
+// the server.
+//
+// Run: ae run examples/03-std/04-http.ae
+// See: docs/http-server.md
+
+import std.http
+import std.string
+
+hello(req: ptr, res: ptr, ud: ptr) {
+    name = http.get_query_param(req, "name")
+    if name == "" {
+        name = "stranger"
+    }
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "hello, ${name}")
+}
+
+echo(req: ptr, res: ptr, ud: ptr) {
+    body = http.request_body(req)
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "${string.length(body)} bytes: ${string.to_upper(body)}")
+}
+
+main() {
+    server = http.server_create(0)
+    defer http.server_free(server)
+    err = http.server_bind(server, "127.0.0.1", 0)
+    if err != "" {
+        println("cannot listen: ${err}")
+        exit(1)
+    }
+    http.server_get(server, "/hello", hello, null)
+    http.server_post(server, "/echo", echo, null)
+    started = http.server_start_background(server)
+    if started != "" {
+        println("cannot serve: ${started}")
+        exit(1)
+    }
+    base = "http://127.0.0.1:${http.server_port(server)}"
+
+    body, gerr = http.get("${base}/hello?name=Ada")
+    println("GET /hello?name=Ada -> ${body} [${gerr}]")
+    body2, _ = http.get("${base}/hello")
+    println("GET /hello -> ${body2}")
+    body3, perr = http.post("${base}/echo", "ping", "text/plain")
+    println("POST /echo -> ${body3} [${perr}]")
+    _, missing = http.get("${base}/missing")
+    println("GET /missing -> [${missing}]")
+
+    http.server_stop(server)
+}
+
+// Output:
+// GET /hello?name=Ada -> hello, Ada []
+// GET /hello -> hello, stranger
+// POST /echo -> 4 bytes: PING []
+// GET /missing -> [HTTP 404 Not Found]

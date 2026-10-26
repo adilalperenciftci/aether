@@ -1,0 +1,75 @@
+// Processes: run a program, give it input, read what it prints.
+//
+// std.os runs a child process from an argument list, with no shell in
+// between, so an argument with spaces or quotes arrives as it was given.
+// `os.run_capture` returns what the child wrote to stdout, its exit status
+// and an error that is set only when it could not be started;
+// `os.run_full` also feeds it stdin and keeps its stderr apart. An
+// environment, when given, is a list of `NAME=value` strings.
+//
+// The child here is this same program, started with an argument, so the
+// example runs anywhere without depending on what is installed: main
+// finds its own path with `os.argv0()`.
+//
+// Run: ae run examples/03-std/03-processes.ae
+// See: docs/stdlib-reference.md
+
+import std.io
+import std.list
+import std.os
+import std.string
+
+// What the program does when it is the child.
+child(mode: string) {
+    if mode == "greet" {
+        println("hello, ${os.args_get(2)}")
+    } else if mode == "fail" {
+        println("about to fail")
+        exit(3)
+    } else if mode == "shout" {
+        line, _ = io.fd_read_line(0) // 0 is stdin
+        _e = io.stderr_write("shouting\n")
+        println(string.to_upper(line))
+    } else if mode == "env" {
+        println("TASK_ID=${os.getenv("TASK_ID")}")
+    }
+}
+
+main() {
+    if os.args_count() > 1 {
+        child(os.args_get(1))
+        return
+    }
+    me = os.argv0()
+    args = list.new()
+    defer list.free(args)
+
+    list.add(args, "greet")
+    list.add(args, "Ada Lovelace") // one argument, space and all
+    out, status, err = os.run_capture(me, args, null)
+    println("[${string.trim(out)}] status ${status} err [${err}]")
+
+    list.clear(args)
+    list.add(args, "fail")
+    out2, status2, _ = os.run_capture(me, args, null)
+    println("[${string.trim(out2)}] status ${status2}")
+
+    list.clear(args)
+    list.add(args, "shout")
+    sout, serr, code, _ = os.run_full(me, args, null, "quiet please\n")
+    println("stdout [${string.trim(sout)}] stderr [${string.trim(serr)}] status ${code}")
+
+    list.clear(args)
+    list.add(args, "env")
+    env = list.new()
+    defer list.free(env)
+    list.add(env, "TASK_ID=42")
+    out4, _, _ = os.run_capture(me, args, env)
+    println(string.trim(out4))
+}
+
+// Output:
+// [hello, Ada Lovelace] status 0 err []
+// [about to fail] status 3
+// stdout [QUIET PLEASE] stderr [shouting] status 0
+// TASK_ID=42

@@ -475,8 +475,9 @@ non-empty is an error message.
 - [`docs/http-server.md`](http-server.md), the inbound side
   (routes, middleware, TLS, h2, WS, SSE, health probes,
   metrics, graceful shutdown).
-- [`examples/stdlib/http-reverse-proxy.ae`](../examples/stdlib/http-reverse-proxy.ae)
-  minimal single-upstream demo.
-- [`examples/stdlib/http-reverse-proxy-pool.ae`](../examples/stdlib/http-reverse-proxy-pool.ae)
-  full enterprise stack: pool, health, breaker, cache, retry,
-  rate limit, drain, trace-context, Prometheus metrics.
+- [`examples/03-std/07-reverse-proxy.ae`](../examples/03-std/07-reverse-proxy.ae)
+  one upstream behind `proxy.mount_simple`, upstream and client in the
+  same program.
+- [`examples/03-std/08-proxy-pool.ae`](../examples/03-std/08-proxy-pool.ae)
+  a weighted pool of three upstreams configured with the `proxy.pool`
+  block, mounted with `proxy.mount`.

@@ -1,0 +1,100 @@
+// JSON: parse a document, read it, build one, write it out.
+//
+// `json.parse` gives a value and an error; the value is a handle to a
+// tree of JSON values, and `json.free` releases the whole tree. A value
+// inside it is borrowed from the tree, valid until that free. `json.type`
+// says which kind a value is, one of `json.JSON_NULL` .. `json.JSON_OBJECT`,
+// and the typed readers (`json.get_string`, `json.get_int`, ...)
+// take it out. An object keeps its keys in the order they came, in parsed
+// text and in an object you build, so `json.encode` writes them back in
+// that order. A malformed document is an error naming the line and the
+// column.
+//
+// Run: ae run examples/03-std/02-json.ae
+// See: docs/stdlib-reference.md
+
+import std.json
+
+// One line per value, indented by depth.
+show(v: ptr, label: string, depth: int) {
+    pad = ""
+    for i in 0..depth {
+        pad = "${pad}  "
+    }
+    match json.type(v) {
+        json.JSON_OBJECT -> {
+            println("${pad}${label}: object of ${json.object_size(v)}")
+            for i in 0..json.object_size(v) {
+                key, child, _ = json.object_entry(v, i)
+                show(child, key, depth + 1)
+            }
+        }
+        json.JSON_ARRAY -> {
+            println("${pad}${label}: array of ${json.array_size(v)}")
+            for i in 0..json.array_size(v) {
+                child, _ = json.array_get(v, i)
+                show(child, "[${i}]", depth + 1)
+            }
+        }
+        json.JSON_STRING -> {
+            s, _ = json.get_string(v)
+            println("${pad}${label}: \"${s}\"")
+        }
+        json.JSON_NUMBER -> println("${pad}${label}: ${json.get_number(v)}")
+        json.JSON_BOOL -> println("${pad}${label}: ${json.get_bool(v) == 1}")
+        _ -> println("${pad}${label}: null")
+    }
+}
+
+main() {
+    text = <<JSON
+{
+  "service": "api",
+  "port": 8080,
+  "debug": false,
+  "owners": ["ada", "grace"],
+  "limits": {"rps": 250.5, "burst": null}
+}
+JSON
+    doc, err = json.parse(text)
+    if err != "" {
+        println("bad config: ${err}")
+        exit(1)
+    }
+    defer json.free(doc)
+    show(doc, "config", 0)
+
+    port, _ = json.object_get(doc, "port")
+    println("the port is ${json.get_int(port)}")
+
+    // Building a document: values made with json.str, json.from_int and
+    // the rest belong to the object they are set into.
+    response = json.obj()
+    defer json.free(response)
+    json.set(response, "status", json.str("ok"))
+    json.set(response, "code", json.from_int(200))
+    tags = json.arr()
+    json.push(tags, json.str("fast"))
+    json.push(tags, json.boolean(1))
+    json.set(response, "tags", tags)
+    out, _ = json.encode(response)
+    println(out)
+
+    _, bad = json.parse("{\n  \"retries\": 03\n}")
+    println("error: ${bad}")
+}
+
+// Output:
+// config: object of 5
+//   service: "api"
+//   port: 8080
+//   debug: false
+//   owners: array of 2
+//     [0]: "ada"
+//     [1]: "grace"
+//   limits: object of 2
+//     rps: 250.5
+//     burst: null
+// the port is 8080
+// {"status":"ok","code":200,"tags":["fast",true]}
+// error: leading zeros not allowed in numbers at 2:14

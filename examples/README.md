@@ -54,6 +54,20 @@ behind each step; every row below links the part it builds on.
 | [10-crash-isolation.ae](02-actors/10-crash-isolation.ae) | a panic stays in its actor; supervision today | [Panics](../docs/actor-concurrency.md#panic-and-stack-traces) |
 | [11-sharded-map.ae](02-actors/11-sharded-map.ae) | keys split over owner actors instead of a lock | [Sharded actor map](../docs/design/sharded-actor-map.md) |
 
+## 3. The standard library
+
+| Example | What it teaches | Reference |
+|---|---|---|
+| [01-files.ae](03-std/01-files.ae) | std.fs: a temp directory, write, read, walk, remove | [stdlib reference](../docs/stdlib-reference.md) |
+| [02-json.ae](03-std/02-json.ae) | parse, read by kind, build, encode, errors with a position | [stdlib reference](../docs/stdlib-reference.md) |
+| [03-processes.ae](03-std/03-processes.ae) | run a program with arguments, input, environment; read its output and status | [stdlib reference](../docs/stdlib-reference.md) |
+| [04-http.ae](03-std/04-http.ae) | an HTTP server and client in one program | [HTTP server](../docs/http-server.md) |
+| [05-http-server.ae](03-std/05-http-server.ae) | a long-running server: middleware, health probes, metrics | [HTTP server](../docs/http-server.md) |
+| [06-http2-tls.ae](03-std/06-http2-tls.ae) | HTTP/2 and TLS on the same server API | [HTTP server](../docs/http-server.md) |
+| [07-reverse-proxy.ae](03-std/07-reverse-proxy.ae) | forwarding to an upstream with std.http.proxy | [Reverse proxy](../docs/http-reverse-proxy.md) |
+| [08-proxy-pool.ae](03-std/08-proxy-pool.ae) | a weighted pool configured as code | [Reverse proxy](../docs/http-reverse-proxy.md) |
+| [09-logging.ae](03-std/09-logging.ae) | std.log levels, a log file, the threshold | [stdlib reference](../docs/stdlib-reference.md) |
+
 ## Writing an example
 
 An example is one `.ae` file, or a directory when it needs more than one
