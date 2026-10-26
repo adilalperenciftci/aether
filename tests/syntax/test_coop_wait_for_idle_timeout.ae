@@ -1,0 +1,29 @@
+// Test: wait_for_idle() waits for an armed receive timeout to fire (#3219).
+// The cooperative scheduler gave up after 100 idle rounds of a millisecond,
+// so an `after` longer than that never fired before wait_for_idle()
+// returned. Both schedulers now wait for the countdown, as the multicore one
+// did (#3102); the end of main does not.
+
+message Ping {}
+
+actor Waiter {
+    state pings = 0
+    state fired = 0
+
+    receive {
+        Ping -> { pings = pings + 1 }
+    } after 400 -> {
+        fired = fired + 1
+    }
+}
+
+main() {
+    w = spawn(Waiter())
+    w ! Ping {}
+    wait_for_idle()
+    if w.pings != 1 || w.fired != 1 {
+        println("FAIL: pings ${w.pings}, fired ${w.fired}, expected 1 and 1")
+        exit(1)
+    }
+    println("PASS: the 400 ms timeout fired before wait_for_idle returned")
+}

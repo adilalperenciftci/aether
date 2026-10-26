@@ -3582,6 +3582,7 @@ ci-coop: clean compiler ae
 	           tests/syntax/test_coop_ask_reply.ae \
 	           tests/syntax/test_coop_self_send.ae \
 	           tests/syntax/test_coop_stubs.ae \
+	           tests/syntax/test_coop_wait_for_idle_timeout.ae \
 	           examples/02-actors/02-state.ae \
 	           examples/02-actors/04-actor-refs.ae \
 	           examples/02-actors/03-ask-reply.ae \
@@ -3597,6 +3598,15 @@ ci-coop: clean compiler ae
 			fail=$$((fail + 1)); \
 		fi; \
 	done; \
+	printf "  %-50s " "end of main, countdown armed (#3219)"; \
+	if sh tests/integration/exit_armed_timeout/test_exit_armed_timeout.sh >/tmp/ae_coop_out.txt 2>&1; then \
+		echo "PASS"; \
+		pass=$$((pass + 1)); \
+	else \
+		echo "FAIL"; \
+		cat /tmp/ae_coop_out.txt | head -10; \
+		fail=$$((fail + 1)); \
+	fi; \
 	echo ""; \
 	echo "  $$pass passed, $$fail failed"; \
 	if [ "$$fail" -gt 0 ]; then exit 1; fi

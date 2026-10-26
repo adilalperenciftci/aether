@@ -493,42 +493,45 @@ void scheduler_send_batch_flush(void) {
 // Wait for quiescence — poll until no messages remain
 // ============================================================================
 
-void scheduler_wait(void) {
-    // Drain all pending messages cooperatively
-    // Also wait for active timeouts to fire
-    int idle_rounds = 0;
-    while (idle_rounds < 100) {
-        int processed = aether_scheduler_poll(0);
-        if (processed == 0) {
-            // Check if any actor has a pending timeout
-            int has_pending_timeout = 0;
-            g_coop_walk_depth++;
-            Scheduler* sched = &schedulers[0];
-            AetherActorTable* table = atomic_load_explicit(&sched->actor_table, memory_order_relaxed);
-            int count = atomic_load_explicit(&sched->actor_count, memory_order_relaxed);
-            for (int i = 0; i < count; i++) {
-                ActorBase* a = atomic_load_explicit(&table->slots[i], memory_order_relaxed);
-                /* Armed, not merely configured (#3162), and not dead. */
-                if (a && a->timeout_ns > 0 && a->last_activity_ns > 0 &&
-                    atomic_load_explicit(&a->dead, memory_order_relaxed) == 0) {
-                    has_pending_timeout = 1;
-                    break;
-                }
-            }
-            g_coop_walk_depth--;
-            if (!has_pending_timeout) break;
-            // Sleep briefly to avoid spinning while waiting for timeout
-            #ifdef _WIN32
-            Sleep(1);
-            #elif defined(__EMSCRIPTEN__)
-            // No sleep in WASM — just spin
-            #else
-            usleep(1000);  // 1ms
-            #endif
-            idle_rounds++;
-        } else {
-            idle_rounds = 0;  // Reset on progress
+/* Whether a live actor's receive timeout is armed (#3162). */
+static int coop_timeout_armed(void) {
+    int armed = 0;
+    g_coop_walk_depth++;
+    Scheduler* sched = &schedulers[0];
+    AetherActorTable* table = atomic_load_explicit(&sched->actor_table, memory_order_relaxed);
+    int count = atomic_load_explicit(&sched->actor_count, memory_order_relaxed);
+    for (int i = 0; i < count; i++) {
+        ActorBase* a = atomic_load_explicit(&table->slots[i], memory_order_relaxed);
+        if (a && a->timeout_ns > 0 && a->last_activity_ns > 0 &&
+            atomic_load_explicit(&a->dead, memory_order_relaxed) == 0) {
+            armed = 1;
+            break;
         }
+    }
+    g_coop_walk_depth--;
+    return armed;
+}
+
+/* wait_for_idle(): every message handled, and no live actor's receive
+ * timeout armed, as on the multicore scheduler (#3102): a countdown fires
+ * once its deadline passes, and its arm may send more. While one counts
+ * down the poll does no work, and the wait sleeps a millisecond at a time,
+ * bounded as the multicore scheduler bounds it (100 s); it used to spin on
+ * the CPU, the poll counting each check of the deadline as work. The end of
+ * main does not wait for countdowns (scheduler_shutdown, #3219). */
+void scheduler_wait(void) {
+    uint64_t give_up = aether_now_ns() + 100ULL * 1000000000ULL;
+    for (;;) {
+        if (aether_scheduler_poll(0) > 0) continue;
+        if (!coop_timeout_armed() || aether_now_ns() >= give_up) break;
+        // Sleep briefly while a timeout counts down
+        #ifdef _WIN32
+        Sleep(1);
+        #elif defined(__EMSCRIPTEN__)
+        // No sleep in WASM: the countdown is polled
+        #else
+        usleep(1000);  // 1ms
+        #endif
     }
 }
 
@@ -576,9 +579,14 @@ int aether_scheduler_poll(int max_per_actor) {
                 processed++;
             }
         } else if (has_timeout) {
-            // No messages but timeout is ticking — call step to check timeout
+            /* No messages but a countdown is armed: the step checks its
+             * deadline by the generated code's clock and fires the arm,
+             * disarming it, once it has passed. Only a firing is work: a
+             * check counted as one kept wait_for_idle() and the end of main
+             * spinning until the deadline (#3219). */
+            uint64_t armed_at = actor->last_activity_ns;
             scheduler_step_actor(actor);
-            processed++;
+            if (actor->last_activity_ns != armed_at) processed++;
         }
         total += processed;
     }

@@ -2408,7 +2408,17 @@ static int has_pending_actor_timeout(void) {
     return found;
 }
 
+/* Until every message sent has been handled, and with `countdowns`, until
+ * no live actor's receive timeout is armed either (each fires once its
+ * deadline passes, and its arm may send more). wait_for_idle() waits for
+ * both (#3102); the end of main for the messages alone (#3219). */
+static void scheduler_wait_quiet(int countdowns);
+
 void scheduler_wait(void) {
+    scheduler_wait_quiet(1);
+}
+
+static void scheduler_wait_quiet(int countdowns) {
     batch_flush_pending();
     // Check if scheduler is still running
     int still_running = 0;
@@ -2441,7 +2451,8 @@ void scheduler_wait(void) {
             // Quiet, but a receive timeout is armed (#3102): its core fires
             // it once the deadline passes, and its arm may send more, so the
             // wait goes on, polling every millisecond (100000 times at most).
-            if (stable_count == 5 && timeout_rounds < 100000 && has_pending_actor_timeout()) {
+            if (countdowns && stable_count == 5 && timeout_rounds < 100000 &&
+                has_pending_actor_timeout()) {
                 stable_count = 0;
                 timeout_rounds++;
                 aether_usleep(1000);
@@ -2492,8 +2503,14 @@ void scheduler_wait(void) {
 // Called once at program exit.  Safe to call even if threads were never
 // started or already shut down.
 void scheduler_shutdown(void) {
-    // Wait for any in-flight messages first
-    scheduler_wait();
+    /* The messages already sent are handled; a receive timeout still armed
+     * is not waited for (#3219). The program is over, so the silence the
+     * countdown waits on will not be broken, and an actor with `after
+     * 60000` that handled a message just before main returned held the exit
+     * for that minute and then ran its arm at shutdown. wait_for_idle()
+     * still waits for countdowns: a program that wants one to fire says so.
+     * The cooperative scheduler ends the same way. */
+    scheduler_wait_quiet(0);
 
     // Stopping (3): a send from a thread the scheduler does not own is
     // refused from here on, not queued for cores about to stop (#2912).

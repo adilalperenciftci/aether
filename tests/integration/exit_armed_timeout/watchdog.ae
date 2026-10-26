@@ -1,0 +1,36 @@
+// The end of main waits for the messages sent, not for an armed receive
+// timeout (#3219). A watchdog's `after 30000` is armed again by the message
+// it handles just before main returns; the program used to wait the 30 s
+// for it and then run its arm at shutdown. wait_for_idle() still waits for
+// countdowns: the first actor shows its timeout firing there.
+
+message Ping {}
+
+actor Short {
+    receive {
+        Ping() -> { println("short: ping") }
+    } after 200 -> {
+        println("short: quiet for 200 ms")
+    }
+}
+
+// Its handler prints nothing: main's line would race with it.
+actor Watchdog {
+    state pings = 0
+
+    receive {
+        Ping() -> { pings = pings + 1 }
+    } after 30000 -> {
+        println("watchdog: quiet for 30 s")
+    }
+}
+
+main() {
+    s = spawn(Short())
+    s ! Ping {}
+    wait_for_idle()
+
+    w = spawn(Watchdog())
+    w ! Ping {}
+    println("main: done")
+}

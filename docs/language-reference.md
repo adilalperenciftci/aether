@@ -3338,7 +3338,7 @@ actor Poller {
 }
 ```
 
-and a handler that sends nothing leaves the actor idle, so `wait_for_idle()` returns. `wait_for_idle()` waits for every countdown that is running, so a poller that never stops keeps it waiting (#3162), and so does the end of `main`: a countdown of a minute that started just before `main` returned holds the exit for that minute. There is no way yet to let `main` end without it (#3219).
+and a handler that sends nothing leaves the actor idle, so `wait_for_idle()` returns. `wait_for_idle()` waits for every countdown that is running, so a poller that never stops keeps it waiting (#3162). The end of `main` waits for the messages sent to be handled, but not for countdowns: a countdown still running then does not hold the exit, and its timeout does not run (#3219). A program that wants a countdown to fire before it ends calls `wait_for_idle()` first.
 
 ### State Variables
 
