@@ -872,9 +872,10 @@ const char* http_request_query(HttpRequest* req);
 // reality. Returns the dotted-quad form for IPv4 ("203.0.113.7") and
 // the `inet_ntop` AF_INET6 form for IPv6 ("2001:db8::1") — no
 // brackets, no scope id. Returns "" when unavailable (Unix-domain
-// socket, getpeername failed, or req is NULL). The companion
-// X-Forwarded-For middleware remains the right tool when this server
-// sits behind a trusted reverse proxy.
+// socket, getpeername failed, or req is NULL). Behind a trusted
+// reverse proxy, the companion middleware `use_real_ip` resolves the
+// client from X-Forwarded-For and makes it the address this returns to
+// every middleware and handler after it (#3169).
 const char* http_request_remote_addr(HttpRequest* req);
 // Companion port for `http_request_remote_addr`. Returns 0 when
 // unavailable (same conditions as the address).

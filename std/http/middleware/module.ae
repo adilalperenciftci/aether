@@ -359,9 +359,11 @@ use_error_pages(server: ptr, opts: ptr) -> {
 // level peer IP is the proxy. Operators conventionally pass the
 // original client through `X-Forwarded-For: client, proxy1, ...`
 // (leftmost = oldest, original client). This middleware reads the
-// configured header and adds an `X-Real-IP: <original>` header to
-// the request so downstream handlers, ratelimit, access logs, and
-// metrics see the client identity rather than the proxy.
+// configured header and makes that client the peer the request
+// reports (`http.request_remote_addr` answers it from then on, its
+// port 0) and its `X-Real-IP`, replacing any `X-Real-IP` the client
+// sent (#3169), so downstream handlers, ratelimit, access logs,
+// metrics and std.http.proxy see the client rather than the proxy.
 //
 //   header_name    — header to read from. Pass "" for the default
 //                    "X-Forwarded-For"; alternatives include

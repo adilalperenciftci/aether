@@ -2300,7 +2300,7 @@ main() {
 - `middleware.use_session_auth(server, cookie_name, redirect_url, verify_cb, ud)` → `string` - Session-cookie auth. Reads a named cookie, hands the value to the verifier; on failure either 401s (when `redirect_url` is empty) or 302s to the configured login URL.
 - `middleware.use_rate_limit(server, max_requests, window_ms)` → `string` - Token-bucket per-client-IP rate limit. Client IP comes from `X-Forwarded-For` → `X-Real-IP` → `"anonymous"` resolution chain.
 - `middleware.use_vhost(server, hosts_csv)` → `string` - Host-header gate. Comma-separated allowed hosts; unknown hosts get 404.
-- `middleware.use_real_ip(server, header_name)` → `string` - Proxy-aware client IP detection. Reads the configured header (default `X-Forwarded-For`), takes the leftmost non-empty IP, adds `X-Real-IP` to the request. Idempotent. **Trust model: only safe behind a proxy that strips client-supplied X-Forwarded-For.**
+- `middleware.use_real_ip(server, header_name)` → `string` - Proxy-aware client IP detection. Reads the configured header (default `X-Forwarded-For`), takes the leftmost non-empty IP, and makes it the peer the request reports from then on (`http.request_remote_addr` answers it, the port reads 0) and its `X-Real-IP`, replacing any `X-Real-IP` the client sent (#3169). Idempotent. **Trust model: only safe behind a proxy that strips client-supplied X-Forwarded-For.**
 - `middleware.use_static_files(server, url_prefix, root)` → `string` - Mount a directory under a URL prefix; `..` traversal blocked.
 - `middleware.use_rewrite(server, opts)` → `string` - Prefix-rewrite rules; build via `middleware.rewrite_add_rule(opts, from, to)`.
 

@@ -372,10 +372,15 @@ Plus any header listed in the request's `Connection:` value.
 | `Via` | `1.1 aether-proxy` (appended to existing) | always on |
 | `Host` | rewritten to upstream's `host:port` | `proxy.opts_set_preserve_host(opts, 1)` to forward client Host: instead |
 
-Client IP is resolved via the same chain `middleware.use_real_ip`
-uses: `X-Forwarded-For` (leftmost) → `X-Real-IP` → `"unknown"`.
-Mount `middleware.use_real_ip` before the proxy if you want
-clients behind a trusted edge to be visible via XFF.
+The entry the proxy appends is the peer the request reports
+(`http.request_remote_addr`): the connection's peer address, or, when
+`middleware.use_real_ip` ran before the proxy, the client it resolved from
+the trusted chain. A request that reaches the proxy over a Unix-domain
+socket has no IP peer and adds `unknown`. The proxy never reads
+`X-Real-IP`: any client can send that header, and taking it let a client
+write its own entry into the chain the upstream trusts (#3169). Mount
+`middleware.use_real_ip` before the proxy when clients reach it through a
+trusted edge, so the entry names the client rather than the edge.
 
 ## Error responses
 

@@ -161,9 +161,10 @@ else
                 "$PROXY/echo" 2>"$TMPDIR/c3.err")
     # The whole value, not a prefix of it. A prefix passes even when the
     # client's own header is forwarded alongside the proxy's and the upstream
-    # reads the client's, which is the value it must not trust.
-    echo "$RESP" | grep -q '^xff=1.2.3.4, unknown$' || {
-        echo "  [FAIL] T3 XFF: expected '1.2.3.4, unknown', this hop appended"
+    # reads the client's, which is the value it must not trust. This hop's
+    # entry is the peer the request reports, curl on loopback (#3169).
+    echo "$RESP" | grep -q '^xff=1.2.3.4, 127.0.0.1$' || {
+        echo "  [FAIL] T3 XFF: expected '1.2.3.4, 127.0.0.1', this hop appended"
         echo "$RESP"; exit 1;
     }
     # And exactly one of it: two X-Forwarded-For headers reaching the upstream
@@ -315,9 +316,10 @@ case "$XFF_SEEN" in
         echo "         chain sent (${#LONG_XFF} chars), got: $XFF_SEEN"
         exit 1 ;;
 esac
-# The proxy appends its own hop after the chain it received.
+# The proxy appends its own hop after the chain it received: the peer the
+# request reports, curl on loopback (#3169).
 case "$XFF_SEEN" in
-    *", unknown") : ;;
+    *", 127.0.0.1") : ;;
     *) echo "  [FAIL] T14 long forwarded chain: this hop was not appended: $XFF_SEEN"; exit 1 ;;
 esac
 

@@ -1,0 +1,126 @@
+// std.http.proxy's X-Forwarded-For entry is the peer the request reports
+// (#3169).
+//
+// The proxy appended `X-Forwarded-For: unknown` to every request that came
+// without an X-Real-IP header, and took a client's own X-Real-IP as the hop's
+// entry: any client could write itself into the chain the upstream trusts.
+// The entry is now http.request_remote_addr: the connection's peer, or, after
+// middleware.use_real_ip, the client it resolved from the forwarded chain,
+// which also replaces a forged X-Real-IP.
+//
+// An upstream echoes what it was sent. Two gateways forward to it, one plain
+// and one behind use_real_ip, each on 127.0.0.1 and a port the kernel picks.
+
+import std.http
+import std.http.client
+import std.http.middleware
+import std.http.proxy
+
+extern exit(code: int)
+extern http_server_bind_raw(server: ptr, host: string, port: int) -> int
+extern http_server_port(server: ptr) -> int
+
+handle_echo(req: ptr, res: ptr, ud: ptr) {
+    xff = http.get_header(req, "X-Forwarded-For")
+    xri = http.get_header(req, "X-Real-IP")
+    body = "xff=${xff}|xri=${xri}"
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, body)
+}
+
+// A server, set to 127.0.0.1, bound to a free port and started in the
+// background; its port.
+start(server: ptr) -> int {
+    if http_server_bind_raw(server, "127.0.0.1", 0) < 0 {
+        println("FAIL: bind")
+        exit(1)
+    }
+    err = http.server_start_background(server)
+    if err != "" {
+        println("FAIL: ${err}")
+        exit(1)
+    }
+    return http_server_port(server)
+}
+
+// GET through a gateway with the given extra headers ("" for none), the
+// upstream's echo back.
+through(port: int, name1: string, value1: string, name2: string, value2: string) -> string {
+    req = client.request("GET", "http://127.0.0.1:${port}/echo")
+    if name1 != "" { client.set_header(req, name1, value1) }
+    if name2 != "" { client.set_header(req, name2, value2) }
+    resp, err = client.send_request(req)
+    client.request_free(req)
+    if err != "" {
+        println("FAIL: request through :${port}: ${err}")
+        exit(1)
+    }
+    body = client.response_body(resp)
+    client.response_free(resp)
+    return body
+}
+
+expect(label: string, got: string, want: string) -> int {
+    if got != want {
+        println("  FAIL ${label}: upstream saw '${got}', expected '${want}'")
+        return 1
+    }
+    println("  PASS ${label}")
+    return 0
+}
+
+main() {
+    println("=== std.http.proxy's X-Forwarded-For entry is the request's peer (#3169) ===")
+    upstream = http.server_create(0)
+    http.server_set_host(upstream, "127.0.0.1")
+    http.server_get(upstream, "/echo", handle_echo, 0)
+    up_port = start(upstream)
+    up_url = "http://127.0.0.1:${up_port}"
+
+    plain = http.server_create(0)
+    http.server_set_host(plain, "127.0.0.1")
+    perr = proxy.mount_simple(plain, "/", up_url, 5)
+    if perr != "" {
+        println("FAIL: mount_simple: ${perr}")
+        exit(1)
+    }
+    plain_port = start(plain)
+
+    behind = http.server_create(0)
+    http.server_set_host(behind, "127.0.0.1")
+    rerr = middleware.use_real_ip(behind, "")
+    if rerr != "" {
+        println("FAIL: use_real_ip: ${rerr}")
+        exit(1)
+    }
+    berr = proxy.mount_simple(behind, "/", up_url, 5)
+    if berr != "" {
+        println("FAIL: mount_simple: ${berr}")
+        exit(1)
+    }
+    behind_port = start(behind)
+    sleep(200)
+
+    bad = 0
+    bad = bad + expect("a direct client is named by its address",
+        through(plain_port, "", "", "", ""), "xff=127.0.0.1|xri=")
+    bad = bad + expect("a forged X-Real-IP is not the hop's entry",
+        through(plain_port, "X-Real-IP", "6.6.6.6", "", ""),
+        "xff=127.0.0.1|xri=6.6.6.6")
+    bad = bad + expect("an incoming chain gets the hop appended",
+        through(plain_port, "X-Forwarded-For", "203.0.113.9", "", ""),
+        "xff=203.0.113.9, 127.0.0.1|xri=")
+    bad = bad + expect("behind use_real_ip the resolved client is the peer, and a forged X-Real-IP is replaced",
+        through(behind_port, "X-Forwarded-For", "203.0.113.7", "X-Real-IP", "6.6.6.6"),
+        "xff=203.0.113.7, 203.0.113.7|xri=203.0.113.7")
+
+    http.server_stop(behind)
+    http.server_stop(plain)
+    http.server_stop(upstream)
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

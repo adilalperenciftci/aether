@@ -263,7 +263,7 @@ HTTP/1.1 path) feed the same chain:
 | `middleware.use_vhost`        | ✓ |
 | `middleware.use_static_files` | ✓ |
 | `middleware.use_rewrite`      | ✓ |
-| `middleware.use_real_ip`      | ✓, X-Real-IP appended to the request, visible to handlers + downstream middleware on every h2 stream |
+| `middleware.use_real_ip`      | ✓, the resolved client becomes the request's reported peer and its X-Real-IP, for handlers + downstream middleware on every h2 stream |
 | `middleware.use_gzip` (response transformer) | ✓, `Content-Encoding: gzip` rides on the h2 HEADERS frame |
 | `middleware.use_error_pages`  | ✓ |
 | `http_server_set_health_probes` | ✓ |
@@ -541,8 +541,9 @@ middleware.use_error_pages(server, ep)
 // Real-IP / X-Forwarded-For, extracts the original client IP
 // when the server is behind a load balancer / reverse proxy / CDN.
 // Reads the configured header (default "X-Forwarded-For"), takes
-// the leftmost IP, and adds X-Real-IP to the request so downstream
-// handlers / ratelimit / access logs see the real client identity.
+// the leftmost IP, and makes it the peer the request reports
+// (http.request_remote_addr) and its X-Real-IP, so downstream
+// handlers / ratelimit / access logs / the proxy see the client.
 // Pass "" for the default header name; alternatives include
 // "Forwarded", "CF-Connecting-IP", "True-Client-IP".
 middleware.use_real_ip(server, "")
@@ -560,9 +561,12 @@ run it behind trusted edge infrastructure that strips any
 client-supplied X-Forwarded-For, typical setups are a firewall-
 restricted port plus a load-balancer rule, or a CDN that overwrites
 X-Forwarded-For. Without that guarantee, callers can spoof their
-apparent client IP. The middleware is idempotent, running it
-twice (or running it after the edge already set X-Real-IP) doesn't
-double-tag the request.
+apparent client IP. The middleware sets the address the way nginx's
+realip module does: `http.request_remote_addr` answers the client it
+resolved, not the edge's address, to every middleware and handler after
+it, and the port reads as 0. An `X-Real-IP` already on the request,
+which any client can send, is replaced with the same address, never kept
+(#3169). Running it twice sets the same values again.
 
 ---
 

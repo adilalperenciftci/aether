@@ -6966,12 +6966,11 @@ const char* http_request_remote_addr(HttpRequest* req) {
      * socket) or when the kernel call failed (the empty string
      * keeps the FFI shape stable for Aether callers).
      *
-     * Intentionally separate from the X-Forwarded-For header path:
-     * the header is client-supplied (use the
-     * `std.http.middleware.use_real_ip` middleware behind a trusted
-     * proxy that overwrites it); this accessor is what the kernel
-     * actually sees on the socket, which is the only basis for a
-     * directly-exposed listener's source-IP allow/deny decision. */
+     * Never read from a header: X-Forwarded-For and X-Real-IP are
+     * client-supplied. This is what the kernel sees on the socket, the
+     * only basis for a directly-exposed listener's source-IP allow/deny
+     * decision, unless `std.http.middleware.use_real_ip` ran: behind a
+     * trusted proxy it puts the client it resolved here (#3169). */
     return (req && req->remote_addr) ? req->remote_addr : "";
 }
 

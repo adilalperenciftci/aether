@@ -1068,11 +1068,29 @@ int aether_middleware_real_ip(HttpRequest* req, HttpServerResponse* res, void* u
     memcpy(ip_buf, p, len);
     ip_buf[len] = '\0';
 
-    /* Idempotent: if X-Real-IP already set (we ran twice), don't
-     * append a duplicate that would mask the first. */
+    /* The resolved client is the peer the request reports from here on
+     * (#3169): http_request_remote_addr answers it to every handler and
+     * middleware after this one, std.http.proxy's X-Forwarded-For entry
+     * among them. The proxy connection's port says nothing of the client,
+     * so the port reads as unavailable. */
+    char* peer = strdup(ip_buf);
+    if (peer) {
+        free(req->remote_addr);
+        req->remote_addr = peer;
+        req->remote_port = 0;
+    }
+
+    /* X-Real-IP carries the same address. A client can send that header
+     * itself, so one already on the request is replaced, never kept: kept,
+     * a forged value masked the address resolved here. */
     for (int i = 0; i < req->header_count; i++) {
         if (req->header_keys[i] &&
             strcasecmp(req->header_keys[i], "X-Real-IP") == 0) {
+            char* v = strdup(ip_buf);
+            if (v) {
+                free(req->header_values[i]);
+                req->header_values[i] = v;
+            }
             return 1;
         }
     }

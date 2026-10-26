@@ -245,9 +245,11 @@ void aether_xform_error_pages(HttpRequest* req, HttpServerResponse* res, void* u
 //
 // This middleware reads the configured header (default
 // X-Forwarded-For), takes the leftmost non-empty IP as the
-// original client, and adds an `X-Real-IP: <ip>` header to the
-// request so downstream handlers, rate-limit middleware, access
-// logs, and metrics see the original client identity.
+// original client, and makes it the peer the request reports
+// (http_request_remote_addr answers it from then on, the port 0)
+// and its `X-Real-IP: <ip>`, replacing an X-Real-IP the client sent
+// (#3169), so downstream handlers, rate-limit middleware, access
+// logs, metrics and std.http.proxy see the original client.
 //
 // Trust model: the middleware does NOT validate that the request
 // came through a trusted proxy. Operators are responsible for

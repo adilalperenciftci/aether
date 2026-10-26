@@ -188,15 +188,16 @@ static int route_pattern_matches(const char* pattern, const char* path) {
 
 /* ----- helpers ----- */
 
+/* This hop's own X-Forwarded-For entry: the peer the request reports
+ * (#3169). That is the connection's peer, or, after
+ * middleware.use_real_ip, the client it resolved from a trusted chain.
+ * X-Real-IP is never read here: any client can send it, and taking it
+ * let a client write its own entry into the chain the upstream trusts.
+ * A connection with no IP peer (a Unix-domain socket) adds "unknown",
+ * the RFC 7239 word for a hop that cannot be named. */
 static const char* client_ip_for_xff(HttpRequest* req) {
-    const char* xri = http_get_header(req, "X-Real-IP");
-    if (xri && *xri) return xri;
-    /* Best-effort fallback. The HTTP server doesn't currently
-     * expose the connection's remote-address back to middleware
-     * at a stable address, so we use "unknown" rather than
-     * lying. Operators who care should register
-     * middleware.use_real_ip first; that populates X-Real-IP. */
-    return "unknown";
+    const char* peer = http_request_remote_addr(req);
+    return (peer && *peer) ? peer : "unknown";
 }
 
 /* Append `value` to an existing comma-separated header value, writing into
