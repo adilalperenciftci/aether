@@ -414,8 +414,8 @@ get_with_headers(url: string, header_pairs: ptr) -> {
 }
 
 // "POST this body and tell me both the body and the status." Like
-// the v1 http.post but doesn't collapse non-2xx into "http error" —
-// the caller sees the real status code.
+// http.post, but a status other than 2xx comes back with its body as a
+// value to act on, not as an error.
 post_with_status(url: string, body: string, content_type: string) -> {
     req = request("POST", url)
     if req == null { return "", 0, "request build failed" }

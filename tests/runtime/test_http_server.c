@@ -196,6 +196,15 @@ TEST(http_server_status_text) {
     ASSERT_STREQ("Bad Request", http_status_text(400));
     ASSERT_STREQ("Not Found", http_status_text(404));
     ASSERT_STREQ("Internal Server Error", http_status_text(500));
+    // Every registered code has its phrase, not only the common ten (#3147):
+    // a 409 or a 429 used to go out as "Unknown".
+    ASSERT_STREQ("Conflict", http_status_text(409));
+    ASSERT_STREQ("Too Many Requests", http_status_text(429));
+    ASSERT_STREQ("Permanent Redirect", http_status_text(308));
+    ASSERT_STREQ("Network Authentication Required", http_status_text(511));
+    // An unregistered code has no phrase; the status line carries none.
+    ASSERT_STREQ("", http_status_text(418));
+    ASSERT_STREQ("", http_status_text(599));
 }
 
 TEST(http_server_mime_types) {

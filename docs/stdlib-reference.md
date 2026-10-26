@@ -2181,7 +2181,9 @@ main() {
 - `http.put(url, body, content_type)` → `(string, string)` - HTTP PUT
 - `http.delete(url)` → `(string, string)` - HTTP DELETE
 
-All wrappers auto-free the underlying response and return an error string for transport failures or non-2xx status codes. Raw externs: `http_get_raw`, `http_get_with_timeout_raw`, `http_post_raw`, `http_put_raw`, `http_delete_raw`.
+- `http.status_text(code)` → `string` - The reason phrase registered for a status code (`"Not Found"` for 404), `""` for a code nobody registered. The server writes the same phrase on its status line.
+
+All wrappers auto-free the underlying response and return `("", err)` on failure: a transport failure names its cause, and a status other than 2xx names the status and its reason, `"HTTP 404 Not Found"` or `"HTTP 503 Service Unavailable"` (the number alone, `"HTTP 599"`, for a code nobody registered), so a missing page and a failing server read apart. For the body of such a response, or its headers, use `std.http.client`. Raw externs: `http_get_raw`, `http_get_with_timeout_raw`, `http_post_raw`, `http_put_raw`, `http_delete_raw`.
 
 **Connection reuse.** The client keeps a connection open after a response whose length was definite (`Content-Length` or chunked) and reuses it for the next request to the same origin, which is what HTTP/1.1 is for: a proxy or a polling client otherwise pays a TCP, and for HTTPS a TLS, handshake per request. It is on by default; a reverse proxy through `std.http.proxy` measured about 2x on the same box once it stopped dialling per request. Connections are keyed by origin, by the proxy actually dialled, by TLS, and by the verification the caller asked for, so a connection opened with a pinned CA or with verification off is never handed to a request that did not ask for that. A response with no definite length, or either side saying `Connection: close`, retires the connection instead of pooling it, and a streaming response (`stream()`) is never pooled because the caller may abandon it mid-body. A connection the peer closed while it sat idle looks live until it is used, so a pooled connection that returns nothing is redialled and the request sent once more, which is safe precisely because the server never saw it.
 
@@ -2469,7 +2471,7 @@ main() {
 }
 ```
 
-Design choices: `method` is an arbitrary string, not a `{GET,POST,PUT,DELETE}` enum, so WebDAV / DeltaV / PATCH / project-specific verbs ride through without a stdlib release (the native client sends the method verbatim on the request line). A non-2xx status is not an error: `send_request` returns the response cleanly and the caller drives status interpretation, so 404/403/401 are distinguishable rather than collapsed to `"http error"`. The builder is named `send_request` rather than `send` because `send` is reserved for actor messaging. `tests/integration/test_http_client_v2.ae` is the runnable example for the buffered API; `tests/integration/http_client_stream/` and `http_client_stream_chunked/` cover streaming.
+Design choices: `method` is an arbitrary string, not a `{GET,POST,PUT,DELETE}` enum, so WebDAV / DeltaV / PATCH / project-specific verbs ride through without a stdlib release (the native client sends the method verbatim on the request line). A non-2xx status is not an error: `send_request` returns the response cleanly and the caller drives status interpretation, and the body and headers of a 404 or a 500 are there to read; the one-line `http.get` reports only `"HTTP 404 Not Found"`. The builder is named `send_request` rather than `send` because `send` is reserved for actor messaging. `tests/integration/test_http_client_v2.ae` is the runnable example for the buffered API; `tests/integration/http_client_stream/` and `http_client_stream_chunked/` cover streaming.
 
 ### HTTP record/replay (VCR), moved out of the stdlib
 

@@ -527,6 +527,7 @@ void http_server_response_free(HttpServerResponse* res);
 
 // Helpers
 int http_route_matches(const char* pattern, const char* path, HttpRequest* req);
+// The registered reason phrase for a status code, "" for an unregistered one.
 const char* http_status_text(int code);
 
 // MIME type detection
