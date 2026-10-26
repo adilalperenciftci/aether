@@ -220,7 +220,9 @@ the middleware:
 3. Calls the load-balancer picker again, usually selecting a
    different upstream.
 4. Backs off for `backoff_base_ms × 2^(attempt-1)` with full jitter
-   (uniform random in `[0, current_backoff]`), capped at 10 s.
+   (uniform random in `[0, current_backoff]`), capped at 10 s. On the
+   event loop the backoff is a timer: the driver serves its other
+   connections meanwhile (#3232).
 5. Retries.
 
 `POST` and `PATCH` are **never retried**, at-most-once delivery is

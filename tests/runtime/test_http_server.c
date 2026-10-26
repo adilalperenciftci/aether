@@ -692,6 +692,50 @@ TEST(http_request_edit_an_arena_backed_request) {
 }
 #endif  /* !_WIN32 */
 
+#if !defined(_WIN32)
+/* A retry's backoff is the exchange's caller's to wait out (#3232). The
+ * exchange slept it inside resume, which on the proxy event loop put the
+ * driver to sleep with every connection it held. Four retries with a 10 s
+ * backoff base, each an upstream that could not be reached: resume has to
+ * hand each one back at once, with the wait in backoff_ms. */
+TEST(http_proxy_exchange_leaves_the_backoff_to_its_caller) {
+    AetherProxyPool* pool = aether_proxy_pool_new(AETHER_PROXY_LB_ROUND_ROBIN, 5, 0, 0);
+    ASSERT_NOT_NULL(pool);
+    ASSERT_STREQ("", aether_proxy_upstream_add(pool, "http://127.0.0.1:9", 1));
+    AetherProxyOpts* opts = aether_proxy_opts_new();
+    ASSERT_NOT_NULL(opts);
+    opts->pool = pool;   /* the opts free the pool with themselves */
+    ASSERT_STREQ("", aether_proxy_opts_set_retry_policy(opts, 4, 10000));
+
+    HttpRequest* req = http_parse_request("GET /x HTTP/1.1\r\nHost: h\r\n\r\n");
+    ASSERT_NOT_NULL(req);
+    HttpServerResponse* res = http_response_create();
+    AetherProxyExchange px;
+    int r = aether_proxy_exchange_begin(&px, req, res, opts, NULL);
+    ASSERT_EQ(PX_NEED_SEND, r);
+
+    int64_t started = aether_proxy_now_ms();
+    int retries = 0;
+    while (r == PX_NEED_SEND) {
+        http_request_free_raw(px.outbound);
+        free(px.upstream_url);
+        px.outbound = NULL;
+        px.upstream_url = NULL;
+        px.resp = http_response_alloc_failed("connection failed");
+        r = aether_proxy_exchange_resume(&px, 0);
+        if (r == PX_NEED_SEND) retries++;
+    }
+    int64_t took = aether_proxy_now_ms() - started;
+    ASSERT_EQ(4, retries);
+    ASSERT_TRUE(took < 1000);
+    ASSERT_EQ(502, http_response_get_status(res));
+
+    http_server_response_free(res);
+    http_request_free(req);
+    aether_proxy_opts_free(opts);
+}
+#endif
+
 /* X-Real-IP is something a client can send, so use_real_ip leaves none of a
  * client's on the request (#3169). It replaced the first and kept a second,
  * which reached an upstream that reads the last X-Real-IP (#3239). */

@@ -314,6 +314,12 @@ typedef struct {
     int                 status;
     int                 attempt;
     int                 max_attempts;
+    /* How long to wait before sending `outbound`, in milliseconds: a retry's
+     * backoff, 0 for a first attempt. The caller waits it out its own way
+     * (#3232): the blocking driver sleeps, the event loop sets a timer and
+     * serves its other connections meanwhile. The exchange slept it itself,
+     * which put the loop's whole driver to sleep. */
+    int                 backoff_ms;
     /* Optional. A driver serving many requests on one connection points this
      * at an arena it owns, and the outbound request's headers are built there
      * instead of one malloc each. NULL means the ordinary allocator, which is
@@ -323,8 +329,9 @@ typedef struct {
 
 /* Returns 0 or 1, the middleware's own result, when the exchange is finished,
  * or PX_NEED_SEND when `outbound` is built and waiting. On PX_NEED_SEND the
- * caller sends it, frees it and `upstream_url`, stores the reply in `resp`,
- * and calls resume with how long the send took in milliseconds. */
+ * caller waits `backoff_ms`, sends it, frees it and `upstream_url`, stores
+ * the reply in `resp`, and calls resume with how long the send took in
+ * milliseconds. */
 int aether_proxy_exchange_begin(AetherProxyExchange* px,
                                 HttpRequest* req,
                                 HttpServerResponse* res,

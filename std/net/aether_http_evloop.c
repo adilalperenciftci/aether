@@ -66,6 +66,7 @@ typedef enum {
     EV_UPSTREAM_DIAL,    /* a connect this driver started is still in flight */
     EV_UPSTREAM_SEND,    /* writing the request to the upstream */
     EV_UPSTREAM_RECV,    /* reading the response from the upstream */
+    EV_BACKOFF,          /* waiting out a retry's backoff, on a timer (#3232) */
     EV_CLIENT_SEND,      /* writing the response to the client */
     EV_CLOSING
 } EvState;
@@ -871,6 +872,16 @@ static int ev_answer(EvDriver* d, EvConn* c) {
  * exchange. */
 static int ev_begin_retry_ex(EvDriver* d, EvConn* c, int next_addr);
 static int ev_begin_retry(EvDriver* d, EvConn* c) {
+    /* A retry's backoff is waited out on a timer (#3232). The exchange used
+     * to sleep it, on this thread, and every connection the driver held
+     * waited with it; now the connection parks and ev_expire dials when it
+     * is due. */
+    if (c->px.backoff_ms > 0) {
+        int64_t due = aether_proxy_now_ms() + c->px.backoff_ms;
+        c->px.backoff_ms = 0;
+        c->state = EV_BACKOFF;
+        return ev_timer_set(d, c, due) == 0 ? 0 : -1;
+    }
     return ev_begin_retry_ex(d, c, 0);
 }
 
@@ -1018,6 +1029,8 @@ static void ev_arm_deadline(EvDriver* d, EvConn* c) {
  * and it is the same one the blocking path gives. */
 static int ev_expire(EvDriver* d, EvConn* c) {
     ev_timer_set(d, c, 0);
+    /* Not a timeout: the backoff before a retry is over (#3232). */
+    if (c->state == EV_BACKOFF) return ev_begin_retry_ex(d, c, 0);
     if (c->up.t.sockfd >= 0) {
         aether_io_poller_remove(&d->poller, c->up.t.sockfd);
         ev_untrack(d, c->up.t.sockfd);
@@ -1420,6 +1433,8 @@ static int ev_advance(EvDriver* d, EvConn* c) {
             if (r <= 0) return r;
             continue;
         }
+        case EV_BACKOFF:
+            return 0;    /* the timer moves it on (ev_expire) */
         case EV_CLIENT_SEND: {
             int r = ev_step_client_send(d, c);
             if (r <= 0) return r;

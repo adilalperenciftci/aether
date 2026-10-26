@@ -570,10 +570,12 @@ static int px_build(AetherProxyExchange* px) {
     AetherProxyOpts* opts = px->opts;
     HttpRequest* req = px->req;
     HttpServerResponse* res = px->res;
+    /* Backoff between attempts, for the caller to wait out before it sends
+     * (#3232): sleeping here put the proxy event loop's driver to sleep, and
+     * every connection it held with it. */
+    px->backoff_ms = 0;
     if (px->attempt > 0) {
-        /* Backoff between attempts. */
-        int sleep_ms = retry_backoff_ms(opts->retry_backoff_base_ms, px->attempt);
-        retry_sleep_ms(sleep_ms);
+        px->backoff_ms = retry_backoff_ms(opts->retry_backoff_base_ms, px->attempt);
         atomic_fetch_add(&px->u->metric_retries, 1);
     }
 
@@ -1121,13 +1123,15 @@ int aether_proxy_direct_head(const AetherProxyDirect* d,
 }
 
 /* The blocking driver: the server's worker owns the thread for the whole
- * request, so it simply performs the send itself. */
+ * request, so it simply performs the send itself, and sleeps out a retry's
+ * backoff before it. */
 int aether_middleware_reverse_proxy(HttpRequest* req,
                                     HttpServerResponse* res,
                                     void* user_data) {
     AetherProxyExchange px;
     int r = aether_proxy_exchange_begin(&px, req, res, user_data, NULL);
     while (r == PX_NEED_SEND) {
+        retry_sleep_ms(px.backoff_ms);
         int64_t t0 = aether_proxy_now_ms();
         px.resp = http_send_raw(px.outbound);
         int64_t elapsed = aether_proxy_now_ms() - t0;
