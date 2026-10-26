@@ -3622,6 +3622,8 @@ ci-coop: clean compiler ae
 # 01-hello.c while the second still compiled hello.c.
 WASM_CI_PROGRAMS := examples/01-language/01-hello.ae examples/actors/counter.ae \
                     tests/syntax/test_platform_caps.ae tests/syntax/test_coop_chain.ae
+# The runtime those programs link, the list ci-esp32's CMakeLists reads too.
+COOP_RUNTIME_SOURCES := $(shell sed -e '/^\#/d' runtime/coop_runtime_sources.txt)
 
 ci-wasm: clean compiler ae
 	@echo "==================================="
@@ -3653,26 +3655,7 @@ ci-wasm: clean compiler ae
 		-Wall -Wextra -Wno-unused-parameter -Wno-unused-function \
 		-Wno-unused-variable -Wno-missing-field-initializers -Wno-unused-label"; \
 	pass=0; fail=0; \
-	RUNTIME_FILES="runtime/scheduler/aether_scheduler_coop.c runtime/scheduler/scheduler_optimizations.c \
-		runtime/config/aether_optimization_config.c runtime/memory/aether_arena.c \
-		runtime/memory/aether_pool.c runtime/memory/aether_memory_stats.c \
-		runtime/utils/aether_bounds_check.c runtime/utils/aether_test.c runtime/memory/aether_arena_optimized.c \
-		runtime/utils/aether_spawn.c \
-		runtime/aether_runtime_types.c runtime/aether_locale_num.c runtime/utils/aether_cpu_detect.c \
-		runtime/utils/aether_simd_vectorized.c runtime/aether_runtime.c runtime/aether_numa.c \
-		runtime/aether_host.c \
-		runtime/actors/aether_send_buffer.c runtime/actors/aether_send_message.c \
-		runtime/actors/aether_unwind.c runtime/aether_callbacks.c \
-		runtime/actors/aether_actor_thread.c \
-		std/string/aether_string.c std/math/aether_math.c std/net/aether_http.c \
-		std/net/aether_http_server.c std/net/aether_http_pool.c std/net/aether_http_park.c std/net/aether_net.c std/net/aether_actor_bridge.c \
-		std/udp/aether_udp.c \
-		std/collections/aether_collections.c \
-		std/json/aether_json.c std/fs/aether_fs.c std/log/aether_log.c std/io/aether_io.c \
-		std/os/aether_os.c \
-		std/quote/aether_quote.c \
-		std/collections/aether_set.c std/collections/aether_pqueue.c std/collections/aether_intarr.c std/collections/aether_longarr.c std/collections/aether_bits.c \
-		runtime/sandbox/capsicum_autosandbox.c"; \
+	RUNTIME_FILES="$(COOP_RUNTIME_SOURCES)"; \
 	for src in $(WASM_CI_PROGRAMS); do \
 		name=$$(basename $$src .ae); \
 		printf "  %-40s " "emcc $$name"; \
