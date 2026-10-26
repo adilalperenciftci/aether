@@ -93,6 +93,13 @@ execution order; a mount whose method or path pattern does not match
 passes through to the next middleware, so narrower carve-outs should
 be registered first.
 
+Middleware registered before a proxy (a rate limiter, basic auth,
+`use_real_ip`) runs on every request the proxy forwards. On Linux and
+macOS a server whose first middleware is the proxy serves its plain-HTTP
+connections from an event loop, without a thread per connection. Any
+middleware before the proxy keeps the ordinary per-connection path, so
+that middleware is never skipped (#3203).
+
 ```aether,fragment
 proxy.mount_match(server, "/repos/:repo/info", primary_pool, primary_opts, "GET,HEAD")
 proxy.mount_methods(server, "/repos", primary_pool, write_opts, "POST,PUT,DELETE")

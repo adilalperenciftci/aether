@@ -2496,6 +2496,17 @@ void* http_server_proxy_opts(HttpServer* server) {
     return NULL;
 }
 
+/* Is the reverse proxy the first middleware of the chain, so that no other
+ * runs before it on a request? The event loop runs the proxy exchange
+ * alone; for a chain with use_real_ip, a rate limiter or basic auth ahead
+ * of the proxy it skipped them, and a proxied request went past the auth on
+ * Linux. Middleware after the proxy sees only what the proxy passes on,
+ * which the loop hands back to the worker path. */
+int http_server_proxy_runs_first(HttpServer* server) {
+    return server && server->middleware_chain &&
+           server->middleware_chain->middleware == aether_middleware_reverse_proxy;
+}
+
 void http_response_set_header(HttpServerResponse* res, const char* key, const char* value) {
     if (!res) return;
     /* A header carrying a line ending would be written into the response head
@@ -4444,51 +4455,59 @@ static int conn_recv_timed_out(void) {
  *
  * Not thread-safe by design: an HttpConn is owned by one worker at a
  * time. Parking hands it between workers, but never concurrently. */
+/* One end of socket `fd` as text and port: the peer (getpeername) when
+ * `peer`, else the local end (getsockname). "" and 0 when the lookup fails
+ * or the family is neither IPv4 nor IPv6 (a Unix-domain socket). */
+static void fd_end_text(int fd, int peer, char* buf, size_t cap, int* port) {
+    buf[0] = '\0';
+    *port = 0;
+    if (fd < 0) return;
+    struct sockaddr_storage ss;
+    socklen_t sslen = sizeof(ss);
+    int rc = peer ? getpeername(fd, (struct sockaddr*)&ss, &sslen)
+                  : getsockname(fd, (struct sockaddr*)&ss, &sslen);
+    if (rc != 0) return;
+    aether_addr_unmap(&ss);   /* an IPv4 client of a "::" listener */
+    const char* src = NULL;
+    if (ss.ss_family == AF_INET) {
+        struct sockaddr_in* sa = (struct sockaddr_in*)&ss;
+        src = inet_ntop(AF_INET, &sa->sin_addr, buf, cap);
+        *port = ntohs(sa->sin_port);
+    } else if (ss.ss_family == AF_INET6) {
+        struct sockaddr_in6* sa = (struct sockaddr_in6*)&ss;
+        src = inet_ntop(AF_INET6, &sa->sin6_addr, buf, cap);
+        *port = ntohs(sa->sin6_port);
+    }
+    if (!src) { buf[0] = '\0'; *port = 0; }
+}
+
 static void conn_resolve_addrs(HttpConn* c) {
     if (!c || c->addrs_resolved) return;
     c->addrs_resolved = 1;
-    c->remote_addr[0] = '\0';
-    c->local_addr[0] = '\0';
-    c->remote_port = 0;
-    c->local_port = 0;
-    if (c->fd < 0) return;
+    fd_end_text(c->fd, 1, c->remote_addr, sizeof(c->remote_addr), &c->remote_port);
+    fd_end_text(c->fd, 0, c->local_addr, sizeof(c->local_addr), &c->local_port);
+}
 
-    struct sockaddr_storage ss;
-    socklen_t sslen = sizeof(ss);
-    if (getpeername(c->fd, (struct sockaddr*)&ss, &sslen) == 0) {
-        aether_addr_unmap(&ss);   /* an IPv4 client of a "::" listener */
-        const char* src = NULL;
-        if (ss.ss_family == AF_INET) {
-            struct sockaddr_in* sa = (struct sockaddr_in*)&ss;
-            src = inet_ntop(AF_INET, &sa->sin_addr,
-                            c->remote_addr, sizeof(c->remote_addr));
-            c->remote_port = ntohs(sa->sin_port);
-        } else if (ss.ss_family == AF_INET6) {
-            struct sockaddr_in6* sa = (struct sockaddr_in6*)&ss;
-            src = inet_ntop(AF_INET6, &sa->sin6_addr,
-                            c->remote_addr, sizeof(c->remote_addr));
-            c->remote_port = ntohs(sa->sin6_port);
-        }
-        if (!src) { c->remote_addr[0] = '\0'; c->remote_port = 0; }
-    }
-
-    sslen = sizeof(ss);
-    if (getsockname(c->fd, (struct sockaddr*)&ss, &sslen) == 0) {
-        aether_addr_unmap(&ss);
-        const char* src = NULL;
-        if (ss.ss_family == AF_INET) {
-            struct sockaddr_in* sa = (struct sockaddr_in*)&ss;
-            src = inet_ntop(AF_INET, &sa->sin_addr,
-                            c->local_addr, sizeof(c->local_addr));
-            c->local_port = ntohs(sa->sin_port);
-        } else if (ss.ss_family == AF_INET6) {
-            struct sockaddr_in6* sa = (struct sockaddr_in6*)&ss;
-            src = inet_ntop(AF_INET6, &sa->sin6_addr,
-                            c->local_addr, sizeof(c->local_addr));
-            c->local_port = ntohs(sa->sin6_port);
-        }
-        if (!src) { c->local_addr[0] = '\0'; c->local_port = 0; }
-    }
+/* The peer and the local address of the plain-HTTP connection on `fd`,
+ * copied into `req` as http_request_copy_conn_meta does for an HttpConn.
+ * The proxy event loop (aether_http_evloop.c) serves its connections
+ * without an HttpConn, and its requests read "" for both: the proxy's
+ * X-Forwarded-For named the hop "unknown" on Linux (#3169). The strings are
+ * the request's, freed by http_request_free; a parse does not reset them,
+ * so a connection's request takes them once. */
+void http_request_copy_fd_meta(HttpRequest* req, int fd) {
+    if (!req) return;
+    char text[INET6_ADDRSTRLEN];
+    int port = 0;
+    fd_end_text(fd, 1, text, sizeof(text), &port);
+    free(req->remote_addr);
+    req->remote_addr = text[0] ? strdup(text) : NULL;
+    req->remote_port = text[0] ? port : 0;
+    fd_end_text(fd, 0, text, sizeof(text), &port);
+    free(req->local_addr);
+    req->local_addr = text[0] ? strdup(text) : NULL;
+    req->local_port = text[0] ? port : 0;
+    req->is_tls = 0;
 }
 
 /* Connection-level metadata that handlers learn from the kernel rather
@@ -5738,7 +5757,9 @@ void http_server_drain_connection(HttpServer* server, int client_fd) {
      *
      * A refusal costs nothing, because the connection has not been touched
      * yet and the worker path is still right below. */
-    if (server->evloop && !server->h2_enabled) {
+    /* A chain changed since the loop started may have middleware ahead of
+     * the proxy now, which the loop would skip. */
+    if (server->evloop && !server->h2_enabled && http_server_proxy_runs_first(server)) {
         if (http_evloop_submit((HttpEvLoop*)server->evloop, client_fd) == 0) return;
     }
 

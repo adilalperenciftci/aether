@@ -966,6 +966,10 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
     if (!c->req) {
         c->req = (HttpRequest*)calloc(1, sizeof(HttpRequest));
         if (!c->req) return -1;
+        /* The connection's peer, which the proxy names in X-Forwarded-For
+         * (#3169). One request per connection, reset by each parse, which
+         * keeps it. */
+        http_request_copy_fd_meta(c->req, c->client_fd);
     }
     /* The arena is emptied before the parse, not after it: the parse takes
      * this request's strings from it, and resetting afterwards would hand the
@@ -1422,8 +1426,10 @@ static void ev_driver_destroy(EvDriver* d) {
 HttpEvLoop* http_evloop_start(HttpServer* server, int threads) {
     if (!server || threads <= 0) return NULL;
     /* No proxy mounted means nothing for this driver to do, and it says so by
-     * not existing rather than by running empty. */
-    if (!http_server_proxy_opts(server)) return NULL;
+     * not existing rather than by running empty. Nor does a chain that runs
+     * other middleware before the proxy: the driver runs the exchange alone,
+     * and would skip them (http_server_proxy_runs_first). */
+    if (!http_server_proxy_opts(server) || !http_server_proxy_runs_first(server)) return NULL;
 
     HttpEvLoop* loop = (HttpEvLoop*)calloc(1, sizeof(HttpEvLoop));
     if (!loop) return NULL;

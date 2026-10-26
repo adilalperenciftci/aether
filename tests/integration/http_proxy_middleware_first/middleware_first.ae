@@ -1,0 +1,112 @@
+// Middleware registered before std.http.proxy runs on every proxied request
+// (#3203).
+//
+// On Linux and macOS a server that mounted a proxy handed its connections to
+// the proxy event loop, which ran the proxy exchange alone: the rate limiter,
+// basic auth, CORS and use_real_ip ahead of the proxy were skipped for each
+// request the proxy forwarded. The loop now serves a connection only when the
+// proxy is the chain's first middleware. Windows has no such loop and ran the
+// whole chain all along.
+//
+// An upstream answers "ok". One gateway rate-limits to one request a minute
+// before its proxy; the other is the proxy alone, which the loop still
+// serves. Each listens on 127.0.0.1 and a port the kernel picks.
+
+import std.http
+import std.http.client
+import std.http.middleware
+import std.http.proxy
+
+extern exit(code: int)
+
+handle_ok(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "ok")
+}
+
+// A server, set to 127.0.0.1, bound to a free port and started in the
+// background; its port.
+start(server: ptr) -> int {
+    if http.server_bind(server, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    err = http.server_start_background(server)
+    if err != "" {
+        println("FAIL: ${err}")
+        exit(1)
+    }
+    return http.server_port(server)
+}
+
+// The status of a GET through the gateway on `port`.
+status_through(port: int) -> int {
+    req = client.request("GET", "http://127.0.0.1:${port}/ok")
+    resp, err = client.send_request(req)
+    client.request_free(req)
+    if err != "" {
+        println("FAIL: request through :${port}: ${err}")
+        exit(1)
+    }
+    code = client.response_status(resp)
+    client.response_free(resp)
+    return code
+}
+
+expect(label: string, got: int, want: int) -> int {
+    if got != want {
+        println("  FAIL ${label}: status ${got}, expected ${want}")
+        return 1
+    }
+    println("  PASS ${label}")
+    return 0
+}
+
+main() {
+    println("=== middleware before std.http.proxy runs on proxied requests (#3203) ===")
+    upstream = http.server_create(0)
+    http.server_set_host(upstream, "127.0.0.1")
+    http.server_get(upstream, "/ok", handle_ok, 0)
+    up_url = "http://127.0.0.1:${start(upstream)}"
+
+    limited = http.server_create(0)
+    http.server_set_host(limited, "127.0.0.1")
+    lerr = middleware.use_rate_limit(limited, 1, 60000)
+    if lerr != "" {
+        println("FAIL: use_rate_limit: ${lerr}")
+        exit(1)
+    }
+    merr = proxy.mount_simple(limited, "/", up_url, 5)
+    if merr != "" {
+        println("FAIL: mount_simple: ${merr}")
+        exit(1)
+    }
+    limited_port = start(limited)
+
+    alone = http.server_create(0)
+    http.server_set_host(alone, "127.0.0.1")
+    aerr = proxy.mount_simple(alone, "/", up_url, 5)
+    if aerr != "" {
+        println("FAIL: mount_simple: ${aerr}")
+        exit(1)
+    }
+    alone_port = start(alone)
+    sleep(200)
+
+    bad = 0
+    bad = bad + expect("the first proxied request is under the limit", status_through(limited_port), 200)
+    bad = bad + expect("the second is refused by the rate limiter ahead of the proxy",
+        status_through(limited_port), 429)
+    bad = bad + expect("a proxy with nothing before it forwards", status_through(alone_port), 200)
+    bad = bad + expect("and forwards again", status_through(alone_port), 200)
+
+    http.server_stop(alone)
+    http.server_stop(limited)
+    http.server_stop(upstream)
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

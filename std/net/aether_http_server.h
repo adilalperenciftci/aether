@@ -539,6 +539,9 @@ void http_request_free(HttpRequest* req);
 // Copy a connection's peer and local address and its TLS state into a
 // request it carries; every request, HTTP/1.1 or h2, gets them (#3175).
 void http_request_copy_conn_meta(HttpRequest* req, struct HttpConn* conn);
+// The same for a plain-HTTP connection held by its fd alone: the proxy
+// event loop's, which has no HttpConn (#3169).
+void http_request_copy_fd_meta(HttpRequest* req, int fd);
 
 // Response building
 HttpServerResponse* http_response_create(void);
@@ -966,6 +969,9 @@ void http_format_clf_time(char* out, size_t out_size, const struct tm* tmv);
 /* The reverse proxy's options when one is mounted on this server, else NULL.
  * The event driver runs the proxy exchange itself and needs them. */
 void* http_server_proxy_opts(HttpServer* server);
+// 1 when the reverse proxy is the chain's first middleware: nothing runs
+// before it, and the proxy event loop may serve the connection alone.
+int http_server_proxy_runs_first(HttpServer* server);
 
 /* Whether any response transformer is registered. A driver that answers a
  * proxied request from the upstream's own bytes must not do so when one is,
