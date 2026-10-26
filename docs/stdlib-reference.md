@@ -2808,32 +2808,27 @@ Structured logging with levels.
 import std.log
 
 main() {
-    err = log.init("app.log", 0)  // 0 = LOG_DEBUG
+    err = log.init("app.log", log.LOG_LEVEL_DEBUG)
     if err != "" {
-        println("log file unavailable, falling back to stderr: ${err}")
+        println("logging to stderr instead: ${err}")
     }
 
-    log.write(0, "Debug message")
-    log.write(1, "Info message")
-    log.write(2, "Warning message")
-    log.write(3, "Error message")
+    log.write(log.LOG_LEVEL_DEBUG, "Debug message")
+    log.write(log.LOG_LEVEL_INFO, "Info message")
+    log.write(log.LOG_LEVEL_WARN, "Disk 95% full")
+    log.write(log.LOG_LEVEL_ERROR, "Error message")
 
     log.print_stats()
     log.shutdown()
 }
 ```
 
-**Log Levels:**
-- `0` = DEBUG
-- `1` = INFO
-- `2` = WARN
-- `3` = ERROR
-- `4` = FATAL
+**Log Levels**, lowest first: `log.LOG_LEVEL_DEBUG`, `log.LOG_LEVEL_INFO`, `log.LOG_LEVEL_WARN`, `log.LOG_LEVEL_ERROR` and `log.LOG_LEVEL_FATAL` (which aborts the program after writing). A message below the current level is dropped.
 
 **Functions:**
-- `log.init(filename, level)` → `string` - Initialize logging, return error string if the log file could not be opened (logging still works via stderr as a fallback)
+- `log.init(filename, level)` → `string` - Initialize logging, appending to `filename`, or to stderr when it is `""` or `"-"`. Returns `""`, or an error naming a file that could not be opened (logging then goes to stderr, so nothing is lost)
 - `log.shutdown()` - Shutdown logging
-- `log.write(level, message)` - Write a log message at the given level
+- `log.write(level, message)` - Write `message` at `level`, as it is: a `%` in it is text, not a format
 - `log.set_level(level)` - Set minimum level
 - `log.set_colors(enabled)` - Enable/disable colored output (1/0)
 - `log.set_timestamps(enabled)` - Enable/disable timestamps (1/0)

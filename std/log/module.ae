@@ -1,22 +1,31 @@
 // std.log - Logging Module
 // Import with: import std.log
-
-// Log level constants
-// LOG_LEVEL_DEBUG = 0, LOG_LEVEL_INFO = 1, LOG_LEVEL_WARN = 2
-// LOG_LEVEL_ERROR = 3, LOG_LEVEL_FATAL = 4
+//
+//     err = log.init("app.log", log.LOG_LEVEL_INFO)   // "" or "-": stderr
+//     log.write(log.LOG_LEVEL_WARN, "disk almost full")
+//
+// A message below the level init (or set_level) gave is dropped.
 
 exports(
     log_init_raw, log_shutdown, log_write,
     log_set_level, log_set_colors, log_set_timestamps,
     log_get_stats, log_print_stats,
-    init
+    init,
+    LOG_LEVEL_DEBUG, LOG_LEVEL_INFO, LOG_LEVEL_WARN, LOG_LEVEL_ERROR, LOG_LEVEL_FATAL
 )
+
+// The levels, lowest first (aether_log.h's LogLevel).
+const LOG_LEVEL_DEBUG = 0
+const LOG_LEVEL_INFO = 1
+const LOG_LEVEL_WARN = 2
+const LOG_LEVEL_ERROR = 3
+const LOG_LEVEL_FATAL = 4
 
 // Initialize and shutdown. Raw init returns 1/0 for ok/file-open-failed.
 extern log_init_raw(filename: string, min_level: int) -> int
 extern log_shutdown()
 
-// Core logging (variadic not fully supported, use with format string)
+// Write `msg` at `level`, as it is: a % in it is text, not a format.
 extern log_write(level: int, msg: string)
 
 // Configuration
@@ -28,13 +37,13 @@ extern log_set_timestamps(enabled: int)
 extern log_get_stats() -> ptr
 extern log_print_stats()
 
-// Initialize logging. Returns "" on success, error string if the
-// requested log file could not be opened (in which case logging still
-// works via stderr as a fallback).
+// Initialize logging to `filename`, appending, or to stderr when it is ""
+// or "-". Returns "" on success, or an error naming a file that could not
+// be opened (logging then goes to stderr, so nothing is lost).
 init(filename: string, min_level: int) -> {
     ok = log_init_raw(filename, min_level)
     if ok == 0 {
-        return "cannot open log file"
+        return "cannot open log file ${filename}"
     }
     return ""
 }

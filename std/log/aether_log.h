@@ -29,17 +29,20 @@ int log_init_raw(const char* filename, LogLevel min_level);
 void log_init_with_config(LogConfig* config);
 void log_shutdown(void);
 
-// Core logging functions
-void log_write(LogLevel level, const char* fmt, ...);
+// Core logging functions. log_write writes `msg` as it is (what std.log's
+// log.write calls, so a message holding a % is text, never a format);
+// log_writef and the macros below format printf-style.
+void log_write(LogLevel level, const char* msg);
+void log_writef(LogLevel level, const char* fmt, ...);
 void log_with_location(LogLevel level, const char* file, int line,
                        const char* func, const char* fmt, ...);
 
 // Convenience macros
-#define LOG_DEBUG(...)  log_write(LOG_LEVEL_DEBUG, __VA_ARGS__)
-#define LOG_INFO(...)   log_write(LOG_LEVEL_INFO, __VA_ARGS__)
-#define LOG_WARN(...)   log_write(LOG_LEVEL_WARN, __VA_ARGS__)
-#define LOG_ERROR(...)  log_write(LOG_LEVEL_ERROR, __VA_ARGS__)
-#define LOG_FATAL(...)  log_write(LOG_LEVEL_FATAL, __VA_ARGS__)
+#define LOG_DEBUG(...)  log_writef(LOG_LEVEL_DEBUG, __VA_ARGS__)
+#define LOG_INFO(...)   log_writef(LOG_LEVEL_INFO, __VA_ARGS__)
+#define LOG_WARN(...)   log_writef(LOG_LEVEL_WARN, __VA_ARGS__)
+#define LOG_ERROR(...)  log_writef(LOG_LEVEL_ERROR, __VA_ARGS__)
+#define LOG_FATAL(...)  log_writef(LOG_LEVEL_FATAL, __VA_ARGS__)
 
 // With source location
 #define LOG_DEBUG_LOC(...)  log_with_location(LOG_LEVEL_DEBUG, __FILE__, __LINE__, __func__, __VA_ARGS__)
