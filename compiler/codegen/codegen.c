@@ -9223,6 +9223,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     /* #3159: the drop of a string place by its address, as own_emit_part
      * drops one (a `make` buffer's elements, freed with the buffer). */
     print_line(gen, "static AETHER_MAYBE_UNUSED void _aether_string_drop_unwind(const void* p) { const char** s = (const char**)p; aether_heap_str_free(*s); *s = (const char*)0; }");
+    /* #3172: the target of a send or an ask, which panics with `why` (a
+     * literal naming the operation and the place) on a null reference. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void* _aether_send_target(void* t, const char* why) { if (!t) aether_panic(why); return t; }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED void _aether_seq_free_place(StringSeq** p) { string_seq_free(*p); *p = (StringSeq*)0; }");
     /* #2755: a closure cell (a `fn` variable a closure writes) holds a
      * reference of its own to the closure in it, as a string cell owns its

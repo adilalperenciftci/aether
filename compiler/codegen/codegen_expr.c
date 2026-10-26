@@ -5685,13 +5685,21 @@ void emit_message_field_init(CodeGenerator* gen, MessageFieldDef* fdef, ASTNode*
 // Actor refs produce (ActorBase*)(expr) directly.
 // Int/int64 values (actor refs stored in int message fields or state) need
 // (ActorBase*)(intptr_t)(expr) to avoid pointer-width conversion warnings.
-static void emit_send_target(CodeGenerator* gen, ASTNode* target, const char* cast_type) {
+// #3172: the target goes through _aether_send_target, which panics, by name
+// and place, on a null reference (`op` is "send" or "ask"), as #3098's check
+// does for a call through a null function pointer: the send read the null
+// actor's fields and the process died of an access violation, past the
+// barrier that catches an actor's panic.
+static void emit_send_target(CodeGenerator* gen, ASTNode* target, const char* cast_type,
+                             const char* op) {
     int needs_intptr = target->node_type &&
         (target->node_type->kind == TYPE_INT || target->node_type->kind == TYPE_INT64);
-    fprintf(gen->output, "(%s)(", cast_type);
+    fprintf(gen->output, "(%s)_aether_send_target((void*)(", cast_type);
     if (needs_intptr) fprintf(gen->output, "(intptr_t)");
     generate_expression(gen, target);
-    fprintf(gen->output, ")");
+    fprintf(gen->output, "), \"null_actor_%s: %s to a null actor reference at \" ", op, op);
+    emit_slice_diag_file(gen, target);
+    fprintf(gen->output, " \":%d:%d\")", target->line, target->column);
 }
 
 /* Length of the valid UTF-8 sequence starting at `s`, or 1 if the
@@ -11804,15 +11812,15 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
 
                             if (gen->in_main_loop) {
                                 fprintf(gen->output, "scheduler_send_batch_add(");
-                                emit_send_target(gen, target, "ActorBase*");
+                                emit_send_target(gen, target, "ActorBase*", "send");
                                 fprintf(gen->output, ", _imsg); }");
                             } else if (gen->current_actor == NULL) {
                                 fprintf(gen->output, "scheduler_send_remote(");
-                                emit_send_target(gen, target, "ActorBase*");
+                                emit_send_target(gen, target, "ActorBase*", "send");
                                 fprintf(gen->output, ", _imsg, aether_core_id_get()); }");
                             } else {
                                 fprintf(gen->output, "ActorBase* _send_target = ");
-                                emit_send_target(gen, target, "ActorBase*");
+                                emit_send_target(gen, target, "ActorBase*", "send");
                                 fprintf(gen->output, "; ");
                                 fprintf(gen->output, "{ int _cid = aether_core_id_get(); if (_cid >= 0 && _cid == _send_target->assigned_core) { ");
                                 fprintf(gen->output, "scheduler_send_local(_send_target, _imsg); } else { ");
@@ -11867,7 +11875,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                              * among the loop's one-int ones. */
                             fprintf(gen->output, gen->in_main_loop ? "aether_send_message_batch("
                                                                    : "aether_send_message(");
-                            emit_send_target(gen, target, "void*");
+                            emit_send_target(gen, target, "void*", "send");
                             fprintf(gen->output, ", &_msg, sizeof(%s)); }", message->value);
                         }
                     } else {
@@ -11980,7 +11988,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         }
 
                         fprintf(gen->output, "void* _ask_r = scheduler_ask_message(");
-                        emit_send_target(gen, target, "ActorBase*");
+                        emit_send_target(gen, target, "ActorBase*", "ask");
                         fprintf(gen->output, ", &_msg, sizeof(%s), %d); ", message->value, timeout_ms);
 
                         if (reply_msg_name && reply_field) {
@@ -12020,7 +12028,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                          * path (#2528). */
                         gen->ask_temp_counter++;
                         fprintf(gen->output, "(*(%s*)_aether_ask_helper(", c_type);
-                        emit_send_target(gen, target, "ActorBase*");
+                        emit_send_target(gen, target, "ActorBase*", "ask");
                         if (message_has_array_fields(gen, message)) {
                             /* Its arrays are filled once it exists, so the
                              * message is a temporary, not a literal. */

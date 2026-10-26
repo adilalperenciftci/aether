@@ -28,6 +28,7 @@ runtime/aether_callbacks.c
 runtime/actors/aether_send_buffer.c
 runtime/actors/aether_send_message.c
 runtime/actors/aether_unwind.c
+runtime/actors/aether_panic.c
 runtime/actors/aether_actor_thread.c
 runtime/sandbox/capsicum_autosandbox.c
 std/string/aether_string.c
