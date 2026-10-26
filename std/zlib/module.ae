@@ -84,7 +84,7 @@ extern zlib_release_stream(handle: ptr)
 // Length-preserving string constructor from std.string — takes an
 // explicit byte count so binary payloads with embedded NULs survive
 // the copy out of the TLS buffer into an owned AetherString.
-extern string_new_with_length(data: ptr, length: long) -> string @heap
+extern string_new_with_length(data: ptr, length: size_t) -> string @heap
 
 // A slice with no bound (`p as byte[]`, `.len` -1) has no length.
 fn unbounded(fname: string) {

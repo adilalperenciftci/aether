@@ -2844,6 +2844,7 @@ help:
 	@echo "  make check-tests      - The test suite can fail: verdicts reach the exit code, prune list is consistent, every std module has tests, listeners bind loopback, shell tests end background programs through server_jobs.sh and compare files with same_bytes, test programs write temp files under names of their own and ask the build for the platform"
 	@echo "  make check-extern-widths - Every extern bound to C in this tree agrees with the C definition on each width; no plain C long in a bound signature"
 	@echo "  make check-raw-calls     - No file calls or re-declares a raw C binding another module declares"
+	@echo "  make check-extern-abi    - Every extern binds its C function with the widths that function takes"
 	@echo "  make check-warnings      - Every .ae file under std and contrib type-checks without a warning"
 	@echo "  make check-examples      - Every example builds clean and prints the output it says it prints"
 	@echo "  make check-contrib-modules - Type-check every non-host contrib module"
@@ -3039,6 +3040,7 @@ ci: clean
 	@$(CI_STAGE) 900 check-tests $(MAKE) check-tests
 	@$(CI_STAGE) 900 check-extern-widths $(MAKE) check-extern-widths
 	@$(CI_STAGE) 600 check-raw-calls $(MAKE) check-raw-calls
+	@$(CI_STAGE) 300 check-extern-abi $(MAKE) check-extern-abi
 	@$(CI_STAGE) 900 check-warnings $(MAKE) check-warnings
 	@echo ""
 	@echo "[5/11] Running .ae integration tests..."
@@ -3128,7 +3130,8 @@ check-extern-widths: compiler ae stdlib
 # is stored, bounds). No std or contrib file calls such a binding that
 # another module declares; it calls that module's public function. The
 # checker is Aether (tests/raw_calls/check.ae). Its self-test first: the
-# fixture holds exactly 4 such calls among uses that are not.
+# fixture holds exactly 6 such calls and re-declarations among uses that
+# are not.
 # -----------------------------------------------------------------
 # Every .ae file under std and contrib type-checks without a warning: an
 # unused value there was often a test's error result nobody checked. The
@@ -3152,6 +3155,22 @@ check-raw-calls: compiler ae stdlib
 	    > $(BUILD_DIR)/raw_calls/self_test.log 2>&1 || \
 	    { cat $(BUILD_DIR)/raw_calls/self_test.log; exit 1; }
 	@./$(RAW_CALLS_CHECKER) --exclude tests/raw_calls/fixture std contrib tests examples
+
+# Extern ABI (#3185): an extern's Aether types lower to fixed C types, and
+# a C definition of another width links on a 64-bit host and traps on a
+# 32-bit one (wasm32, ESP32). Every extern binds its C function with that
+# function's widths, and no C function is defined in two directories. The
+# checker is Aether (tests/extern_abi/check.ae). Its self-test first: the
+# fixture holds exactly 6 findings among declarations that match.
+EXTERN_ABI_CHECKER := $(BUILD_DIR)/extern_abi/check$(EXE_EXT)
+.PHONY: check-extern-abi
+check-extern-abi: compiler ae stdlib
+	@mkdir -p $(BUILD_DIR)/extern_abi
+	@./$(BUILD_DIR)/ae$(EXE_EXT) build tests/extern_abi/check.ae -o $(EXTERN_ABI_CHECKER)
+	@./$(EXTERN_ABI_CHECKER) --expect 6 tests/extern_abi/fixture \
+	    > $(BUILD_DIR)/extern_abi/self_test.log 2>&1 || \
+	    { cat $(BUILD_DIR)/extern_abi/self_test.log; exit 1; }
+	@./$(EXTERN_ABI_CHECKER) runtime std contrib
 
 # -----------------------------------------------------------------
 # Examples (#3105): examples/ is the path a learner follows, so each example
@@ -3674,6 +3693,10 @@ ci-wasm: clean compiler ae
 	echo "  $$pass generated, $$fail failed"; \
 	if [ "$$fail" -gt 0 ]; then exit 1; fi
 	@echo ""
+# wasm-ld only warns when a call and its definition disagree on the
+# signature (an int64_t where the definition takes a 32-bit size_t), and
+# links a stub that traps when the call runs: --fatal-warnings makes that
+# the build error it is.
 	@echo "[2/3] Compiling runtime + generated C with emcc..."
 	@WASM_CFLAGS="-O2 -DAETHER_NO_THREADING -DAETHER_NO_FILESYSTEM -DAETHER_NO_NETWORKING \
 		-Iruntime -Iruntime/actors -Iruntime/scheduler -Iruntime/utils -Iruntime/memory \
@@ -3686,7 +3709,7 @@ ci-wasm: clean compiler ae
 		name=$$(basename $$src .ae); \
 		printf "  %-40s " "emcc $$name"; \
 		if emcc $$WASM_CFLAGS "$(BUILD_DIR)/wasm/$$name.c" $$RUNTIME_FILES \
-			-o "$(BUILD_DIR)/wasm/$$name.js" -lm 2>/tmp/emcc_err.txt; then \
+			-Wl,--fatal-warnings -o "$(BUILD_DIR)/wasm/$$name.js" -lm 2>/tmp/emcc_err.txt; then \
 			echo "OK"; \
 			pass=$$((pass + 1)); \
 		else \

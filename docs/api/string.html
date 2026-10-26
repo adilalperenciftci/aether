@@ -235,7 +235,7 @@
     <div class="function" id="new_with_length" data-name="new_with_length">
       <h3 class="function-name">new_with_length <span class="kind">extern</span></h3>
       <pre class="usage"><code>new_with_length(data, length) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">data: ptr, length: long</span></p>
+      <p class="signature"><span class="sig-params">data: ptr, length: size_t</span></p>
       <p class="doc">`length` bytes from `data` as a new string. A `ptr` (a buffer C filled) is copied as given, never read as a string, so a binary payload that begins like a string's header is copied, not followed (#2301, #3030); a `string` is passed as its characters, so `length` must not exceed its length (string.substring(s, 0, n) stops at the end).</p>
     </div>
     <div class="function" id="empty" data-name="empty">

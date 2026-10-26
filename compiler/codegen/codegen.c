@@ -8689,7 +8689,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#include <stdlib.h>");
     print_line(gen, "#include <stddef.h>");
     print_line(gen, "extern void* aether_caps_malloc(size_t bytes);");
-    print_line(gen, "extern const char* string_new_with_length(void* data, int64_t length);");
+    print_line(gen, "extern const char* string_new_with_length(void* data, size_t length);");
     print_line(gen, "extern void string_retain(const char*);");
     print_line(gen, "extern void aether_string_publish(const void*);");
     /* The header of a counted string, as the runtime lays it out. A string
@@ -8714,7 +8714,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                (unsigned)AETHER_STRING_SHARED_BIT);
     print_line(gen, "        return s;");
     print_line(gen, "    }");
-    print_line(gen, "    return string_new_with_length((void*)s, (int64_t)strlen(s));");
+    print_line(gen, "    return string_new_with_length((void*)s, strlen(s));");
     print_line(gen, "}");
     /* A string handed out as a `ptr` result: a pinned string (a literal, a
      * fault's name) is its C characters, as a literal used as a `ptr` is
@@ -9053,9 +9053,11 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * the duplicates are tolerated by C: no conflicting-types error.
      * string_new_with_length is declared as the std modules' extern is
      * (a `ptr` buffer, `-> string @heap`: `const char*` from `void*`, #3018,
-     * #3030) for the same reason, with a `long` length: the runtime takes a
-     * size_t, which an `int` filled only half of (#3097). */
-    print_line(gen, "extern const char* string_new_with_length(void* data, int64_t length);");
+     * #3030) for the same reason, with the runtime's size_t length: an
+     * `int` filled only half of it (#3097), and an int64_t is not its type
+     * where size_t is 32 bits (wasm32, ESP32), whose linker then traps the
+     * call. */
+    print_line(gen, "extern const char* string_new_with_length(void* data, size_t length);");
     /* Issue #467: list / map heap-string-value owning-add helpers.
      * Prototypes emitted here so codegen can route `list.add(l,
      * heap_str)` / `map.put(m, k, heap_str)` calls to these symbols

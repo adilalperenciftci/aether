@@ -5407,7 +5407,7 @@ void emit_message_string_copy(CodeGenerator* gen, const char* lv, ASTNode* init)
         is_heap_string_expr(gen, init);
     fprintf(gen->output,
             "if (%s) { const char* _mt = %s; size_t _ml = aether_string_length(_mt); "
-            "%s = (const char*)string_new_with_length((void*)aether_string_data(_mt), (int64_t)_ml); ",
+            "%s = (const char*)string_new_with_length((void*)aether_string_data(_mt), _ml); ",
             lv, lv, lv);
     if (owned_temp) fprintf(gen->output, "aether_heap_str_free(_mt); ");
     fprintf(gen->output, "} ");

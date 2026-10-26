@@ -18,8 +18,8 @@
  *   that purpose; we forward it verbatim.)
  *
  * Surface:
- *   xml_parser_new()                     -> XML_Parser*  (NULL on OOM)
- *   xml_parser_free(p)                   -> void
+ *   xml_expat_new()                      -> XML_Parser*  (NULL on OOM)
+ *   xml_expat_free(p)                    -> void
  *   xml_parser_set_user_data(p, ud)      -> void
  *   xml_parser_get_user_data(p)          -> void*
  *   xml_parser_set_start_handler(p, fn)  -> void   fn = void(*)(void* ud, const char* name, const char** atts)
@@ -52,13 +52,13 @@
  * convention so they don't collide with libc / other libraries. The
  * Aether module.ae registers them as bare-named externs. */
 
-XML_Parser xml_parser_new(void) {
+XML_Parser xml_expat_new(void) {
     return XML_ParserCreate(NULL);  /* NULL = no explicit encoding;
                                      * expat handles XML decl
                                      * autodetect. */
 }
 
-void xml_parser_free(XML_Parser p) {
+void xml_expat_free(XML_Parser p) {
     if (p) XML_ParserFree(p);
 }
 
