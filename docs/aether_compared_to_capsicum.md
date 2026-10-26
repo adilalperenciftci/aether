@@ -182,7 +182,7 @@ main() {
 
     // Contained code as a closure. Closures bind inside a function body,
     // and the captured param is typed so the list passes as a ptr.
-    worker_code = |perms: ptr| {
+    worker_code = | perms: ptr | {
         if sandboxed_tcp_connect(perms, "db.internal", 5432) == 1 {
             println("Connected to DB")
         } else {
@@ -540,7 +540,7 @@ This inverts the traditional Unix model (allow by default, explicitly restrict),
 
 ```aether,fragment
 // Untrusted plugin (could be malicious)
-plugin = |ctx| {
+plugin = | ctx | {
     // This is sandboxed: permission checks will deny it
     sandboxed_tcp_connect(ctx, "evil.com", 443)  // Denied by language check
     
@@ -694,7 +694,7 @@ Allow hosted modules (Java, Python, Go) to declare Capsicum requirements:
 
 ```aether,fragment
 // Aether code compiled to library, embedded in Java
-config = |ctx| {
+config = | ctx | {
     grant_tcp(ctx, "api.example.com", 443)
     grant_fs_read(ctx, "/etc/app/config")
     
@@ -783,7 +783,7 @@ The runtime would apply RCTL rules when spawning the actor.
 
 ```aether,fragment
 // Untrusted configuration script
-config = |ctx| {
+config = | ctx | {
     // Script can only access /etc/myapp/ and connect to config.internal
     grant_fs_read(ctx, "/etc/myapp/*")
     grant_tcp(ctx, "config.internal", 8080)
@@ -811,7 +811,7 @@ Even if the config script is malicious or compromised, it can't escape its sandb
 
 ```aether,fragment
 // User-supplied plugin
-plugin = |ctx| {
+plugin = | ctx | {
     // Plugin can query the database and read data files
     grant_tcp(ctx, "db.internal", 5432)
     grant_fs_read(ctx, "/var/lib/myapp/data/*")
@@ -837,7 +837,7 @@ main() {
 
 ```aether,fragment
 // Provisioning script
-script = |ctx| {
+script = | ctx | {
     grant_tcp(ctx, "*.cloud.provider", 443)        // Only to cloud provider
     grant_fs_read(ctx, "/var/lib/provisioning/*")
     grant_fs_write(ctx, "/tmp/provision-*")         // Scratch space

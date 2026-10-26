@@ -37,7 +37,7 @@ main() {
     m = heap.new(Model)
     m.status = "idle"                 // nothing registered yet: silent
 
-    token = observe.observe(m, |obj: ptr| {
+    token = observe.observe(m, | obj: ptr | {
         println("render: count=${m.count} status=${m.status}")
     })
     m.count = 1
@@ -93,7 +93,7 @@ struct Health @observable {
 main() {
     h = heap.new(Health)
     dirty = 0
-    observe.fields(h, |obj: ptr, field: int| {
+    observe.fields(h, | obj: ptr, field: int | {
         if field == observe.ANY_FIELD {
             dirty = 7                 // unknown: resend all three fields
         } else {

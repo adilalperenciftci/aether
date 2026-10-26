@@ -237,7 +237,7 @@ The original sketch:
 main() {
     server = web_server(8080) {
         path("/api") {
-            end_point(GET, "/health") |req, res, ctx| { ... }
+            end_point(GET, "/health") | req, res, ctx | { ... }
         }
     }
     return server  // the map IS the config
@@ -339,7 +339,7 @@ inv = host_call("get_inventory")
 
 web_server(8080) {
     path("/api/cart") {
-        end_point(POST, "/add") |req, res, ctx| {
+        end_point(POST, "/add") | req, res, ctx | {
             hide inv   // can't touch inventory directly here
             sku = request_param(req, "sku")
             host_call("cart_add", sku)

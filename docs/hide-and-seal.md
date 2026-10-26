@@ -359,7 +359,7 @@ srv = web_server(8080) {
     }
 
     path("/cart") {
-        end_point(POST, "/add") |req, res, ctx| {
+        end_point(POST, "/add") | req, res, ctx | {
             seal except req, res, ctx, dep, response_write, response_write_status
 
             inventory = dep(ctx, "inventory")   // app-scoped (cached for server lifetime)

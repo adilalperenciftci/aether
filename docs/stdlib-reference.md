@@ -281,7 +281,7 @@ string_list_add(names, "Bob")
 
 string_list_sort_lex(names)                 // "Bob", "Charlie", "alice" (ASCII order)
 
-string_list_sort(names, |a: string, b: string| {
+string_list_sort(names, | a: string, b: string | {
     return string.length(a) - string.length(b)   // shortest first, stable
 })
 ```
@@ -1194,7 +1194,7 @@ The building blocks beyond one-level listing: visit a whole tree, and learn when
 import std.fs
 
 // Walk: the callback sees every entry with its kind and depth.
-n, err = fs.walk(root, |path: string, kind: int, depth: int| {
+n, err = fs.walk(root, | path: string, kind: int, depth: int | {
     // kind: 1 file / 2 dir / 3 symlink / 4 other / 5 socket / 6 fifo / 7 device
     // (same encoding as file_stat; see fs.STAT_KIND_*)
     if kind == 2 && string.ends_with(path, "/node_modules") == 1 {
@@ -1207,7 +1207,7 @@ n, err = fs.walk(root, |path: string, kind: int, depth: int| {
 // Collecting paths: `path` is borrowed for the callback, and the list
 // takes a string of its own, so it is stored as it is.
 found = list.new()
-n2, err2 = fs.walk(root, |path: string, kind: int, depth: int| {
+n2, err2 = fs.walk(root, | path: string, kind: int, depth: int | {
     if kind == 1 && string.ends_with(path, ".md") == 1 {
         list.add(found, path)
     }
@@ -3827,7 +3827,7 @@ cooperative builds, pool sizing) is documented at the top of
   count, for hosts driving their own loop.
 
 ```aether,fragment
-lengths = worker.map(paths, |p: ptr| { return measure(p) })
+lengths = worker.map(paths, | p: ptr | { return measure(p) })
 ```
 
   **When it pays.** Dispatching and joining a batch costs a flat ~100 us

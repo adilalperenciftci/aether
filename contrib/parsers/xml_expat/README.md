@@ -111,9 +111,9 @@ expat.parse_with(input: string) { /* bind_* calls */ }    -> int
 // Setters used inside the parse_with trailing block.
 // Closure signatures match the SAX events 1:1, and ONLY the
 // SAX-event args. No env / user-data param.
-bind_start(|name: string, atts: ptr|        { ... })
-bind_end(  |name: string|                    { ... })
-bind_text( |text: string, len: int|          { ... })
+bind_start(| name: string, atts: ptr | { ... })
+bind_end(  | name: string |             { ... })
+bind_text( | text: string, len: int |   { ... })
 ```
 
 Returns `1` on success, `0` on parse error. For error details on a
@@ -144,10 +144,10 @@ do NOT declare a leading `env` / `ud` / `user_data` parameter.
 
 ```aether
 // CORRECT
-bind_text(|text: string, len: int| { bytes = bytes + len })
+bind_text(| text: string, len: int | { bytes = bytes + len })
 
 // WRONG: extra `env: ptr` parameter
-bind_text(|env: ptr, text: string, len: int| { bytes = bytes + len })
+bind_text(| env: ptr, text: string, len: int | { bytes = bytes + len })
 //        ^^^^^^^^^ shifts every following param by one slot;
 //                  `len` reads uninitialised stack data, you get
 //                  garbage numbers like 516052160 instead of 7.
@@ -206,7 +206,7 @@ import contrib.parsers.xml_expat
 main() {
     count = 0
     expat.parse_with("<root><a/><b/><c/></root>") {
-        bind_start(|name: string, atts: ptr| {
+        bind_start(| name: string, atts: ptr | {
             count = count + 1
         })
     }
@@ -228,9 +228,9 @@ main() {
     ends = 0
     bytes = 0
     ok = expat.parse_with("<g>hi<inner/>there</g>") {
-        bind_start(|name: string, atts: ptr| { starts = starts + 1 })
-        bind_end(  |name: string|             { ends = ends + 1 })
-        bind_text( |text: string, len: int|   { bytes = bytes + len })
+        bind_start(| name: string, atts: ptr | { starts = starts + 1 })
+        bind_end(  | name: string |             { ends = ends + 1 })
+        bind_text( | text: string, len: int |   { bytes = bytes + len })
     }
     println("ok=${ok} starts=${starts} ends=${ends} bytes=${bytes}")
     // ok=1 starts=2 ends=2 bytes=7

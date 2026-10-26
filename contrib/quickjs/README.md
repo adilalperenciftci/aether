@@ -13,7 +13,7 @@ main() {
     q = quickjs.runtime(8192, 0)            // 8 MB heap cap, default stack
     quickjs.set_time_limit(q, 100)          // each entry: at most 100 ms
 
-    add = quickjs.function(q, "add", 2, |q: ptr, this_h: int, args: int| {
+    add = quickjs.function(q, "add", 2, | q: ptr, this_h: int, args: int | {
         return quickjs.new_int(q, quickjs.arg_int(q, args, 0) + quickjs.arg_int(q, args, 1))
     })
     quickjs.set_global(q, "add", add)
@@ -66,7 +66,7 @@ per element.
   `std.bytes` buffer), so the host's buffer can be freed at once.
 
 ```aether
-sum = quickjs.function(q, "sum", 1, |q: ptr, this_h: int, args: int| {
+sum = quickjs.function(q, "sum", 1, | q: ptr, this_h: int, args: int | {
     p, n = quickjs.arg_bytes(q, args, 0)
     if n < 0 { return quickjs.throw_error(q, "TypeError", "sum: a Uint8Array") }
     t = 0

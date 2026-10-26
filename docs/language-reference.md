@@ -1041,9 +1041,9 @@ Guards add conditions using the `when` keyword:
 
 ```aether,fragment
 // Classify numbers using guards
-classify(x) when x < 0 -> print("negative\n")
-classify(x) when x == 0 -> print("zero\n")
-classify(x) when x > 0 -> print("positive\n")
+classify(x) when x < 0 -> println("negative")
+classify(x) when x == 0 -> println("zero")
+classify(x) when x > 0 -> println("positive")
 
 // Factorial with guard
 factorial(0) -> 1
@@ -1277,14 +1277,17 @@ is_odd(n) when n > 0 -> is_even(n - 1)
 ### If Statements
 
 ```aether,fragment
-if (x > 0) {
-    print("Positive\n");
-} else if (x < 0) {
-    print("Negative\n");
+if x > 0 {
+    println("positive")
+} else if x < 0 {
+    println("negative")
 } else {
-    print("Zero\n");
+    println("zero")
 }
 ```
+
+The condition needs no parentheses; `if (x > 0)` is accepted too, the
+parentheses read as grouping.
 
 ### If-Expressions
 
@@ -1316,20 +1319,21 @@ Each branch is an expression that gives a value, so a branch made of a call that
 ### While Loops
 
 ```aether,fragment
-i = 0;
-while (i < 10) {
-    print(i);
-    print("\n");
-    i = i + 1;
+i = 0
+while i < 10 {
+    println(i)
+    i = i + 1
 }
 ```
 
 ### For Loops
 
+The C-style loop: an init, a condition and a step. A loop over a range of
+numbers is usually written as a range-for (below).
+
 ```aether,fragment
-for (i = 0; i < 10; i = i + 1) {
-    print(i);
-    print("\n");
+for (i = 0; i < 10; i++) {
+    println(i)
 }
 ```
 
@@ -1419,10 +1423,9 @@ main() {
 Iterate over a range with `for VAR in START..END`:
 
 ```aether,fragment
-// Prints 0 1 2 3 4
+// Prints 0 to 4, one a line
 for i in 0..5 {
-    print(i)
-    print(" ")
+    println(i)
 }
 
 // Sum with variable bound
@@ -1437,19 +1440,19 @@ The range `start..end` is exclusive of `end` (like Python's `range(start, end)`)
 ### Loop Control
 
 ```aether,fragment
-// Break - exit loop early
-for (i = 0; i < 100; i = i + 1) {
-    if (i == 50) {
-        break;
+// break: leave the loop early
+for i in 0..100 {
+    if i == 50 {
+        break
     }
 }
 
-// Continue - skip to next iteration
-for (i = 0; i < 10; i = i + 1) {
-    if (i == 5) {
-        continue;
+// continue: on to the next pass
+for i in 0..10 {
+    if i == 5 {
+        continue
     }
-    print(i);
+    println(i)
 }
 ```
 
@@ -1484,11 +1487,11 @@ Match statements provide pattern-based dispatch:
 ### Integer Matching
 
 ```aether,fragment
-match (value) {
-    0 -> { print("zero\n"); }
-    1 -> { print("one\n"); }
-    2 -> { print("two\n"); }
-    _ -> { print("other\n"); }
+match value {
+    0 -> { println("zero") }
+    1 -> { println("one") }
+    2 -> { println("two") }
+    _ -> { println("other") }
 }
 ```
 
@@ -1672,25 +1675,33 @@ main() {
 C-style switch for simple value dispatch:
 
 ```aether,fragment
-switch (month) {
-    case 1: name = "January";
-    case 2: name = "February";
-    case 3: name = "March";
+switch month {
+    case 1: name = "January"
+    case 2: name = "February"
+    case 3: name = "March"
     // ... more cases
-    default: name = "Invalid";
+    default: name = "Invalid"
 }
 ```
 
 Aether's `switch` has **no fall-through**: each case auto-breaks after its body.
 Cases also accept comma-lists and ranges, the same as `match` arms:
 
-```aether,fragment
-switch code {
-case 200, 201, 204: kind = "success";
-case 300..<400:     kind = "redirect";   // ranged case (lowered to an if-chain)
-case 400..<500:     kind = "client-error";
-default:            kind = "other";
+```aether,run
+main() {
+    code = 404
+    kind = ""
+    switch code {
+        case 200, 201, 204: kind = "success"
+        case 300..<400: kind = "redirect" // a ranged case, lowered to an if-chain
+        case 400..<500: kind = "client-error"
+        default: kind = "other"
+    }
+    println(kind)
 }
+```
+```output
+client-error
 ```
 
 A comma-list case lowers to several C `case` labels sharing one body; a `switch`
@@ -1811,12 +1822,12 @@ The `defer` statement schedules code to run when leaving the current scope:
 
 ```aether,fragment
 process_file() {
-    handle = open_resource();
-    defer close_resource(handle);  // Runs when function exits
+    handle = open_resource()
+    defer close_resource(handle) // runs when the function exits
 
-    use_resource(handle);
-    use_resource(handle);
-    // close_resource(handle) called automatically here
+    use_resource(handle)
+    use_resource(handle)
+    // close_resource(handle) runs here
 }
 ```
 
@@ -1824,13 +1835,17 @@ process_file() {
 
 Multiple defers execute in Last-In-First-Out order:
 
-```aether,fragment
-example() {
-    defer print("First\n");   // Runs third
-    defer print("Second\n");  // Runs second
-    defer print("Third\n");   // Runs first
+```aether,run
+main() {
+    defer println("First") // runs third
+    defer println("Second") // runs second
+    defer println("Third") // runs first
 }
-// Output: Third, Second, First
+```
+```output
+Third
+Second
+First
 ```
 
 ### `defer try` and `defer catch`, cleanup for one outcome only
@@ -1968,8 +1983,7 @@ main() {
     defer list.free(items)
 
     list.add(items, "hello")
-    print(list.size(items))
-    print("\n")
+    println(list.size(items))
     // list.free(items) runs here (scope exit)
 }
 ```
@@ -1983,12 +1997,10 @@ A function that returns a handle it allocated gives it to the caller, which free
 ```aether
 import std.list
 
-build_list(n) : ptr {
+build_list(n: int) -> ptr {
     result = list.new()
-    i = 0
-    while i < n {
-        list.add(result, i)
-        i = i + 1
+    for i in 0..n {
+        list.add(result, "item ${i}")
     }
     return result
 }
@@ -1997,8 +2009,7 @@ main() {
     items = build_list(10)
     defer list.free(items)
 
-    print(list.size(items))
-    print("\n")
+    println(list.size(items))
 }
 ```
 
@@ -3004,34 +3015,35 @@ follow-up.
 
 ## Structs
 
-Structs group related data:
+Structs group related data, each field with its name and its type:
 
-```aether
+```aether,run
 struct Point {
-    x,
-    y
+    x: int
+    y: int
 }
 
 struct Person {
-    name,
-    age
+    name: string
+    age: int
 }
 
 main() {
-    p = Point { x: 10, y: 20 };
-    print(p.x);  // 10
-    print(p.y);  // 20
+    p = Point { x: 10, y: 20 }
+    who = Person { name: "Ada", age: 36 }
+    println("${p.x} ${p.y} ${who.name} ${who.age}")
 }
 ```
+```output
+10 20 Ada 36
+```
 
-### Explicit Field Types
+### Field Types
+
+A field's type may also come first, C's way, with commas between the
+fields:
 
 ```aether,fragment
-struct Point {
-    int x,
-    int y
-}
-
 struct Config {
     string name,
     int timeout,
@@ -3401,15 +3413,15 @@ balance 100
 ### Spawning Actors
 
 ```aether,fragment
-counter = spawn(Counter());
-calculator = spawn(Calculator());
+counter = spawn(Counter())
+calculator = spawn(Calculator())
 ```
 
 ### Sending Messages (Fire-and-Forget)
 
 ```aether,fragment
-counter ! Increment { amount: 10 };
-counter ! Reset {};
+counter ! Increment { amount: 10 }
+counter ! Reset {}
 ```
 
 ### Ask Pattern (Request-Reply)
@@ -3421,7 +3433,7 @@ each message carries its own reply slot.
 
 ```aether,fragment
 // Synchronous request-reply, result is an int (from Result.value)
-result = calculator ? Add { a: 5, b: 3 };
+result = calculator ? Add { a: 5, b: 3 }
 ```
 
 A handler replies in one of two ways, and the ask takes its type from whichever
@@ -3483,8 +3495,8 @@ Actors respond using the `reply` statement:
 actor Calculator {
     receive {
         Add(a, b) -> {
-            result = a + b;
-            reply Result { value: result };
+            result = a + b
+            reply Result { value: result }
         }
     }
 }
@@ -3497,7 +3509,7 @@ The `_` pattern catches unmatched messages:
 ```aether,fragment
 receive {
     Known() -> { /* handle */ }
-    _ -> { print("Unknown message\n"); }
+    _ -> { println("unknown message") }
 }
 ```
 
@@ -3640,15 +3652,15 @@ type (`float`, `f32`, `longdouble`). Any other operand is a compile error
 ### Standard Library Imports
 
 ```aether,fragment
-import std.file;         // File operations
-import std.string;       // String utilities
-import std.list;         // ArrayList
-import std.http;         // HTTP client & server
-import std.json;         // JSON parsing
+import std.fs      // files and directories
+import std.string  // string utilities
+import std.list    // a list that grows
+import std.http    // HTTP client and server
+import std.json    // JSON
 
 // Use with namespace syntax
-result = string.new("hello");
-if (file.exists("config.txt") == 1) { }
+loud = string.to_upper("hello")
+if fs.exists("config.txt") == 1 { }
 ```
 
 ### Selective Imports
@@ -3947,10 +3959,10 @@ solve(constraints: ptr, n: int) {
 ### Local Module Imports
 
 ```aether,fragment
-import utils;           // Loads lib/utils/module.ae
-import helpers;         // Loads lib/helpers/module.ae
+import utils    // loads lib/utils/module.ae
+import helpers  // loads lib/helpers/module.ae
 
-result = utils.double_value(21);
+result = utils.double_value(21)
 ```
 
 In `utils.name`, `utils` is the imported module unless a value of that name
@@ -4331,10 +4343,10 @@ animate(el: @keep ptr, tick: fn(@keep ptr, float)) {
 main() {
     registry = list.new()
     shape = list.new()
-    animate(shape) callback |el: @keep ptr, t: float| {
+    animate(shape) callback | el: @keep ptr, t: float | {
         element_set_fill(el, "red")
     }
-    animate(shape) callback |el, t| {     // takes `@keep ptr` and `float`
+    animate(shape) callback | el, t | {     // takes `@keep ptr` and `float`
         element_set_fill(el, "blue")
     }
     println("${list.size(registry)}")
@@ -4393,7 +4405,7 @@ struct Model @observable {
 
 main() {
     m = heap.new(Model)
-    token = observe.observe(m, |obj: ptr| {
+    token = observe.observe(m, | obj: ptr | {
         println("count is now ${m.count}")
     })
     m.count = 1          // count is now 1
@@ -5528,8 +5540,8 @@ Explicit types are optional but can improve clarity:
 
 ```aether,fragment
 // Both are valid:
-x = 42;
-int y = 42;
+x = 42
+int y = 42
 ```
 
 ---
@@ -5538,50 +5550,61 @@ int y = 42;
 
 ### Hello World
 
-```aether
+```aether,run
 main() {
-    print("Hello, World!\n");
+    println("Hello, World!")
 }
+```
+```output
+Hello, World!
 ```
 
 ### Factorial with Pattern Matching
 
-```aether
+```aether,run
 factorial(0) -> 1
 factorial(n) when n > 0 -> n * factorial(n - 1)
 
 main() {
-    print(factorial(10))  // 3628800
+    println(factorial(10))
 }
+```
+```output
+3628800
 ```
 
 ### Counter Actor
 
-```aether
-message Increment { amount: int }
+```aether,run
+message Increment {
+    amount: int
+}
+
 message GetCount {}
 
 actor Counter {
-    state count = 0;
+    state count = 0
 
     receive {
         Increment(amount) -> {
-            count = count + amount;
+            count = count + amount
         }
-        GetCount() -> {
-            print(count);
-            print("\n");
+        GetCount -> {
+            println(count)
         }
     }
 }
 
 main() {
-    c = spawn(Counter());
-    c ! Increment { amount: 5 };
-    c ! Increment { amount: 3 };
-    c ! GetCount {};
-    wait_for_idle();  // Output: 8
+    c = spawn(Counter())
+    c ! Increment { amount: 5 }
+    c ! Increment { amount: 3 }
+    c ! GetCount {}
+    wait_for_idle()
 }
+```
+```output
+8
 ```
 
 ### Resource Management with Defer
@@ -5590,11 +5613,11 @@ main() {
 extern fopen(path: string, mode: string) -> ptr
 extern fclose(file: ptr) -> int
 
-process_file(path) {
-    file = fopen(path, "r");
-    defer fclose(file);
+process_file(path: string) {
+    file = fopen(path, "r")
+    defer fclose(file)
 
-    // Process file...
-    // fclose called automatically
+    // Process the file...
+    // fclose runs when the function returns
 }
 ```

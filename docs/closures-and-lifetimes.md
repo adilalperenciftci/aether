@@ -443,7 +443,7 @@ A closure loses its signature at a bare `fn` parameter or return, at
 
 ```aether,fragment
 handlers = list.new()
-list.add(handlers, box_closure(|_| { return "hello" }))
+list.add(handlers, box_closure(| _ | { return "hello" }))
 h = unbox_closure(list.get_raw(handlers, 0))       // L1: from a list
 
 op = if user_wants_add { add_fn } else { mul_fn }  // L2: chosen at run time (#2055)
@@ -573,8 +573,8 @@ answers.
 ### L5. Closure-var reassignment leaked the previous env
 
 ```aether,fragment
-op = |x: int| { return x + 1 }
-op = |x: int| { return x * 2 }  // a capturing old env used to leak here
+op = | x: int | { return x + 1 }
+op = | x: int | { return x * 2 }  // a capturing old env used to leak here
 ```
 
 Fixed by the ownership model: a closure local owns a reference to its
