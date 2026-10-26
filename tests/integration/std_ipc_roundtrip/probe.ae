@@ -25,6 +25,11 @@
 //   7. An explicit env is refused before the fork: the child's
 //      AETHER_IPC_FD would have to be in it. It used to make the child
 //      exit 127 without running the program.
+//
+//   8. With an AETHER_IPC_FD of this process's own, the child's is still
+//      3: the parent builds the child's env, environ without its own entry
+//      plus AETHER_IPC_FD=3, where the child used to setenv it between
+//      fork and exec (#3200).
 
 import std.os
 import std.fs
@@ -229,10 +234,25 @@ main() {
         }
     }
 
+    // Case 8 — this process's own AETHER_IPC_FD does not reach the child.
+    {
+        os.setenv("AETHER_IPC_FD", "9")
+        argv8 = list.new()
+        payload8, code8, err8 = os.run_pipe_drain_and_wait(child_bin, argv8, null)
+        os.unsetenv("AETHER_IPC_FD")
+        if err8 != "" || code8 != 0 || string_equals(payload8, EXPECTED_PAYLOAD) == 0 {
+            println("  [8] FAIL with AETHER_IPC_FD=9 here: exit=${code8} err='${err8}' payload=${payload8}")
+            failed = failed + 1
+        } else {
+            println("  [8] PASS with AETHER_IPC_FD=9 here, the child's is 3 (payload byte-equal, exit 0)")
+            passed = passed + 1
+        }
+    }
+
     fs.delete(child_bin)
 
     println("")
-    println("std_ipc_roundtrip: ${passed} passing, ${failed} failing (of 7)")
+    println("std_ipc_roundtrip: ${passed} passing, ${failed} failing (of 8)")
     if failed > 0 {
         exit(1)
     }

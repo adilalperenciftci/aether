@@ -19,7 +19,16 @@
  * stdio from them: installed in place, one overwrote another still to be
  * installed, or the close of an original closed what had been installed.
  * os.run_full's child lost its stdout with the parent's 1 or 2 closed, and
- * os.spawn_proc_to's child its output file with the parent's 0 closed. */
+ * os.spawn_proc_to's child its output file with the parent's 0 closed.
+ *
+ * Then os.run_pipe (#3200). Its child used to call setenv between fork and
+ * exec, which a child of a threaded parent must not: it mallocs and takes
+ * the environment's lock, and a lock another thread held at the fork stays
+ * held in the child. That deadlock depends on timing, so the harness pins
+ * the cause instead: it defines setenv itself, the runtime's calls bind to
+ * it, and a child that calls it exits 97. The child must still see
+ * AETHER_IPC_FD=3, once, although this process has one of its own. */
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,6 +48,51 @@ extern tuple_run_full os_run_full_raw(const char* prog, void* argv_list, void* e
 extern tuple_int_string os_spawn_to_raw(const char* prog, void* argv_list, void* env_list,
                                         const char* out_path);
 extern const char* aether_string_data(const void* s);
+
+static pid_t harness_pid;
+
+/* Every setenv the runtime makes binds here. In a child, between fork and
+ * exec, it ends the child with 97; in this process nothing calls it. */
+int setenv(const char* name, const char* value, int overwrite) {
+    (void)name;
+    (void)value;
+    (void)overwrite;
+    if (getpid() != harness_pid) _exit(97);
+    errno = ENOSYS;
+    return -1;
+}
+
+typedef struct { int _0; int _1; const char* _2; } tuple_int_int_string;
+extern tuple_int_int_string os_run_pipe_raw(const char* prog, void* argv_list, void* env_list);
+extern tuple_int_string os_wait_pid_raw(int pid);
+
+/* run_pipe's child sees AETHER_IPC_FD=3 exactly once and writes to fd 3,
+ * without a setenv between fork and exec. */
+static int run_pipe_env(void) {
+    static char own[] = "AETHER_IPC_FD=9";
+    putenv(own);
+    void* av = list_new();
+    list_add_raw(av, (void*)"-c");
+    list_add_raw(av, (void*)"n=$(env | grep -c '^AETHER_IPC_FD='); "
+                            "[ \"$AETHER_IPC_FD\" = 3 ] && [ \"$n\" = 1 ] && echo ok >&3");
+    tuple_int_int_string sp = os_run_pipe_raw("/bin/sh", av, (void*)0);
+    if (sp._2 && sp._2[0]) { printf("FAIL: run_pipe: %s\n", sp._2); return 1; }
+    char got[16] = { 0 };
+    ssize_t k = read(sp._0, got, sizeof got - 1);
+    if (k < 0) got[0] = '\0';
+    close(sp._0);
+    tuple_int_string w = os_wait_pid_raw(sp._1);
+    if (w._0 == 97) {
+        printf("FAIL: run_pipe's child called setenv between fork and exec\n");
+        return 1;
+    }
+    if (w._0 != 0 || strcmp(got, "ok\n") != 0) {
+        printf("FAIL: run_pipe's child exited %d and wrote '%s': AETHER_IPC_FD was not 3, once\n", w._0, got);
+        return 1;
+    }
+    printf("PASS: run_pipe's child sees AETHER_IPC_FD=3 once, with no setenv between fork and exec\n");
+    return 0;
+}
 
 static double seconds(void) {
     struct timespec ts;
@@ -137,6 +191,7 @@ static int closed_slots(const char* dir) {
 
 int main(int argc, char** argv) {
     if (argc < 3) { fprintf(stderr, "usage: %s <probe-script> <scratch-dir>\n", argv[0]); return 2; }
+    harness_pid = getpid();
 
     for (int fd = 0; fd <= 2; fd++) {
         int fl = fcntl(fd, F_GETFD);
@@ -153,5 +208,6 @@ int main(int argc, char** argv) {
     if (w._0 != 0) { printf("FAIL: the probe exited %d: a standard stream was closed in the child\n", w._0); return 1; }
     printf("PASS: the spawned child has stdin, stdout and stderr\n");
     int rc = closed_stdio_spawn();
-    return closed_slots(argv[2]) | rc;
+    rc |= closed_slots(argv[2]);
+    return run_pipe_env() | rc;
 }

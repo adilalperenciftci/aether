@@ -1372,9 +1372,9 @@ static int aether_can_exec(const char* path) {
  * only functions POSIX lists as async-signal-safe: sigemptyset, sigprocmask,
  * sigaction, memset, fcntl, dup2, close, open, setpgid, execve (the
  * program, then /bin/sh for a file with no #! line, as execvp does), write
- * (the exec-error pipe) and _exit. No malloc, no stdio, no execvp, whose PATH
- * walk POSIX does not promise to be safe there; os.run_pipe's setenv is the
- * one exception left, and #3200 builds its env in the parent. */
+ * (the exec-error pipe) and _exit. No malloc, no setenv (os.run_pipe's env
+ * is built in the parent, #3200), no stdio, no execvp, whose PATH walk
+ * POSIX does not promise to be safe there. */
 static char* aether_resolve_program(const char* prog) {
     if (!prog || !*prog) { errno = ENOENT; return NULL; }
     if (strchr(prog, '/')) return strdup(prog);
@@ -1866,6 +1866,31 @@ _tuple_string_int_string os_run_capture_status_raw(const char* prog, void* argv_
 typedef struct { int _0; int _1; const char* _2; } _tuple_int_int_string;
 typedef struct { int _0; int _1; int _2; const char* _3; } _tuple_int_int_int_string;
 
+/* os.run_pipe's child env (#3200): this process's environ without any
+ * AETHER_IPC_FD of its own, plus AETHER_IPC_FD=3, which tells the child
+ * that fd 3 carries the parent channel (its ipc.parent_channel() reads
+ * it). Built in the parent: the child used to call setenv between fork and
+ * exec, which mallocs and takes the environment's lock, and a lock another
+ * thread held at the fork is never released in the child. The array is
+ * malloc'd; its strings are environ's and a literal. NULL when malloc
+ * fails. */
+static char** aether_ipc_env(void) {
+    static const char ipc[] = "AETHER_IPC_FD=";
+    char** env = aether_environ;
+    size_t n = 0;
+    while (env && env[n]) n++;
+    char** out = (char**)malloc((n + 2) * sizeof(char*));
+    if (!out) return NULL;
+    size_t k = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (strncmp(env[i], ipc, sizeof ipc - 1) == 0) continue;
+        out[k++] = env[i];
+    }
+    out[k++] = (char*)"AETHER_IPC_FD=3";
+    out[k] = NULL;
+    return out;
+}
+
 /* Spawn child with a back-channel pipe at fd 3 (write end), set
  * AETHER_IPC_FD=3 in child's env. Returns (parent_read_fd,
  * child_pid, err). On success, err is "" and caller must:
@@ -1922,6 +1947,19 @@ _tuple_int_int_string os_run_pipe_raw(const char* prog, void* argv_list, void* e
         out._2 = xerr;
         return out;
     }
+    /* No explicit env reaches here, so x.envp is NULL: the child's env is
+     * environ with AETHER_IPC_FD=3. */
+    x.envp = aether_ipc_env();
+    if (!x.envp) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        close(errp[0]);
+        close(errp[1]);
+        aether_exec_release(&x);
+        out._2 = "env build failed";
+        return out;
+    }
+    x.env = x.envp;
 
     pid_t pid = aether_fork();
     if (pid < 0) {
@@ -1934,7 +1972,7 @@ _tuple_int_int_string os_run_pipe_raw(const char* prog, void* argv_list, void* e
         return out;
     }
     if (pid == 0) {
-        /* Child — wire pipefd[1] to fd 3 and tell child where it is. */
+        /* Child — wire pipefd[1] to fd 3; its env says so. */
         aether_child_reset_signals();
         aether_child_keep_stdio();
         close(pipefd[0]);
@@ -1943,13 +1981,6 @@ _tuple_int_int_string os_run_pipe_raw(const char* prog, void* argv_list, void* e
         int chan = aether_child_lift_fd(pipefd[1]);
         if (aether_child_fd(chan, 3) < 0) aether_child_exec_failed(ef);
         close(chan);
-        /* AETHER_IPC_FD tells the child via env that fd 3 carries
-         * the parent channel. The child's ipc.parent_channel()
-         * reads this and returns the int — a future change can
-         * pick a different fd by setting a different value, no
-         * code change needed in the child. */
-        setenv("AETHER_IPC_FD", "3", 1);
-        x.env = aether_environ;
         aether_child_exec(&x);
         aether_child_exec_failed(ef);
     }

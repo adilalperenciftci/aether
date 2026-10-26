@@ -4,8 +4,9 @@
 # Exercises the parent ↔ child back-channel via the three spawn
 # variants (run_pipe_drain_and_wait, run_pipe + wait_pid, and
 # run_capture as a negative control), then a program that cannot start,
-# one that exits 127 and an explicit env (#3170). Probe.ae compiles the
-# child binary in the temp directory and runs all seven cases.
+# one that exits 127 and an explicit env (#3170), and an AETHER_IPC_FD of
+# the parent's own (#3200). Probe.ae compiles the child binary in the temp
+# directory and runs all eight cases.
 #
 # Skips on Windows — std.ipc is POSIX-only in v1; Windows
 # parent_channel returns -1 unconditionally and the parent-side
@@ -44,8 +45,8 @@ if ! AETHER_HOME="$ROOT" "$AE" run "$SCRIPT_DIR/probe.ae" >"$TMPDIR/out.log" 2>&
     exit 1
 fi
 
-if ! grep -q "std_ipc_roundtrip: 7 passing, 0 failing" "$TMPDIR/out.log"; then
-    echo "  [FAIL] std_ipc_roundtrip — not all 7 cases passed"
+if ! grep -q "std_ipc_roundtrip: 8 passing, 0 failing" "$TMPDIR/out.log"; then
+    echo "  [FAIL] std_ipc_roundtrip — not all 8 cases passed"
     tail -40 "$TMPDIR/out.log" | sed 's/^/    /'
     exit 1
 fi
