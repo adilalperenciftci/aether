@@ -1,0 +1,24 @@
+// os.run_supervised of a program that cannot start (#3170): -1 with the
+// reason, on every platform. POSIX used to read it as an exit of 127, which a
+// program that ran and exited 127 also gives (test_os_run_supervised checks
+// that one).
+//
+// On its own because the macOS leaks gate cannot run it (#3202): the exec
+// fails in the forked child, which leaves by _exit, and leaks(1) --atExit
+// interposes _exit in the target's image, which the fork copies. The hook
+// stops the exiting child for an inspection that leaks(1) only makes of its
+// target, so the child stays stopped and its parent's wait never returns.
+// The Linux legs check its leaks.
+
+import std.os
+
+extern exit(code: int)
+
+main() {
+    code, outcome = os.run_supervised("/no/such/program_3170", null, null, 1, 1, 0, 1)
+    if code != -1 || outcome != "program not found" {
+        println("FAIL: missing program code=${code} outcome=${outcome}, expected -1 / program not found")
+        exit(1)
+    }
+    println("PASS: run_supervised missing program → (-1, program not found)")
+}

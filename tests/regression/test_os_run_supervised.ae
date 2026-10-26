@@ -84,14 +84,9 @@ main() {
     list.free(av0)
     println("  PASS: run_supervised clean exit → outcome exited, code 3")
 
-    // --- run_supervised: a program that cannot start (#3170) ----------
-    // -1 with the reason, on every platform; POSIX used to read it as an
-    // exit of 127. A program that ran and exited 127 is (127, "exited").
-    code_m, outcome_m = os.run_supervised("/no/such/program_3170", null, null, 1, 1, 0, 1)
-    if code_m != -1 || outcome_m != "program not found" {
-        println("  FAIL: missing program code=${code_m} outcome=${outcome_m}, expected -1 / program not found")
-        exit(1)
-    }
+    // --- run_supervised: a program that ran and exited 127 --------------
+    // (127, "exited"), not the (-1, reason) of a program that cannot start,
+    // which test_os_run_supervised_cannot_start checks (#3170, #3202).
     av127 = list.new()
     list.add(av127, "exit127")
     code_e, outcome_e = os.run_supervised(me, av127, null, 1, 1, 0, 1)
@@ -100,7 +95,7 @@ main() {
         exit(1)
     }
     list.free(av127)
-    println("  PASS: run_supervised missing program → (-1, program not found); exit 127 → (127, exited)")
+    println("  PASS: run_supervised exit 127 → (127, exited)")
 
     // --- run_supervised: timeout -------------------------------------
     // Child sleeps 30s; a 1s timeout must tear it down and report 124
