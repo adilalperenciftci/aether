@@ -14,3 +14,8 @@
   stdout or stderr from std's C; an exempt one (a requested report, the last
   line before an abort) carries `silent-ok: <why>`. The rule is in
   `docs/stdlib-module-pattern.md`.
+- **Windows: a listener on a taken port now fails its bind.** The listen
+  socket set `SO_REUSEADDR`, which on Windows lets a second socket bind a port
+  another process is listening on, so a server started twice "succeeded" and
+  shared the port. Windows now gets `SO_EXCLUSIVEADDRUSE` (POSIX keeps
+  `SO_REUSEADDR`), and the bind fails with the reason as on Linux and macOS.
