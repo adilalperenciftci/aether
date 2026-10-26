@@ -58,7 +58,6 @@ start(server: ptr) -> int {
     return http.server_port(server)
 }
 
-
 // A request on a connection of its own, written and left unread.
 open_request(port: int, path: string) -> ptr {
     sock, err = tcp.connect("127.0.0.1", port)
