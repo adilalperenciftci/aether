@@ -2552,8 +2552,9 @@ static int module_has_extern_named(ASTNode* mod_ast, const char* name) {
 
 /* #2978: the C name the merge gives function (or builder) `name` of the
  * module `mod_ast`, whose namespace is `ns`: `<ns>_<name>`, the spelling C
- * uses for its own functions, unless the module declares a bare extern of
- * that name. Then it is `ae_<ns>_<name>`, a spelling no C symbol uses.
+ * uses for its own functions, unless the module declares an extern of that
+ * name, or an extern of the build binds that C symbol (c_symbol_bound_by_extern).
+ * Then it is `ae_<ns>_<name>`, a spelling no C symbol uses.
  *
  * A module like contrib.aether_ui has both
  *     extern aether_ui_app_create(...) -> int                 // the C name
@@ -2580,10 +2581,49 @@ static int module_defines_function(ASTNode* mod_ast, const char* name) {
     return 0;
 }
 
+/* Does `decl`, an extern, bind the C symbol `sym`? A bare extern binds its
+ * own name; `@extern("c_name") name(...)` binds c_name (its annotation,
+ * `c_symbol:c_name` with an optional `;varargs`). */
+static int extern_binds_c_symbol(const ASTNode* decl, const char* sym) {
+    if (!decl || decl->type != AST_EXTERN_FUNCTION || !decl->value) return 0;
+    if (decl->annotation && strncmp(decl->annotation, "c_symbol:", 9) == 0) {
+        const char* s = decl->annotation + 9;
+        const char* semi = strchr(s, ';');
+        size_t n = semi ? (size_t)(semi - s) : strlen(s);
+        return strlen(sym) == n && strncmp(s, sym, n) == 0;
+    }
+    return strcmp(decl->value, sym) == 0;
+}
+
+static int ast_binds_c_symbol(const ASTNode* mod_ast, const char* sym) {
+    if (!mod_ast) return 0;
+    for (int i = 0; i < mod_ast->child_count; i++) {
+        if (extern_binds_c_symbol(unwrap_export(mod_ast->children[i]), sym)) return 1;
+    }
+    return 0;
+}
+
+/* Is the C symbol `sym` one an extern of the build binds: the module's own
+ * (bare, or through `@extern("sym")`), or another loaded module's? Then a
+ * function of the module cannot have it as its C name. std.file's `close`
+ * as `file_close` beside std.fs's `extern file_close` was two conflicting
+ * declarations of one C function, a C compile error. */
+static int c_symbol_bound_by_extern(ASTNode* mod_ast, const char* sym) {
+    if (ast_binds_c_symbol(mod_ast, sym)) return 1;
+    ModuleRegistry* reg = global_module_registry;
+    if (!reg) return 0;
+    for (int i = 0; i < reg->module_count; i++) {
+        AetherModule* m = reg->modules[i];
+        if (m && m->ast != mod_ast && ast_binds_c_symbol(m->ast, sym)) return 1;
+    }
+    return 0;
+}
+
 static void merged_function_name(const char* ns, ASTNode* mod_ast, const char* name,
                                  char* buf, size_t cap) {
     snprintf(buf, cap, "%s_%s", ns, name);
-    if (module_has_extern_named(mod_ast, buf) && module_defines_function(mod_ast, name))
+    if (module_defines_function(mod_ast, name) &&
+        (module_has_extern_named(mod_ast, buf) || c_symbol_bound_by_extern(mod_ast, buf)))
         snprintf(buf, cap, "ae_%s_%s", ns, name);
 }
 

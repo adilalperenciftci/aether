@@ -1,0 +1,15 @@
+// `count` and `total` are Aether functions whose C names would be
+// tally_count and tally_total: the C symbols this module's @extern and
+// tally_c's extern bind.
+
+exports(count, total)
+
+@extern("tally_count") count_raw(x: int) -> int
+
+count(x: int) -> string {
+    return "count ${count_raw(x)}"
+}
+
+total(x: int) -> string {
+    return "total ${x}"
+}
