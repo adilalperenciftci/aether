@@ -154,12 +154,37 @@ static int spawn_sandboxed_full(
     }
   }
 
-  // 4. Set up stdout pipe if capturing. Close-on-exec (#3040): a child
+  // 4. The child's env, made here (#3200): this process's, with the
+  //    preload, the grant source and the map put in. The child used to
+  //    setenv them between fork and exec, which a child of a threaded
+  //    parent may not do: setenv mallocs and takes the environment's lock,
+  //    and a lock another thread held at the fork stays held in the child.
+  //    The program is binary_path as given, as execl took it.
+  char preload_var[sizeof preload_path + 16];
+  char grants_var[512];
+  char map_var[512];
+  const char* set[3];
+  int nset = 0;
+  if (perms) {
+    snprintf(preload_var, sizeof preload_var, "LD_PRELOAD=%s", preload_path);
+    snprintf(grants_var, sizeof grants_var, "AETHER_SANDBOX_SHM=%s", grants_shm);
+    set[nset++] = preload_var;
+    set[nset++] = grants_var;
+  }
+  if (map_shm) {
+    snprintf(map_var, sizeof map_var, "AETHER_MAP_SHM=%s", map_shm);
+    set[nset++] = map_var;
+  }
+  char** env = aether_spawn_env(aether_spawn_environ(), set, nset);
+  char* child_argv[] = { (char*)binary_path, NULL };
+
+  // 5. Set up stdout pipe if capturing. Close-on-exec (#3040): a child
   //    another thread starts while it is open must not hold its write end,
   //    or the read below waits for that child too. Ours keeps it through
   //    dup2 onto stdout, which clears the flag on the copy.
   int pipefd[2] = {-1, -1};
-  if (capture && aether_pipe_cloexec(pipefd) != 0) {
+  if (!env || (capture && aether_pipe_cloexec(pipefd) != 0)) {
+    free(env);
     if (grants_shm) {
       shm_unlink(grants_shm); free(grants_shm);
     }
@@ -169,9 +194,10 @@ static int spawn_sandboxed_full(
     return -1;
   }
 
-  // 5. Fork
+  // 6. Fork
   pid_t pid = aether_fork();
   if (pid < 0) {
+    free(env);
     if (capture) { close(pipefd[0]); close(pipefd[1]); }
     if (grants_shm) {
       shm_unlink(grants_shm); free(grants_shm);
@@ -190,19 +216,13 @@ static int spawn_sandboxed_full(
       close(pipefd[1]);
     }
 
-    if (perms) {
-      setenv("LD_PRELOAD", preload_path, 1);
-      setenv("AETHER_SANDBOX_SHM", grants_shm, 1);
-    }
-    if (map_shm) {
-      setenv("AETHER_MAP_SHM", map_shm, 1);
-    }
-
-    execl(binary_path, binary_path, (char*)NULL);
+    // Only async-signal-safe calls from here to the exec (#3200).
+    execve(binary_path, child_argv, env);
     _exit(127);
   }
 
   // ---- Parent process ----
+  free(env);
   if (capture) {
     close(pipefd[1]);
 
@@ -230,13 +250,13 @@ static int spawn_sandboxed_full(
   int status = 0;
   waitpid(pid, &status, 0);
 
-  // 6. Read outputs back from shared map
+  // 7. Read outputs back from shared map
   if (map_shm && map_token != 0) {
     aether_shared_map_read_outputs_from_shm_by_token(
         map_token, map_shm);
   }
 
-  // 7. Cleanup shm segments
+  // 8. Cleanup shm segments
   if (grants_shm) {
     shm_unlink(grants_shm); free(grants_shm);
   }

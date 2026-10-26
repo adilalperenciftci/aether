@@ -36,6 +36,7 @@
 #include <sys/wait.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <errno.h>
 #include <fcntl.h>
 
 extern int list_size(void*);
@@ -104,8 +105,16 @@ static char* serialize_grants_to_shm(void* perms) {
 
 // -----------------------------------------------------------------
 // Core: fork + exec with sandbox preload.
-// argv is NULL-terminated. program is argv[0]; the exec is execvp
-// so PATH resolution works for "go" without an absolute path.
+// argv is NULL-terminated. program is argv[0], looked up on PATH in
+// the parent so "go" works without an absolute path.
+//
+// Everything the child execs with is made here (#3200): the program's
+// path, the /bin/sh argv for a file with no #! line (execvp ran those
+// under /bin/sh), and the env with the preload, the grant source and
+// the map put in. The child used to setenv them and call execvp between
+// fork and exec, which a child of a threaded parent may not do: setenv
+// mallocs and takes the environment's lock, and a lock another thread
+// held at the fork stays held in the child. It now calls only execve.
 // -----------------------------------------------------------------
 static int spawn_go_sandboxed(void* perms,
                               const char* program,
@@ -150,8 +159,44 @@ static int spawn_go_sandboxed(void* perms,
         }
     }
 
+    char preload_var[sizeof preload_path + 16];
+    char grants_var[512];
+    char map_var[512];
+    const char* set[3];
+    int nset = 0;
+    if (perms) {
+        snprintf(preload_var, sizeof preload_var, "LD_PRELOAD=%s", preload_path);
+        snprintf(grants_var, sizeof grants_var, "AETHER_SANDBOX_SHM=%s", grants_shm);
+        set[nset++] = preload_var;
+        set[nset++] = grants_var;
+    }
+    if (map_shm) {
+        snprintf(map_var, sizeof map_var, "AETHER_MAP_SHM=%s", map_shm);
+        set[nset++] = map_var;
+    }
+    size_t argc = 0;
+    while (argv[argc]) argc++;
+    char* path = aether_spawn_resolve(program);
+    char** env = aether_spawn_env(aether_spawn_environ(), set, nset);
+    char** sh_argv = (char**)malloc((argc + 2) * sizeof(char*));
+    if (!path || !env || !sh_argv) {
+        /* A program on no PATH entry ends as the child's failed execvp
+         * did: 127. */
+        int rc = (!path && errno != ENOMEM) ? 127 : -1;
+        free(path); free(env); free(sh_argv);
+        if (grants_shm) { shm_unlink(grants_shm); free(grants_shm); }
+        if (map_shm) {
+            aether_shared_map_unlink_shm(map_shm); free(map_shm);
+        }
+        return rc;
+    }
+    sh_argv[0] = (char*)"/bin/sh";
+    sh_argv[1] = path;
+    for (size_t i = 1; i <= argc; i++) sh_argv[i + 1] = argv[i];
+
     pid_t pid = aether_fork();
     if (pid < 0) {
+        free(path); free(env); free(sh_argv);
         if (grants_shm) { shm_unlink(grants_shm); free(grants_shm); }
         if (map_shm) {
             aether_shared_map_unlink_shm(map_shm); free(map_shm);
@@ -160,15 +205,12 @@ static int spawn_go_sandboxed(void* perms,
     }
 
     if (pid == 0) {
-        // Child.
-        if (perms) {
-            setenv("LD_PRELOAD", preload_path, 1);
-            setenv("AETHER_SANDBOX_SHM", grants_shm, 1);
-        }
-        if (map_shm) setenv("AETHER_MAP_SHM", map_shm, 1);
-        execvp(program, argv);
+        // Child: only execve from here (#3200).
+        execve(path, argv, env);
+        if (errno == ENOEXEC) execve("/bin/sh", sh_argv, env);
         _exit(127);
     }
+    free(path); free(env); free(sh_argv);
 
     int status = 0;
     waitpid(pid, &status, 0);
