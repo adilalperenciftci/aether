@@ -27,6 +27,13 @@
 #include <string.h>
 
 #if defined(_WIN32)
+/* Lean, as aether_thread.h includes it: the full <windows.h> brings the old
+ * <winsock.h>, and a socket file that includes <winsock2.h> after this
+ * header then warns. Only a build without threads, where aether_thread.h
+ * has not included it first, saw that. */
+#ifndef WIN32_LEAN_AND_MEAN
+#  define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #else
 #include <unistd.h>
