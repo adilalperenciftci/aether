@@ -1,21 +1,29 @@
 // Middleware registered before std.http.proxy runs on every proxied request
-// (#3203).
+// (#3203), and the request hooks (the access log, metrics) see every
+// response, a proxied one and one a middleware refused included (#3213).
 //
 // On Linux and macOS a server that mounted a proxy handed its connections to
 // the proxy event loop, which ran the proxy exchange alone: the rate limiter,
 // basic auth, CORS and use_real_ip ahead of the proxy were skipped for each
-// request the proxy forwarded. The loop now serves a connection only when the
-// proxy is the chain's first middleware. Windows has no such loop and ran the
-// whole chain all along.
+// request the proxy forwarded. The loop now serves a connection only when
+// the proxy exchange is all its request gets. The hooks ran for a route
+// handler's response alone, on every platform: a gateway's access log had no
+// line for a proxied request, a 401 or a 429. Response transformers stay the
+// route handler's, as documented: a proxied response is passed on as the
+// upstream sent it (nginx's gzip_proxied is off too), whichever path serves
+// it.
 //
 // An upstream answers "ok". One gateway rate-limits to one request a minute
-// before its proxy; the other is the proxy alone, which the loop still
-// serves. Each listens on 127.0.0.1 and a port the kernel picks.
+// before its proxy, and logs; one is the proxy alone, which the loop still
+// serves; one logs each request; one has gzip. Each listens on 127.0.0.1 and
+// a port the kernel picks.
 
+import std.fs
 import std.http
 import std.http.client
 import std.http.middleware
 import std.http.proxy
+import std.string
 
 extern exit(code: int)
 
@@ -54,6 +62,16 @@ status_through(port: int) -> int {
     return code
 }
 
+count_lines(text: string) -> int {
+    n = 0
+    at = string.index_of_from(text, "\n", 0)
+    while at >= 0 {
+        n = n + 1
+        at = string.index_of_from(text, "\n", at + 1)
+    }
+    return n
+}
+
 expect(label: string, got: int, want: int) -> int {
     if got != want {
         println("  FAIL ${label}: status ${got}, expected ${want}")
@@ -82,6 +100,18 @@ main() {
         println("FAIL: mount_simple: ${merr}")
         exit(1)
     }
+    dir, derr = fs.make_temp_dir("", "aether-mwfirst-")
+    if derr != "" {
+        println("FAIL: temp dir: ${derr}")
+        exit(1)
+    }
+    defer fs.remove_tree(dir)
+    limited_log = fs.join_clean(dir, "limited.log")
+    llerr = http.server_set_access_log(limited, "combined", limited_log)
+    if llerr != "" {
+        println("FAIL: access log: ${llerr}")
+        exit(1)
+    }
     limited_port = start(limited)
 
     alone = http.server_create(0)
@@ -92,6 +122,27 @@ main() {
         exit(1)
     }
     alone_port = start(alone)
+
+    log_path = fs.join_clean(dir, "access.log")
+    logged = http.server_create(0)
+    http.server_set_host(logged, "127.0.0.1")
+    gerr = proxy.mount_simple(logged, "/", up_url, 5)
+    lgerr = http.server_set_access_log(logged, "combined", log_path)
+    if gerr != "" || lgerr != "" {
+        println("FAIL: logged gateway: '${gerr}' '${lgerr}'")
+        exit(1)
+    }
+    logged_port = start(logged)
+
+    zipped = http.server_create(0)
+    http.server_set_host(zipped, "127.0.0.1")
+    zerr = proxy.mount_simple(zipped, "/", up_url, 5)
+    zgerr = middleware.use_gzip(zipped, 1, 6)
+    if zerr != "" || zgerr != "" {
+        println("FAIL: gzip gateway: '${zerr}' '${zgerr}'")
+        exit(1)
+    }
+    zipped_port = start(zipped)
     sleep(200)
 
     bad = 0
@@ -101,6 +152,52 @@ main() {
     bad = bad + expect("a proxy with nothing before it forwards", status_through(alone_port), 200)
     bad = bad + expect("and forwards again", status_through(alone_port), 200)
 
+    // The access log, a request hook, sees each proxied request.
+    i = 0
+    while i < 3 {
+        _s = status_through(logged_port)
+        i = i + 1
+    }
+    text, rerr = fs.read(log_path)
+    lines = 0
+    if rerr == "" {
+        lines = count_lines(text)
+    }
+    bad = bad + expect("the access log has a line for each of 3 proxied requests", lines, 3)
+
+    // And for the 429 the rate limiter answered before the proxy.
+    ltext, lrerr = fs.read(limited_log)
+    llines = 0
+    refused = 0
+    if lrerr == "" {
+        llines = count_lines(ltext)
+        if string.contains(ltext, " 429 ") == 1 {
+            refused = 1
+        }
+    }
+    bad = bad + expect("the limited gateway logs its 200 and its 429", llines, 2)
+    bad = bad + expect("and the 429 is in it", refused, 1)
+
+    // gzip is the route handler's: a proxied response passes as the upstream
+    // sent it, on the event loop and the worker path alike.
+    zreq = client.request("GET", "http://127.0.0.1:${zipped_port}/ok")
+    client.set_header(zreq, "Accept-Encoding", "gzip")
+    zresp, zrerr = client.send_request(zreq)
+    client.request_free(zreq)
+    encoding = "(no response)"
+    if zrerr == "" {
+        encoding = client.response_header(zresp, "Content-Encoding")
+        client.response_free(zresp)
+    }
+    plain = 0
+    if encoding == "" {
+        plain = 1
+    }
+    bad = bad + expect("a proxied response is not gzipped (Content-Encoding '${encoding}')",
+        plain, 1)
+
+    http.server_stop(zipped)
+    http.server_stop(logged)
     http.server_stop(alone)
     http.server_stop(limited)
     http.server_stop(upstream)

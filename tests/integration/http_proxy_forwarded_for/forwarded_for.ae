@@ -87,7 +87,7 @@ main() {
 
     behind = http.server_create(0)
     http.server_set_host(behind, "127.0.0.1")
-    rerr = middleware.use_real_ip(behind, "")
+    rerr = middleware.use_real_ip(behind, "", "127.0.0.1") // this program is the trusted edge
     if rerr != "" {
         println("FAIL: use_real_ip: ${rerr}")
         exit(1)

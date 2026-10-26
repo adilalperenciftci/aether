@@ -14,8 +14,6 @@ import std.http.middleware
 import std.os
 
 extern exit(code: int)
-extern aether_rewrite_opts_new() -> ptr
-extern aether_error_pages_opts_new() -> ptr
 
 handle_api(req: ptr, res: ptr, ud: ptr) {
     http.response_set_status(res, 200)
@@ -43,7 +41,7 @@ main() {
     if raw == 0 { println("FAIL: server_create"); exit(1) }
 
     // 1. rewrite — /old/* -> /api/*
-    rw_opts = aether_rewrite_opts_new()
+    rw_opts = middleware.rewrite_new()
     middleware.rewrite_add_rule(rw_opts, "/old/", "/api/")
     middleware.use_rewrite(raw, rw_opts)
 
@@ -60,7 +58,7 @@ main() {
     middleware.use_gzip(raw, 64, 6)
 
     // 4. error_pages — custom 404 + 500
-    ep_opts = aether_error_pages_opts_new()
+    ep_opts = middleware.error_pages_new()
     middleware.error_pages_register(ep_opts, 404,
         "<html><body><h1>Custom Not Found</h1></body></html>",
         "text/html; charset=utf-8")

@@ -1,0 +1,124 @@
+// use_real_ip names the client behind the proxies it trusts, never one a
+// request names itself (#3212).
+//
+// It took the leftmost X-Forwarded-For entry from any peer. A client that
+// connects directly can send the header, and a proxy that appends to it
+// (std.http.proxy, nginx by default) keeps what the client wrote on its
+// left, so a client named its own address, and with it its rate-limit
+// bucket. The header is now believed only from a trusted peer and read from
+// the right, as nginx's set_real_ip_from with real_ip_recursive does: the
+// first entry that is not a trusted proxy is the client.
+//
+// Each server echoes the peer the request reports and its X-Real-IP. This
+// program connects from 127.0.0.1, which the servers that trust it see as
+// their proxy. Everything listens on 127.0.0.1 and a port the kernel picks.
+
+import std.http
+import std.http.client
+import std.http.middleware
+
+extern exit(code: int)
+
+handle_who(req: ptr, res: ptr, ud: ptr) {
+    real = http.get_header(req, "X-Real-IP")
+    http.response_set_status(res, 200)
+    http.response_set_body(res, "${http.request_remote_addr(req)}|${real}")
+}
+
+// A server with use_real_ip(header, trusted), started; its port.
+serve(header: string, trusted: string) -> int {
+    s = http.server_create(0)
+    http.server_set_host(s, "127.0.0.1")
+    err = middleware.use_real_ip(s, header, trusted)
+    if err != "" {
+        println("FAIL: use_real_ip(\"${header}\", \"${trusted}\"): ${err}")
+        exit(1)
+    }
+    http.server_get(s, "/who", handle_who, 0)
+    if http.server_bind(s, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    serr = http.server_start_background(s)
+    if serr != "" {
+        println("FAIL: start: ${serr}")
+        exit(1)
+    }
+    return http.server_port(s)
+}
+
+// What the server on `port` says of a request carrying `name: value`.
+who(port: int, name: string, value: string) -> string {
+    req = client.request("GET", "http://127.0.0.1:${port}/who")
+    if name != "" {
+        client.set_header(req, name, value)
+    }
+    resp, err = client.send_request(req)
+    client.request_free(req)
+    if err != "" {
+        println("FAIL: GET :${port}: ${err}")
+        exit(1)
+    }
+    body = client.response_body(resp)
+    client.response_free(resp)
+    return body
+}
+
+expect(label: string, got: string, want: string) -> int {
+    if got != want {
+        println("  FAIL ${label}: got '${got}', expected '${want}'")
+        return 1
+    }
+    println("  PASS ${label}")
+    return 0
+}
+
+main() {
+    println("=== use_real_ip: the client behind the proxies it trusts (#3212) ===")
+    edge = serve("", "127.0.0.1")
+    chain = serve("", "127.0.0.1, 10.0.0.0/8")
+    distrust = serve("", "10.0.0.0/8")
+    fwd = serve("Forwarded", "127.0.0.1")
+    v6 = serve("", "127.0.0.1, 2001:db8::/32")
+
+    bad = 0
+    bad = bad + expect("no header: the peer",
+        who(edge, "", ""), "127.0.0.1|127.0.0.1")
+    bad = bad + expect("one entry from the trusted edge",
+        who(edge, "X-Forwarded-For", "203.0.113.5"), "203.0.113.5|203.0.113.5")
+    bad = bad + expect("entries a client wrote left of the edge's change nothing",
+        who(edge, "X-Forwarded-For", "6.6.6.6, 203.0.113.5"), "203.0.113.5|203.0.113.5")
+    bad = bad + expect("a chain of trusted proxies is walked to the client",
+        who(chain, "X-Forwarded-For", "6.6.6.6, 203.0.113.5, 10.1.2.3, 10.0.0.9"),
+        "203.0.113.5|203.0.113.5")
+    bad = bad + expect("every entry trusted: the leftmost",
+        who(chain, "X-Forwarded-For", "10.0.0.1, 10.0.0.2"), "10.0.0.1|10.0.0.1")
+    bad = bad + expect("an entry that is no address ends the walk",
+        who(chain, "X-Forwarded-For", "203.0.113.5, unknown, 10.0.0.9"), "10.0.0.9|10.0.0.9")
+    bad = bad + expect("a port on an IPv4 entry is not part of it",
+        who(edge, "X-Forwarded-For", "203.0.113.5:4711"), "203.0.113.5|203.0.113.5")
+    bad = bad + expect("from a peer that is not trusted, the peer",
+        who(distrust, "X-Forwarded-For", "203.0.113.5"), "127.0.0.1|127.0.0.1")
+    bad = bad + expect("a forged X-Real-IP is replaced, from any peer",
+        who(distrust, "X-Real-IP", "6.6.6.6"), "127.0.0.1|127.0.0.1")
+    bad = bad + expect("Forwarded: each element's for=, quoted [v6]:port included",
+        who(fwd, "Forwarded", "for=6.6.6.6, for=\"[2001:db8:cafe::17]:4711\";proto=https"),
+        "2001:db8:cafe::17|2001:db8:cafe::17")
+    bad = bad + expect("an IPv6 network is trusted as an IPv4 one is",
+        who(v6, "X-Forwarded-For", "198.51.100.4, 2001:db8::1"), "198.51.100.4|198.51.100.4")
+
+    s = http.server_create(0)
+    e1 = middleware.use_real_ip(s, "", "")
+    e2 = middleware.use_real_ip(s, "", "10.0.0.0/33")
+    e3 = middleware.use_real_ip(s, "", "10.0.0.1, proxy.internal")
+    http.server_free(s)
+    bad = bad + expect("no trusted proxies is an error", "${e1 != ""}", "true")
+    bad = bad + expect("a prefix longer than the address is an error", "${e2 != ""}", "true")
+    bad = bad + expect("a name instead of an address is an error", "${e3 != ""}", "true")
+
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

@@ -82,9 +82,11 @@ main() {
     http.server_get(limited, "/x", handle_ok, 0)
     lp = start(limited)
 
+    // This program's requests come from 127.0.0.1, the edge `behind`
+    // trusts, as a proxy's would (#3212).
     behind = http.server_create(0)
     http.server_set_host(behind, "127.0.0.1")
-    rerr = middleware.use_real_ip(behind, "")
+    rerr = middleware.use_real_ip(behind, "", "127.0.0.1")
     berr = middleware.use_rate_limit(behind, 2, 60000)
     if rerr != "" || berr != "" {
         println("FAIL: use_real_ip / use_rate_limit: ${rerr} ${berr}")
@@ -92,6 +94,19 @@ main() {
     }
     http.server_get(behind, "/x", handle_ok, 0)
     bp = start(behind)
+
+    // A server whose trusted proxies the peer is not among believes no
+    // forwarding header: the peer is the client.
+    distrust = http.server_create(0)
+    http.server_set_host(distrust, "127.0.0.1")
+    derr = middleware.use_real_ip(distrust, "", "10.0.0.0/8")
+    dlerr = middleware.use_rate_limit(distrust, 1, 60000)
+    if derr != "" || dlerr != "" {
+        println("FAIL: use_real_ip / use_rate_limit: ${derr} ${dlerr}")
+        exit(1)
+    }
+    http.server_get(distrust, "/x", handle_ok, 0)
+    dp = start(distrust)
 
     up_a = http.server_create(0)
     http.server_set_host(up_a, "127.0.0.1")
@@ -133,6 +148,17 @@ main() {
     b1 = get(bp, "203.0.113.2")
     bad = bad + check("behind use_real_ip each resolved client has a bucket of its own",
         "${a1}|${a2}|${a3}|${b1}", "200 ok|200 ok|429 Too Many Requests|200 ok")
+    // The edge appends what it saw to what the client wrote: entries to the
+    // left of it are the client's own, and change nothing (#3212).
+    b2 = get(bp, "6.6.6.1, 203.0.113.2")
+    b3 = get(bp, "6.6.6.2, 203.0.113.2")
+    bad = bad + check("forged entries left of the edge's keep the client's bucket",
+        "${b2}|${b3}", "200 ok|429 Too Many Requests")
+    // From a peer that is not trusted the header is ignored: one bucket.
+    d1 = get(dp, "203.0.113.7")
+    d2 = get(dp, "203.0.113.8")
+    bad = bad + check("a peer that is not trusted is the client, whatever it forwards",
+        "${d1}|${d2}", "200 ok|429 Too Many Requests")
 
     // ip_hash: one peer reaches one upstream, whatever it forges.
     first = get(gp, "192.0.2.1")
@@ -150,6 +176,7 @@ main() {
     http.server_stop(gateway)
     http.server_stop(up_b)
     http.server_stop(up_a)
+    http.server_stop(distrust)
     http.server_stop(behind)
     http.server_stop(limited)
     if bad > 0 {

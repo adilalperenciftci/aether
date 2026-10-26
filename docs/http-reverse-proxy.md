@@ -94,11 +94,17 @@ passes through to the next middleware, so narrower carve-outs should
 be registered first.
 
 Middleware registered before a proxy (a rate limiter, basic auth,
-`use_real_ip`) runs on every request the proxy forwards. On Linux and
-macOS a server whose first middleware is the proxy serves its plain-HTTP
-connections from an event loop, without a thread per connection. Any
-middleware before the proxy keeps the ordinary per-connection path, so
-that middleware is never skipped (#3203).
+`use_real_ip`) runs on every request the proxy forwards, and the request
+hooks (the access log, metrics) see every response, a proxied one and one
+a middleware refused included. Response transformers (`use_gzip`,
+`use_error_pages`) are the route handler's: a proxied response passes on
+as the upstream sent it, as with nginx's `gzip_proxied off`. On Linux and
+macOS a server whose proxied requests get the proxy exchange and nothing
+else (the proxy is its first middleware, and it has no request hook)
+serves its plain-HTTP connections from an event loop, without a thread
+per connection. Anything more keeps the ordinary per-connection path, so
+nothing is skipped (#3203, #3213). Running that work on the event loop
+too is tracked in #3214.
 
 ```aether,fragment
 proxy.mount_match(server, "/repos/:repo/info", primary_pool, primary_opts, "GET,HEAD")

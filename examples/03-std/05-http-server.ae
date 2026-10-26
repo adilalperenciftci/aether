@@ -68,7 +68,9 @@ main() {
     // Order matters: the client address first, so everything after it
     // sees the client rather than the proxy; CORS before the routes, so a
     // preflight OPTIONS is answered there.
-    middleware.use_real_ip(server, "") // "" is X-Forwarded-For
+    // X-Forwarded-For ("") is believed from a proxy on this machine only:
+    // anything else that connects could write one of its own.
+    middleware.use_real_ip(server, "", "127.0.0.1, ::1")
     middleware.use_cors(server, "*", "GET, POST, OPTIONS", "Content-Type", 0, 600)
     middleware.use_gzip(server, 256, 6) // bodies of 256 bytes or more
 

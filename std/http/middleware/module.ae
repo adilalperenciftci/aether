@@ -40,8 +40,10 @@ exports(
     use_vhost,
     use_gzip,
     use_static_files,
+    rewrite_new,
     use_rewrite,
     rewrite_add_rule,
+    error_pages_new,
     use_error_pages,
     error_pages_register,
     use_real_ip,
@@ -332,15 +334,23 @@ use_static_files(server: ptr, url_prefix: string, root: string) -> {
     return ""
 }
 
-// Allocate a URL-rewrite opts struct. Use `rewrite_add_rule` to
-// install one or more prefix-rewrite rules, then pass the opts to
-// `use_rewrite`. Rules apply in registration order; first match wins.
+// A URL-rewrite opts struct. Use `rewrite_add_rule` to install one or
+// more prefix-rewrite rules, then pass the opts to `use_rewrite`, which
+// gives them to the server. Rules apply in registration order; first match
+// wins. null when allocation fails, which `use_rewrite` reports.
 //
 // Idiom:
-//     opts = mw.aether_rewrite_opts_new()  // (or expose a wrapper)
-//     mw.rewrite_add_rule(opts, "/old/", "/new/")
-//     mw.rewrite_add_rule(opts, "/legacy/", "/api/v1/")
-//     mw.use_rewrite(server, opts)
+//     opts = middleware.rewrite_new()
+//     middleware.rewrite_add_rule(opts, "/old/", "/new/")
+//     middleware.rewrite_add_rule(opts, "/legacy/", "/api/v1/")
+//     middleware.use_rewrite(server, opts)
+//
+// There was no constructor to call: every program re-declared the C
+// binding to get one.
+rewrite_new() -> ptr {
+    return aether_rewrite_opts_new()
+}
+
 rewrite_add_rule(opts: ptr, from_prefix: string, to_prefix: string) -> {
     rc = aether_rewrite_add_rule(opts, from_prefix, to_prefix)
     if rc != 0 {
@@ -352,11 +362,19 @@ rewrite_add_rule(opts: ptr, from_prefix: string, to_prefix: string) -> {
 // The server owns `opts` from here on and frees them with itself (#3191).
 use_rewrite(server: ptr, opts: ptr) -> {
     if opts == null {
-        return "rewrite: opts is null (call aether_rewrite_opts_new first)"
+        return "rewrite: opts is null (make them with rewrite_new)"
     }
     http_server_use_middleware_owned(server, aether_middleware_rewrite, opts,
         aether_rewrite_opts_free)
     return ""
+}
+
+// An error-pages opts struct: register a page per status with
+// `error_pages_register`, then pass the opts to `use_error_pages`, which
+// gives them to the server. null when allocation fails, which
+// `use_error_pages` reports.
+error_pages_new() -> ptr {
+    return aether_error_pages_opts_new()
 }
 
 // Register a custom error page. Body is served with the given
@@ -373,42 +391,49 @@ error_pages_register(opts: ptr, status_code: int, body: string, content_type: st
 // The server owns `opts` from here on and frees them with itself (#3191).
 use_error_pages(server: ptr, opts: ptr) -> {
     if opts == null {
-        return "error_pages: opts is null (call aether_error_pages_opts_new first)"
+        return "error_pages: opts is null (make them with error_pages_new)"
     }
     http_server_use_response_transformer_owned(server, aether_xform_error_pages, opts,
         aether_error_pages_opts_free)
     return ""
 }
 
-// Real-IP / X-Forwarded-For middleware. When the server sits
-// behind a load balancer, reverse proxy, or CDN, the connection-
-// level peer IP is the proxy. Operators conventionally pass the
-// original client through `X-Forwarded-For: client, proxy1, ...`
-// (leftmost = oldest, original client). This middleware reads the
-// configured header and makes that client the peer the request
-// reports (`http.request_remote_addr` answers it from then on, its
-// port 0) and its `X-Real-IP`, replacing any `X-Real-IP` the client
-// sent (#3169), so downstream handlers, ratelimit, access logs,
-// metrics and std.http.proxy see the client rather than the proxy.
+// Real-IP middleware: the client behind the proxies you trust. When
+// the server sits behind a load balancer, reverse proxy, or CDN, the
+// connection's peer is the proxy, and each proxy adds the address it
+// saw to a forwarding header: `X-Forwarded-For: client, proxy1, ...`.
+// This middleware makes the client the peer the request reports
+// (`http.request_remote_addr` answers it from then on, its port 0) and
+// its `X-Real-IP`, replacing any `X-Real-IP` the client sent (#3169),
+// so downstream handlers, ratelimit, access logs, metrics and
+// std.http.proxy see the client rather than the proxy.
 //
-//   header_name    — header to read from. Pass "" for the default
-//                    "X-Forwarded-For"; alternatives include
-//                    "Forwarded" (RFC 7239), "CF-Connecting-IP"
-//                    (Cloudflare), "True-Client-IP" (Akamai), etc.
+//   header_name    : header to read from. Pass "" for the default
+//                    "X-Forwarded-For"; "Forwarded" (RFC 7239) reads
+//                    each element's for=; single-address headers such
+//                    as "CF-Connecting-IP" (Cloudflare) and
+//                    "True-Client-IP" (Akamai) work too.
+//   trusted        : the proxies whose header is believed: addresses
+//                    and networks, comma-separated
+//                    ("127.0.0.1, 10.0.0.0/8, fd00::/8").
 //
-// Trust model — this middleware does NOT validate that the
-// request actually came through a trusted proxy. Operators must
-// only run it behind trusted edge infrastructure that strips any
-// client-supplied X-Forwarded-For. Without that guarantee, callers
-// can spoof their apparent client IP. Returns "" on success, error
-// string on allocation failure.
-extern aether_real_ip_opts_new(header_name: string) -> ptr
+// Anything that connects can send the header, so it is believed only
+// from a trusted peer, and read from the right: each entry is what the
+// hop before it saw, and the first that is not a trusted proxy is the
+// client (#3212), as nginx's set_real_ip_from with real_ip_recursive
+// has it. Entries a client writes itself sit to the left of that and
+// change nothing. From any other peer the peer is the client. Returns
+// "" on success, or an error for an empty or malformed `trusted`.
+extern aether_real_ip_opts_new(header_name: string, trusted: string) -> ptr
 extern aether_middleware_real_ip(req: ptr, res: ptr, user_data: ptr) -> int
 
-use_real_ip(server: ptr, header_name: string) -> {
-    opts = aether_real_ip_opts_new(header_name)
+use_real_ip(server: ptr, header_name: string, trusted: string) -> {
+    if trusted == "" {
+        return "real_ip: name the proxies to trust (\"10.0.0.0/8, ::1\"): a forwarding header from any other peer is the client's own word"
+    }
+    opts = aether_real_ip_opts_new(header_name, trusted)
     if opts == null {
-        return "real_ip: allocation failed"
+        return "real_ip: '${trusted}' is not a comma-separated list of IP addresses and networks such as 10.0.0.0/8 or fd00::/8"
     }
     http_server_use_middleware_owned(server, aether_middleware_real_ip, opts,
         aether_real_ip_opts_free)

@@ -16,8 +16,6 @@ import std.mem
 
 extern exit(code: int)
 extern http_server_free(server: ptr)
-extern aether_rewrite_opts_new() -> ptr
-extern aether_error_pages_opts_new() -> ptr
 
 @c_callback
 deny_basic(user: ptr, pass: ptr, ud: ptr) -> int {
@@ -42,16 +40,16 @@ round(which: int) {
     if which == 6 { err = middleware.use_gzip(s, 256, 6) }
     if which == 7 { err = middleware.use_static_files(s, "/static", ".") }
     if which == 8 {
-        rw = aether_rewrite_opts_new()
+        rw = middleware.rewrite_new()
         err = middleware.rewrite_add_rule(rw, "/old/", "/new/")
         if err == "" { err = middleware.use_rewrite(s, rw) }
     }
     if which == 9 {
-        ep = aether_error_pages_opts_new()
+        ep = middleware.error_pages_new()
         err = middleware.error_pages_register(ep, 404, "<h1>no</h1>", "text/html")
         if err == "" { err = middleware.use_error_pages(s, ep) }
     }
-    if which == 10 { err = middleware.use_real_ip(s, "") }
+    if which == 10 { err = middleware.use_real_ip(s, "", "127.0.0.1") }
     if err != "" {
         println("FAIL: factory ${which}: ${err}")
         exit(1)

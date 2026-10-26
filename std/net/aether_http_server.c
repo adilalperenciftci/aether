@@ -2498,10 +2498,6 @@ int http_response_get_status(HttpServerResponse* res) {
  * than being told, so a server that does not proxy simply has none and the
  * driver is not used.
  */
-int http_server_has_response_transformer(HttpServer* server) {
-    return server && server->response_transformer_chain != NULL;
-}
-
 void* http_server_proxy_opts(HttpServer* server) {
     if (!server) return NULL;
     for (HttpMiddlewareNode* n = server->middleware_chain; n; n = n->next) {
@@ -2510,15 +2506,21 @@ void* http_server_proxy_opts(HttpServer* server) {
     return NULL;
 }
 
-/* Is the reverse proxy the first middleware of the chain, so that no other
- * runs before it on a request? The event loop runs the proxy exchange
- * alone; for a chain with use_real_ip, a rate limiter or basic auth ahead
- * of the proxy it skipped them, and a proxied request went past the auth on
- * Linux. Middleware after the proxy sees only what the proxy passes on,
- * which the loop hands back to the worker path. */
-int http_server_proxy_runs_first(HttpServer* server) {
+/* May the proxy event loop serve this server's connections? It runs the
+ * proxy exchange alone, so only where that is all a proxied request gets
+ * on the worker path: the proxy is the chain's first middleware, and no
+ * request hook is registered. For a chain with use_real_ip, a rate limiter
+ * or basic auth ahead of the proxy the loop skipped them, and a proxied
+ * request went past the auth on Linux (#3203); the access log and metrics,
+ * which observe every response (run_request_hooks), were skipped the same
+ * way (#3213). Response transformers are the route handler's and do not
+ * touch a proxied response on either path. Middleware after the proxy sees
+ * only what the proxy passes on, which the loop hands back to the worker
+ * path. */
+int http_server_evloop_serves(HttpServer* server) {
     return server && server->middleware_chain &&
-           server->middleware_chain->middleware == aether_middleware_reverse_proxy;
+           server->middleware_chain->middleware == aether_middleware_reverse_proxy &&
+           !server->request_hook_chain;
 }
 
 void http_response_set_header(HttpServerResponse* res, const char* key, const char* value) {
@@ -4697,6 +4699,20 @@ static void conn_send_bad_request_line(HttpConn* conn) {
 
 static void conn_set_recv_timeout(HttpConn* c, int ms);
 
+/* The request hooks (#260 Tier 3: the access log, metrics, a program's own)
+ * on the response about to be sent, `t_start` the request's start. Every
+ * response the server sends is observed, the one a middleware answered
+ * included (#3213): a proxied request, a 401 from basic auth, a 429 from
+ * the rate limiter went unlogged and uncounted. Hooks observe; they do not
+ * change the response. */
+static void run_request_hooks(HttpServer* server, HttpRequest* req,
+                              HttpServerResponse* res, int64_t t_start) {
+    if (!server->request_hook_chain) return;
+    int64_t duration_us = http_now_us() - t_start;
+    for (struct HttpRequestHookNode* h = server->request_hook_chain; h; h = h->next)
+        h->hook(req, res, duration_us, h->user_data);
+}
+
 static int handle_one_request(HttpServer* server, HttpConn* conn,
                               int requests_served, int max_requests) {
     int64_t t_start = http_now_us();
@@ -5020,7 +5036,10 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
         /* Same finish as the route-handler path: a middleware that answers
          * (static_files staging a sendfile FD, the reverse proxy returning an
          * upstream response) produces an ordinary response, and the
-         * connection's fate is decided the same way. */
+         * connection's fate is decided the same way. Transformers are the
+         * route handler's (a proxied response is not gzipped here, as
+         * nginx's gzip_proxied is off); the hooks observe it. */
+        run_request_hooks(server, req, res, t_start);
         return finish_response(server, conn, req, res, requests_served, max_requests);
     }
 
@@ -5233,15 +5252,7 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
      * latency measurement includes everything except network
      * write — the hooks are about server-side cost, not client-
      * perceived round trip. Hooks may not mutate; they observe. */
-    if (server->request_hook_chain) {
-        int64_t t_end = http_now_us();
-        int64_t duration_us = t_end - t_start;
-        struct HttpRequestHookNode* h = server->request_hook_chain;
-        while (h) {
-            h->hook(req, res, duration_us, h->user_data);
-            h = h->next;
-        }
-    }
+    run_request_hooks(server, req, res, t_start);
 
     /* #626 — drain any unread streaming-body bytes. A handler that
      * streamed only part of the body (or ignored it entirely — e.g. a
@@ -5316,7 +5327,10 @@ void http_server_dispatch_for_h2(HttpServer* server,
         middleware = middleware->next;
     }
     if (!should_continue) {
-        return;  /* middleware blocked; res already populated */
+        /* middleware answered; res already populated, and observed as
+         * every response is (#3213) */
+        run_request_hooks(server, req, res, t_start);
+        return;
     }
 
     HttpRoute* matched_route = http_resolve_route(server, req);
@@ -5337,14 +5351,7 @@ void http_server_dispatch_for_h2(HttpServer* server,
     }
 
     /* Per-request observation hooks (#260 Tier 3). */
-    if (server->request_hook_chain) {
-        int64_t duration_us = http_now_us() - t_start;
-        struct HttpRequestHookNode* h = server->request_hook_chain;
-        while (h) {
-            h->hook(req, res, duration_us, h->user_data);
-            h = h->next;
-        }
-    }
+    run_request_hooks(server, req, res, t_start);
 }
 
 #ifdef AETHER_HAS_NGHTTP2
@@ -5771,9 +5778,9 @@ void http_server_drain_connection(HttpServer* server, int client_fd) {
      *
      * A refusal costs nothing, because the connection has not been touched
      * yet and the worker path is still right below. */
-    /* A chain changed since the loop started may have middleware ahead of
-     * the proxy now, which the loop would skip. */
-    if (server->evloop && !server->h2_enabled && http_server_proxy_runs_first(server)) {
+    /* A server changed since the loop started may have middleware ahead of
+     * the proxy now, or a hook, which the loop would skip. */
+    if (server->evloop && !server->h2_enabled && http_server_evloop_serves(server)) {
         if (http_evloop_submit((HttpEvLoop*)server->evloop, client_fd) == 0) return;
     }
 

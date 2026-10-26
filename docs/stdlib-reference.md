@@ -2281,7 +2281,7 @@ main() {
     server = http.server_create(8080)
 
     // Order matters: real_ip first so downstream sees the client IP
-    middleware.use_real_ip(server, "")                // default X-Forwarded-For
+    middleware.use_real_ip(server, "", "10.0.0.0/8")  // X-Forwarded-For from the LB
 
     middleware.use_cors(server, "*", "GET, POST", "Content-Type", 0, 600)
 
@@ -2303,12 +2303,14 @@ main() {
 - `middleware.use_session_auth(server, cookie_name, redirect_url, verify_cb, ud)` → `string` - Session-cookie auth. Reads a named cookie, hands the value to the verifier; on failure either 401s (when `redirect_url` is empty) or 302s to the configured login URL.
 - `middleware.use_rate_limit(server, max_requests, window_ms)` → `string` - Token-bucket per-client-IP rate limit. The client is the peer the request reports (`http.request_remote_addr`: the connection's, or, after `use_real_ip`, the client it resolved), never a header the client sends (#3173); `"anonymous"` when there is no IP peer.
 - `middleware.use_vhost(server, hosts_csv)` → `string` - Host-header gate. Comma-separated allowed hosts; unknown hosts get 404.
-- `middleware.use_real_ip(server, header_name)` → `string` - Proxy-aware client IP detection. Reads the configured header (default `X-Forwarded-For`), takes the leftmost non-empty IP, and makes it the peer the request reports from then on (`http.request_remote_addr` answers it, the port reads 0) and its `X-Real-IP`, replacing any `X-Real-IP` the client sent (#3169). Idempotent. **Trust model: only safe behind a proxy that strips client-supplied X-Forwarded-For.**
+- `middleware.use_real_ip(server, header_name, trusted)` → `string` - The client behind the proxies `trusted` names (addresses and networks, comma-separated: `"127.0.0.1, 10.0.0.0/8, fd00::/8"`). The header (`""` for `X-Forwarded-For`; `"Forwarded"` reads each element's `for=`) is believed only from a trusted peer and read from the right: the first entry that is not a trusted proxy is the client, as nginx's `set_real_ip_from` with `real_ip_recursive` has it (#3212), so entries a client writes itself change nothing. It becomes the peer the request reports from then on (`http.request_remote_addr` answers it, the port reads 0) and its `X-Real-IP`, replacing any `X-Real-IP` the client sent (#3169). From a peer that is not trusted, the peer is the client. Idempotent. An empty or malformed `trusted` is an error.
 - `middleware.use_static_files(server, url_prefix, root)` → `string` - Mount a directory under a URL prefix; `..` traversal blocked.
+- `middleware.rewrite_new()` → `ptr` - The opts `use_rewrite` takes; null when allocation fails.
 - `middleware.use_rewrite(server, opts)` → `string` - Prefix-rewrite rules; build via `middleware.rewrite_add_rule(opts, from, to)`.
 
-**Response transformers (run after the route handler emits the response):**
+**Response transformers (run after the route handler emits the response, not on one a middleware answered: a proxied response, a 401, a 429):**
 - `middleware.use_gzip(server, min_size, level)` → `string` - Gzip the response body when the client sends `Accept-Encoding: gzip` and the body is at least `min_size` bytes; level 1 (fastest) to 9 (best), 0 = default 6.
+- `middleware.error_pages_new()` → `ptr` - The opts `use_error_pages` takes; null when allocation fails.
 - `middleware.use_error_pages(server, opts)` → `string` - Replace error-status response bodies with operator-supplied content; build via `middleware.error_pages_register(opts, status_code, body, content_type)`.
 
 ### HTTP Reverse Proxy (`std.http.proxy`)
