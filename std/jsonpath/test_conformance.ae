@@ -198,19 +198,19 @@ _json_equal(a: ptr, b: ptr) -> int {
     tb = json.type(b)
     if ta != tb { return 0 }
 
-    if ta == 0 { return 1 }
-    if ta == 1 {
+    if ta == json.JSON_NULL { return 1 }
+    if ta == json.JSON_BOOL {
         if json.get_bool(a) == json.get_bool(b) { return 1 }
         return 0
     }
-    if ta == 2 {
+    if ta == json.JSON_NUMBER {
         if json.get_number(a) == json.get_number(b) { return 1 }
         return 0
     }
-    if ta == 3 {
+    if ta == json.JSON_STRING {
         return string.equals(json.get_string_raw(a), json.get_string_raw(b))
     }
-    if ta == 4 {
+    if ta == json.JSON_ARRAY {
         n = json.array_size(a)
         if n != json.array_size(b) { return 0 }
         i = 0

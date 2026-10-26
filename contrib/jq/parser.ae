@@ -679,7 +679,7 @@ _parse_string_token(p: *JqParser, format: string) -> ptr {
     while i < count {
         part = json.array_get_raw(parts, i)
         pn = _mk(p, ast.N_STR_PART, null, null)
-        if json.type(part) == 3 {
+        if json.type(part) == json.JSON_STRING {
             (pn as *Node).val = json.str(json.get_string_raw(part))
         } else {
             src = json.get_string_raw(json.array_get_raw(part, 0))

@@ -124,14 +124,6 @@ fn is_array(ty: int) -> bool {
 const KIND_SCHEMA = 1
 const KIND_FIELD = 2
 
-// std.json's value types (aether_json.h's enum).
-const JSON_NULL = 0
-const JSON_BOOL = 1
-const JSON_NUMBER = 2
-const JSON_STRING = 3
-const JSON_ARRAY = 4
-const JSON_OBJECT = 5
-
 // ---- Rule kinds ----
 // Rules split into two families, applied in declaration order during parse:
 //   TRANSFORMS (>= RULE_XFORM_FIRST) rewrite the canonical value (trim/case).
@@ -774,7 +766,7 @@ parse(schema_ptr: ptr, input: ptr) -> (ptr, ptr) {
 parse_json(schema_ptr: ptr, root: ptr) -> (ptr, ptr) {
     s = schema_ptr as *Schema
     errors = list_new()
-    if root == null || json.type(root) != JSON_OBJECT {
+    if root == null || json.type(root) != json.JSON_OBJECT {
         push_error(errors, "", "invalid_type", "the input is not a JSON object")
         return json.obj(), errors
     }
@@ -800,7 +792,7 @@ fn check_object(s: *Schema, obj: ptr, prefix: string, strict: int, errors: ptr) 
         f = list.at(s.fields, i) as *Field
         path = join_path(prefix, f.name)
         v = json.object_get_raw(obj, f.name)
-        if v != null && json.type(v) == JSON_NULL {
+        if v != null && json.type(v) == json.JSON_NULL {
             v = null
         }
         if v == null {
@@ -829,7 +821,7 @@ fn check_object(s: *Schema, obj: ptr, prefix: string, strict: int, errors: ptr) 
 fn check_value(f: *Field, v: ptr, path: string, strict: int, errors: ptr) -> ptr {
     t = json.type(v)
     if f.ty == OBJECT {
-        if t != JSON_OBJECT {
+        if t != json.JSON_OBJECT {
             push_error(errors, path, "invalid_type", "${path} is not an object")
             return null
         }
@@ -842,7 +834,7 @@ fn check_value(f: *Field, v: ptr, path: string, strict: int, errors: ptr) -> ptr
         return obj
     }
     if is_array(f.ty) {
-        if t != JSON_ARRAY {
+        if t != json.JSON_ARRAY {
             push_error(errors, path, "invalid_type", "${path} is not an array")
             return null
         }
@@ -921,7 +913,7 @@ fn count_fails(errors: ptr, f: *Field, path: string, n: int) -> int {
 // ("", "invalid_type").
 fn scalar_text(ty: int, v: ptr, strict: int) -> (string, string) {
     t = json.type(v)
-    if t == JSON_STRING {
+    if t == json.JSON_STRING {
         raw = json.get_string_raw(v)
         if ty == STR {
             return string_concat(raw, ""), ""
@@ -935,7 +927,7 @@ fn scalar_text(ty: int, v: ptr, strict: int) -> (string, string) {
         }
         return string_concat(typed, ""), ""
     }
-    if t == JSON_NUMBER {
+    if t == json.JSON_NUMBER {
         if ty == STR && strict == 1 {
             return "", "invalid_type"
         }
@@ -951,7 +943,7 @@ fn scalar_text(ty: int, v: ptr, strict: int) -> (string, string) {
         }
         return "", "invalid_type"
     }
-    if t == JSON_BOOL {
+    if t == json.JSON_BOOL {
         if ty == BOOL || (ty == STR && strict == 0) {
             if json.get_bool(v) == 1 {
                 return string_concat("true", ""), ""

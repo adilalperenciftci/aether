@@ -1486,7 +1486,9 @@ main() {
     println("JSON: ${output}")
 
     // Type checking
-    type = json.type(json.num(3.0))  // 2 = JSON_NUMBER
+    if json.type(json.num(3.0)) == json.JSON_NUMBER {
+        println("a number")
+    }
 
     // Cleanup
     json.free(data)
@@ -1539,7 +1541,7 @@ main() {
 The `parse_strict` shape is the std.fs structured-error pilot extended to a second module, same tuple, same KIND_* convention.
 
 **Type Checking:**
-- `json.type(value)` - Get type constant (0-5)
+- `json.type(value)` - The kind of a value: `json.JSON_NULL`, `json.JSON_BOOL`, `json.JSON_NUMBER`, `json.JSON_STRING`, `json.JSON_ARRAY` or `json.JSON_OBJECT`. Compare against these names, not their numbers.
 - `json.is_null(value)` - Check if null (returns 1/0)
 - `json.is_integer(value)` - Check if a number was written as an integer within int64 (`42`, not `42.0` or `4e1`) (returns 1/0)
 

@@ -9,9 +9,8 @@
 //   - Aether-native wrappers (below) use Go-style `(value, err)` tuple
 //     returns and are the idiomatic way to call JSON operations.
 //
-// JSON type constants (returned by json.type):
-//   JSON_NULL = 0, JSON_BOOL = 1, JSON_NUMBER = 2,
-//   JSON_STRING = 3, JSON_ARRAY = 4, JSON_OBJECT = 5
+// What json.type returns, one constant per kind of value: JSON_NULL,
+// JSON_BOOL, JSON_NUMBER, JSON_STRING, JSON_ARRAY and JSON_OBJECT.
 
 import std.bytes
 
@@ -27,8 +26,17 @@ exports(
     array_get,
     obj, arr, str, num, from_int, boolean, null_value, set, push, encode,
     parse_strict, last_error_kind, last_error_line, last_error_col,
-    KIND_OK, KIND_PARSE_ERROR, KIND_OUT_OF_MEMORY, KIND_INVALID_INPUT
+    KIND_OK, KIND_PARSE_ERROR, KIND_OUT_OF_MEMORY, KIND_INVALID_INPUT,
+    JSON_NULL, JSON_BOOL, JSON_NUMBER, JSON_STRING, JSON_ARRAY, JSON_OBJECT
 )
+
+// The kind of a value, as json.type returns it (aether_json.h's JsonType).
+const JSON_NULL = 0
+const JSON_BOOL = 1
+const JSON_NUMBER = 2
+const JSON_STRING = 3
+const JSON_ARRAY = 4
+const JSON_OBJECT = 5
 
 // ---- Structured-error pilot (issue #392) ----
 //
@@ -204,7 +212,7 @@ get_string(value: ptr) -> string! {
 // The returned value is borrowed from `obj` — don't json.free it, and
 // don't use it after `obj` is freed.
 object_get(obj: ptr, key: string) -> {
-    if json_type(obj) != 5 {
+    if json_type(obj) != JSON_OBJECT {
         return null, "not an object"
     }
     v = json_object_get_raw(obj, key)
@@ -252,7 +260,7 @@ object_size(obj: ptr) -> int {
 // would leak a key allocation per iteration. See `parse` for the
 // wider rationale.
 object_entry(obj: ptr, i: int) -> (string, ptr, string) {
-    if json_type(obj) != 5 {
+    if json_type(obj) != JSON_OBJECT {
         return string_concat("", ""), null, string_concat("not an object", "")
     }
     n = json_object_size_raw(obj)
@@ -275,7 +283,7 @@ object_entry(obj: ptr, i: int) -> (string, ptr, string) {
 // An empty error means the value is good, as everywhere else in std (#2439).
 // The returned value is borrowed from `arr`.
 array_get(arr: ptr, index: int) -> {
-    if json_type(arr) != 4 {
+    if json_type(arr) != JSON_ARRAY {
         return null, "not an array"
     }
     if index < 0 || index >= json_array_size(arr) {
