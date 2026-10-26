@@ -3094,10 +3094,10 @@ WARNINGS_CHECKER := $(BUILD_DIR)/warnings/check$(EXE_EXT)
 check-warnings: compiler ae stdlib
 	@mkdir -p $(BUILD_DIR)/warnings
 	@./$(BUILD_DIR)/ae$(EXE_EXT) build tests/warnings/check.ae -o $(WARNINGS_CHECKER)
-	@./$(WARNINGS_CHECKER) ./$(BUILD_DIR)/ae$(EXE_EXT) --expect 3 tests/warnings/fixture \
+	@./$(WARNINGS_CHECKER) ./$(BUILD_DIR)/ae$(EXE_EXT) --jobs $(NPROC) --expect 4 tests/warnings/fixture \
 	    > $(BUILD_DIR)/warnings/self_test.log 2>&1 || \
 	    { cat $(BUILD_DIR)/warnings/self_test.log; exit 1; }
-	@./$(WARNINGS_CHECKER) ./$(BUILD_DIR)/ae$(EXE_EXT) std contrib
+	@./$(WARNINGS_CHECKER) ./$(BUILD_DIR)/ae$(EXE_EXT) --jobs $(NPROC) std contrib
 
 RAW_CALLS_CHECKER := $(BUILD_DIR)/raw_calls/check$(EXE_EXT)
 .PHONY: check-raw-calls

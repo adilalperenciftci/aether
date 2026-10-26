@@ -6,20 +6,24 @@
 // (W1006, `fs.fs_is_symlink`). std and contrib carried 36 of them before
 // this gate (#3176), several an unchecked error in a test.
 //
-// This runs `<ae> check` on each file and reports every warning it prints
-// (`warning[...]:`, or `warning:` for the uncoded ones), with the file.
-// The examples have a gate of their own (tests/examples/check.ae), which
-// builds each one warning-free.
+// This runs `<ae> check` on each file, --jobs of them at a time, and
+// reports every warning it prints (`warning[...]:`, or `warning:` for the
+// uncoded ones), with the file, and each file that does not type-check at
+// all: its errors stop the check before the warnings are found. The
+// examples have a gate of their own (tests/examples/check.ae), which builds
+// each one warning-free.
 //
-//     check AE [--expect N] DIR...
+//     check AE [--jobs N] [--expect N] DIR...
 //
-// Exits 1 on a warning; with --expect, unless exactly N were found (the
-// self-test over tests/warnings/fixture). `make check-warnings` runs both.
+// Exits 1 on a warning or a file that does not check; with --expect, unless
+// exactly N such findings were made (the self-test over
+// tests/warnings/fixture). `make check-warnings` runs both.
 
 import std.fs
 import std.os
 import std.io
 import std.list
+import std.mem
 import std.string
 import std.collections
 
@@ -72,6 +76,7 @@ main() {
     }
     ae = os.args_get(1)
     expect = -1
+    jobs = 1
     dirs = collections.string_list_new()
     i = 2
     while i < argc {
@@ -79,6 +84,12 @@ main() {
         if a == "--expect" && i + 1 < argc {
             i = i + 1
             expect = string.get_int(os.args_get(i))
+        } else if a == "--jobs" && i + 1 < argc {
+            i = i + 1
+            jobs = string.get_int(os.args_get(i))
+            if jobs < 1 {
+                jobs = 1
+            }
         } else {
             collections.string_list_add(dirs, string.replace_all(a, "\\", "/"))
         }
@@ -114,26 +125,77 @@ main() {
         i = i + 1
     }
 
-    found = 0
+    // The checks, `jobs` at a time, each one's output (stdout and stderr,
+    // where the diagnostics go) in a file of its own, read in file order
+    // once all have finished: the report reads the same however the checks
+    // interleave. One at a time this took 22 s of every CI leg.
     nf = collections.string_list_size(files)
+    out_dir = "build/warnings/out"
+    _rt = fs.remove_tree(out_dir)
+    _md = fs.mkdir_p(out_dir)
+    codes = list.new()
+    i = 0
+    while i < nf {
+        _c = list.add(codes, mem.long_to_ptr(-1 as long))
+        i = i + 1
+    }
+    live_tok = list.new()
+    live_idx = list.new()
+    next = 0
+    while next < nf || list.size(live_tok) > 0 {
+        while next < nf && list.size(live_tok) < jobs {
+            argv = list.new()
+            _a1 = list.add(argv, "check")
+            _a2 = list.add(argv, collections.string_list_get(files, next))
+            tok, serr = os.spawn_proc_to(ae, argv, null, "${out_dir}/${next}.txt")
+            list.free(argv)
+            if serr != "" {
+                say("warnings: cannot run ${ae} check: ${serr}")
+                exit(2)
+            }
+            _t = list.add(live_tok, mem.long_to_ptr(tok as long))
+            _x = list.add(live_idx, mem.long_to_ptr(next as long))
+            next = next + 1
+        }
+        done, code, werr = os.wait_any(live_tok)
+        if werr != "" {
+            code = -1
+        }
+        k = 0
+        while k < list.size(live_tok) {
+            if mem.ptr_to_long(list.at(live_tok, k)) as int == done {
+                list.set(codes, mem.ptr_to_long(list.at(live_idx, k)) as int, mem.long_to_ptr(code as long))
+                list.remove(live_tok, k)
+                list.remove(live_idx, k)
+                break
+            }
+            k = k + 1
+        }
+    }
+
+    found = 0
+    failed = 0
     i = 0
     while i < nf {
         p = collections.string_list_get(files, i)
-        argv = list.new()
-        _a1 = list.add(argv, "check")
-        _a2 = list.add(argv, p)
-        // The diagnostics go to stderr.
-        _out, diag, _code, err = os.run_full(ae, argv, null, "")
-        list.free(argv)
-        if err != "" {
-            say("warnings: cannot run ${ae} check ${p}: ${err}")
-            exit(2)
+        out, _rerr = fs.read("${out_dir}/${i}.txt")
+        found = found + report(p, out)
+        // A file that does not type-check has its warnings unreported, and
+        // passed the gate: the exit status was not read.
+        code = mem.ptr_to_long(list.at(codes, i)) as int
+        if code != 0 {
+            say("${p}: ${ae} check failed (exit ${code}):")
+            say(out)
+            failed = failed + 1
         }
-        found = found + report(p, diag)
         i = i + 1
     }
+    list.free(live_tok)
+    list.free(live_idx)
+    list.free(codes)
 
-    say("warnings: ${nf} Aether files, ${found} warning(s)")
+    say("warnings: ${nf} Aether files, ${found} warning(s), ${failed} that do not type-check")
+    found = found + failed
     if expect >= 0 {
         if found != expect {
             say("warnings: the self-test expected ${expect}")
