@@ -58,13 +58,16 @@ main() {
             spec.assert_true(bound_port > 0, "listening callback fired with bound port")
             spec.assert_eq(ref_get(heard_host), 1, "listening callback reported host 127.0.0.1")
 
-            // Binding a second server to the taken port
-            second_srv = tinyweb.web_server_host("127.0.0.1", bound_port)
-            bind_err = tinyweb.tw_start(second_srv)
-            want_prefix = "cannot bind 127.0.0.1:${bound_port}: "
-            spec.assert_eq(string.starts_with(bind_err, want_prefix), 1, "bind error starts with '${want_prefix}' (got '${bind_err}')")
-            spec.assert_eq(string.contains(bind_err, "failed to bind"), 0, "bind error does not contain 'failed to bind'")
-            tinyweb.tw_stop(second_srv)
+            // A second server on the taken port. Only with a port to take: on
+            // port 0 the bind would succeed and tw_start would serve forever.
+            if bound_port > 0 {
+                second_srv = tinyweb.web_server_host("127.0.0.1", bound_port)
+                bind_err = tinyweb.tw_start(second_srv)
+                want_prefix = "cannot bind 127.0.0.1:${bound_port}: "
+                spec.assert_eq(string.starts_with(bind_err, want_prefix), 1, "bind error starts with '${want_prefix}' (got '${bind_err}')")
+                spec.assert_eq(string.contains(bind_err, "failed to bind"), 0, "bind error does not contain 'failed to bind'")
+                tinyweb.tw_stop(second_srv)
+            }
 
             spec.assert_eq(ref_get(heard_stop), 0, "stopped has not fired yet while server runs")
 
@@ -78,6 +81,45 @@ main() {
 
             spec.assert_eq(ref_get(heard_stop), 1, "stopped callback fired exactly once after stopping server")
 
+            tinyweb.tw_stop(server)
+        }
+
+        spec.it(fw, "starts again after tw_stop with a fresh server and monitor") callback {
+            heard_port = ref(0)
+            defer ref_free(heard_port)
+            heard_stop = ref(0)
+            defer ref_free(heard_stop)
+
+            server = tinyweb.web_server_host("127.0.0.1", 0)
+            first = tinyweb.http_server(server)
+            spec.assert_true(first != 0, "http_server makes the std.http server on first use")
+            spec.assert_true(tinyweb.http_server(server) == first, "http_server returns the same server until tw_stop")
+            tinyweb.tw_stop(server)
+
+            // The freed server is not handed out again: a fresh one takes the
+            // monitor, and the restarted server reports through it.
+            http.monitor(tinyweb.http_server(server)) {
+                listening() | host: string, port: int | { ref_set(heard_port, port) }
+                stopped() | host: string, port: int | { ref_set(heard_stop, ref_get(heard_stop) + 1) }
+            }
+            a = spawn(ServerActor())
+            a ! StartSrv { srv: server }
+
+            waited = 0
+            while ref_get(heard_port) == 0 && waited < 100 {
+                sleep(20)
+                waited = waited + 1
+            }
+            spec.assert_true(ref_get(heard_port) > 0, "the restarted server's monitor heard listening")
+
+            // Stop, and let the serving actor finish, before tw_stop frees it.
+            http.server_stop(tinyweb.http_server(server))
+            waited_stop = 0
+            while ref_get(heard_stop) == 0 && waited_stop < 100 {
+                sleep(20)
+                waited_stop = waited_stop + 1
+            }
+            spec.assert_eq(ref_get(heard_stop), 1, "the restarted server's monitor heard stopped once")
             tinyweb.tw_stop(server)
         }
     }

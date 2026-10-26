@@ -7,10 +7,11 @@ import std.list
 import std.map
 import std.tcp
 
+
 // Reusable handler function
 handle_greeting(req: ptr, res: ptr, ctx: ptr) {
     first = tinyweb.request_get_path_param(ctx, "1")
-    last = tinyweb.request_get_path_param(ctx, "2")
+    last  = tinyweb.request_get_path_param(ctx, "2")
     tinyweb.response_write(res, "Hello, ${first} ${last}!")
 }
 
@@ -18,14 +19,15 @@ main() {
     println("=== TinyWeb Composition Example ===\n")
 
     server = tinyweb.web_server_host("localhost", 8080) {
+
         // Module 1: Public API
         tinyweb.path("/api") {
             tinyweb.path("/v1") {
-                tinyweb.end_point(tinyweb.GET, "/health") | req: ptr, res: ptr, ctx: ptr | {
+                tinyweb.end_point(tinyweb.GET, "/health") |req: ptr, res: ptr, ctx: ptr| {
                     tinyweb.response_write(res, "OK")
                 }
 
-                tinyweb.end_point(tinyweb.GET, "/greeting/(\\w+)/(\\w+)") | req: ptr, res: ptr, ctx: ptr | {
+                tinyweb.end_point(tinyweb.GET, "/greeting/(\\w+)/(\\w+)") |req: ptr, res: ptr, ctx: ptr| {
                     handle_greeting(req, res, ctx)
                 }
             }
@@ -33,7 +35,7 @@ main() {
 
         // Module 2: Admin with auth tinyweb.filter
         tinyweb.path("/admin") {
-            tinyweb.filter(tinyweb.GET, "/.*") | req: ptr, res: ptr, ctx: ptr | {
+            tinyweb.filter(tinyweb.GET, "/.*") |req: ptr, res: ptr, ctx: ptr| {
                 token = tinyweb.request_get_header(req, "X-Admin-Token")
                 if (token == "secret42") {
                     return tinyweb.CONTINUE
@@ -42,11 +44,11 @@ main() {
                 return tinyweb.STOP
             }
 
-            tinyweb.end_point(tinyweb.GET, "/dashboard") | req: ptr, res: ptr, ctx: ptr | {
+            tinyweb.end_point(tinyweb.GET, "/dashboard") |req: ptr, res: ptr, ctx: ptr| {
                 tinyweb.response_write(res, "Welcome to admin dashboard")
             }
 
-            tinyweb.end_point(tinyweb.GET, "/users") | req: ptr, res: ptr, ctx: ptr | {
+            tinyweb.end_point(tinyweb.GET, "/users") |req: ptr, res: ptr, ctx: ptr| {
                 tinyweb.response_json(res, "[{\"name\":\"alice\"},{\"name\":\"bob\"}]")
             }
         }
@@ -55,7 +57,7 @@ main() {
         tinyweb.path("/shop") {
             tinyweb.path("/catalog") {
                 tinyweb.path("/products") {
-                    tinyweb.end_point(tinyweb.GET, "/(\\d+)") | req: ptr, res: ptr, ctx: ptr | {
+                    tinyweb.end_point(tinyweb.GET, "/(\\d+)") |req: ptr, res: ptr, ctx: ptr| {
                         id = tinyweb.request_get_path_param(ctx, "1")
                         tinyweb.response_json(res, "{\"id\":${id},\"name\":\"Widget\"}")
                     }
@@ -67,7 +69,7 @@ main() {
     // Second composition block — adds routes to existing server
     tinyweb.compose(server) {
         tinyweb.path("/extra") {
-            tinyweb.end_point(tinyweb.GET, "/ping") | req: ptr, res: ptr, ctx: ptr | {
+            tinyweb.end_point(tinyweb.GET, "/ping") |req: ptr, res: ptr, ctx: ptr| {
                 tinyweb.response_write(res, "pong")
             }
         }

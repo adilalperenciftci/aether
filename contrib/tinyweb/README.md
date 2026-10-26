@@ -71,6 +71,33 @@ route's pattern), `stats_get_status`, `stats_get_duration` and
 list of the filters that ran (`filter_stat_path`, `filter_stat_result`,
 "CONTINUE" or "STOP", and `filter_stat_duration`).
 
+### The monitor: listening and stopped
+
+`http_server(server)` is the `std.http` server behind a TinyWeb server, so a
+program can attach the `std.http` monitor
+([docs/http-server.md](../../docs/http-server.md), "The monitor") before it
+starts the server:
+
+```aether,fragment
+http.monitor(tinyweb.http_server(server)) {
+    listening() |host: string, port: int| { println("try curl http://localhost:${port}/") }
+    stopped() |host: string, port: int| { println("stopped") }
+}
+err = tinyweb.tw_start(server)
+```
+
+`listening` fires once the server accepts connections, with the bound port
+(the real one when the server asked for port 0). `tw_start` blocks until
+the server stops, so a "server is up" message belongs in `listening`, not
+after `tw_start`. With no monitor attached, `tw_start` prints the
+`std.http` console banner; `http.null_monitor(tinyweb.http_server(server))`
+silences it. `tw_stop` frees the `std.http` server, and the next
+`http_server` or `tw_start` makes a fresh one, so a program that starts the
+server again attaches its monitor again.
+
+A failed start returns the reason from `std.http`, e.g. `cannot bind
+127.0.0.1:8080: Address already in use`.
+
 ### Timeouts and keep-alive
 
 `with_timeout(server, ms)` is how long a connection may wait for its next

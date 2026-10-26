@@ -241,7 +241,8 @@ static_entry(base_path: string, directory: string) {
 //   "routes"     - list of route entries
 //   "filters"    - list of filter entries
 //   "paths"      - list of { prefix, routes, filters } for nested paths
-//   "raw_server" - ptr to the C http server
+//   "raw_server" - the std.http server: made by http_server()/tw_start,
+//                  freed (and set back to 0) by tw_stop
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -324,8 +325,6 @@ path(_ctx: ptr, base_path: string) {
 // web_server(port) { path("/api") { ... } }
 web_server(port: int) {
     srv = map_new()
-    raw = http.server_create(port)
-    map_put(srv, "raw_server", raw)
     map_put(srv, "port", port)
     map_put(srv, "host", "127.0.0.1")
     map_put(srv, "routes", list.new())
@@ -342,6 +341,9 @@ web_server(port: int) {
     map_put(srv, "tls_key", "")
     // Statistics callback
     map_put(srv, "on_stats", 0)
+    // The std.http server, made by http_server() or tw_start when first asked
+    // for, and freed by tw_stop.
+    map_put(srv, "raw_server", 0)
     return srv
 }
 
@@ -354,13 +356,24 @@ web_server_host(host: string, port: int) {
     return srv
 }
 
-// Returns the std.http server handle so monitor closures can be attached:
+// The std.http server behind a TinyWeb server, for what std.http offers on
+// a server: its monitor above all (#3131), which reports when the server is
+// listening and when it has stopped.
 //
 //     http.monitor(tinyweb.http_server(server)) {
-//         listening() |host: string, port: int| { … }
+//         listening() |host: string, port: int| { println("up on ${port}") }
 //     }
+//
+// Attach the monitor before tw_start. tw_stop frees the std.http server; the
+// next call here (or the next tw_start) makes a fresh one, with no monitor,
+// so a program that starts the server again attaches its monitor again.
 http_server(srv: ptr) -> ptr {
     raw, _ = map.get(srv, "raw_server")
+    if raw == 0 {
+        port_v, _ = map.get(srv, "port")
+        raw = http.server_create(mem.ptr_to_long(port_v) as int)
+        map_put(srv, "raw_server", raw)
+    }
     return raw
 }
 
@@ -660,8 +673,9 @@ tw_start(srv: ptr) -> string {
     port_v, _ = map.get(srv, "port")
     port = mem.ptr_to_long(port_v) as int
     host, _ = map.get_string(srv, "host")
-    raw, _ = map.get(srv, "raw_server")
-    // server_bind returns "" on success, an error message otherwise.
+    raw = http_server(srv)
+    // server_bind returns "" on success, the reason otherwise
+    // ("cannot bind 127.0.0.1:8080: Address already in use").
     bind_err = http.server_bind(raw, host, port)
     if bind_err != "" {
         return bind_err
@@ -765,6 +779,7 @@ tw_stop(srv: ptr) {
     if raw != 0 {
         http.server_stop(raw)
         http.server_free(raw)
+        map_put(srv, "raw_server", 0)
     }
 }
 
