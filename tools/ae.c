@@ -3666,24 +3666,111 @@ static int find_bin_path_by_name(const char* bin_name, char* out, size_t out_siz
  * `<root>/shim.c` ("No such file") and wrote `<root>/ex1`. */
 static char g_walkup_sub[1024] = "";
 
-/* `path` as typed before the walk-up, re-based onto the project root.
- * Returns `path` itself when no walk-up happened or the path is absolute;
- * otherwise a copy from a small ring of buffers (four live values at a
- * time, enough for one command's arguments). */
+/* #3181: the directory the command was typed in, absolute, once it has
+ * entered a project somewhere else (a walk-up, or `ae run|build <dir>`);
+ * "" while it is still there. `ae run` goes back to it before the program
+ * starts, and a path typed relative to it that cannot be spelt from the
+ * project root (the project was named, not walked up to) is re-based onto
+ * it. */
+static char g_entered_from[1024] = "";
+
+/* `path` as typed before entering the project, re-based onto the project
+ * root: through the subdirectory a walk-up left, or onto the directory the
+ * command was typed in. Returns `path` itself when the command did not move
+ * or the path is absolute; otherwise a copy from a small ring of buffers
+ * (four live values at a time, enough for one command's arguments). */
 static const char* walkup_rebase(const char* path) {
-    if (!path || !g_walkup_sub[0] || path_is_absolute_any(path)) return path;
+    if (!path || path_is_absolute_any(path)) return path;
+    const char* base = g_walkup_sub[0] ? g_walkup_sub : g_entered_from;
+    if (!base[0]) return path;
     static char ring[4][2048];
     static int slot = 0;
     char* out = ring[slot];
     slot = (slot + 1) % 4;
-    snprintf(out, sizeof(ring[0]), "%s/%s", g_walkup_sub, path);
+    snprintf(out, sizeof(ring[0]), "%s/%s", base, path);
     return out;
+}
+
+/* Remember where the command was typed, before a chdir into a project. */
+static void remember_entered_from(void) {
+    if (g_entered_from[0]) return;
+    if (!getcwd(g_entered_from, sizeof(g_entered_from))) {
+        g_entered_from[0] = '\0';
+        return;
+    }
+    for (char* q = g_entered_from; *q; q++) if (*q == '\\') *q = '/';
+}
+
+/* #3181: enter the project directory named on the command line (`ae run
+ * <dir>`, `ae build <dir>`), so its imports, manifest and extra sources
+ * resolve exactly as when the command is typed there: a module in its lib/
+ * or src/, its [dependencies], its [build] defines. Only the source was
+ * pointed into the directory before, and the compile, still in the caller's
+ * directory, searched the caller's lib/ and src/ and never the project's.
+ * Returns 0 when it entered, -1 (having said why) when it could not. */
+static int enter_named_project(const char* dir) {
+    remember_entered_from();
+    if (chdir(dir) != 0) {
+        fprintf(stderr, "Error: cannot enter the project directory '%s': %s\n", dir, strerror(errno));
+        return -1;
+    }
+    /* From here the manifest, if the project has one, is in the cwd. */
+    g_manifest_located = 0;
+    g_walkup_sub[0] = '\0';
+    return 0;
+}
+
+/* The --lib directories typed relative to where the command was typed,
+ * re-based like the other typed paths once the command has entered a
+ * project, onto that directory itself: an absolute path stays right
+ * wherever a later step stands. Called right after entering and before
+ * [dependencies] add theirs, which are the manifest's own and already right
+ * from the project root. */
+static void rebase_typed_lib_dirs(void) {
+    if (!g_entered_from[0]) return;
+    for (int i = 0; i < tc.lib_dir_count; i++) {
+        if (path_is_absolute_any(tc.lib_dirs[i])) continue;
+        char* moved = ae_path_printf("%s/%s", g_entered_from, tc.lib_dirs[i]);
+        if (!moved) {
+            fprintf(stderr, "Error: out of memory re-basing the --lib directory '%s'\n", tc.lib_dirs[i]);
+            exit(1);
+        }
+        char* norm = aether_lib_path_normalize(moved);
+        free(moved);
+        if (!norm) {
+            fprintf(stderr, "Error: out of memory re-basing the --lib directory '%s'\n", tc.lib_dirs[i]);
+            exit(1);
+        }
+        free(tc.lib_dirs[i]);
+        tc.lib_dirs[i] = norm;
+    }
+}
+
+/* Back to the directory the command was typed in (#3181): `ae run` compiles
+ * from the project root and runs the program where the user stands, so a
+ * program reading ./data.txt reads the caller's (#2148). `path` (the binary
+ * about to run, `size` bytes of room) is made absolute first when it is
+ * relative to the project root, as a relative AETHER_CACHE_DIR makes it. */
+static void leave_project_keeping(char* path, size_t size) {
+    if (!g_entered_from[0]) return;
+    if (path && path[0] && !path_is_absolute_any(path)) {
+        char root[1024];
+        if (getcwd(root, sizeof(root))) {
+            char* abs = ae_path_printf("%s/%s", root, path);
+            if (abs && strlen(abs) < size) snprintf(path, size, "%s", abs);
+            free(abs);
+        }
+    }
+    if (chdir(g_entered_from) != 0) {
+        fprintf(stderr, "warning: cannot return to '%s': %s\n", g_entered_from, strerror(errno));
+    }
 }
 
 static int find_and_chdir_to_aether_toml(const char** file_inout) {
     g_walkup_sub[0] = '\0';
     char dir[1024], sub[1024];
     if (!manifest_walk_up(dir, sizeof(dir), sub, sizeof(sub))) return 0;
+    remember_entered_from();
     if (chdir(dir) != 0) return 0;
     /* The cwd changed: whatever the no-chdir readers located is stale, and
      * from here the manifest is simply in the cwd. */
@@ -6977,34 +7064,58 @@ static int cmd_run(int argc, char** argv) {
         }
     }
 
+    /* #3181: compile from the project root, as `ae build` does: a directory
+     * named on the command line is the project (its src/main.ae is the
+     * program), and otherwise an ancestor's aether.toml makes its directory
+     * the root. Imports then resolve against the project's lib/ and src/,
+     * and its manifest gives the dependencies, defines and extra sources,
+     * whichever directory the command was typed in. Entering is a chdir;
+     * the paths typed relative to where the user stands move with it, and
+     * leave_project() goes back before the program starts, so the program
+     * runs where the command was typed (#2148). Before this the compile ran
+     * in the caller's directory: `ae run app/` and `ae run` from app/src
+     * could not import a module from app/lib. */
+    if (file && dir_exists(file)) {
+        const char* named = file;
+        char* probe = ae_path_printf("%s/src/main.ae", named);
+        int has_main = path_exists(probe);
+        free(probe);
+        if (!has_main) {
+            char* toml_path = ae_path_printf("%s/aether.toml", named);
+            if (path_exists(toml_path))
+                fprintf(stderr, "Error: No src/main.ae found in %s\n", named);
+            else
+                fprintf(stderr, "Error: '%s' is not an Aether project directory\n", named);
+            free(toml_path);
+            return 1;
+        }
+        if (enter_named_project(named) < 0) return 1;
+        file = "src/main.ae";
+    } else {
+        find_and_chdir_to_aether_toml(&file);
+    }
+    if (g_entered_from[0]) {
+        if (extra_files[0]) {
+            char rebased[8192] = "";
+            const char* cursor = extra_files;
+            char tok[2048];
+            while (extras_next(&cursor, tok, sizeof(tok)))
+                extras_append(rebased, sizeof(rebased), walkup_rebase(tok));
+            snprintf(extra_files, sizeof(extra_files), "%s", rebased);
+        }
+        rebase_typed_lib_dirs();
+    }
+
     /* #1901: [dependencies] join the module search path, after the caller's
-     * own --lib flags so an explicit path still wins. */
+     * own --lib flags so an explicit path still wins. Read from the project
+     * root, entered above. */
     if (ae_resolve_dependencies() < 0) return 1;
     load_defines_from_toml();
 
-    // Resolve directory argument (e.g. "." or "myproject/") to src/main.ae
-    if (file && dir_exists(file)) {
-        static char resolved_run_file[512];
-        snprintf(resolved_run_file, sizeof(resolved_run_file), "%s/src/main.ae", file);
-        if (path_exists(resolved_run_file)) {
-            file = resolved_run_file;
-        } else {
-            char toml_path[512];
-            snprintf(toml_path, sizeof(toml_path), "%s/aether.toml", file);
-            if (path_exists(toml_path))
-                fprintf(stderr, "Error: No src/main.ae found in %s\n", file);
-            else
-                fprintf(stderr, "Error: '%s' is not an Aether project directory\n", file);
-            return 1;
-        }
-    }
-
-    // Project mode: no file argument, the manifest's src/main.ae (the
-    // manifest may be an ancestor's; the program still starts in this cwd)
-    static char project_main[1200];
-    if (!file && path_exists(ae_manifest_path())) {
-        if (path_exists(manifest_relative("src/main.ae", project_main, sizeof(project_main))))
-            file = manifest_relative("src/main.ae", project_main, sizeof(project_main));
+    // Project mode: no file argument, the project's src/main.ae
+    if (!file && path_exists("aether.toml")) {
+        if (path_exists("src/main.ae"))
+            file = "src/main.ae";
         else {
             fprintf(stderr, "Error: aether.toml found but src/main.ae is missing.\n");
             fprintf(stderr, "Create src/main.ae or specify a file: ae run <file.ae>\n");
@@ -7055,6 +7166,7 @@ static int cmd_run(int argc, char** argv) {
             if (tc.verbose) fprintf(stderr, "[cache] hit: %016llx\n", cache_key);
             cache_touch(cached_exe);   /* least-recently-USED, for the cap */
             cache_touch_depfile(file); /* and its depfile, for the 30-day sweep */
+            leave_project_keeping(cached_exe, sizeof(cached_exe));
             char** run_argv = build_run_argv(cached_exe, argc, argv, prog_args_start);
             if (!run_argv) {
                 fprintf(stderr, "Error: out of memory\n");
@@ -7203,6 +7315,7 @@ static int cmd_run(int argc, char** argv) {
     }
 
     // Step 3: run it, forwarding any post-`--` args (see build_run_argv).
+    leave_project_keeping(exe_file, sizeof(exe_file));
     char** run_argv = build_run_argv(exe_file, argc, argv, prog_args_start);
     if (!run_argv) {
         fprintf(stderr, "Error: out of memory\n");
@@ -7237,6 +7350,11 @@ static int cmd_check(int argc, char** argv) {
             file = argv[i];
         }
     }
+    /* #3181: checked from the project root, as `ae build` builds, so an
+     * import of the project's lib/ resolves from any of its directories.
+     * Nothing runs, so the check need not go back. */
+    find_and_chdir_to_aether_toml(&file);
+    rebase_typed_lib_dirs();
     load_defines_from_toml();
 
     // Project mode
@@ -9485,6 +9603,21 @@ static int cmd_build(int argc, char** argv) {
                     }
                 }
                 int rc_exe = cmd_build(argc, dup_exe);
+                /* The exe pass may have entered the project (a walk-up, or a
+                 * named directory, #3181); the library pass reads the same
+                 * arguments, typed where the user stands, so it starts there
+                 * too and enters the project itself. */
+                if (g_entered_from[0]) {
+                    if (chdir(g_entered_from) != 0) {
+                        fprintf(stderr, "Error: cannot return to '%s': %s\n",
+                                g_entered_from, strerror(errno));
+                        free(dup_exe); free(dup_lib);
+                        return 1;
+                    }
+                    g_entered_from[0] = '\0';
+                    g_walkup_sub[0] = '\0';
+                    g_manifest_located = 0;
+                }
                 int rc_lib = (rc_exe == 0) ? cmd_build(argc, dup_lib) : 0;
                 free(dup_exe); free(dup_lib);
                 if (rc_exe != 0) return rc_exe;
@@ -9548,12 +9681,36 @@ static int cmd_build(int argc, char** argv) {
     // chdir there so [[bin]] / extra_sources / cflags resolution
     // works the same as if the user had run `ae build` from the
     // project root. Closes #280 (2).
-    find_and_chdir_to_aether_toml(&file);
-    if (g_walkup_sub[0]) {
+    //
+    // #3181: a directory named on the command line is the project, and the
+    // build enters it the same way, so `ae build app/` resolves app/'s
+    // lib/ and src/ and reads app/aether.toml as `ae build` typed in app/
+    // does. It compiled from the caller's directory before, with only the
+    // source pointed into app/.
+    if (file && dir_exists(file)) {
+        const char* named = file;
+        char* probe = ae_path_printf("%s/src/main.ae", named);
+        int has_main = path_exists(probe);
+        free(probe);
+        if (!has_main) {
+            char* toml_path = ae_path_printf("%s/aether.toml", named);
+            if (path_exists(toml_path))
+                fprintf(stderr, "Error: No src/main.ae found in %s\n", named);
+            else
+                fprintf(stderr, "Error: '%s' is not an Aether project directory\n", named);
+            free(toml_path);
+            return 1;
+        }
+        if (enter_named_project(named) < 0) return 1;
+        file = "src/main.ae";
+    } else {
+        find_and_chdir_to_aether_toml(&file);
+    }
+    if (g_entered_from[0]) {
         /* The other paths the user typed relative to where they stood: the
-         * --extra files (each entry, quoted ones included) and the -o
-         * output. `cc -o` and `go build -o` name a path relative to the
-         * invocation directory, and so does this. */
+         * --extra files (each entry, quoted ones included), the -o output
+         * and the --lib directories. `cc -o` and `go build -o` name a path
+         * relative to the invocation directory, and so does this. */
         if (extra_files[0]) {
             char rebased[8192] = "";
             const char* cursor = extra_files;
@@ -9563,6 +9720,7 @@ static int cmd_build(int argc, char** argv) {
             snprintf(extra_files, sizeof(extra_files), "%s", rebased);
         }
         if (output_name) output_name = walkup_rebase(output_name);
+        rebase_typed_lib_dirs();
     }
 
     /* #1901: resolve [dependencies] AFTER the walk-up, not with the other

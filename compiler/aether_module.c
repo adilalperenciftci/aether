@@ -17,6 +17,7 @@
 #ifdef _WIN32
     #include <io.h>
     #include <windows.h>
+    #include <direct.h>    // _getcwd, for the unresolved-import message (#3181)
     #define access _access
     #define F_OK 0
 #else
@@ -303,6 +304,12 @@ void module_registry_init(void) {
         global_module_registry->module_count = 0;
         global_module_registry->module_capacity = 0;
         global_module_registry->source_dir = NULL;
+        /* #3181: the entry program's imports are resolved first, so this
+         * starts at 0. It was left as malloc gave it: where that was not
+         * zero, the entry program's imports looked beside it before the
+         * project's lib/ (the order #3103 keeps for a module's own), and a
+         * missing one was reported as "beside this module". */
+        global_module_registry->source_is_module = 0;
         global_module_registry->lib_dir_count = 0;
         const char* env_lib = getenv("AETHER_LIB_DIR");
         if (env_lib && env_lib[0]) {
@@ -1564,17 +1571,73 @@ static int import_is_compiler_builtin(const char* name) {
     return 0;
 }
 
+/* Append `text` to a message, cut at its end rather than overrunning it. */
+static void msg_append(char* msg, size_t size, const char* text) {
+    size_t used = strlen(msg);
+    if (!text || used + 1 >= size) return;
+    snprintf(msg + used, size - used, "%s", text);
+}
+
+/* Append a searched directory to the message, as an absolute path: `dir`
+ * itself when it is one, else `dir` under `here`, the directory the compile
+ * ran in. Then `note` (" (beside this module)", or ""), and a comma. */
+static void msg_append_dir(char* msg, size_t size, const char* here, const char* dir,
+                           const char* note) {
+    /* Without the trailing slash source_dir keeps. */
+    char bare[1024];
+    snprintf(bare, sizeof(bare), "%s", dir);
+    size_t n = strlen(bare);
+    while (n > 1 && (bare[n - 1] == '/' || bare[n - 1] == '\\')) bare[--n] = '\0';
+    int absolute = bare[0] == '/' || bare[0] == '\\' || (bare[0] && bare[1] == ':');
+    if (!absolute) {
+        msg_append(msg, size, here);
+        if (strcmp(bare, ".") != 0) {
+            msg_append(msg, size, "/");
+            msg_append(msg, size, bare);
+        }
+    } else {
+        msg_append(msg, size, bare);
+    }
+    msg_append(msg, size, note);
+    msg_append(msg, size, ", ");
+}
+
 static void report_unresolved_import(ASTNode* import_node) {
     const char* name = import_node && import_node->value ? import_node->value : "?";
     if (import_is_compiler_builtin(name)) return;
-    char msg[512];
-    const char* roots =
-        strncmp(name, "std.", 4) == 0     ? "the standard library" :
-        strncmp(name, "contrib.", 8) == 0 ? "contrib" :
-                                            "src/, the project root, and installed packages";
-    snprintf(msg, sizeof(msg),
-             "unresolved import '%s': no module of that name was found in %s",
-             name, roots);
+    char msg[2048];
+    if (strncmp(name, "std.", 4) == 0 || strncmp(name, "contrib.", 8) == 0) {
+        snprintf(msg, sizeof(msg),
+                 "unresolved import '%s': no module of that name was found in %s", name,
+                 name[0] == 's' ? "the standard library" : "contrib");
+    } else {
+        /* #3181: the directories module_resolve_local_path tried, in its
+         * order, each spelt in full. "src/, the project root" said nothing
+         * of where that root was, so a search made from the wrong directory
+         * (`ae run app/` from outside app/ compiled from the caller's) read
+         * as a module that does not exist. */
+        char here[1024];
+#ifdef _WIN32
+        if (!_getcwd(here, (int)sizeof(here))) snprintf(here, sizeof(here), ".");
+#else
+        if (!getcwd(here, sizeof(here))) snprintf(here, sizeof(here), ".");
+#endif
+        for (char* q = here; *q; q++) if (*q == '\\') *q = '/';
+        snprintf(msg, sizeof(msg),
+                 "unresolved import '%s': no module of that name was found in ", name);
+        const char* src_dir = global_module_registry ? global_module_registry->source_dir : NULL;
+        int has_src_dir = src_dir && src_dir[0];
+        int beside_first = global_module_registry && global_module_registry->source_is_module;
+        if (beside_first && has_src_dir)
+            msg_append_dir(msg, sizeof(msg), here, src_dir, " (beside this module)");
+        for (int i = 0; global_module_registry && i < global_module_registry->lib_dir_count; i++)
+            msg_append_dir(msg, sizeof(msg), here, global_module_registry->lib_dirs[i], "");
+        msg_append_dir(msg, sizeof(msg), here, "src", "");
+        msg_append_dir(msg, sizeof(msg), here, ".", " (where the compile ran)");
+        if (!beside_first && has_src_dir)
+            msg_append_dir(msg, sizeof(msg), here, src_dir, " (beside the importing file)");
+        msg_append(msg, sizeof(msg), "and the installed packages");
+    }
     aether_error_simple(msg, import_node ? import_node->line : 0,
                         import_node ? import_node->column : 0);
 }
