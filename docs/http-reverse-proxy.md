@@ -40,7 +40,12 @@ main() {
 builds a single-upstream pool with round-robin (no other upstream
 to balance against), default opts, and the given timeout. Mounts
 the middleware on `path_prefix`. `"/"` forwards everything;
-`"/api"` forwards just the `/api` subtree.
+`"/api"` forwards just the `/api` subtree. The server owns that
+pool and those opts, and `http.server_free` frees them (#3171).
+`proxy.mount`, `mount_methods` and `mount_match` take opts the
+caller made: the server uses them while it runs, and the caller
+frees them (`opts_free`, then `upstream_pool_free`) after
+`http.server_free`.
 
 ## Pool form, load balancing + health + cache + breaker
 

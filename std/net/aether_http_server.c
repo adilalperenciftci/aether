@@ -182,6 +182,9 @@ void http_server_post(HttpServer* s, const char* p, HttpHandler h, void* u) { (v
 void http_server_put(HttpServer* s, const char* p, HttpHandler h, void* u) { (void)s; (void)p; (void)h; (void)u; }
 void http_server_delete(HttpServer* s, const char* p, HttpHandler h, void* u) { (void)s; (void)p; (void)h; (void)u; }
 void http_server_use_middleware(HttpServer* s, HttpMiddleware m, void* u) { (void)s; (void)m; (void)u; }
+void http_server_use_middleware_owned(HttpServer* s, HttpMiddleware m, void* u, void (*r)(void*)) {
+    (void)s; (void)m; (void)u; (void)r;
+}
 void http_server_use_response_transformer(HttpServer* s, HttpResponseTransformer x, void* u) {
     (void)s; (void)x; (void)u;
 }
@@ -2734,11 +2737,21 @@ void http_server_delete(HttpServer* server, const char* path, HttpHandler handle
 }
 
 void http_server_use_middleware(HttpServer* server, HttpMiddleware middleware, void* user_data) {
+    http_server_use_middleware_owned(server, middleware, user_data, NULL);
+}
+
+void http_server_use_middleware_owned(HttpServer* server, HttpMiddleware middleware,
+                                      void* user_data, void (*release)(void*)) {
     HttpMiddlewareNode* node = (HttpMiddlewareNode*)malloc(sizeof(HttpMiddlewareNode));
-    if (!node) return;
+    if (!node) {
+        /* Not installed: what it would have owned goes now. */
+        if (release && user_data) release(user_data);
+        return;
+    }
     node->middleware = middleware;
     node->user_data = user_data;
     node->next = NULL;
+    node->release = release;
     /* Append to the end of the chain so registration order matches
      * execution order — what every HTTP framework does, what the
      * std.http.middleware factories assume, and what the
@@ -6254,10 +6267,11 @@ void http_server_free(HttpServer* server) {
         route = next;
     }
     
-    // Free middleware
+    // Free middleware, and the user data each owns (#3171)
     HttpMiddlewareNode* middleware = server->middleware_chain;
     while (middleware) {
         HttpMiddlewareNode* next = middleware->next;
+        if (middleware->release) middleware->release(middleware->user_data);
         free(middleware);
         middleware = next;
     }

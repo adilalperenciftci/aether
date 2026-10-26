@@ -1132,11 +1132,13 @@ const char* aether_proxy_use_reverse_proxy(HttpServer* server,
                                                   opts, NULL);
 }
 
-const char* aether_proxy_use_reverse_proxy_methods(HttpServer* server,
-                                                   const char* path_prefix,
-                                                   AetherProxyPool* pool,
-                                                   AetherProxyOpts* opts,
-                                                   const char* methods_csv) {
+/* The mount the public functions share. `release` is NULL for opts the
+ * caller made and frees (after the server); mount_simple passes the opts'
+ * free, so the server gives back the opts it made, and with them the pool's
+ * last reference (#3171). */
+static const char* proxy_mount_prefix(HttpServer* server, const char* path_prefix,
+                                      AetherProxyPool* pool, AetherProxyOpts* opts,
+                                      const char* methods_csv, void (*release)(void*)) {
     if (!server) return "server is null";
     if (!pool)   return "pool is null";
     if (!opts)   return "opts is null";
@@ -1167,8 +1169,16 @@ const char* aether_proxy_use_reverse_proxy_methods(HttpServer* server,
         return "out of memory";
     }
 
-    http_server_use_middleware(server, aether_middleware_reverse_proxy, opts);
+    http_server_use_middleware_owned(server, aether_middleware_reverse_proxy, opts, release);
     return "";
+}
+
+const char* aether_proxy_use_reverse_proxy_methods(HttpServer* server,
+                                                   const char* path_prefix,
+                                                   AetherProxyPool* pool,
+                                                   AetherProxyOpts* opts,
+                                                   const char* methods_csv) {
+    return proxy_mount_prefix(server, path_prefix, pool, opts, methods_csv, NULL);
 }
 
 const char* aether_proxy_use_reverse_proxy_match(HttpServer* server,
@@ -1235,9 +1245,11 @@ const char* aether_proxy_use_simple_proxy(HttpServer* server,
         return "opts allocation failed";
     }
 
-    err = aether_proxy_use_reverse_proxy(server, path_prefix, pool, opts);
-    /* The opts owns the pool refcount now via aether_proxy_use_reverse_proxy.
-     * We drop our local one. */
+    /* The server owns these opts: it frees them with itself, and they hold
+     * the pool's last reference once ours goes below (#3171). */
+    err = proxy_mount_prefix(server, path_prefix, pool, opts, NULL,
+                             (void (*)(void*))aether_proxy_opts_free);
+    if (err && *err) aether_proxy_opts_free(opts);   /* not mounted: ours to free */
     aether_proxy_pool_free(pool);
     return err;
 }

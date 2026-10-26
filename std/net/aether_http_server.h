@@ -145,6 +145,10 @@ typedef struct HttpMiddlewareNode {
     HttpMiddleware middleware;
     void* user_data;
     struct HttpMiddlewareNode* next;
+    /* Run on user_data by http_server_free when non-NULL: a middleware
+     * registered with http_server_use_middleware_owned owns its user data
+     * and gives it back with the server (#3171). */
+    void (*release)(void*);
 } HttpMiddlewareNode;
 
 // Forward declare these so the HttpServer struct can hold them as
@@ -460,6 +464,11 @@ void http_server_delete(HttpServer* server, const char* path, HttpHandler handle
 
 // Middleware
 void http_server_use_middleware(HttpServer* server, HttpMiddleware middleware, void* user_data);
+/* As http_server_use_middleware, for user data the middleware owns:
+ * http_server_free runs `release` on it (#3171). A middleware registered
+ * the plain way leaves its user data to whoever made it. */
+void http_server_use_middleware_owned(HttpServer* server, HttpMiddleware middleware,
+                                      void* user_data, void (*release)(void*));
 
 // Response-transformer chain (#260 Tier 1). Registered transformers
 // run AFTER the route handler emits a response and BEFORE the
