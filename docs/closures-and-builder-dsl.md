@@ -57,7 +57,11 @@ function (whose last parameter is a `quote.Tree`) reads it as a tree instead
 **Same-line rule** (line 100+): a trailing block is attached to a call only when `{`
 appears on the same line as the call's closing `)`. A `{` on the next line is an
 independent block. This is what stops `result = build()\n{ ... }` from greedily
-consuming the bare block as `build`'s closure.
+consuming the bare block as `build`'s closure. The `()` is never optional:
+`serve { port(1) }` is the name `serve` and then a bare block, and a
+function's name alone as a statement calls nothing, so it is an error at
+the name, bare or qualified (`my_lib.serve`), that says to write
+`serve() { ... }` (#3188).
 
 **Separate axis, fluent method chaining (UFCS):** the two axes above are the
 *block* DSL (a trailing block fills structure). The *value-chain* primitive is

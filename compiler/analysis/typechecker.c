@@ -13342,6 +13342,40 @@ static int check_return_statement(ASTNode* ret, SymbolTable* table) {
     return ok;
 }
 
+/* #3188: a function's name alone as a statement calls nothing. `serve {
+ * port(1) }` read that way, the name and then a bare block, compiled
+ * without a word, and the builder never ran. The name, bare or qualified
+ * (`my_lib.serve`), is an error at it. */
+static int report_uncalled_function(ASTNode* e, SymbolTable* table) {
+    if (!e) return 0;
+    char shown[256];
+    Symbol* sym = NULL;
+    if (e->type == AST_IDENTIFIER && e->value) {
+        sym = lookup_symbol(table, e->value);
+        snprintf(shown, sizeof(shown), "%s", e->value);
+    } else if (e->type == AST_MEMBER_ACCESS && e->value && e->child_count > 0 &&
+               e->children[0] && e->children[0]->type == AST_IDENTIFIER &&
+               e->children[0]->value && !value_hides_namespace(table, e->children[0]->value) &&
+               is_visible_namespace(e->children[0]->value, table)) {
+        /* `ns.name` reaches the C name the merge gave it, as a call does. */
+        char cname[512];
+        qualified_c_name(e->children[0]->value, e->value, cname, sizeof(cname));
+        if (cname[0]) sym = lookup_symbol(table, cname);
+        snprintf(shown, sizeof(shown), "%s.%s", e->children[0]->value, e->value);
+    }
+    if (!sym || !sym->is_function) return 0;
+    char msg[1024], hint[600];
+    snprintf(msg, sizeof(msg),
+             "'%s' is a function, and its name alone calls nothing: call it as %s(), and a "
+             "trailing block goes after the parentheses, %s() { ... }",
+             shown, shown, shown);
+    snprintf(hint, sizeof(hint), "add the parentheses: %s()", shown);
+    /* Reported where the name starts: a qualified one's node is its dot. */
+    ASTNode* at = e->type == AST_MEMBER_ACCESS ? e->children[0] : e;
+    type_error_hint(msg, hint, at->line, at->column);
+    return 1;
+}
+
 int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
     if (!stmt) return 0;
 
@@ -14749,6 +14783,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
         
         case AST_EXPRESSION_STATEMENT: {
             if (stmt->child_count > 0) {
+                if (report_uncalled_function(stmt->children[0], table)) return 0;
                 typecheck_expression(stmt->children[0], table);
                 /* Phase 2: a `T!` result dropped as a bare statement is
                  * an error — it must be consumed. Only fires on a raw
