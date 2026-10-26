@@ -2927,7 +2927,11 @@ with spaces or an argument holding `$` or `;` arrives exactly as written.
   still sees the program itself as its `argv[0]`.
 - `env` is a list of `"KEY=VALUE"` strings, or `null` to inherit this
   process's environment.
-- A program named without a path separator is looked up on `PATH`. On
+- A program named without a path separator is looked up on this
+  process's `PATH`, before the child starts, whatever `env` it is given:
+  an `env` without `PATH` still finds it, and the child still sees exactly
+  that `env` (#3201). On POSIX the first entry where it is an executable
+  file is taken, and a name that is not found is `"program not found"`. On
   Windows the program's own directory and the system directories come
   first, as they always have there, and a name without an extension is
   tried with the extensions in `PATHEXT` that Windows can start

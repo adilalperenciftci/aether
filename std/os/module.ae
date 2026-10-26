@@ -50,7 +50,8 @@ extern os_exec_raw(cmd: string) -> string @heap
 // be started: a missing program is -1 on every platform, so 127 is a
 // program that ran and exited 127 (#3170).
 //
-//   prog  — program to execute (resolved via PATH if it has no '/')
+//   prog  — program to execute; with no '/' it is looked up on this
+//           process's PATH, whatever env is given (#3201)
 //   argv  — list of strings to pass as arguments AFTER argv[0]=prog,
 //           or null/empty list for no arguments
 //   env   — list of "KEY=VALUE" strings to pass as the child's

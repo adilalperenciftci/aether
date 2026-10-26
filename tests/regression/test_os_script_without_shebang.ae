@@ -1,0 +1,56 @@
+// A script with no #! line runs under /bin/sh. execve refuses such a file
+// with ENOEXEC; execvp, which std.os used until #3201, then runs it with
+// /bin/sh, and programs rely on that. std.os does the same: when the
+// child's execve says ENOEXEC, it execs /bin/sh with the script and its
+// arguments, and "not an executable" means /bin/sh could not run it either.
+//
+// Through os.run_capture and os.run: the script prints its first argument
+// and exits 5.
+//
+// POSIX only: Windows starts a program by its extension, and a file with no
+// #! line is a POSIX notion.
+
+import std.os
+import std.fs
+import std.list
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("  FAIL: ${msg}")
+    exit(1)
+}
+
+main() {
+    println("=== a script with no #! line ===")
+    if os.platform() == "windows" {
+        println("SKIP: a file with no #! line is a POSIX notion")
+        return
+    }
+    path = "${os.temp_dir()}/aether_no_shebang_${os.getpid()}"
+    _w = fs.write(path, "echo ran-$1\nexit 5\n")
+    ok, _kind, cerr = fs.chmod(path, 493)
+    if ok != 1 {
+        fail("chmod ${path}: ${cerr}")
+    }
+    av = list.new()
+    list.add(av, "x")
+
+    out, status, err = os.run_capture(path, av, null)
+    if err != "" || status != 5 || out != "ran-x\n" {
+        _d = fs.delete(path)
+        fail("run_capture: out='${out}' status=${status} err='${err}', expected 'ran-x' 5 ''")
+    }
+    println("  PASS: run_capture runs it under /bin/sh (ran-x, exit 5)")
+
+    code = os.run(path, av, null)
+    if code != 5 {
+        _d = fs.delete(path)
+        fail("os.run: ${code}, expected 5")
+    }
+    println("  PASS: os.run runs it under /bin/sh (exit 5)")
+
+    list.free(av)
+    _d = fs.delete(path)
+    println("=== All cases passed ===")
+}
