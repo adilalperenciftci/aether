@@ -1,0 +1,71 @@
+// A message's string field built from a fresh string leaves nothing behind
+// (#3206).
+//
+// A string field is the message's own copy (#466), so the fresh string it
+// is copied from is freed at the send. The send kept a list of its own of
+// what counts as fresh, which lacked an ask's string reply and a
+// fallible's `or`: `sink ! Note { text: srv ? Name {} }` and
+// `sink ! Note { text: word(1) or "dflt" }` leaked that string at every
+// send. The field now takes the one list (is_fresh_heap_string_temp).
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+message Name { n: int }
+message Note { text: string }
+message Seen {}
+message Count { n: int }
+
+actor Server {
+    receive {
+        Name(n: k) -> { reply "name-${k}" }
+    }
+}
+
+actor Sink {
+    state chars = 0
+    receive {
+        Note(text: t) -> { chars = chars + string.length(t) }
+        Seen() -> { reply Count { n: chars } }
+    }
+}
+
+word(k: int) -> string! {
+    if k < 0 { return "", "negative" }
+    return string.concat("w", "${k}")
+}
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    srv = spawn(Server())
+    sink = spawn(Sink())
+
+    sink ! Note { text: srv ? Name { n: 5 } }
+    sink ! Note { text: word(7) or "dflt" }
+    sink ! Note { text: word(-1) or "dflt" }
+    int seen = sink ? Seen {}
+    check(seen == 6 + 2 + 4, "the three notes arrived whole (${seen} chars)")
+
+    if mem.heap_in_use_exact() {
+        asked = mem.steady_growth(|| {
+                sink ! Note { text: srv ? Name { n: 5 } }
+                int _a = sink ? Seen {}
+            }, 4)
+        check(asked == 0, "an ask's reply as a field grew the heap by ${asked} bytes")
+        ored = mem.steady_growth(|| {
+                sink ! Note { text: word(7) or "dflt" }
+                sink ! Note { text: word(-1) or "dflt" }
+                int _b = sink ? Seen {}
+            }, 4)
+        check(ored == 0, "an `or` as a field grew the heap by ${ored} bytes")
+    }
+    println("PASS")
+}

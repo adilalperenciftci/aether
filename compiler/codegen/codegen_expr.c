@@ -5400,11 +5400,12 @@ void emit_message_array_hoists(CodeGenerator* gen, ASTNode* message, MessageDef*
  * was filled from: when it is an owned temporary (a call or interpolation
  * result held by nothing else), the temporary is freed once it is copied.
  * Nothing else frees it, so every such send leaked one string. */
+/* Whether a string field's initializer is a fresh heap string the copy
+ * takes the place of: the one list of such temporaries,
+ * is_fresh_heap_string_temp. A list of its own here lacked an ask's string
+ * reply and a fallible's `or`, and each such field leaked its temporary. */
 static int message_string_init_owned(CodeGenerator* gen, ASTNode* init) {
-    return init &&
-        (init->type == AST_FUNCTION_CALL || init->type == AST_STRING_INTERP ||
-         is_owned_string_unwrap(gen, init)) &&
-        is_heap_string_expr(gen, init);
+    return is_fresh_heap_string_temp(gen, init);
 }
 
 void emit_message_string_copy(CodeGenerator* gen, const char* lv, ASTNode* init) {
