@@ -597,6 +597,17 @@ wall time across the parallel jobs, so they measure work rather than the
 sweep's elapsed time, and a test or a toolchain step that got slower shows
 in the log of the run that made it slower (#2673).
 
+The sweep passes only on a complete tally. It writes the tally to
+`build/test-ae.verdict` with the number of tests it listed, and a last step
+of its own (`tests/scripts/sweep_verdict.sh`) passes it only with no failure
+and a report from every listed test. A listed test that left no PASS, FAIL
+or SKIP marker is named under `=== TESTS THAT NEVER REPORTED ===` and in
+`build/test-ae.unreported`, and fails the sweep. On a Windows machine that
+stopped starting processes mid-sweep, most of the shell tests never ran,
+the sweep's `xargs` still returned 0, and the sweep counted only what had
+reported; an earlier sweep stopped before its tally and `make` still
+exited 0 (#3111).
+
 **Wine and the Windows lanes.** `.github/workflows/windows.yml` has two
 shapes of Windows coverage from a Linux runner. `windows-cross` cross-builds
 only. `windows-wine` ("Windows / runtime under Wine (x86_64)") goes one step

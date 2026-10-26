@@ -1418,7 +1418,7 @@ test-ae: compiler ae stdlib
 	@# A bad AE_SWEEP_SHARD (#2757) must fail here: inside the pipelines below
 	@# it would leave the sweep with nothing to run, and nothing reads as a pass.
 	@sh tests/scripts/sweep_shard.sh < /dev/null
-	@rm -f $(BUILD_DIR)/test-ae.verdict
+	@rm -f $(BUILD_DIR)/test-ae.verdict $(BUILD_DIR)/test-ae.unreported
 	@tmpdir=$$(mktemp -d); \
 	root=$$(pwd); \
 	script="$$root/tests/scripts/run_ae_test.sh"; \
@@ -1426,8 +1426,9 @@ test-ae: compiler ae stdlib
 	if [ -n "$(AE_SWEEP_EXTRA_PRUNE)" ]; then \
 	  echo "  Extra prune list: $(AE_SWEEP_EXTRA_PRUNE) ($$(sed '/^#/d;/^$$/d' "$(AE_SWEEP_EXTRA_PRUNE)" | wc -l | tr -d ' ') patterns)"; \
 	fi; \
-	sh tests/scripts/ae_sweep_list.sh "$(AE_SWEEP_EXTRA_PRUNE)" | sh tests/scripts/sweep_shard.sh | \
-	xargs -P $(NPROC) -I{} sh "$$script" "{}" "$$tmpdir" "$$root"; \
+	sh tests/scripts/ae_sweep_list.sh "$(AE_SWEEP_EXTRA_PRUNE)" | sh tests/scripts/sweep_shard.sh \
+	    > "$$tmpdir/units_ae.txt"; \
+	xargs -P $(NPROC) -I{} sh "$$script" "{}" "$$tmpdir" "$$root" < "$$tmpdir/units_ae.txt"; \
 	sh_script="$$root/tests/scripts/run_ae_sh_dir.sh"; \
 	sh_nproc=$${SH_NPROC:-$(NPROC)}; \
 	if [ -n "$(AE_SWEEP_EXTRA_PRUNE)" ]; then \
@@ -1445,12 +1446,15 @@ test-ae: compiler ae stdlib
 	  done; \
 	  for d in $$(cat "$$tmpdir/shdirs.txt"); do \
 	    [ -f "$$d/DRIVERS_INDEPENDENT" ] || echo "$$d"; \
-	  done; } | sh tests/scripts/sweep_shard.sh \
-	    | xargs -P $$sh_nproc -I{} sh "$$sh_script" "{}" "$$tmpdir" "$$root"; \
+	  done; } | sh tests/scripts/sweep_shard.sh > "$$tmpdir/units_sh.txt"; \
+	xargs -P $$sh_nproc -I{} sh "$$sh_script" "{}" "$$tmpdir" "$$root" < "$$tmpdir/units_sh.txt"; \
 	passed=$$(ls "$$tmpdir"/PASS_* 2>/dev/null | wc -l | tr -d ' '); \
 	failed=$$(ls "$$tmpdir"/FAIL_* 2>/dev/null | wc -l | tr -d ' '); \
 	skipped=$$(ls "$$tmpdir"/SKIP_* 2>/dev/null | wc -l | tr -d ' '); \
 	total=$$((passed + failed + skipped)); \
+	unrep="$$root/$(BUILD_DIR)/test-ae.unreported"; \
+	expected=$$(sh "$$root/tests/scripts/sweep_unreported.sh" "$$tmpdir" "$$unrep"); \
+	unreported=$$(wc -l < "$$unrep" | tr -d ' '); \
 	echo ""; \
 	if [ "$$failed" -gt 0 ]; then \
 		echo "=== FAILURE DETAILS ==="; \
@@ -1482,14 +1486,21 @@ test-ae: compiler ae stdlib
 			echo ""; \
 		done; \
 	fi; \
+	if [ "$$unreported" -gt 0 ]; then \
+		echo "=== TESTS THAT NEVER REPORTED ($$unreported of the $$expected listed) ==="; \
+		sed 's/^/  /' "$$unrep"; \
+		echo ""; \
+	fi; \
 	sh "$$root/tests/scripts/sweep_timings.sh" "$$tmpdir"; \
 	echo "Aether Tests: $$passed passed, $$failed failed, $$skipped skipped, $$total total"; \
-	printf '%s %s %s %s\n' "$$passed" "$$failed" "$$skipped" "$$total" > "$$root/$(BUILD_DIR)/test-ae.verdict"; \
+	printf '%s %s %s %s %s\n' "$$passed" "$$failed" "$$skipped" "$$total" "$$expected" > "$$root/$(BUILD_DIR)/test-ae.verdict"; \
 	rm -rf "$$tmpdir"; \
-	if [ "$$failed" -gt 0 ]; then exit 1; fi
+	if [ "$$failed" -gt 0 ] || [ "$$unreported" -gt 0 ]; then exit 1; fi
 	@# A shell that stopped before its tally can still leave make with status
-	@# 0: only a written tally with no failure is a pass.
-	@sh tests/scripts/sweep_verdict.sh $(BUILD_DIR)/test-ae.verdict
+	@# 0, and an xargs that ran part of its list can return 0 (#3111): only a
+	@# written tally with no failure, and a report from every listed test, is
+	@# a pass.
+	@sh tests/scripts/sweep_verdict.sh $(BUILD_DIR)/test-ae.verdict $(BUILD_DIR)/test-ae.unreported
 endif
 
 # Install smoke test: installs to a temp dir, runs ae init + ae run, cleans up

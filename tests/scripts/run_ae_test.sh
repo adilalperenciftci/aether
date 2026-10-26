@@ -44,7 +44,8 @@ root="$3"
 sweep_timeout_bound TO "$root" "${AE_TEST_TIMEOUT:-120}"
 sweep_timeout_bound BTO "$root" "${AE_TEST_BUILD_TIMEOUT:-600}"
 
-name=$(echo "$f" | sed "s|tests/||;s|/|_|g;s|\.ae$||")
+. "$root/tests/scripts/sweep_name.sh"
+name=$(echo "$f" | sed "$SWEEP_NAME_SED")
 dir=$(dirname "$f")
 base=$(basename "$f")
 
