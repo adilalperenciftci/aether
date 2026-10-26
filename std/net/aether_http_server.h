@@ -467,8 +467,10 @@ const char* http_server_set_h2_raw(HttpServer* server,
 // default; thread-pool mode does not use it. A socket server_bind made
 // first is kept as listener 0 and gives the others its port, a port 0's
 // included; without one, a port 0 is resolved once and every listener
-// binds that. "" on success; an error where there is no SO_REUSEPORT
-// (Windows).
+// binds that. "" on success; an error where the kernel does not spread
+// connections across the listeners (Linux and DragonFly do with
+// SO_REUSEPORT, FreeBSD with SO_REUSEPORT_LB; Windows, macOS, OpenBSD and
+// NetBSD do not).
 const char* http_server_set_multi_accept_raw(HttpServer* server, int on);
 
 // Per-stream concurrent dispatch for HTTP/2. When `worker_count` > 0,

@@ -12,9 +12,11 @@
 //   2. without a bind, on port 0, the port is resolved once: the listening
 //      event and server_port agree on it, and requests on it are served.
 //
-// Windows has no multi-accept: actor dispatch mode needs the accept poller,
-// and the listeners need SO_REUSEPORT, which Windows does not have. There
-// the setter must say so, and that is all this test checks.
+// Multi-accept exists where the kernel spreads connections across the
+// listeners: Linux and DragonFly (SO_REUSEPORT) and FreeBSD
+// (SO_REUSEPORT_LB). Elsewhere the setter must say it cannot, and that is
+// all this test checks: Windows has no SO_REUSEPORT, and on macOS, OpenBSD
+// and NetBSD one listener takes every connection.
 //
 // actor_shim.c switches the server to actor dispatch mode, which has no
 // Aether surface; the driving shell test builds the two together.
@@ -111,13 +113,14 @@ run_case(label: string, prebind: int) {
 }
 
 main() {
-    if os.platform() == "windows" {
+    platform = os.platform()
+    if platform != "linux" && platform != "freebsd" && platform != "dragonfly" {
         s = http.server_create(0)
         http.server_set_host(s, "127.0.0.1")
         merr = http.server_set_multi_accept(s, 1)
         http.server_free(s)
         if merr == "" {
-            println("FAIL server_set_multi_accept said yes on Windows, which has no SO_REUSEPORT")
+            println("FAIL server_set_multi_accept said yes on ${platform}, whose kernel does not spread connections")
             exit(1)
         }
         println("MULTI-ACCEPT-OK")

@@ -300,6 +300,18 @@ const char* http_request_header_value(HttpRequest* r, int i) { (void)r; (void)i;
 #define AE_SEND_NOSIGNAL 0
 #endif
 
+/* The socket option under which the kernel spreads incoming connections
+ * across the listeners bound to one port, which multi-accept is for
+ * (#3194): SO_REUSEPORT on Linux and DragonFly, SO_REUSEPORT_LB on FreeBSD,
+ * where nginx's reuseport works too. macOS, OpenBSD and NetBSD have
+ * SO_REUSEPORT without the spreading, so one listener would take every
+ * connection; multi-accept is refused there, as on Windows. */
+#if (defined(__linux__) || defined(__DragonFly__)) && defined(SO_REUSEPORT)
+#define AETHER_REUSEPORT_LB SO_REUSEPORT
+#elif defined(__FreeBSD__) && defined(SO_REUSEPORT_LB)
+#define AETHER_REUSEPORT_LB SO_REUSEPORT_LB
+#endif
+
 // -----------------------------------------------------------------------------
 // Server-side TLS (#260 Tier 0)
 // -----------------------------------------------------------------------------
@@ -1091,9 +1103,11 @@ HttpServer* http_server_create(int port) {
  * from Aether or the header. */
 const char* http_server_set_multi_accept_raw(HttpServer* server, int on) {
     if (!server) return "server is null";
-#if defined(_WIN32) || !defined(SO_REUSEPORT)
+#ifndef AETHER_REUSEPORT_LB
     (void)on;
-    return "multi-accept needs SO_REUSEPORT, which this platform does not have";
+    return "multi-accept needs a kernel that spreads connections across SO_REUSEPORT "
+           "listeners (Linux, DragonFly, or FreeBSD's SO_REUSEPORT_LB), which this platform "
+           "does not have";
 #else
     server->multi_accept = on ? 1 : 0;
     return "";
@@ -5840,9 +5854,9 @@ static int create_reuseport_socket(const char* host, int port, int backlog) {
     int fd = aether_addr_listen_socket(&addr);
     if (fd < 0) return -1;
 
-#ifdef SO_REUSEPORT
+#ifdef AETHER_REUSEPORT_LB
     int opt = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+    setsockopt(fd, SOL_SOCKET, AETHER_REUSEPORT_LB, &opt, sizeof(opt));
 #endif
 
     if (bind(fd, (struct sockaddr*)&addr, addr_len) < 0) {
@@ -6077,11 +6091,12 @@ static int http_server_serve(HttpServer* server) {
         char where[300];
         char why[128];
         if (server->socket_fd >= 0) {
-#ifdef SO_REUSEPORT
-            /* Without SO_REUSEPORT http_server_set_multi_accept_raw refuses,
-             * so this mode never starts there, but the file still builds. */
+#ifdef AETHER_REUSEPORT_LB
+            /* Where the kernel does not spread connections,
+             * http_server_set_multi_accept_raw refuses, so this mode never
+             * starts there, but the file still builds. */
             int opt = 1;
-            if (setsockopt(server->socket_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof opt) != 0) {
+            if (setsockopt(server->socket_fd, SOL_SOCKET, AETHER_REUSEPORT_LB, &opt, sizeof opt) != 0) {
                 server_fail(server, "cannot set SO_REUSEPORT on the socket bound to %s: %s",
                             aether_addr_authority(where, sizeof where, server->host, server->port),
                             socket_error_text(why, sizeof why));
@@ -6361,20 +6376,16 @@ void http_server_stop(HttpServer* server) {
     }
 #endif
 
-#if !defined(_WIN32)
-    // Destroy pollers to unblock poll/epoll_wait/kevent in accept threads
-    for (int i = 0; i < server->accept_thread_count; i++) {
-        if (server->accept_pollers) {
-            aether_io_poller_destroy(&server->accept_pollers[i]);
-        }
-        if (server->accept_listen_fds && server->accept_listen_fds[i] >= 0) {
-            close(server->accept_listen_fds[i]);
-            server->accept_listen_fds[i] = -1;
-        }
-    }
-
-    aether_io_poller_destroy(&server->accept_poller);
-#endif
+    /* The accept pollers of actor dispatch mode, and multi-accept's listeners
+     * and arrays, are the server thread's: it opens them, and it gives them
+     * back once every accept loop has seen is_running cleared, which each
+     * does within its 100 ms poll. A stop used to destroy and close them
+     * here while those loops still ran, and the server thread then did it
+     * again: on macOS a closed kqueue wakes its waiter at once, so the
+     * server thread freed the arrays this loop was walking, and each
+     * listener and poller was closed twice (the second close could take a
+     * descriptor something else had opened since); with the poll() backend
+     * a waiting loop's poller was freed under it. */
 
     /* Winsock stays up: http_server_init starts it once for the process,
      * and a client, another server or the background thread still use it.
