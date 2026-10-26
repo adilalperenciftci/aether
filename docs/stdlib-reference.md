@@ -38,19 +38,19 @@ header comment is the authoritative description.
 | `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 148 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
 | `std.hash` | Fast non-cryptographic hashes and checksums: FNV, MurmurHash3, SipHash, CRC-32. | 6 | [guide](../std/hash/README.md) · [source](../std/hash/module.ae) |
 | `std.host` | Primitives for Aether scripts embedded in a host application. | 14 | [guide](../std/host/README.md) · [source](../std/host/module.ae) |
-| `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 132 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
+| `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 133 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
 | `std.http1` | Pure-Aether HTTP/1.1 response reader (RFC 9112). | 14 | [guide](../std/http1/README.md) · [source](../std/http1/module.ae) |
 | `std.intarr` | Fixed-size packed-int buffer. | 15 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
 | `std.intmap` | Hash map from `long` keys to `long` values, for integer-keyed counting and lookup. | 12 | [guide](../std/intmap/README.md) · [source](../std/intmap/module.ae) |
 | `std.io` | Console output, whole-file reads and writes, file descriptors, environment variables. | 44 | [full section](#io-stdio) |
 | `std.ipc` | Child-to-parent back-channel for processes started by `std.os`. | 4 | [guide](../std/ipc/README.md) · [source](../std/ipc/module.ae) |
-| `std.json` | JSON parsing, building and serialisation. | 45 | [full section](#json-stdjson) |
+| `std.json` | JSON parsing, building and serialisation. | 51 | [full section](#json-stdjson) |
 | `std.jsonpath` | RFC 9535 JSONPath queries over parsed JSON, with a reusable compiled path. | 10 | [guide](../std/jsonpath/README.md) · [source](../std/jsonpath/module.ae) |
 | `std.ksuid` | KSUID: 160-bit lexicographically sortable identifier. | 1 | [guide](../std/ksuid/README.md) · [source](../std/ksuid/module.ae) |
 | `std.language` | BCP 47 language tags and matching (RFC 5646, RFC 4647). | 11 | [guide](../std/language/README.md) · [source](../std/language/module.ae) |
 | `std.lanes` | SIMD lanes: four or eight floats, or two doubles, per vector, with masks and select. | 127 | [guide](../std/lanes/README.md) · [source](../std/lanes/module.ae) |
 | `std.list` | Dynamic array, re-exported from `std.collections`. | 14 | [guide](../std/list/README.md) · [source](../std/list/module.ae) |
-| `std.log` | Levelled logging with timestamps, colours and counters. | 9 | [full section](#logging-stdlog) |
+| `std.log` | Levelled logging with timestamps, colours and counters. | 14 | [full section](#logging-stdlog) |
 | `std.longarr` | Fixed-size packed-long buffer. | 15 | [guide](../std/longarr/README.md) · [source](../std/longarr/module.ae) |
 | `std.lzf` | One-shot LZF compression and decompression. | 9 | [guide](../std/lzf/README.md) · [source](../std/lzf/module.ae) |
 | `std.map` | Hash map, re-exported from `std.collections`, with readable key snapshots. | 20 | [guide](../std/map/README.md) · [source](../std/map/module.ae) |
