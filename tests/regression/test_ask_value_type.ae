@@ -1,0 +1,81 @@
+// Regression (#3165): an ask has its reply's type wherever it stands. Only a
+// binding inferred it, so an ask given straight to a function, into an
+// interpolation or to println was an int, and a string reply was read as a
+// number (gcc: "format '%d' expects int, but argument 2 has type 'const
+// char *'"). The reply string an unbound ask hands over is still the
+// asker's, reclaimed after the expression that uses it.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+message Name {}
+message Label {}
+message Count {}
+message Reply {
+    text: string
+}
+
+actor Echo {
+    state name = "echo"
+    state calls = 0
+    receive {
+        Name -> {
+            reply name
+        }
+        Label -> {
+            calls = calls + 1
+            local = "label-${name}-${calls}"
+            reply Reply { text: local }
+        }
+        Count -> {
+            reply calls
+        }
+    }
+}
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+same(got: string, want: string, what: string) {
+    if got != want {
+        println("FAIL: ${what}: got '${got}', want '${want}'")
+        exit(1)
+    }
+}
+
+length_of(s: string) -> int {
+    return string.length(s)
+}
+
+name_of(e: actor_ref) -> string {
+    return e ? Name {}
+}
+
+main() {
+    e = spawn(Echo())
+    bound = e ? Label {}
+    same(bound, "label-echo-1", "a bound ask")
+    same(e ? Label {}, "label-echo-2", "an ask as an argument")
+    same("${e ? Label {}}", "label-echo-3", "an ask in an interpolation")
+    same("[${e ? Name {}}]", "[echo]", "a bare reply in an interpolation")
+    check(length_of(e ? Name {}) == 4, "an ask as a string argument")
+    same(name_of(e), "echo", "a returned ask")
+    check(e ? Count {} == 3, "an int reply as an operand")
+    println(e ? Name {})
+
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                same(e ? Name {}, "echo", "an ask in the window")
+                n = length_of(e ? Label {})
+                check(n > 0, "a label in the window")
+            }, 8)
+        check(grown == 0, "an unbound ask's reply grew the heap by ${grown} bytes a round")
+    }
+    println("OK")
+}

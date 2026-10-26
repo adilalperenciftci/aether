@@ -580,10 +580,11 @@ static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
          * it takes its own). */
         int literal_arg = arg->type == AST_CLOSURE &&
                           !(arg->value && strcmp(arg->value, "trailing") == 0);
-        if (arg->type != AST_FUNCTION_CALL &&
-            arg->type != AST_STRING_INTERP &&
-            arg->type != AST_OR_ELSE && !literal_arg &&
-            !is_owned_string_unwrap(gen, arg)) continue;
+        /* A call (it may hand over a closure too), or a fresh string
+         * temporary of any kind is_fresh_heap_string_temp names, the one
+         * list (#3165: an ask's reply, passed straight on, leaked). */
+        if (arg->type != AST_FUNCTION_CALL && !literal_arg &&
+            !is_fresh_heap_string_temp(gen, arg)) continue;
         if (arg_drain_lookup(arg)) continue;
         /* #2507: a closure a call hands over (call_returns_owned_closure),
          * passed on as an argument anywhere in an expression: dead after
@@ -769,11 +770,12 @@ int interp_segment_is_heap_call(CodeGenerator* gen, ASTNode* ch) {
      * node's own type is not reliably stamped; is_heap_string_expr reads the
      * fallible's value slot. */
     if (ch->type == AST_OR_ELSE) return is_heap_string_expr(gen, ch);
-    if (ch->type != AST_FUNCTION_CALL && ch->type != AST_STRING_INTERP &&
-        !is_owned_string_unwrap(gen, ch)) return 0;   /* #2750 */
     TypeKind tk = ch->node_type ? ch->node_type->kind : TYPE_UNKNOWN;
     if (tk != TYPE_STRING && tk != TYPE_PTR) return 0;
-    return is_heap_string_expr(gen, ch);
+    /* The kinds that make a fresh string are is_fresh_heap_string_temp's
+     * one list: a call, an interpolation, an unwrap (#2750), an ask's
+     * reply (#3165, which a segment read without freeing). */
+    return is_fresh_heap_string_temp(gen, ch);
 }
 
 /* --- Variables bound to a closure literal (#2513) -----------------------
@@ -7468,15 +7470,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
      * field or an element, which the call reads through its hold rather
      * than evaluating the place again. An `if` giving a fresh value is
      * taken into one (#3006). */
-    if (expr->type == AST_FUNCTION_CALL ||
-        expr->type == AST_STRING_INTERP ||
-        expr->type == AST_CLOSURE ||
-        expr->type == AST_OR_ELSE ||
-        expr->type == AST_TUPLE_UNWRAP ||
-        expr->type == AST_NULL_COALESCE ||
-        (expr->type == AST_IF_EXPRESSION && g_arg_drain_count > 0) ||
-        ((expr->type == AST_IDENTIFIER || expr->type == AST_MEMBER_ACCESS ||
-          expr->type == AST_ARRAY_ACCESS) && g_arg_drain_count > 0)) {
+    /* Any node the wrap took, whatever its kind: the table holds only the
+     * arguments it chose, filled before they were bound. A list of kinds
+     * here missed an ask's reply, which was then asked for a second time
+     * and leaked (#3165). */
+    if (g_arg_drain_count > 0) {
         const char* sub = arg_drain_lookup(expr);
         if (sub) {
             fprintf(gen->output, "%s", sub);

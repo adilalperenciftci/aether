@@ -17452,6 +17452,34 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             return 1;
         }
 
+        case AST_SEND_ASK: {
+            /* `actor ? Request {}`: its operands are checked as a send's
+             * are, and it has its reply's type wherever it stands (#3165).
+             * Only a binding inferred that type, so an ask given straight to
+             * println or into an interpolation reached codegen untyped and
+             * a string reply printed as an int. */
+            if (expr->child_count >= 2) {
+                typecheck_expression(expr->children[0], table);
+                ASTNode* message = expr->children[1];
+                if (message && message->type == AST_MESSAGE_CONSTRUCTOR && message->value) {
+                    Symbol* msg_sym = lookup_symbol(table, message->value);
+                    if (!msg_sym || !msg_sym->type || msg_sym->type->kind != TYPE_MESSAGE) {
+                        char error_msg[256];
+                        snprintf(error_msg, sizeof(error_msg),
+                                 "Undefined message type '%s'", message->value);
+                        type_error(error_msg, message->line, message->column);
+                        return 0;
+                    }
+                    typecheck_message_constructor(message, table);
+                } else {
+                    typecheck_expression(message, table);
+                }
+            }
+            Type* reply = infer_type(expr, table);   /* stamps node_type from the reply */
+            if (reply) free_type(reply);
+            return 1;
+        }
+
         default:
             // Type check all children
             for (int i = 0; i < expr->child_count; i++) {

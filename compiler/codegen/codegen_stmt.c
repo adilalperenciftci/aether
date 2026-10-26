@@ -4401,11 +4401,14 @@ int is_owned_string_unwrap(CodeGenerator* gen, ASTNode* e) {
 
 /* An expression whose value is a heap string nobody else holds, which the
  * expression that reads it must free: a call or an interpolation that
- * makes one, a fallible's `or`, an unwrapped `string?` call. */
+ * makes one, a fallible's `or`, an unwrapped `string?` call, an ask whose
+ * reply is a string (the reply hands over a copy, #3165: given straight to
+ * a function or an interpolation, the copy was never reclaimed). */
 int is_fresh_heap_string_temp(CodeGenerator* gen, ASTNode* e) {
     if (!e) return 0;
     if (e->type != AST_FUNCTION_CALL && e->type != AST_STRING_INTERP &&
-        e->type != AST_OR_ELSE && !is_owned_string_unwrap(gen, e)) return 0;
+        e->type != AST_OR_ELSE && e->type != AST_SEND_ASK &&
+        !is_owned_string_unwrap(gen, e)) return 0;
     return is_heap_string_expr(gen, e);
 }
 
