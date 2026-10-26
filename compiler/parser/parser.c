@@ -345,6 +345,37 @@ static void missing_operand(Parser* parser, Token* after, int errors_before,
     if (parser->suppress_errors || parser->depth_exceeded) return;
     if (aether_error_count() != errors_before) return;
     Token* found = peek_token(parser);
+    if (found && found->type == TOKEN_TRY) {
+        /* #3150: `r = try { work() } catch e { ... }`. A `try` is a
+         * statement and gives no value. Reported as a keyword used for a
+         * name, and with only `try {` taken as the rest of the line, the
+         * block's own `}` then closed the function and its `catch` was read
+         * at top level: six errors. Say what it is once, and step over the
+         * whole statement, its `catch` included, so nothing after it is
+         * misread. */
+        aether_error_full("`try` is a statement and gives no value",
+                          found->line, found->column,
+                          "bind the value inside it: `try { r = work() } catch e { ... }`",
+                          NULL, AETHER_ERR_SYNTAX);
+        advance_token(parser); // `try`
+        for (int part = 0; part < 2; part++) {
+            if (part == 1) {
+                if (!peek_token(parser) || peek_token(parser)->type != TOKEN_CATCH) break;
+                advance_token(parser); // `catch`
+                if (peek_token(parser) && peek_token(parser)->type == TOKEN_IDENTIFIER) {
+                    advance_token(parser); // the name the message binds
+                }
+            }
+            if (!peek_token(parser) || peek_token(parser)->type != TOKEN_LEFT_BRACE) break;
+            int depth = 0;
+            while (!is_at_end(parser)) {
+                Token* t = advance_token(parser);
+                if (t->type == TOKEN_LEFT_BRACE) depth++;
+                if (t->type == TOKEN_RIGHT_BRACE && --depth == 0) break;
+            }
+        }
+        return;
+    }
     if (found && found->value && token_is_reserved_keyword(found) &&
         !token_is_value_ident(found)) {
         /* `rc = send()`: the operand is there, named by a keyword. */
@@ -4943,6 +4974,16 @@ ASTNode* parse_return_statement(Parser* parser) {
                                            ret_tok ? ret_tok->column : 0);
 
     if (!match_token(parser, TOKEN_SEMICOLON)) {
+        /* #3150: `return try { ... } catch e { ... }` on the return's line
+         * is a `try` given as the value, which it cannot be. Read on, it
+         * was a bare `return` (an E0200 in a function with a result) and a
+         * try statement after it. */
+        Token* tv = peek_token(parser);
+        if (tv && tv->type == TOKEN_TRY && ret_tok && tv->line == ret_tok->line) {
+            missing_operand(parser, ret_tok, aether_error_count(), "a value");
+            free_ast_node(return_stmt);
+            return NULL;
+        }
         // #1054: `return match x { ... }`; codegen lowers a match in return
         // position to a value-producing form. A `match` is an expression
         // (#2993), so `return match x { ... } + 1` returns the sum.

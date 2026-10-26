@@ -251,6 +251,7 @@ static void apply_levenshtein(Finding* f, const ExportEntry* exports, int n_expo
                               char (*imports)[AE_HELP_NAME_LEN], int n_imports);
 static void apply_yaml_shape_detection(SourceFile* sf, Finding* findings, int* count, int max);
 static void apply_top_level_dsl(SourceFile* sf, Finding* findings, int* count, int max);
+static void drop_explained_syntax(Finding* findings, int* count);
 static void apply_missing_import(Finding* f, const ExportEntry* exports, int n_exports);
 static void apply_type_mismatch_english(Finding* f);
 static void apply_canonical_template(Finding* findings, int count,
@@ -494,6 +495,7 @@ int ae_help_main(int argc, char** argv) {
     }
     apply_yaml_shape_detection(&sf, findings, &n_findings, AE_HELP_MAX_FINDINGS);
     apply_top_level_dsl(&sf, findings, &n_findings, AE_HELP_MAX_FINDINGS);
+    drop_explained_syntax(findings, &n_findings);
 
     /* Library-author hints: one *.help.md per imported module — and
      * once only. A module can legitimately appear in more than one
@@ -1641,6 +1643,39 @@ static void apply_yaml_shape_detection(SourceFile* sf, Finding* findings, int* c
         safe_strncpy(f->fix_replace, fixed, sizeof(f->fix_replace));
         f->safe_fix = 1;
     }
+}
+
+/* === Parser errors a finding accounts for (#3150) ===================
+ * The parser stops making sense at the first construct it cannot read,
+ * and its errors from there on follow from that one. When a shape finding
+ * of ae help's own (YAML colon, HCL equals, YAML list, a DSL block at top
+ * level) names a line, it says what is wrong there and how to write it, so
+ * the raw syntax errors from that line on are left out: the report gave
+ * the two findings for the YAML/HCL demo beside the two parser errors they
+ * explain, and read as four problems. A syntax error on an earlier line is
+ * a problem of its own and stays. Fixing the findings and running ae help
+ * again shows anything the parser still finds. */
+static int is_shape_finding(FindingKind kind) {
+    return kind == FK_YAML_COLON || kind == FK_HCL_EQUAL ||
+           kind == FK_YAML_LIST || kind == FK_TOPLEVEL_DSL;
+}
+
+static void drop_explained_syntax(Finding* findings, int* count) {
+    int first_shape = 0;
+    for (int i = 0; i < *count; i++) {
+        if (is_shape_finding(findings[i].kind) && findings[i].line > 0 &&
+            (first_shape == 0 || findings[i].line < first_shape)) {
+            first_shape = findings[i].line;
+        }
+    }
+    if (first_shape == 0) return;
+    int kept = 0;
+    for (int i = 0; i < *count; i++) {
+        if (findings[i].kind == FK_SYNTAX && findings[i].line >= first_shape) continue;
+        if (kept != i) findings[kept] = findings[i];
+        kept++;
+    }
+    *count = kept;
 }
 
 /* === Top-level closure-DSL detection ===============================

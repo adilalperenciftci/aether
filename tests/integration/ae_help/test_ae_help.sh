@@ -353,6 +353,50 @@ expect_match "--lib hint found from outside the checkout" \
     "Label must be non-empty" \
     outside_help "$TMPDIR/usewidgets.ae" --lib "$TMPDIR/lib"
 
+# Case 18: the parser errors a finding explains are left out (#3150). A
+# DSL block written in YAML and HCL shape gave its two findings beside the
+# two raw syntax errors they explain ("Expected RIGHT_BRACE, got
+# IDENTIFIER" on the HCL line, "Expected actor, struct, function, or main"
+# at the closing brace), and the report read as four problems. A syntax
+# error on a line before the first finding is a problem of its own and
+# stays.
+cat > "$TMPDIR/shapes.ae" <<EOF
+import my_lib
+main() {
+    my_lib.serve {
+        port: 9990
+        host = "127.0.0.1"
+        repo("alpha", "/data/alpha")
+    }
+}
+EOF
+expect_match "YAML and HCL lines report their two findings" \
+    "ae help, 2 findings" \
+    "$AE" help "$TMPDIR/shapes.ae"
+out=$("$AE" help "$TMPDIR/shapes.ae" 2>&1)
+if printf '%s\n' "$out" | grep -q "syntax error"; then
+    echo "  [FAIL] the parser errors the findings explain are left out"
+    printf '%s\n' "$out" | sed 's/^/      /'
+    fail=$((fail + 1))
+else
+    echo "  [PASS] the parser errors the findings explain are left out"
+    pass=$((pass + 1))
+fi
+cat > "$TMPDIR/earlier.ae" <<EOF
+import my_lib
+helper() {
+    x = = 1
+}
+main() {
+    my_lib.serve {
+        port: 9990
+    }
+}
+EOF
+expect_match "a syntax error before the first finding stays" \
+    "syntax error at .*earlier\.ae:3" \
+    "$AE" help "$TMPDIR/earlier.ae"
+
 echo
 echo "ae_help: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -2130,6 +2130,65 @@ Used outside a `T!` function, `expr!` is *unwrap-or-trap*: it panics on a
 non-empty error slot (catchable with `try`/`catch`). Both `!` and `or` accept
 any `(value, err)` tuple, not just `T!` returns.
 
+### Panics: `panic`, `try` and `catch`
+
+An error result is for a failure the caller expects and handles; a panic is
+for a bug. `panic("reason")` unwinds to the nearest enclosing `try`, whose
+`catch name { ... }` block runs with the reason bound to `name`. The runtime
+raises the same kind of panic for a broken contract, an index out of range,
+`x!` on `none` and a call through an empty closure, each reason starting
+with its [category](#panic-categories). Outside any `try` a panic prints its
+reason and ends the program; in an actor's handler it ends that actor.
+What the scopes it leaves hold is released, and their plain `defer`s run.
+
+```aether,run
+average(xs: int[]) -> int {
+    if xs.len == 0 {
+        panic("average of no numbers")
+    }
+    total = 0
+    for i in 0..xs.len {
+        total = total + xs[i]
+    }
+    return total / xs.len
+}
+
+main() {
+    result = 0
+    try {
+        result = average([4, 8])
+        result = average([])
+    } catch reason {
+        println("caught: ${reason}")
+    }
+    println(result)
+}
+```
+```output
+caught: average of no numbers
+6
+```
+
+`try` is a statement and gives no value: to keep what its block computes,
+assign it inside the block, as above. A `try` where a value goes is one
+error (#3150):
+
+```aether,fails
+work() -> int {
+    return 42
+}
+
+main() {
+    r = try {
+        work()
+    } catch e {
+        println("caught ${e}")
+    }
+}
+// error[E0100]: `try` is a statement and gives no value
+// help: bind the value inside it: `try { r = work() } catch e { ... }`
+```
+
 ### Function contracts: `requires` / `ensures`
 
 Eiffel-style runtime-checked preconditions and postconditions. Clauses appear after the typed return arrow and before the body; each is a single boolean expression, panic on violation.

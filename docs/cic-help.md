@@ -120,6 +120,14 @@ The list is bounded by what people actually do, keep it short and
 high-precision. False positives are worse than misses here, since
 the user is already confused.
 
+Such a line is usually where the parser gives up, and its errors from
+there on (`Expected RIGHT_BRACE, got IDENTIFIER` on the HCL line, a
+stray `}` at the end of the file) follow from it. A finding that names a
+line accounts for them, so the raw syntax errors from the first such line
+on are left out of the report; a syntax error on an earlier line is a
+problem of its own and stays. After the rewrite, `ae help` again shows
+whatever the parser still finds (#3150).
+
 ### 3. Type-mismatch with English
 
 When the typer reports "expected int, got string" on a setter call,
