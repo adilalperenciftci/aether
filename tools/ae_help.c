@@ -1024,15 +1024,18 @@ static int run_aetherc_capture(const char* script_path, char* stderr_buf, size_t
      * compile resolve project-local library imports, so `ae help` on
      * a real config script stops flagging every library call as an
      * undefined function. Shared by both spawn branches below. */
+    /* The options before the positionals (#3183): aetherc reads none after
+     * them, and dropped every --lib here without a word (#3182 now refuses
+     * one there), so ae help never saw a library its script imports. */
     const char* argv[4 + 2 * AE_HELP_MAX_LIBS + 1];
     int ac = 0;
     argv[ac++] = aetherc;
-    argv[ac++] = script_path;
-    argv[ac++] = sink;
     for (int i = 0; i < g_lib_count; i++) {
         argv[ac++] = "--lib";
         argv[ac++] = g_lib_dirs[i];
     }
+    argv[ac++] = script_path;
+    argv[ac++] = sink;
     argv[ac] = NULL;
 
     int rc;

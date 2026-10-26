@@ -397,6 +397,34 @@ expect_match "a syntax error before the first finding stays" \
     "syntax error at .*earlier\.ae:3" \
     "$AE" help "$TMPDIR/earlier.ae"
 
+# Case 19: a library given with --lib reaches the compile (#3183). ae help
+# put `--lib` after aetherc's input and output, where aetherc reads nothing
+# (#3182), so the library never resolved: a setter misspelt inside its
+# builder block was not reported at all, and the run said "no
+# diagnostics". The "did you mean" comes from the library's exports.
+mkdir -p "$TMPDIR/dsl/my_lib"
+cat > "$TMPDIR/dsl/my_lib/module.ae" <<'EOF'
+import std.map
+exports(serve, superuser_token)
+builder serve() {
+    println("serving")
+}
+superuser_token(_ctx: ptr, t: string) {
+    println("token ${t}")
+}
+EOF
+cat > "$TMPDIR/typo.ae" <<'EOF'
+import my_lib
+main() {
+    my_lib.serve() {
+        superuser_tokn("admin-1234")
+    }
+}
+EOF
+expect_match "a --lib library's misspelt setter gets its did-you-mean" \
+    "Did you mean: superuser_token \(in my_lib\)" \
+    "$AE" help "$TMPDIR/typo.ae" --lib "$TMPDIR/dsl"
+
 echo
 echo "ae_help: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
