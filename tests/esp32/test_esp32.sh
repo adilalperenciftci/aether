@@ -36,7 +36,7 @@ bad() { echo "  [FAIL] esp32: $1"; fail=$((fail + 1)); }
 
 # program  source  line it must print
 PROGRAMS="hello:examples/01-language/01-hello.ae:Hello, Aether!
-counter:examples/actors/counter.ae:Current value: 18
+counter:examples/02-actors/02-state.ae:Current value: 18
 test_coop_chain:tests/syntax/test_coop_chain.ae:Chain test passed!
 test_platform_caps:tests/syntax/test_platform_caps.ae:All platform caps tests passed!"
 

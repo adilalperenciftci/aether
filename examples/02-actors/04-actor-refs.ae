@@ -1,0 +1,66 @@
+// Actor references: actors that talk to each other.
+//
+// What `spawn` gives back is an `actor_ref`, a value like any other: it
+// goes into a message field or into state, so an actor can be told whom
+// to answer. Inside a handler, `self` is the actor's own reference. Here
+// two players hit a ball back and forth: each `Hit` carries the reference
+// of the player who sent it, the receiver hits back to that reference, and
+// the rally ends after five hits. Messages from one sender to one actor
+// arrive in order; messages from two senders have no order between them,
+// so main lets both players take their names before it serves. After that
+// one message is in flight at a time, and the rally prints in order.
+//
+// Run: ae run examples/02-actors/04-actor-refs.ae
+// See: docs/language-reference.md#sending-messages-fire-and-forget
+
+message Hit {
+    count: int
+    from: actor_ref
+}
+
+message Serve {
+    to: actor_ref
+}
+
+message Named {
+    text: string
+}
+
+actor Player {
+    state name = ""
+
+    receive {
+        Named(text) -> {
+            name = text
+        }
+        Serve(to) -> {
+            to ! Hit { count: 1, from: self }
+        }
+        Hit(count, from) -> {
+            println("${name} returns hit ${count}")
+            if count < 5 {
+                from ! Hit { count: count + 1, from: self }
+            } else {
+                println("${name} wins the rally")
+            }
+        }
+    }
+}
+
+main() {
+    ping = spawn(Player())
+    pong = spawn(Player())
+    ping ! Named { text: "ping" }
+    pong ! Named { text: "pong" }
+    wait_for_idle() // both players have their names before the serve
+    ping ! Serve { to: pong }
+    wait_for_idle()
+}
+
+// Output:
+// pong returns hit 1
+// ping returns hit 2
+// pong returns hit 3
+// ping returns hit 4
+// pong returns hit 5
+// pong wins the rally

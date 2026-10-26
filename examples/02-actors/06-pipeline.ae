@@ -1,0 +1,112 @@
+// A pipeline: each actor a stage, each stage passing its result on.
+//
+// Every stage is told where its output goes with a `Connect` message that
+// carries the next stage's reference. An arm binds a message's fields by
+// name, and `Connect(next: n)` binds the field `next` to `n`, since the
+// stage's own state is called `next` too. Main waits until every stage is
+// connected before it feeds the first: the squarer hears from main and
+// from the parser, and two senders' messages have no order between them.
+// Then each stage handles one item at a time and sends what it made
+// downstream. The stages run concurrently: while the collector takes in
+// item 1, the parser can already be reading item 3. Each link keeps its
+// order (one sender, one receiver), so the items come out in the order
+// they went in. Only the last stage prints, and main asks it for the total
+// once everything has drained.
+//
+// Run: ae run examples/02-actors/06-pipeline.ae
+// See: docs/actor-concurrency.md
+
+import std.string
+
+message Connect {
+    next: actor_ref
+}
+
+message Line {
+    text: string
+}
+
+message Number {
+    value: int
+}
+
+message Total {}
+
+message Rejected {}
+
+// Stage 1: text to numbers; text that is not a number is dropped.
+actor Parser {
+    state next: actor_ref = null
+    state rejected = 0
+
+    receive {
+        Connect(next: n) -> {
+            next = n
+        }
+        Line(text) -> {
+            v, err = string.to_int(string.trim(text))
+            if err == "" {
+                next ! Number { value: v }
+            } else {
+                rejected = rejected + 1
+            }
+        }
+        Rejected -> {
+            reply rejected
+        }
+    }
+}
+
+// Stage 2: square each number.
+actor Squarer {
+    state next: actor_ref = null
+
+    receive {
+        Connect(next: n) -> {
+            next = n
+        }
+        Number(value) -> {
+            next ! Number { value: value * value }
+        }
+    }
+}
+
+// Stage 3: collect.
+actor Collector {
+    state count = 0
+    state sum = 0
+
+    receive {
+        Number(value) -> {
+            count = count + 1
+            sum = sum + value
+            println("item ${count}: ${value}")
+        }
+        Total -> {
+            reply sum
+        }
+    }
+}
+
+main() {
+    parser = spawn(Parser())
+    squarer = spawn(Squarer())
+    collector = spawn(Collector())
+    parser ! Connect { next: squarer }
+    squarer ! Connect { next: collector }
+    wait_for_idle() // every stage connected before the first item flows
+
+    inputs = ["3", " 4", "x", "5 ", "10"]
+    for i in 0..inputs.len {
+        parser ! Line { text: inputs[i] }
+    }
+    wait_for_idle()
+    println("sum of squares: ${collector ? Total {}}, lines rejected: ${parser ? Rejected {}}")
+}
+
+// Output:
+// item 1: 9
+// item 2: 16
+// item 3: 25
+// item 4: 100
+// sum of squares: 150, lines rejected: 1

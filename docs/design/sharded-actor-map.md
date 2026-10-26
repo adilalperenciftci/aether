@@ -13,7 +13,7 @@ readers and writers without collapsing onto a single core.
 [Design discussion on the issue tracker](https://github.com/aether-lang-dev/aether/issues/839).
 
 See the runnable example at
-[`examples/actors/sharded-map.ae`](../../examples/actors/sharded-map.ae) and
+[`examples/02-actors/11-sharded-map.ae`](../../examples/02-actors/11-sharded-map.ae) and
 the regression test under
 [`tests/integration/sharded_actor_map/`](../../tests/integration/sharded_actor_map/).
 
@@ -89,7 +89,7 @@ got = shards[idx] ? Get { key: key }       // read:  synchronous ask
 This is built **entirely** on Aether's existing ask/reply primitive (the
 `?` operator + the `reply` statement); the sharded map adds no runtime
 machinery. See [`actor-concurrency.md`](../actor-concurrency.md) for the
-ask/reply mechanics and [`examples/actors/ask-pattern.ae`](../../examples/actors/ask-pattern.ae)
+ask/reply mechanics and [`examples/02-actors/03-ask-reply.ae`](../../examples/02-actors/03-ask-reply.ae)
 for the base pattern.
 
 ### Routing hash

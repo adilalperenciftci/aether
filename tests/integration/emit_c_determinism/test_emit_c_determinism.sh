@@ -25,7 +25,7 @@ trap 'rm -rf "$TMPDIR" || true' EXIT
 
 CORPUS="examples/01-language/01-hello.ae
 examples/01-language/03-strings.ae
-examples/actors/ask-pattern.ae
+examples/02-actors/03-ask-reply.ae
 examples/applications/chat-room.ae
 examples/applications/task-queue.ae
 std/set/test_set.ae

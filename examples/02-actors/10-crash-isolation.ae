@@ -1,0 +1,78 @@
+// Crash isolation: a failing actor does not take the others with it.
+//
+// A panic in a handler ends that actor and nothing else: the scheduler
+// catches it at the actor's step, releases what the handler held, and the
+// other actors keep running. The dead actor handles no more messages;
+// what is sent to it is dropped. An actor that should survive a bad
+// message catches the panic in its own handler with `try`, as any code
+// does. That is the supervision Aether has today: crashes stay where they
+// happen. Nothing tells another actor that one died yet, so nothing can
+// restart it: links, monitors and supervisors are proposed in #2974 (and
+// docs/structured-concurrency.md), and are not built. Until then, do not
+// ask a dead actor: the ask waits its full timeout and returns zero.
+//
+// Run: ae run examples/02-actors/10-crash-isolation.ae
+// See: docs/actor-concurrency.md#panic-and-stack-traces
+
+message Divide {
+    a: int
+    b: int
+}
+
+message Done {}
+
+divide(a: int, b: int) -> int {
+    if b == 0 {
+        panic("division by zero")
+    }
+    return a / b
+}
+
+// No try: a zero divisor ends this actor.
+actor Fragile {
+    receive {
+        Divide(a, b) -> {
+            println("fragile: ${a} / ${b} = ${divide(a, b)}")
+        }
+    }
+}
+
+// Catches the panic itself and keeps going.
+actor Careful {
+    state handled = 0
+
+    receive {
+        Divide(a, b) -> {
+            try {
+                println("careful: ${a} / ${b} = ${divide(a, b)}")
+            } catch reason {
+                println("careful: ${a} / ${b} refused: ${reason}")
+            }
+            handled = handled + 1
+        }
+        Done -> {
+            reply handled
+        }
+    }
+}
+
+main() {
+    fragile = spawn(Fragile())
+    careful = spawn(Careful())
+
+    fragile ! Divide { a: 1, b: 0 } // the fragile actor dies here
+    wait_for_idle()
+    fragile ! Divide { a: 8, b: 2 } // dropped: nobody is there to print it
+    wait_for_idle()
+
+    careful ! Divide { a: 9, b: 3 }
+    careful ! Divide { a: 1, b: 0 }
+    careful ! Divide { a: 8, b: 2 }
+    println("careful handled ${careful ? Done {}} messages")
+}
+
+// Output:
+// careful: 9 / 3 = 3
+// careful: 1 / 0 refused: division by zero
+// careful: 8 / 2 = 4
+// careful handled 3 messages

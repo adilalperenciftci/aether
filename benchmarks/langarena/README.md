@@ -49,11 +49,11 @@ this packed-float measurement.
 
 ## Actor-parallel matmul example
 
-[`examples/actors/matmul.ae`](../../examples/actors/matmul.ae) demonstrates a
+[`actor_matmul.ae`](actor_matmul.ae) demonstrates a
 reusable pool of worker actors with typed messages and `float[]` views:
 
 ```sh
-./build/ae build examples/actors/matmul.ae -o /tmp/actor-matmul
+./build/ae build benchmarks/langarena/actor_matmul.ae -o /tmp/actor-matmul
 /tmp/actor-matmul 900 4 5
 /tmp/actor-matmul 900 8 5
 /tmp/actor-matmul 900 16 5

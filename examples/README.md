@@ -38,6 +38,22 @@ behind each step; every row below links the part it builds on.
 | [16-defer.ae](01-language/16-defer.ae) | `defer`, `defer try`, `defer catch` | [Defer](../docs/language-reference.md#defer-statement) |
 | [17-ownership.ae](01-language/17-ownership.ae) | what the compiler frees, what the program frees | [Memory management](../docs/memory-management.md) |
 
+## 2. Actors
+
+| Example | What it teaches | Reference |
+|---|---|---|
+| [01-first-actor.ae](02-actors/01-first-actor.ae) | `message`, `actor`, `receive`, `spawn`, `!`, `wait_for_idle` | [Actors](../docs/language-reference.md#actors) |
+| [02-state.ae](02-actors/02-state.ae) | state an actor keeps between messages | [State variables](../docs/language-reference.md#state-variables) |
+| [03-ask-reply.ae](02-actors/03-ask-reply.ae) | `?` and `reply`, a handle in state | [Ask pattern](../docs/language-reference.md#ask-pattern-request-reply) |
+| [04-actor-refs.ae](02-actors/04-actor-refs.ae) | `actor_ref` in messages, `self`, message order | [Sending messages](../docs/language-reference.md#sending-messages-fire-and-forget) |
+| [05-messages.ae](02-actors/05-messages.ae) | strings, arrays, sequences and handles in messages | [Messages](../docs/memory-management.md#containers-module-variables-actor-state-messages) |
+| [06-pipeline.ae](02-actors/06-pipeline.ae) | stages connected by references, items in order | [Actor runtime](../docs/actor-concurrency.md) |
+| [07-worker-pool.ae](02-actors/07-worker-pool.ae) | fan-out to workers, fan-in to a collector | [Actor runtime](../docs/actor-concurrency.md) |
+| [08-state-machine.ae](02-actors/08-state-machine.ae) | an enum as state, a transition table | [Enums](../docs/language-reference.md#enums) |
+| [09-timeouts.ae](02-actors/09-timeouts.ae) | `receive ... after`, a watchdog | [Actor timeouts](../docs/actor-concurrency.md#actor-timeouts) |
+| [10-crash-isolation.ae](02-actors/10-crash-isolation.ae) | a panic stays in its actor; supervision today | [Panics](../docs/actor-concurrency.md#panic-and-stack-traces) |
+| [11-sharded-map.ae](02-actors/11-sharded-map.ae) | keys split over owner actors instead of a lock | [Sharded actor map](../docs/design/sharded-actor-map.md) |
+
 ## Writing an example
 
 An example is one `.ae` file, or a directory when it needs more than one

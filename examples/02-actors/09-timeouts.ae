@@ -1,0 +1,47 @@
+// Timeouts: doing something when no message comes.
+//
+// `receive { ... } after N -> { ... }` runs the `after` body when the actor
+// has had nothing to handle for N milliseconds. The countdown starts each
+// time the mailbox empties, and a message that arrives stops it; it fires
+// once per quiet spell, so an actor that hears nothing more is left idle.
+// A watchdog is the natural use: beats keep it quiet, and silence raises
+// the alarm. `wait_for_idle()` also waits for an armed timeout to fire,
+// so main sees the alarm before it goes on.
+//
+// Run: ae run examples/02-actors/09-timeouts.ae
+// See: docs/actor-concurrency.md#actor-timeouts
+
+message Beat {
+    from: string
+}
+
+actor Watchdog {
+    state beats = 0
+    state alarms = 0
+
+    receive {
+        Beat(from) -> {
+            beats = beats + 1
+            println("beat ${beats} from ${from}")
+        }
+    } after 100 -> {
+        alarms = alarms + 1
+        println("alarm ${alarms}: no beat for 100 ms")
+    }
+}
+
+main() {
+    w = spawn(Watchdog())
+    w ! Beat { from: "worker-1" }
+    wait_for_idle() // the beat, then 100 ms of silence: the first alarm
+    w ! Beat { from: "worker-2" }
+    wait_for_idle() // the beat stopped the countdown; silence again: a second alarm
+    println("main: done")
+}
+
+// Output:
+// beat 1 from worker-1
+// alarm 1: no beat for 100 ms
+// beat 2 from worker-2
+// alarm 2: no beat for 100 ms
+// main: done

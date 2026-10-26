@@ -6,7 +6,7 @@ ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 export AETHER_HOME="$ROOT"
-"$ROOT/build/ae" build "$ROOT/examples/actors/matmul.ae" -o "$work/matmul"
+"$ROOT/build/ae" build "$ROOT/benchmarks/langarena/actor_matmul.ae" -o "$work/matmul"
 for workers in 1 4 8 16 47; do
     "$work/matmul" 31 "$workers" 3 > "$work/result"
     grep -q '^PASS: every output cell matches the serial reference$' "$work/result"

@@ -3604,10 +3604,10 @@ ci-coop: clean compiler ae
 	           tests/syntax/test_coop_ask_reply.ae \
 	           tests/syntax/test_coop_self_send.ae \
 	           tests/syntax/test_coop_stubs.ae \
-	           examples/actors/counter.ae \
-	           examples/actors/ping-pong.ae \
-	           examples/actors/ask-pattern.ae \
-	           examples/actors/cooperative-demo.ae \
+	           examples/02-actors/02-state.ae \
+	           examples/02-actors/04-actor-refs.ae \
+	           examples/02-actors/03-ask-reply.ae \
+	           examples/02-actors/07-worker-pool.ae \
 	           examples/01-language/01-hello.ae; do \
 		printf "  %-50s " "$$src"; \
 		if AETHER_HOME="" ./$(BUILD_DIR)/ae run "$$src" >/tmp/ae_coop_out.txt 2>&1; then \
@@ -3646,7 +3646,7 @@ ci-coop: clean compiler ae
 # three steps share. Each step used to name its own files, and when hello
 # moved to examples/01-language/01-hello.ae the first step wrote
 # 01-hello.c while the second still compiled hello.c.
-WASM_CI_PROGRAMS := examples/01-language/01-hello.ae examples/actors/counter.ae \
+WASM_CI_PROGRAMS := examples/01-language/01-hello.ae examples/02-actors/02-state.ae \
                     tests/syntax/test_platform_caps.ae tests/syntax/test_coop_chain.ae
 # The runtime those programs link, the list ci-esp32's CMakeLists reads too.
 COOP_RUNTIME_SOURCES := $(shell sed -e '/^\#/d' runtime/coop_runtime_sources.txt)
@@ -3767,7 +3767,7 @@ ci-embedded: clean compiler
 	@echo "[2/2] Generating and syntax-checking example programs..."
 	@mkdir -p $(BUILD_DIR)/embedded
 	@pass=0; fail=0; \
-	for src in examples/01-language/01-hello.ae examples/actors/counter.ae; do \
+	for src in examples/01-language/01-hello.ae examples/02-actors/02-state.ae; do \
 		name=$$(basename $$src .ae); \
 		printf "  %-55s " "$$name → syntax-check"; \
 		./$(BUILD_DIR)/aetherc "$$src" "$(BUILD_DIR)/embedded/$$name.c" 2>/dev/null && \

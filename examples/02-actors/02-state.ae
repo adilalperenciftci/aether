@@ -1,0 +1,60 @@
+// Actor state: what an actor remembers between messages.
+//
+// `state name = value` declares a field each actor of that kind owns, set
+// when it is spawned. A handler reads and writes it like a local, and the
+// next message sees what the last one left. Nothing outside the actor
+// touches it: other code sends a message and the actor changes its own
+// state, one message at a time, so there is no lock to take. Two actors of
+// one kind each have their own.
+//
+// Run: ae run examples/02-actors/02-state.ae
+// See: docs/language-reference.md#state-variables
+
+message Increment {
+    amount: int
+}
+
+message Show {}
+
+message Name {
+    text: string
+}
+
+actor Counter {
+    state label = "counter"
+    state count = 0
+    state changes = 0
+
+    receive {
+        Increment(amount) -> {
+            count = count + amount
+            changes = changes + 1
+        }
+        Name(text) -> {
+            label = text
+        }
+        Show -> {
+            println("${label}: Current value: ${count} after ${changes} changes")
+        }
+    }
+}
+
+main() {
+    c = spawn(Counter())
+    c ! Increment { amount: 5 }
+    c ! Increment { amount: 3 }
+    c ! Increment { amount: 10 }
+    c ! Show {}
+    wait_for_idle()
+
+    // A second counter starts from its own zero.
+    other = spawn(Counter())
+    other ! Name { text: "other" }
+    other ! Increment { amount: 1 }
+    other ! Show {}
+    wait_for_idle()
+}
+
+// Output:
+// counter: Current value: 18 after 3 changes
+// other: Current value: 1 after 1 changes

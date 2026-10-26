@@ -1,0 +1,69 @@
+// Ask and reply: a question to an actor, and its answer.
+//
+// `ref ? Message { ... }` sends and waits for the handler's `reply`. A
+// handler replies with a value (`reply count`) or with a message whose
+// first field is the answer (`reply Found { value: v }`); the asker gets a
+// value of that type, inferred from the handler. Sends from main and asks
+// from main reach the actor in the order they were written, so an ask sees
+// every message sent before it. A handler that never replies leaves the
+// asker waiting until the ask times out (5 seconds), and it then gets the
+// type's zero. The map in the store's state is a handle: the actor frees
+// it in the handler that closes it.
+//
+// Run: ae run examples/02-actors/03-ask-reply.ae
+// See: docs/language-reference.md#ask-pattern-request-reply
+
+import std.map
+
+message Put {
+    key: string
+    value: string
+}
+
+message Get {
+    key: string
+}
+
+message Count {}
+
+message Found {
+    value: string
+}
+
+message Close {}
+
+actor Store {
+    state entries = map.new()
+
+    receive {
+        Put(key, value) -> {
+            map.put(entries, key, value)
+        }
+        Get(key) -> {
+            v, _ = map.get_string(entries, key)
+            reply Found { value: v }
+        }
+        Count -> {
+            reply map.size(entries)
+        }
+        Close -> {
+            map.free(entries) // a handle in state is freed by the actor
+        }
+    }
+}
+
+main() {
+    store = spawn(Store())
+    store ! Put { key: "lang", value: "Aether" }
+    store ! Put { key: "year", value: "2026" }
+
+    lang = store ? Get { key: "lang" }
+    missing = store ? Get { key: "colour" }
+    n = store ? Count {}
+    println("lang=${lang} colour=[${missing}] entries=${n}")
+    store ! Close {}
+    wait_for_idle()
+}
+
+// Output:
+// lang=Aether colour=[] entries=2

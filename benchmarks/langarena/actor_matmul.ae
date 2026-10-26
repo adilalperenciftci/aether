@@ -1,5 +1,5 @@
 // Actor-parallel packed-float matmul (#1986).
-// ae run examples/actors/matmul.ae -- 256 4 3
+// ae run benchmarks/langarena/actor_matmul.ae -- 256 4 3
 // Arguments: matrix dimension, worker actors, repetitions.
 import std.floatarr
 import std.list

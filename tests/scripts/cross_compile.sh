@@ -155,8 +155,8 @@ fi
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 HELLO="examples/01-language/01-hello.ae"
-ACTOR="examples/actors/counter.ae"
-HTTP="examples/actors/site-poller.ae"
+ACTOR="examples/02-actors/02-state.ae"
+HTTP="examples/stdlib/http-client.ae"
 
 echo "Cross-compilation targets ($(zig version)):"
 

@@ -1,0 +1,97 @@
+// A worker pool: fan out jobs to several actors, fan the results back in.
+//
+// Main spawns a few workers and deals the jobs out round-robin; each job
+// says where its result goes. The workers run in parallel on the cores
+// the scheduler has, so results reach the collector in whatever order the
+// workers finish. The collector files each result under its job number,
+// so the report it prints is the same on every run however the work
+// interleaved. Here each job counts the primes below a bound.
+//
+// Run: ae run examples/02-actors/07-worker-pool.ae
+// See: docs/actor-concurrency.md
+
+const JOBS = 8
+const WORKERS = 3
+
+message Job {
+    id: int
+    bound: int
+    report_to: actor_ref
+}
+
+message Result {
+    id: int
+    bound: int
+    primes: int
+}
+
+message Report {}
+
+count_primes(bound: int) -> int {
+    count = 0
+    for n in 2..bound {
+        prime = true
+        d = 2
+        while d * d <= n {
+            if n % d == 0 {
+                prime = false
+                break
+            }
+            d = d + 1
+        }
+        if prime {
+            count = count + 1
+        }
+    }
+    return count
+}
+
+actor Worker {
+    receive {
+        Job(id, bound, report_to) -> {
+            report_to ! Result { id: id, bound: bound, primes: count_primes(bound) }
+        }
+    }
+}
+
+actor Collector {
+    state int[8] bounds
+    state int[8] primes
+    state received = 0
+
+    receive {
+        Result(id, bound, primes: count) -> {
+            bounds[id] = bound
+            primes[id] = count
+            received = received + 1
+        }
+        Report -> {
+            for i in 0..received {
+                println("job ${i}: ${primes[i]} primes below ${bounds[i]}")
+            }
+            reply received
+        }
+    }
+}
+
+main() {
+    collector = spawn(Collector())
+    workers = [spawn(Worker()), spawn(Worker()), spawn(Worker())]
+    for i in 0..JOBS {
+        workers[i % WORKERS] ! Job { id: i, bound: (i + 1) * 1000, report_to: collector }
+    }
+    wait_for_idle()
+    done = collector ? Report {}
+    println("${done} jobs on ${WORKERS} workers")
+}
+
+// Output:
+// job 0: 168 primes below 1000
+// job 1: 303 primes below 2000
+// job 2: 430 primes below 3000
+// job 3: 550 primes below 4000
+// job 4: 669 primes below 5000
+// job 5: 783 primes below 6000
+// job 6: 900 primes below 7000
+// job 7: 1007 primes below 8000
+// 8 jobs on 3 workers
