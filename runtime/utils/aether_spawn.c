@@ -77,12 +77,15 @@ char** aether_spawn_environ(void) {
 #endif
 }
 
-/* Is `entry` ("KEY=..." from an env) one of the keys `set` gives? */
+/* Is `entry` ("KEY=..." from an env) one of the keys `set` gives? The whole
+ * name before the `=` on both sides, so `PATH` is not `PATHEXT`. */
 static int aether_spawn_env_has(const char* entry, const char* const* set, int nset) {
+    const char* eeq = strchr(entry, '=');
+    size_t elen = eeq ? (size_t)(eeq - entry) : strlen(entry);
     for (int i = 0; i < nset; i++) {
         const char* eq = strchr(set[i], '=');
-        size_t klen = eq ? (size_t)(eq - set[i]) + 1 : strlen(set[i]);
-        if (strncmp(entry, set[i], klen) == 0) return 1;
+        size_t klen = eq ? (size_t)(eq - set[i]) : strlen(set[i]);
+        if (klen == elen && strncmp(entry, set[i], klen) == 0) return 1;
     }
     return 0;
 }

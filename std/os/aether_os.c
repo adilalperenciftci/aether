@@ -1853,17 +1853,17 @@ _tuple_string_int_string os_run_capture_status_raw(const char* prog, void* argv_
 typedef struct { int _0; int _1; const char* _2; } _tuple_int_int_string;
 typedef struct { int _0; int _1; int _2; const char* _3; } _tuple_int_int_int_string;
 
-/* os.run_pipe's child env (#3200): this process's environ without any
- * AETHER_IPC_FD of its own, plus AETHER_IPC_FD=3, which tells the child
- * that fd 3 carries the parent channel (its ipc.parent_channel() reads
- * it). Built in the parent: the child used to call setenv between fork and
- * exec, which mallocs and takes the environment's lock, and a lock another
- * thread held at the fork is never released in the child. The array is
- * malloc'd; its strings are environ's and a literal. NULL when malloc
- * fails. */
-static char** aether_ipc_env(void) {
+/* os.run_pipe's child env (#3200): `base` (the env the caller gave, or this
+ * process's environ when it gave none) without any AETHER_IPC_FD of its
+ * own, plus AETHER_IPC_FD=3, which tells the child that fd 3 carries the
+ * parent channel (its ipc.parent_channel() reads it). Built in the parent:
+ * the child used to call setenv between fork and exec, which mallocs and
+ * takes the environment's lock, and a lock another thread held at the fork
+ * is never released in the child. The array is malloc'd; its strings are
+ * the base's and a literal. NULL when malloc fails. */
+static char** aether_ipc_env(char** base) {
     static const char* const ipc[] = { "AETHER_IPC_FD=3" };
-    return aether_spawn_env(aether_environ, ipc, 1);
+    return aether_spawn_env(base ? base : aether_environ, ipc, 1);
 }
 
 /* Spawn child with a back-channel pipe at fd 3 (write end), set
@@ -1894,10 +1894,6 @@ _tuple_int_int_string os_run_pipe_raw(const char* prog, void* argv_list, void* e
         return out;
     }
 
-    if (env_list) {
-        out._2 = "explicit env unsupported";
-        return out;
-    }
 
     int pipefd[2];
     if (aether_pipe_cloexec(pipefd) != 0) {
@@ -1922,9 +1918,11 @@ _tuple_int_int_string os_run_pipe_raw(const char* prog, void* argv_list, void* e
         out._2 = xerr;
         return out;
     }
-    /* No explicit env reaches here, so x.envp is NULL: the child's env is
-     * environ with AETHER_IPC_FD=3. */
-    x.envp = aether_ipc_env();
+    /* The child's env: the one given, or environ, with AETHER_IPC_FD=3. The
+     * spliced array borrows the given one's strings, so only its array goes. */
+    char** spliced = aether_ipc_env(x.envp);
+    free(x.envp);
+    x.envp = spliced;
     if (!x.envp) {
         close(pipefd[0]);
         close(pipefd[1]);

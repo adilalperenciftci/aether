@@ -22,9 +22,9 @@
 //      exited 127 is exit 127 with no err (#3170). Both used to read
 //      as exit 127.
 //
-//   7. An explicit env is refused before the fork: the child's
-//      AETHER_IPC_FD would have to be in it. It used to make the child
-//      exit 127 without running the program.
+//   7. An explicit env is the child's, with AETHER_IPC_FD=3 in place of
+//      the one it gives. It used to make the child exit 127 without
+//      running the program, and then was refused.
 //
 //   8. With an AETHER_IPC_FD of this process's own, the child's is still
 //      3: the parent builds the child's env, environ without its own entry
@@ -219,17 +219,21 @@ main() {
         }
     }
 
-    // Case 7 — an explicit env is refused before the fork.
+    // Case 7: an explicit env is the child's, with AETHER_IPC_FD=3 in place
+    // of one the env gives. It was refused ("explicit env unsupported").
     {
         argv7 = list.new()
+        list.add(argv7, "-c")
+        list.add(argv7, "printf '%s %s' \"$A\" \"$AETHER_IPC_FD\" >&3")
         env7 = list.new()
         list.add(env7, "A=1")
-        fd7, pid7, err7 = os.run_pipe(child_bin, argv7, env7)
-        if fd7 != -1 || pid7 != -1 || err7 != "explicit env unsupported" {
-            println("  [7] FAIL run_pipe with env: (${fd7}, ${pid7}, '${err7}'), expected (-1, -1, 'explicit env unsupported')")
+        list.add(env7, "AETHER_IPC_FD=9")
+        p7, code7, err7 = os.run_pipe_drain_and_wait("/bin/sh", argv7, env7)
+        if err7 != "" || code7 != 0 || p7 != "1 3" {
+            println("  [7] FAIL run_pipe with env: payload='${p7}' exit=${code7} err='${err7}', expected '1 3', 0 and no err")
             failed = failed + 1
         } else {
-            println("  [7] PASS run_pipe with an explicit env → refused, no child")
+            println("  [7] PASS run_pipe with an explicit env → the child has it, AETHER_IPC_FD=3")
             passed = passed + 1
         }
     }

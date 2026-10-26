@@ -102,9 +102,9 @@ extern os_run_capture_status_raw(prog: string, argv: ptr, env: ptr) -> (string @
 // the cross-platform spawn / wait / wait_any trio below.
 //
 // A program that cannot start is (-1, -1, reason) with no child to reap,
-// "program not found" for a missing one, on every platform (#3170). On
-// POSIX an explicit env is refused with "explicit env unsupported": the
-// child's AETHER_IPC_FD would have to be spliced into it.
+// "program not found" for a missing one, on every platform (#3170). An
+// explicit env is the child's whole environment, with AETHER_IPC_FD=3 in
+// place of any it gives.
 extern os_run_pipe_raw(prog: string, argv: ptr, env: ptr) -> (int, int, string)
 
 // Wait for a child to exit and reap it. Companion to
