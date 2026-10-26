@@ -401,6 +401,14 @@ c_header(defs: CDefs, header: string, path: string, dir: string, line: int) {
     if name == "" || ret == "" {
         return
     }
+    // A C keyword is no function, whatever the text before it looked like:
+    // `else if (x) {` read as a definition named `if` when a line ending or a
+    // macro left the scan at file scope, and the duplicate check then found
+    // "if" in two directories (Windows CI, std/net and std/audio).
+    if name == "if" || name == "for" || name == "while" || name == "switch" || name == "return" ||
+    name == "sizeof" || name == "do" || name == "else" || name == "case" || name == "defined" {
+        return
+    }
     rw = " ${words_of(ret)} "
     if string.contains(rw, " static ") == 1 || string.contains(rw, " typedef ") == 1 {
         return
@@ -463,6 +471,13 @@ scan_c(defs: CDefs, path: string, dir: string) {
                 if d == 92 && i + 1 < n && string.char_at_n(text, n, i + 1) == 10 {
                     line = line + 1
                     i = i + 2
+                } else if d == 92 && i + 2 < n && string.char_at_n(text, n, i + 1) == 13 &&
+                string.char_at_n(text, n, i + 2) == 10 {
+                    // A CRLF checkout (Windows CI): the continuation is
+                    // `\` then CR LF, and missing it read a multi-line
+                    // #define's body as code.
+                    line = line + 1
+                    i = i + 3
                 } else if d == 10 {
                     stop = 1
                 } else {
