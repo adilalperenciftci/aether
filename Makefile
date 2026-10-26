@@ -3616,6 +3616,13 @@ ci-coop: clean compiler ae
 
 # WASM cross-compilation test (requires Emscripten — use Docker or local emsdk)
 # Builds native aetherc, generates .c, then compiles with emcc
+# The programs ci-wasm takes through aetherc, emcc and node: one list the
+# three steps share. Each step used to name its own files, and when hello
+# moved to examples/01-language/01-hello.ae the first step wrote
+# 01-hello.c while the second still compiled hello.c.
+WASM_CI_PROGRAMS := examples/01-language/01-hello.ae examples/actors/counter.ae \
+                    tests/syntax/test_platform_caps.ae tests/syntax/test_coop_chain.ae
+
 ci-wasm: clean compiler ae
 	@echo "==================================="
 	@echo "  WebAssembly (Emscripten) CI"
@@ -3624,10 +3631,7 @@ ci-wasm: clean compiler ae
 	@echo "[1/3] Generating C from test programs..."
 	@mkdir -p $(BUILD_DIR)/wasm
 	@pass=0; fail=0; \
-	for src in examples/01-language/01-hello.ae \
-	           examples/actors/counter.ae \
-	           tests/syntax/test_platform_caps.ae \
-	           tests/syntax/test_coop_chain.ae; do \
+	for src in $(WASM_CI_PROGRAMS); do \
 		name=$$(basename $$src .ae); \
 		printf "  %-40s " "$$name → .c"; \
 		if ./$(BUILD_DIR)/aetherc "$$src" "$(BUILD_DIR)/wasm/$$name.c" 2>/tmp/ae_wasm_err.txt; then \
@@ -3669,11 +3673,10 @@ ci-wasm: clean compiler ae
 		std/quote/aether_quote.c \
 		std/collections/aether_set.c std/collections/aether_pqueue.c std/collections/aether_intarr.c std/collections/aether_longarr.c std/collections/aether_bits.c \
 		runtime/sandbox/capsicum_autosandbox.c"; \
-	for src in $(BUILD_DIR)/wasm/hello.c $(BUILD_DIR)/wasm/counter.c $(BUILD_DIR)/wasm/test_platform_caps.c \
-	           $(BUILD_DIR)/wasm/test_coop_chain.c; do \
-		name=$$(basename $$src .c); \
+	for src in $(WASM_CI_PROGRAMS); do \
+		name=$$(basename $$src .ae); \
 		printf "  %-40s " "emcc $$name"; \
-		if emcc $$WASM_CFLAGS $$src $$RUNTIME_FILES \
+		if emcc $$WASM_CFLAGS "$(BUILD_DIR)/wasm/$$name.c" $$RUNTIME_FILES \
 			-o "$(BUILD_DIR)/wasm/$$name.js" -lm 2>/tmp/emcc_err.txt; then \
 			echo "OK"; \
 			pass=$$((pass + 1)); \
@@ -3688,11 +3691,10 @@ ci-wasm: clean compiler ae
 	@echo ""
 	@echo "[3/3] Running WASM programs with Node.js..."
 	@pass=0; fail=0; \
-	for js in $(BUILD_DIR)/wasm/hello.js $(BUILD_DIR)/wasm/counter.js $(BUILD_DIR)/wasm/test_platform_caps.js \
-	          $(BUILD_DIR)/wasm/test_coop_chain.js; do \
-		name=$$(basename $$js .js); \
+	for src in $(WASM_CI_PROGRAMS); do \
+		name=$$(basename $$src .ae); \
 		printf "  %-40s " "node $$name"; \
-		if node "$$js" >/tmp/wasm_out.txt 2>&1; then \
+		if node "$(BUILD_DIR)/wasm/$$name.js" >/tmp/wasm_out.txt 2>&1; then \
 			echo "PASS"; \
 			pass=$$((pass + 1)); \
 		else \
