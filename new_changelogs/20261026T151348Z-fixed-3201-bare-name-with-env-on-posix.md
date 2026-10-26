@@ -5,4 +5,6 @@
   `os.spawn_proc_to` ran it with this process's environment instead of the
   one given. The parent now resolves the program, as Windows does, and
   every child execs it with `execve` and its env, calling nothing between
-  fork and exec that is not async-signal-safe (#3201).
+  fork and exec that is not async-signal-safe; a child given no env reads
+  this process's environment after the fork, so a `setenv` on another
+  thread before it cannot leave it a stale array (#3201).

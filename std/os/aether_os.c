@@ -316,7 +316,7 @@ static FILE* aether_os_shell_open(const char* cmd, pid_t* out_pid) {
         return NULL;
     }
     char* sh_argv[] = { (char*)"sh", (char*)"-c", (char*)"--", (char*)cmd, NULL };
-    char** sh_env = aether_environ;
+    /* environ is read in the child, after the fork: see aether_child_exec. */
     pid_t pid = aether_fork();
     if (pid < 0) {
         close(pipefd[0]);
@@ -331,7 +331,7 @@ static FILE* aether_os_shell_open(const char* cmd, pid_t* out_pid) {
         int out_fd = aether_child_lift_fd(pipefd[1]);
         if (aether_child_fd(out_fd, 1) < 0) aether_child_exec_failed(ef);
         close(out_fd);
-        execve(AETHER_OS_SHELL, sh_argv, sh_env);
+        execve(AETHER_OS_SHELL, sh_argv, aether_environ);
         aether_child_exec_failed(ef);
     }
     close(pipefd[1]);
@@ -395,7 +395,7 @@ static int aether_os_system_posix(const char* cmd) {
     dfl.sa_handler = SIG_DFL;
     sigemptyset(&dfl.sa_mask);
     char* sh_argv[] = { (char*)"sh", (char*)"-c", (char*)"--", (char*)cmd, NULL };
-    char** sh_env = aether_environ;
+    /* environ is read in the child, after the fork: see aether_child_exec. */
     pid_t pid = aether_fork();
     if (pid == 0) {
         if (!intr_ignored) sigaction(SIGINT, &dfl, NULL);
@@ -403,7 +403,7 @@ static int aether_os_system_posix(const char* cmd) {
         sigprocmask(SIG_SETMASK, &omask, NULL);
         close(errp[0]);
         int ef = aether_child_lift_fd(errp[1]);
-        execve(AETHER_OS_SHELL, sh_argv, sh_env);
+        execve(AETHER_OS_SHELL, sh_argv, aether_environ);
         aether_child_exec_failed(ef);
     }
     int status = -1;
@@ -1362,7 +1362,11 @@ typedef struct {
     char** argv;     /* build_argv_array */
     char** sh_argv;  /* /bin/sh, path, argv[1..]: for a file with no #! */
     char** envp;     /* build_envp_array: the explicit env, or NULL */
-    char** env;      /* what execve gets: envp, or this process's environ */
+    char** env;      /* what execve gets: envp, or NULL for this process's
+                      * environ, which the child reads after the fork: taken
+                      * in the parent, a setenv on another thread before the
+                      * fork could move the array and leave the pointer
+                      * dangling */
 } AetherExec;
 
 /* NULL when `x` is ready, else the err the spawn reports. */
@@ -1392,7 +1396,7 @@ static const char* aether_exec_prepare(AetherExec* x, const char* prog,
         memset(x, 0, sizeof *x);
         return "env build failed";
     }
-    x->env = x->envp ? x->envp : aether_environ;
+    x->env = x->envp;
     return NULL;
 }
 
@@ -1410,9 +1414,10 @@ static void aether_exec_release(AetherExec* x) {
  * neither could start, errno set: "not an executable" then means /bin/sh
  * could not run it either. Only execve, which is async-signal-safe. */
 static void aether_child_exec(const AetherExec* x) {
-    execve(x->path, x->argv, x->env);
+    char** env = x->env ? x->env : aether_environ;
+    execve(x->path, x->argv, env);
     if (errno != ENOEXEC) return;
-    execve(AETHER_OS_SHELL, x->sh_argv, x->env);
+    execve(AETHER_OS_SHELL, x->sh_argv, env);
     errno = ENOEXEC;
 }
 
