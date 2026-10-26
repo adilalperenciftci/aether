@@ -140,8 +140,8 @@ NUMA-aware allocation is active in the multicore scheduler.
 No changes needed. NUMA support is automatically included:
 
 ```bash
-make test     # Tests include NUMA-aware scheduler
-make examples # Benchmarks use NUMA allocation
+make test        # Tests include NUMA-aware scheduler
+make benchmark   # Benchmarks use NUMA allocation
 ```
 
 ## Linux Build Note
@@ -197,9 +197,9 @@ All tests pass with NUMA support:
 make test
 ```
 
-The multicore benchmarks under `make examples` run through the NUMA-aware allocation path (they fall back to `malloc` unless a libnuma multi-node build is used):
+The multicore benchmarks (`make benchmark`) run through the NUMA-aware allocation path (they fall back to `malloc` unless a libnuma multi-node build is used):
 ```bash
-make examples
+make benchmark
 ```
 
 ## Future Enhancements

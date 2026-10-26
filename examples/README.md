@@ -132,9 +132,12 @@ An example is one `.ae` file, or a directory when it needs more than one
 (a module, a C file). Its header comment says what it teaches and holds:
 
 - `// Run: <command>`, the command a reader types from the repository
-  root: `ae run <file> [-- args]`, another `ae` command, or `sh <script>`.
+  root: `ae run <file or project> [--lib dir] [-- args]`, another `ae`
+  command, or `sh <script>`.
 - `// Needs: <what>`, when it cannot run unattended: a server that waits
-  for requests, a terminal, a platform, a library. CI builds it.
+  for requests, a terminal, a platform, a library. CI builds it, or
+  type-checks it when it imports a contrib bridge, which only that
+  bridge's job builds.
 - `// See: <doc>`, the part of the documentation it builds on.
 
 A file that belongs to another example (a module it imports) says
@@ -146,8 +149,9 @@ runs unattended ends with its output, exactly:
 // Hello, Aether!
 ```
 
-`make check-examples` builds every example (a warning fails it), runs the
-ones with an `Output:` block and compares, and checks that this README
-links every example and nothing else. Add the new example's row here, in
-the place a reader should meet it. The checker is
-[tests/examples/check.ae](../tests/examples/check.ae).
+`make check-examples` builds every example run with `ae run` (a warning
+fails it), runs the ones with an `Output:` block and compares, with the
+tree's own `ae` first on PATH, and checks that this README links every
+example and nothing else, and that the directory holds only source. Add
+the new example's row here, in the place a reader should meet it. The
+checker is [tests/examples/check.ae](../tests/examples/check.ae).

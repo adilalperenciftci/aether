@@ -3,13 +3,22 @@
   where to start, two styles of the language (`println("...");` and
   `if (x > y)` beside the current style), memory advice the ownership model
   retired ("manual mode is the default", `string.new` and `release` by
-  hand) and examples that did not do what their names said; nothing checked
-  what any of them printed. `examples/01-language/` is now a numbered tour
-  from the first program to ownership, each file one idea in current style,
-  starting with what it teaches and how to run it and ending with the exact
-  output it prints, and examples/README.md is the path, one row per example
-  with a link into the reference. `make check-examples` (an Aether checker,
-  tests/examples/check.ae) builds every example, fails on a warning, runs
-  each one that ends in an `// Output:` block and compares, requires a
-  `// Needs:` line on the ones that cannot run unattended, and checks the
-  README links every example (#3105).
+  hand), examples that did not do what their names said, a stray
+  executable, and a sandbox demo whose child could never find the sandbox
+  library. Nothing checked what any of them printed. It is seven numbered
+  sections now: the language, actors, the standard library, C and other
+  languages, containing code, the tools, and whole programs. Each file is
+  one idea in current style, starts with what it teaches and how to run it,
+  and ends with the exact output it prints, and examples/README.md is the
+  path, one row per example with a link into the reference. `make
+  check-examples` (an Aether checker, tests/examples/check.ae) runs in
+  `make ci` in place of the old build-only step, and `make examples` is it.
+  It builds every example, fails on a warning (coded or not), type-checks
+  the ones that import a contrib bridge, and runs each one that ends in an
+  `// Output:` block, with the tree's own `ae` first on PATH, and compares
+  what it prints. It also requires a `// Needs:` line on the ones that
+  cannot run unattended, and checks that the README links every example and
+  the directory holds only source. `ae examples` follows the same headers:
+  it builds the programs and skips what is run another way, and it names
+  each output by its path, so two `main.ae` files no longer overwrite each
+  other (#3105).

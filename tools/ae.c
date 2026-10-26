@@ -7020,7 +7020,10 @@ static int print_command_help(const char* cmd) {
         printf("  clear  Remove every cached build\n");
     } else if (strcmp(cmd, "examples") == 0) {
         printf("Usage: ae examples [dir]\n");
-        printf("  Build every .ae file under dir (default: examples) into build/examples/.\n");
+        printf("  Build every example program under dir (default: examples) into build/examples/:\n");
+        printf("  a file whose header runs it with `ae run <file>`, or one with no header. A\n");
+        printf("  module of another example, or one run another way, is skipped; `make\n");
+        printf("  check-examples` runs those.\n");
     } else if (strcmp(cmd, "repl") == 0) {
         printf("Usage: ae repl\n");
         printf("  Start the interactive REPL.\n");
@@ -11777,6 +11780,103 @@ write_toml:
     return 0;
 }
 
+/* What an example's header says about building it (#3105). The examples
+ * say how each one runs (examples/README.md, "Writing an example"):
+ * `// Run: ae run <this file> [-- args]` is a program `ae examples` builds;
+ * `// Part of: <file>` is a module of another example; any other Run (`ae
+ * help`, `sh script`, a project directory, `--lib`) is run that way, by
+ * `make check-examples`. A file with no header at all, in a directory of
+ * plain programs, is built as it always was. `how` gets the Run line. */
+enum { AE_EXAMPLE_BUILD, AE_EXAMPLE_PART, AE_EXAMPLE_OTHER };
+
+static void ae_slashes_forward(char* p) {
+    for (; *p; p++) if (*p == '\\') *p = '/';
+}
+
+static int example_kind(const char* src, char* how, size_t how_size) {
+    how[0] = '\0';
+    FILE* f = fopen(src, "r");
+    if (!f) return AE_EXAMPLE_BUILD;   /* the build says why it cannot read it */
+    char line[1024];
+    char run[1024] = "";
+    int part = 0, in_header = 1, contrib = 0;
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (line[0] == '\0') continue;
+        if (in_header && strncmp(line, "//", 2) != 0) in_header = 0;   /* the header ends */
+        if (in_header) {
+            if (strncmp(line, "// Part of:", 11) == 0) part = 1;
+            if (strncmp(line, "// Run: ", 8) == 0 && !run[0]) snprintf(run, sizeof(run), "%s", line + 8);
+        } else if (strncmp(line, "import contrib.", 15) == 0) {
+            contrib = 1;
+        }
+    }
+    fclose(f);
+    if (part) return AE_EXAMPLE_PART;
+    /* A contrib bridge's archive comes from `make contrib`, and the bridge's
+     * own job builds the examples that import one. */
+    if (contrib) {
+        snprintf(how, how_size, "%s, with its contrib bridge built", run[0] ? run : "ae run");
+        return AE_EXAMPLE_OTHER;
+    }
+    if (!run[0]) return AE_EXAMPLE_BUILD;
+    snprintf(how, how_size, "%s", run);
+    if (strncmp(run, "ae run ", 7) != 0) return AE_EXAMPLE_OTHER;
+    /* The file run, and nothing after it but the program's own `--` args. */
+    char target[1024];
+    const char* t = run + 7;
+    size_t len = strcspn(t, " ");
+    if (len == 0 || len >= sizeof(target)) return AE_EXAMPLE_OTHER;
+    memcpy(target, t, len);
+    target[len] = '\0';
+    const char* rest = t + len;
+    while (*rest == ' ') rest++;
+    if (*rest && strncmp(rest, "--", 2) != 0) return AE_EXAMPLE_OTHER;
+    if (rest[0] == '-' && rest[1] == '-' && rest[2] != '\0' && rest[2] != ' ') return AE_EXAMPLE_OTHER;
+    char me[2048];
+    snprintf(me, sizeof(me), "%s", src);
+    ae_slashes_forward(me);
+    ae_slashes_forward(target);
+    size_t ml = strlen(me), tl = strlen(target);
+    int same = ml >= tl && strcmp(me + ml - tl, target) == 0 &&
+               (ml == tl || me[ml - tl - 1] == '/');
+    return same ? AE_EXAMPLE_BUILD : AE_EXAMPLE_OTHER;
+}
+
+/* The output name of an example: its path under the examples directory with
+ * the slashes as underscores, so examples/01-language/01-hello.ae and two
+ * main.ae files in different directories each get a name of their own (the
+ * file's base name alone made them overwrite each other). */
+static char* example_output_name(const char* src, const char* examples_dir) {
+    char* p = ae_path_printf("%s", src);
+    char* dir = ae_path_printf("%s", examples_dir);
+    ae_slashes_forward(p);
+    ae_slashes_forward(dir);
+    size_t dl = strlen(dir);
+    while (dl > 0 && dir[dl - 1] == '/') dir[--dl] = '\0';
+    const char* rel = p;
+    if (dl > 0 && strncmp(p, dir, dl) == 0 && p[dl] == '/') {
+        rel = p + dl + 1;
+    } else {
+        /* An absolute listing (Windows `dir /s`): after the directory's own
+         * name, the last time it appears. */
+        const char* base = strrchr(dir, '/');
+        base = base ? base + 1 : dir;
+        char* marker = ae_path_printf("/%s/", base);
+        const char* at = NULL;
+        for (const char* q = strstr(p, marker); q; q = strstr(q + 1, marker)) at = q;
+        if (at) rel = at + strlen(marker);
+        free(marker);
+    }
+    char* name = ae_path_printf("%s", rel);
+    for (char* q = name; *q; q++) if (*q == '/') *q = '_';
+    char* dot = strrchr(name, '.');
+    if (dot && strcmp(dot, ".ae") == 0) *dot = '\0';
+    free(p);
+    free(dir);
+    return name;
+}
+
 static int cmd_examples(int argc, char** argv) {
     const char* examples_dir = "examples";
     if (argc > 0 && argv[0][0] != '-') {
@@ -11838,12 +11938,22 @@ static int cmd_examples(int argc, char** argv) {
             continue;
         }
 
-        const char* slash = strrchr(src, '/');
-        if (!slash) slash = strrchr(src, '\\');
-        const char* name = slash ? slash + 1 : src;
-        char* base = ae_path_printf("%s", name);
-        char* dot = strrchr(base, '.');
-        if (dot) *dot = '\0';
+        /* #3105: what the example's header says. A module of another
+         * example is not built alone; one run another way is said so and
+         * left to `make check-examples`. */
+        char how[1024];
+        int kind = example_kind(src, how, sizeof(how));
+        if (kind == AE_EXAMPLE_PART) {
+            skipped++;
+            continue;
+        }
+        char* base = example_output_name(src, examples_dir);
+        if (kind == AE_EXAMPLE_OTHER) {
+            printf("  %-30s SKIP (run as: %s)\n", base, how);
+            free(base);
+            skipped++;
+            continue;
+        }
 
         printf("  %-30s ", base);
         fflush(stdout);

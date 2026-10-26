@@ -1,4 +1,4 @@
-.PHONY: all clean test compiler examples examples-run ci ci-sweep
+.PHONY: all clean test compiler examples ci ci-sweep
 
 # Pin the default goal to `all` regardless of rule order. Without this, the
 # first FILE-target rule defined becomes the default goal — and the generated
@@ -1822,79 +1822,12 @@ benchmark: benchmark-results
 	@echo ""
 	@cd benchmarks/cross-language/visualize && ./server
 
-# Builds every example aetherc and the C compiler can build alone. A file
-# that is part of another example, one run by a script or another ae
-# command, one run as a project directory or with --lib, and one that
-# imports a contrib bridge (built only with that bridge) are left to the
-# checker, tests/examples/check.ae.
-ifdef WINDOWS_NATIVE
-examples: compiler ae
-	@echo ===================================
-	@echo   Building Aether Examples
-	@echo ===================================
-	@.\build\ae.exe examples
-else
-examples: compiler ae stdlib
-	@echo "==================================="
-	@echo "  Building Aether Examples"
-	@echo "  Parallel: $(NPROC) jobs"
-	@echo "==================================="
-	@$(MKDIR) $(BUILD_DIR)/examples $(BUILD_DIR)/examples/basics $(BUILD_DIR)/examples/actors $(BUILD_DIR)/examples/applications $(BUILD_DIR)/examples/c-interop $(BUILD_DIR)/examples/stdlib
-	@tmpdir=$$(mktemp -d); \
-	script="$$tmpdir/build_one.sh"; \
-	printf '#!/bin/sh\n'                                                                            > "$$script"; \
-	printf 'src="$$1"; tmpdir="$$2"; root="$$3"\n'                                                  >> "$$script"; \
-	printf 'name=$$(echo "$$src" | sed "s|examples/||;s|\\.ae$$||")\n'                              >> "$$script"; \
-	printf 'key=$$(echo "$$name" | sed "s|/|_|g")\n'                                                >> "$$script"; \
-	printf 'dir=$$(dirname "$$src")\n'                                                              >> "$$script"; \
-	printf 'extra_c=""\n'                                                                           >> "$$script"; \
-	printf 'if [ -d "$$dir" ]; then\n'                                                              >> "$$script"; \
-	printf '  extra_c=$$(find "$$dir" -maxdepth 1 -name "*.c" 2>/dev/null | tr "\\n" " ")\n'        >> "$$script"; \
-	printf 'fi\n'                                                                                   >> "$$script"; \
-	printf 'out_c="$$root/$(BUILD_DIR)/examples/$$name.c"\n'                                        >> "$$script"; \
-	printf 'mkdir -p "$$(dirname "$$out_c")"\n'                                                     >> "$$script"; \
-	printf 'if ! "$$root/build/aetherc$(EXE_EXT)" "$$src" "$$out_c" 2>"$$tmpdir/$$key.aetherc.err"; then\n' >> "$$script"; \
-	printf '  printf "  %%-30s %%s\\n" "$$name" "FAIL (aetherc)"\n'                                 >> "$$script"; \
-	printf '  head -5 "$$tmpdir/$$key.aetherc.err"\n'                                               >> "$$script"; \
-	printf '  touch "$$tmpdir/FAIL_$$key"\n'                                                        >> "$$script"; \
-	printf '  exit 1\n'                                                                             >> "$$script"; \
-	printf 'fi\n'                                                                                   >> "$$script"; \
-	printf 'if ! $(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) "$$out_c" $$extra_c "$$root/$(BUILD_DIR)/libaether.a" -o "$$root/$(BUILD_DIR)/examples/$$name$(EXE_EXT)" $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) 2>"$$tmpdir/$$key.gcc.err"; then\n' >> "$$script"; \
-	printf '  printf "  %%-30s %%s\\n" "$$name" "FAIL (gcc)"\n'                                     >> "$$script"; \
-	printf '  head -20 "$$tmpdir/$$key.gcc.err"\n'                                                  >> "$$script"; \
-	printf '  touch "$$tmpdir/FAIL_$$key"\n'                                                        >> "$$script"; \
-	printf '  exit 1\n'                                                                             >> "$$script"; \
-	printf 'fi\n'                                                                                   >> "$$script"; \
-	printf 'printf "  %%-30s %%s\\n" "$$name" "OK"\n'                                               >> "$$script"; \
-	printf 'touch "$$tmpdir/PASS_$$key"\n'                                                          >> "$$script"; \
-	chmod +x "$$script"; \
-	root=$$(pwd); \
-	find examples -name '*.ae' \
-	    | grep -v '/lib/' | grep -v '/packages/' \
-	    | sort \
-	    | xargs grep -L -e '^// Part of:' -e '^// Run: sh ' -e '^// Run: ae [^r]' -e '^// Run: ae run [^ ]*[^e] *$$' -e '^// Run: ae run .* --lib ' -e '^import contrib\.' \
-	    | xargs -P $(NPROC) -I{} "$$script" "{}" "$$tmpdir" "$$root"; \
-	pass=$$(ls "$$tmpdir"/PASS_* 2>/dev/null | wc -l | tr -d ' '); \
-	fail=$$(ls "$$tmpdir"/FAIL_* 2>/dev/null | wc -l | tr -d ' '); \
-	echo ""; \
-	echo "  $$pass passed, $$fail failed"; \
-	echo "  Binaries in $(BUILD_DIR)/examples/"; \
-	rm -rf "$$tmpdir"; \
-	if [ "$$fail" -gt 0 ]; then exit 1; fi
-endif
+# `make examples` is the checker (check-examples below): every example built,
+# run and compared with the output it says it prints. It used to build each
+# file with aetherc and the C compiler alone, which an example run as a
+# project, with --lib, by a script or through a contrib bridge cannot be.
+examples: check-examples
 
-examples-run: examples
-	@echo "==================================="
-	@echo "  Running Aether Examples"
-	@echo "==================================="
-	@. tests/lib/sweep_timeout.sh; sweep_timeout_bound TO "$$(pwd)" 5; \
-	for bin in $$(find $(BUILD_DIR)/examples -type f ! -name '*.c' ! -name '*.o' | sort); do \
-		test -x "$$bin" || continue; \
-		name=$$(echo $$bin | sed "s|$(BUILD_DIR)/examples/||"); \
-		echo "--- $$name ---"; \
-		$$TO $$bin 2>&1 || true; \
-		echo ""; \
-	done
 
 # Standalone aether-lsp binary — kept as a transitional alias for editor
 # integrations that hardcode the binary name. The same code is also embedded
@@ -2882,7 +2815,7 @@ help:
 	@echo ""
 	@echo "Other Targets:"
 	@echo "  make benchmark-results - Run the cross-language benchmarks, no dashboard"
-	@echo "  make examples       - Compile example programs"
+	@echo "  make examples       - Build and run every example (make check-examples)"
 	@echo "  make install        - Install to $(PREFIX)"
 	@echo "  make stats          - Show build statistics"
 	@echo ""
@@ -3047,8 +2980,8 @@ ci: clean
 	@echo "[5/11] Running .ae integration tests..."
 	@$(MAKE) test-ae
 	@echo ""
-	@echo "[6/11] Building examples..."
-	@$(CI_STAGE) 900 examples $(MAKE) examples
+	@echo "[6/11] Checking examples..."
+	@$(CI_STAGE) 900 check-examples $(MAKE) check-examples
 	@echo ""
 	@echo "[7/11] Install smoke test..."
 	@$(CI_STAGE) 900 test-install $(MAKE) test-install
@@ -3178,7 +3111,8 @@ check-examples: compiler ae stdlib
 	@./$(EXAMPLES_CHECKER) --ae ./$(BUILD_DIR)/ae$(EXE_EXT) --timeout 2 --expect 15 tests/examples/fixture \
 	    > $(BUILD_DIR)/examples_check/self_test.log 2>&1 || \
 	    { cat $(BUILD_DIR)/examples_check/self_test.log; exit 1; }
-	@./$(EXAMPLES_CHECKER) --ae ./$(BUILD_DIR)/ae$(EXE_EXT) --timeout $(EXAMPLES_TIMEOUT) examples
+	@PATH="$$(pwd)/$(BUILD_DIR):$$PATH" ./$(EXAMPLES_CHECKER) --ae ./$(BUILD_DIR)/ae$(EXE_EXT) \
+	    --timeout $(EXAMPLES_TIMEOUT) examples
 
 # The C a program gets when the C compiler is not GCC-compatible
 # (AETHER_GCC_COMPAT 0, which is what MSVC compiles): strict C11 under gcc,

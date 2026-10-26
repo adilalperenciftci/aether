@@ -149,7 +149,7 @@ ae check [file.ae]       # Type-check without compiling (skips codegen + link)
 ae fmt [--check] [path]  # Format source (stdin, or .ae files/dirs in place)
 ae fmt --short-names src # Rewrite json.json_free(v) as json.free(v) where both are one function
 ae test [file|dir]...    # Discover and run tests (every file and directory named)
-ae examples [dir]        # Build all example programs
+ae examples [dir]        # Build the example programs (examples/README.md)
 ae add <host/user/repo>  # Add a dependency (any git host)
 ae repl                  # Start interactive REPL
 ae cache                 # Show build cache info
@@ -183,7 +183,7 @@ make ae                          # Build ae CLI tool
 make test                        # Run runtime C test suite
 make test-ae                     # Run .ae source tests
 make test-all                    # Run all tests
-make examples                    # Build all examples
+make examples                    # Build and run every example, checking its output
 make -j8                         # Parallel build
 make help                        # Show all targets
 ```
@@ -437,7 +437,7 @@ make test-ae
 # Everything (unit + .ae)
 make test-all
 
-# Build all example programs
+# Build and run every example, checking what it prints
 make examples
 
 # Full CI + Valgrind + ASan in Docker (Linux)
