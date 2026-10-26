@@ -30,6 +30,14 @@ AETHERC="$ROOT/build/aetherc"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP" || true' EXIT
 
+# Each deep compile runs under the sweep's own bound (#3154). A bare
+# `timeout 60` was GNU coreutils: absent on macOS, where every deep case
+# then exited 127 without aetherc running and the test still passed, and
+# on Windows its SIGTERM at the limit goes to aetherc's MSYS2 stand-in, a
+# signal that reaches unrelated MSYS2 shells (tests/lib/sweep_timeout.sh).
+. "$ROOT/tests/lib/sweep_timeout.sh"
+sweep_timeout_bound TO "$ROOT" 60
+
 rep() { # rep <string> <count>
     awk -v s="$1" -v n="$2" 'BEGIN { for (i = 0; i < n; i++) printf "%s", s }'
 }
@@ -48,9 +56,13 @@ for kind in brace paren neg ifs; do
     for depth in 1000 5000 20000; do
         gen "$kind" "$depth" "$TMP/deep.ae"
         set +e
-        timeout 60 "$AETHERC" "$TMP/deep.ae" "$TMP/out.c" > "$TMP/log" 2>&1
+        $TO "$AETHERC" "$TMP/deep.ae" "$TMP/out.c" > "$TMP/log" 2>&1
         rc=$?
         set -e
+        if [ "$rc" -eq 126 ] || [ "$rc" -eq 127 ]; then
+            echo "  [FAIL] parse_depth_guard: $kind at depth $depth: aetherc did not run (exit $rc)"
+            exit 1
+        fi
         if [ "$rc" -gt 128 ]; then
             echo "  [FAIL] parse_depth_guard: $kind at depth $depth died of signal $((rc - 128))"
             exit 1

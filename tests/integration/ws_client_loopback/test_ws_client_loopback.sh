@@ -36,17 +36,12 @@ cleanup() {
 trap cleanup EXIT
 fail() { echo "  [FAIL] $1"; exit 1; }
 
-# `timeout` is GNU coreutils and is absent on macOS; gtimeout exists there only
-# if coreutils is brewed. It is a backstop rather than the actual safety net --
-# the client sets its own recv timeout -- so running bare is an acceptable
-# fallback, and better than the test erroring out with "command not found".
-if command -v timeout >/dev/null 2>&1; then
-    TIMEOUT="timeout 30"
-elif command -v gtimeout >/dev/null 2>&1; then
-    TIMEOUT="gtimeout 30"
-else
-    TIMEOUT=""
-fi
+# A backstop rather than the actual safety net (the client sets its own recv
+# timeout), and the sweep's own bound: never timeout(1) here, which ends the
+# client by signalling it, and on Windows a signal to a native program's MSYS2
+# stand-in reaches unrelated MSYS2 shells (#3154, tests/lib/sweep_timeout.sh).
+. "$ROOT/tests/lib/sweep_timeout.sh"
+sweep_timeout_bound TIMEOUT "$ROOT" 30
 
 "$AE" build "$SCRIPT_DIR/wsserver.ae" -o "$TMP/wssrv" >"$TMP/b1.log" 2>&1 \
     || { sed -n '1,10p' "$TMP/b1.log"; fail "server did not build"; }

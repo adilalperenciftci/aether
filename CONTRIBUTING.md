@@ -353,10 +353,13 @@ native program makes the MSYS2 runtime signal unrelated processes found
 through recycled parent pids, the CI step's own shell among them (#2479); the
 helpers end the program itself there, and send a signal to a job elsewhere.
 `make check-tests` runs `tests/scripts/check_shell_kills.py`, which rejects a
-`kill` of a pid held in a variable, `pkill` and `killall` in `tests/**/*.sh`.
-`kill -0 "$pid"` (a liveness probe) is fine; a POSIX-only test whose subject
-is a signal to a process that is no job of the script marks that line
-`kill-ok: <why>`.
+`kill` of a pid held in a variable or of a job (`kill %1`: on Windows the
+job's process is the same stand-in), `pkill`, `killall`, and `timeout(1)` or
+`gtimeout` (as a command, or held in a variable as a command prefix) in
+`tests/**/*.sh`; a test bounds a command of its own with the sweep's limit,
+below (#3154). `kill -0 "$pid"` (a liveness probe) is fine; a POSIX-only test
+whose subject is a signal to a process that is no job of the script, or a
+script that never runs under MSYS2, marks that line `kill-ok: <why>`.
 
 ### Test time limits
 
@@ -370,7 +373,8 @@ and on Windows a job object around the test, which a native watchdog
 (`tests/lib/sweep_watchdog.c`, compiled into `build/` on first use) ends with
 TerminateJobObject. Windows never gets `timeout(1)`: its signal to a hung
 test's native programs would make the MSYS2 runtime signal unrelated
-processes, as above (#2758). A runner script of your own does the same:
+processes, as above (#2758). A runner script of your own, or a test that
+bounds a client or a compile of its own, does the same (#3154):
 
 ```sh
 . "$root/tests/lib/sweep_timeout.sh"
