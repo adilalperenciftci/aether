@@ -441,7 +441,8 @@ open(path: string, mode: string) -> {
 // LIFETIME: the error string is BORROWED from thread-local storage and is only
 // valid until this thread's next failed read. Print it, or copy it with
 // `string.concat(err, "")`, before issuing another read — do NOT hold it across
-// one. Do not free it. (The success value IS owned and must be freed.)
+// one. Do not free it. The text read is the caller's string, released like any
+// other when its place lets it go (#3168).
 read(path: string) -> {
     // "rb", not "r": Windows text mode collapses "\r\n" back to "\n" and stops
     // at the first Ctrl-Z (0x1A) byte, neither of which fs.read should do — it
@@ -943,7 +944,7 @@ block_info(dev: string) -> {
 // LIFETIME: the error string is BORROWED from thread-local storage, valid only
 // until this thread's next failed read. Print it, or copy it with
 // `string.concat(err, "")`, before issuing another read. Do not free it. The
-// bytes value IS owned and must be freed.
+// bytes are the caller's, released like any other string (#3168).
 read_binary(path: string) -> {
     // Single tuple-returning extern (#271 + #273). The four-extern
     // split-accessor pattern (fs_try_read_binary + fs_get_read_binary
