@@ -86,7 +86,14 @@
 // THREAD-LOCAL STORAGE
 // ============================================================================
 
-#if defined(_MSC_VER)
+// One thread runs a program built without threads (the cooperative
+// scheduler): its thread-locals are plain static storage. ESP-IDF places a
+// __thread block at the top of every FreeRTOS task's stack, the small
+// system tasks' too, and aether_panic.c's frame stack overflowed them
+// before app_main ran.
+#if defined(AETHER_NO_THREADING)
+#  define AETHER_TLS
+#elif defined(_MSC_VER)
 #  define AETHER_TLS __declspec(thread)
 #elif AETHER_GCC_COMPAT
 // __thread predates _Thread_local and is supported by all GCC/Clang versions
@@ -113,7 +120,7 @@
 // attribute; on bare-metal / pre-C11 fallbacks the TLS keyword is
 // already empty, so the model is moot. Only the GCC/Clang ELF
 // path needs the annotation.
-#if AETHER_GCC_COMPAT && !defined(_WIN32) && !defined(__APPLE__)
+#if AETHER_GCC_COMPAT && !defined(_WIN32) && !defined(__APPLE__) && !defined(AETHER_NO_THREADING)
 #  define AETHER_TLS_SHARED __thread __attribute__((tls_model("global-dynamic")))
 #else
 #  define AETHER_TLS_SHARED AETHER_TLS
