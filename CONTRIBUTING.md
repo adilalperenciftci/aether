@@ -211,6 +211,10 @@ make test-valgrind
 
 # With AddressSanitizer
 make test-asan
+
+# The C unit tests and the whole .ae corpus with everything under UBSan
+# (Linux, macOS); fails on any report, listed in build/ubsan/reports
+make test-ubsan
 ```
 
 ### Prove the test can fail
@@ -466,6 +470,7 @@ treat `.github/workflows/` as authoritative and this as the shape.)
 | **Windows MSYS2** | MinGW-w64 GCC | `#ifdef _WIN32` branches actually execute; POSIX syscalls (`symlink`, `readlink`, `fork`, `execvp`, `pipe`) are absent or stubbed; `/bin/sh` / `rm` / `ln` not guaranteed; path separators; `_mkdir`/`_unlink` instead of `mkdir`/`unlink`; `$PATH` uses `;` not `:` |
 | **`ci-coop`** | `gcc`, `AETHER_NO_THREADING` | Cooperative scheduler only, tests that assume pthreads / `spawn` semantics may behave differently |
 | **AddressSanitizer** | Clang/GCC | Any use-after-free / leak in your new C code (runs on Linux and macOS) |
+| **UBSan** (`ubsan.yml`) | `gcc`, `make test-ubsan` | Undefined behaviour in the C you add or the C a program compiles to: signed shifts that overflow, misaligned loads, null stores. Runs on PRs touching compiler/, runtime/, std/, tools/ or the Makefile, and nightly |
 | **Valgrind** | Linux | Same, slower, catches a slightly different set |
 
 (A local `make ci-windows` cross-builds with `x86_64-w64-mingw32-gcc`;
@@ -733,8 +738,8 @@ Brief description of changes
 ### Review Process
 
 1. Automated CI checks must pass, Linux (GCC, Clang, and a hardened GCC
-   build), macOS, Windows (MSYS2 + MinGW-w64), and the AddressSanitizer /
-   Valgrind memory-safety jobs
+   build), macOS, Windows (MSYS2 + MinGW-w64), the AddressSanitizer /
+   Valgrind memory-safety jobs, and UBSan where the PR touches what it checks
 2. Code review by maintainer
 3. Address feedback
 4. Merge when approved

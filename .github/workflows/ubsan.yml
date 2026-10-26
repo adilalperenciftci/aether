@@ -1,0 +1,73 @@
+name: UBSan
+
+# The C unit tests and the `make test-ae` sweep (every .ae program and every
+# tests/integration shell test it runs) under UndefinedBehaviorSanitizer, with
+# aetherc, ae, libaether and every program they build instrumented: `make
+# test-ubsan` (#2488, tests/scripts/ubsan_sweep.sh). It fails on any test
+# failure and on any UBSan report, and puts the reports in the step summary
+# grouped by source location.
+#
+# Not on every PR. Measured on ubuntu-22.04 with 4 jobs: the toolchain build
+# took 56 s and the sweep 8 m 36 s under UBSan, against 4 m 55 s for the same
+# sweep uninstrumented in the Linux / GCC leg, so the job is about 11 minutes.
+# It runs beside the matrix rather than on its critical path (the Windows legs
+# take 13 to 21 minutes), but every PR would still pay it. So it runs on the
+# PRs that change what it checks: the compiler, which writes the C every
+# program is; the runtime and std, C and Aether; ae; the Makefile and the
+# sweep's own scripts. And every night on main, which catches a test added
+# elsewhere that reaches undefined behaviour already there, and by hand.
+on:
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'compiler/**'
+      - 'runtime/**'
+      - 'std/**'
+      - 'tools/**'
+      - 'include/**'
+      - 'lsp/**'
+      - 'Makefile'
+      - 'tests/ubsan/**'
+      - 'tests/scripts/ubsan_sweep.sh'
+      - 'tests/scripts/ae_sweep_list.sh'
+      - 'tests/scripts/run_ae_test.sh'
+      - 'tests/scripts/run_ae_sh_dir.sh'
+      - 'tests/lib/sweep_timeout.sh'
+      - '.github/workflows/ubsan.yml'
+  schedule:
+    - cron: '23 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# As in ci.yml: a new push to a PR cancels the run of the one before it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  ubsan:
+    name: Linux / GCC under UBSan
+    # The image and packages of ci.yml's Linux / GCC leg, so the sweep runs
+    # the same programs and shell tests.
+    runs-on: ubuntu-22.04
+    # About three times a healthy run (11 min), so a hang costs one cap.
+    timeout-minutes: 35
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install toolchain
+      run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc pkg-config libgtk-4-dev; pip install --retries 10 --timeout 120 --break-system-packages websockets 2>/dev/null || pip install --retries 10 --timeout 120 websockets
+
+    - name: make test-ubsan
+      run: make test-ubsan NPROC="$(nproc)"
+
+    - name: Upload the UBSan reports
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ubsan-reports
+        path: build/ubsan/reports/
+        if-no-files-found: ignore

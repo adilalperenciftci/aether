@@ -2841,6 +2841,7 @@ help:
 	@echo "  make test-install   - Install smoke test (init + run)"
 	@echo "  make test-valgrind  - Run tests with Valgrind"
 	@echo "  make test-asan      - Run tests with AddressSanitizer"
+	@echo "  make test-ubsan     - C unit tests + .ae corpus with everything under UBSan; fails on any report (Linux, macOS)"
 	@echo "  make self-test      - Test compiler on complex examples"
 	@echo ""
 	@echo "CI/CD Targets:"
@@ -3144,6 +3145,18 @@ test-msvc-compat: compiler
 .PHONY: test-ae-opt-diff
 test-ae-opt-diff: compiler ae stdlib
 	@CC="$${CC:-$(BASE_CC)}" NPROC=$(NPROC) sh tests/differential/run_opt_diff.sh "$(AE_SWEEP_EXTRA_PRUNE)"
+
+# The C unit tests and the `test-ae` sweep under UndefinedBehaviorSanitizer
+# (#2488). Rebuilds the toolchain and libaether instrumented, into this tree's
+# build/ (CC becomes build/ubsan/bin/gcc, so the build-flags digest moves and
+# the next plain build recompiles), then runs `test` and `test-ae` with every
+# compile and link going through that sanitizing compiler. Fails on any test
+# failure and on any UBSan report (build/ubsan/reports). Linux or macOS: it
+# needs a UBSan runtime, which MinGW lacks. Not part of `ci`: ubsan.yml runs
+# it. See tests/scripts/ubsan_sweep.sh and docs/differential-testing.md.
+.PHONY: test-ubsan
+test-ubsan:
+	@MAKE="$(MAKE)" NPROC=$(NPROC) BASE_CC="$(BASE_CC)" sh tests/scripts/ubsan_sweep.sh
 
 # -----------------------------------------------------------------
 # contrib/host bridge check

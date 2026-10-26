@@ -124,13 +124,50 @@ between them, is a bug in the compiler or in the test, and is fixed instead.
 `OPT_DIFF_ONLY=<regex>` narrows a run to the matching programs, for re-running
 the ones a sweep reported.
 
+## Undefined behaviour: the corpus under UBSan
+
+A program can agree with itself at both levels and still rest on undefined
+behaviour that a later compiler, or another flag, turns into a different
+program. `make test-ubsan` (#2488) runs the C unit tests and the whole `make
+test-ae` sweep with UndefinedBehaviorSanitizer on everything: aetherc, ae and
+libaether are rebuilt instrumented, and so is every program and C host the
+tests build. The flags reach all of them through one sanitizing compiler,
+`build/ubsan/bin/gcc` (and `cc`), first on PATH and named by its path in `CC`,
+so the Makefile, `ae build` and the shell tests that run `"$CC"` or `gcc` by
+name all go through it. Naming it by path keeps the build-flags digest and
+`ae`'s cache key apart from a plain build's: nothing instrumented is mixed with
+anything plain.
+
+A report stops the program (`-fno-sanitize-recover`), so the test fails, and is
+written to `build/ubsan/reports/report.<program>.<pid>`, where a test that
+expects its program to fail, or compares stderr, cannot hide it. The target
+fails on any report and lists them grouped by source location. Before the
+tests it proves the configuration took: `build/libaether.a` must call the UBSan
+handlers, and `tests/ubsan/canary.ae`, whose C half shifts an `int` by 32, must
+be stopped with a report. A run whose flags never reached the programs would
+otherwise read as a clean corpus.
+
+A finding is fixed where it is, never suppressed, unless it is in vendored
+third-party code and shown to be; then the suppression names that code's
+upstream report. The first run found a misaligned 16-bit load in liblzf (our
+`lzfP.h` had turned its `STRICT_ALIGN` off), signed shifts that overflowed in
+`std.mem`'s u64 readers and in two base64 decoders, a test child that faulted
+by writing through null, and a `lane_wide` check that counted the instrumented
+build's stack spills as heap moves.
+
+It needs a UBSan runtime: gcc's libubsan or clang's compiler-rt, so Linux and
+macOS (MinGW has none, and the target stops there and says so). CI runs it in
+`.github/workflows/ubsan.yml` on ubuntu-22.04, on the pull requests that touch
+the compiler, the runtime, std, `ae`, the Makefile or the sweep's scripts,
+every night on main, and by hand. It takes about 11 minutes (the sweep under
+UBSan is 1.75 times the plain one), which is why it is not on every PR.
+
 ## Extending it
 
 The exe-vs-lib pair and the two optimisation levels are path comparisons; there
-are others. A UBSan build is the natural third configuration of the
-optimisation-level target. Per-target codegen is another (the Linux and MSYS2
-builds CI already runs are each checked only against their own expectations,
-never against each other).
+are others. Per-target codegen is one (the Linux and MSYS2 builds CI already
+runs are each checked only against their own expectations, never against each
+other).
 
 The harness self-checks that its comparison can fail. Without that, a broken
 diff would make every case vacuously agree and the suite would report success
