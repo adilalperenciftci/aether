@@ -8066,9 +8066,14 @@ int typecheck_actor_definition(ASTNode* actor, SymbolTable* table) {
                 typecheck_node(child, actor_table);
                 checked = 1;
                 Type* it = infer_type(init, actor_table);
+                /* `null` goes where a binding, a field or a result of the
+                 * type takes it (ast_type_takes_null): a string, a pointer,
+                 * a closure, a slice. A slice alone was let through here,
+                 * and `state string s = null`, which compiled before the
+                 * state's value was checked, was refused. */
                 int fits = !it || it->kind == TYPE_UNKNOWN ||
                            is_assignable(it, child->node_type) ||
-                           (init->type == AST_NULL_LITERAL && type_is_slice(child->node_type));
+                           (init->type == AST_NULL_LITERAL && ast_type_takes_null(child->node_type));
                 if (!fits) {
                     char msg[512], want[200], have[200];
                     snprintf(msg, sizeof(msg),

@@ -45,6 +45,11 @@ actor Holder {
     state label: string? = "named"
     state counts: int[3]
     state step: fn = | x: int | -> x + 1
+    // A string takes `null`, as a binding or a field of one does: it reads
+    // as the empty text (#3129). `state string s = null` compiled before the
+    // value was checked, and the check refused it.
+    state string unset = null
+    state blank: string = null
 
     receive {
         Connect(next: n) -> {
@@ -58,7 +63,7 @@ actor Holder {
             name == "holder" && !on && origin.x == 1 && origin.y == 2 &&
             mode == Mode.Busy && a == 7 && b == "seven" && (maybe ?? 0) == 4 &&
             nothing == none && (label ?? "") == "named" && counts[2] == 0 &&
-            step(1) == 2
+            step(1) == 2 && unset == "" && blank == "" && unset == null
             if !ok {
                 println("FAIL: a state with a written type holds the wrong value")
                 exit(1)

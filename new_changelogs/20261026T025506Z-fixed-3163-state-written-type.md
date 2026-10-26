@@ -5,5 +5,6 @@
   without one (its type's zero), for every type a struct field takes, and
   `state actor_ref r` is accepted; the value is checked against the written
   type as a typed binding's is (it reached C, "makes integer from pointer"),
-  and an optional state's value is wrapped as `let x: T? = v` wraps it (an
-  int was assigned to an ae_opt_int) (#3163).
+  `null` going wherever a binding of the type takes it (a string, a pointer,
+  a closure, a slice), and an optional state's value is wrapped as `let x:
+  T? = v` wraps it (an int was assigned to an ae_opt_int) (#3163).
