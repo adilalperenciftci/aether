@@ -503,6 +503,9 @@ const char* http_get_header(HttpRequest* req, const char* key);
 const char* http_get_query_param(HttpRequest* req, const char* key);
 const char* http_get_path_param(HttpRequest* req, const char* key);
 void http_request_free(HttpRequest* req);
+// Copy a connection's peer and local address and its TLS state into a
+// request it carries; every request, HTTP/1.1 or h2, gets them (#3175).
+void http_request_copy_conn_meta(HttpRequest* req, struct HttpConn* conn);
 
 // Response building
 HttpServerResponse* http_response_create(void);

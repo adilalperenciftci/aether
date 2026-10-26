@@ -107,6 +107,21 @@ if ! grep -q '^h2-tls-ok$' "$RESP"; then
     echo "  [FAIL] h2-over-TLS body mismatch:"; cat "$RESP"; exit 1
 fi
 
+# An h2 request over TLS carries its connection's metadata (#3175): the
+# peer, the local address, tls=1 and scheme https. It used to read
+# peer="" tls=0 scheme=http on every h2 stream.
+PEER=$(curl --silent --show-error --max-time 5 \
+            --insecure \
+            --http2 \
+            -w ' version=%{http_version}' \
+            "${URL}peer" 2>"$TMPDIR/peer.err") || {
+    echo "  [FAIL] curl --http2 GET /peer over TLS failed:"; cat "$TMPDIR/peer.err"; exit 1
+}
+PEER_WANT="peer=127.0.0.1 port_set=1 local=127.0.0.1 tls=1 scheme=https version=2"
+[ "$PEER" = "$PEER_WANT" ] || {
+    echo "  [FAIL] h2-over-TLS request metadata: got '$PEER', expected '$PEER_WANT'"; exit 1
+}
+
 # Sanity: an HTTP/1.1 client (curl --http1.1) must STILL work
 # against the same server. ALPN advertises both protocols; the
 # client side decides.

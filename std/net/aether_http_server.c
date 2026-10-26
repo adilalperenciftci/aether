@@ -4391,6 +4391,47 @@ static void conn_resolve_addrs(HttpConn* c) {
     }
 }
 
+/* Connection-level metadata that handlers learn from the kernel rather
+ * than from the request bytes, copied into a request. Every request a
+ * connection carries gets it: the HTTP/1.1 dispatcher calls this after the
+ * parse, the h2 dispatch after it builds each stream's request (#3175).
+ *
+ * Resolved ONCE per connection (#1719) — neither address can change
+ * while the socket is open, and fetching them per request cost 2
+ * syscalls, 2 inet_ntop calls and 2 strdups each time. nginx makes none
+ * of those calls at all.
+ *
+ * - remote_addr/remote_port (getpeername): the trusted peer. The
+ *   X-Forwarded-For header is client-supplied and a wrong basis for an
+ *   allow/deny decision on a direct listener; this is the kernel's view
+ *   of the socket, which is unspoofable.
+ * - local_addr/local_port (getsockname): which NIC this accepted fd is
+ *   bound to. Needed when the listener binds 0.0.0.0 and the handler
+ *   gates on the receiving interface (admin-on-loopback, multi-tenant
+ *   per-IP routing).
+ * - is_tls: the connection wrapper, not anything in the wire bytes.
+ *   Drives scheme/redirect/cookie-Secure decisions.
+ *
+ * The request keeps owning its copies — http_request_free frees both —
+ * so the strdups stay and only the syscalls go. A failed lookup leaves
+ * the cache empty and the accessors return ""/0, as before.
+ *
+ * IPv4 + IPv6 via sockaddr_storage. Runs on the thread that owns the
+ * connection (conn_resolve_addrs is not thread-safe). */
+void http_request_copy_conn_meta(HttpRequest* req, HttpConn* conn) {
+    if (!req || !conn) return;
+    conn_resolve_addrs(conn);
+    if (conn->remote_addr[0]) {
+        req->remote_addr = strdup(conn->remote_addr);
+        req->remote_port = conn->remote_port;
+    }
+    if (conn->local_addr[0]) {
+        req->local_addr = strdup(conn->local_addr);
+        req->local_port = conn->local_port;
+    }
+    req->is_tls = (conn->ssl != NULL || conn->pure_tls != NULL) ? 1 : 0;
+}
+
 /* Is every header line in this block one this server will read the same way
  * as whoever sent it?
  *
@@ -4820,42 +4861,8 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
     }
 
 
-    /* Connection-level metadata that handlers learn from the kernel rather
-     * than from the request bytes.
-     *
-     * Resolved ONCE per connection (#1719) — neither address can change
-     * while the socket is open, and fetching them per request cost 2
-     * syscalls, 2 inet_ntop calls and 2 strdups each time. nginx makes none
-     * of those calls at all.
-     *
-     * - remote_addr/remote_port (getpeername): the trusted peer. The
-     *   X-Forwarded-For header is client-supplied and a wrong basis for an
-     *   allow/deny decision on a direct listener; this is the kernel's view
-     *   of the socket, which is unspoofable.
-     * - local_addr/local_port (getsockname): which NIC this accepted fd is
-     *   bound to. Needed when the listener binds 0.0.0.0 and the handler
-     *   gates on the receiving interface (admin-on-loopback, multi-tenant
-     *   per-IP routing).
-     * - is_tls: the connection wrapper, not anything in the wire bytes.
-     *   Drives scheme/redirect/cookie-Secure decisions.
-     *
-     * The request keeps owning its copies — http_request_free frees both —
-     * so the strdups stay and only the syscalls go. A failed lookup leaves
-     * the cache empty and the accessors return ""/0, as before.
-     *
-     * IPv4 + IPv6 via sockaddr_storage. */
-    {
-        conn_resolve_addrs(conn);
-        if (conn->remote_addr[0]) {
-            req->remote_addr = strdup(conn->remote_addr);
-            req->remote_port = conn->remote_port;
-        }
-        if (conn->local_addr[0]) {
-            req->local_addr = strdup(conn->local_addr);
-            req->local_port = conn->local_port;
-        }
-        req->is_tls = (conn->ssl != NULL || conn->pure_tls != NULL) ? 1 : 0;
-    }
+    /* The peer, the local address and the TLS state, from the connection. */
+    http_request_copy_conn_meta(req, conn);
 
     // Create response
     HttpServerResponse* res = http_response_create();

@@ -2,7 +2,8 @@
 //
 // Spins up an HTTPS server on port 18263 with HTTP/2 enabled. The
 // shell runner verifies that ALPN advertises h2 + http/1.1 and
-// that curl --http2 negotiates HTTP/2.
+// that curl --http2 negotiates HTTP/2, and that an h2 request over TLS
+// carries its connection's metadata (#3175).
 
 import std.http
 import std.os
@@ -14,6 +15,19 @@ handle_root(req: ptr, res: ptr, ud: ptr) {
     http.response_set_status(res, 200)
     http.response_set_header(res, "Content-Type", "text/plain")
     http.response_set_body(res, "h2-tls-ok")
+}
+
+// The connection's metadata, which every request carries, an h2 stream's
+// too (#3175): the peer the kernel reports, whether it has a port, the
+// local address, the TLS state and the scheme.
+handle_peer(req: ptr, res: ptr, ud: ptr) {
+    port_set = 0
+    if http.request_remote_port(req) > 0 {
+        port_set = 1
+    }
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "peer=${http.request_remote_addr(req)} port_set=${port_set} local=${http.request_local_addr(req)} tls=${http.request_is_tls(req)} scheme=${http.request_scheme(req)}")
 }
 
 message StartSrv { raw: ptr }
@@ -62,6 +76,7 @@ main() {
     }
 
     http.server_get(raw, "/", handle_root, 0)
+    http.server_get(raw, "/peer", handle_peer, 0)
 
     a = spawn(SrvActor())
     a ! StartSrv { raw: raw }

@@ -712,6 +712,10 @@ static void dispatch_stream(AetherH2Session* s, AetherH2Stream* str) {
         str->response_submitted = 1;
         return;
     }
+    /* The connection's peer, local address and TLS state, as an HTTP/1.1
+     * request carries them (#3175). conn_userdata is the HttpConn this
+     * session runs on, and this is its thread. */
+    http_request_copy_conn_meta(req, (struct HttpConn*)s->conn_userdata);
 
     HttpServerResponse* res = http_response_create();
     if (!res) {
