@@ -208,6 +208,9 @@ void http_server_use_response_transformer_owned(HttpServer* s, HttpResponseTrans
 }
 HttpRequest* http_parse_request(const char* r) { (void)r; return NULL; }
 const char* http_get_header(HttpRequest* r, const char* k) { (void)r; (void)k; return NULL; }
+int http_request_set_header(HttpRequest* r, const char* n, const char* v) { (void)r; (void)n; (void)v; return -1; }
+void http_request_remove_header(HttpRequest* r, const char* n) { (void)r; (void)n; }
+int http_request_set_path(HttpRequest* r, const char* p) { (void)r; (void)p; return -1; }
 const char* http_get_query_param(HttpRequest* r, const char* k) { (void)r; (void)k; return NULL; }
 const char* http_get_path_param(HttpRequest* r, const char* k) { (void)r; (void)k; return NULL; }
 void http_request_free(HttpRequest* r) { (void)r; }
@@ -1941,6 +1944,122 @@ static void req_release(HttpRequest* req, void* p) {
     if (!req->arena_backed) free(p);
 }
 
+/* Header arrays holding at least `want` slots, keeping what they hold: 1, or
+ * 0 when the allocator refused. They grow and never shrink (#3234). A
+ * capacity nobody recorded (header_cap 0) is read as the headers held, and
+ * grown to no less than HTTP_MAX_HEADERS, so arrays sized by someone else
+ * are not cut below what a parse puts in them. */
+static int req_header_room(HttpRequest* req, int want) {
+    int have = req->header_cap > req->header_count ? req->header_cap : req->header_count;
+    if (req->header_keys && req->header_values && have >= want) return 1;
+    int grown = want > have ? want : have;
+    if (req->header_cap == 0 && grown < HTTP_MAX_HEADERS) grown = HTTP_MAX_HEADERS;
+    char** keys = (char**)realloc(req->header_keys, sizeof(char*) * (size_t)grown);
+    if (!keys) return 0;
+    req->header_keys = keys;
+    char** values = (char**)realloc(req->header_values, sizeof(char*) * (size_t)grown);
+    if (!values) return 0;    /* the keys grew, which costs nothing but space */
+    req->header_values = values;
+    req->header_cap = grown;
+    return 1;
+}
+
+/* An arena-backed request's strings, copied out of the arena, so that one can
+ * be replaced and freed like any other (#3234): a parse takes them all from
+ * the arena or none (arena_backed), and an edit keeps it that way by moving
+ * them all. 0, or -1 when the allocator refused, the request unchanged. The
+ * arena keeps its copies until its owner resets it. */
+static int req_own_strings(HttpRequest* req) {
+    if (!req->arena_backed) return 0;
+    int n = req->header_count;
+    char* fixed[4] = { req->method, req->path, req->query_string, req->http_version };
+    char* copy[4] = { NULL, NULL, NULL, NULL };
+    char** keys = n ? (char**)calloc((size_t)n, sizeof(char*)) : NULL;
+    char** values = n ? (char**)calloc((size_t)n, sizeof(char*)) : NULL;
+    int ok = n == 0 || (keys && values);
+    for (int i = 0; ok && i < 4; i++)
+        if (fixed[i] && !(copy[i] = strdup(fixed[i]))) ok = 0;
+    for (int i = 0; ok && i < n; i++) {
+        if (req->header_keys[i] && !(keys[i] = strdup(req->header_keys[i]))) ok = 0;
+        if (ok && req->header_values[i] && !(values[i] = strdup(req->header_values[i]))) ok = 0;
+    }
+    if (!ok) {
+        for (int i = 0; i < 4; i++) free(copy[i]);
+        for (int i = 0; i < n && keys && values; i++) { free(keys[i]); free(values[i]); }
+        free(keys);
+        free(values);
+        return -1;
+    }
+    req->method = copy[0];
+    req->path = copy[1];
+    req->query_string = copy[2];
+    req->http_version = copy[3];
+    for (int i = 0; i < n; i++) {
+        req->header_keys[i] = keys[i];
+        req->header_values[i] = values[i];
+    }
+    free(keys);
+    free(values);
+    req->arena_backed = 0;
+    return 0;
+}
+
+int http_request_set_header(HttpRequest* req, const char* name, const char* value) {
+    if (!req || !name || !value) return -1;
+    if (req_own_strings(req) != 0) return -1;
+    for (int i = 0; i < req->header_count; i++) {
+        if (!req->header_keys[i] || strcasecmp(req->header_keys[i], name) != 0) continue;
+        char* v = strdup(value);
+        if (!v) return -1;
+        free(req->header_values[i]);
+        req->header_values[i] = v;
+        return 0;
+    }
+    if (!req_header_room(req, req->header_count + 1)) return -1;
+    char* k = strdup(name);
+    char* v = strdup(value);
+    if (!k || !v) { free(k); free(v); return -1; }
+    req->header_keys[req->header_count] = k;
+    req->header_values[req->header_count] = v;
+    req->header_count++;
+    return 0;
+}
+
+/* The headers after a removed one move down, so the rest keep their order,
+ * which is the order they are forwarded in. An arena-backed request's strings
+ * are the arena's, so they are dropped, not freed. */
+void http_request_remove_header(HttpRequest* req, const char* name) {
+    if (!req || !name || !req->header_keys || !req->header_values) return;
+    int kept = 0;
+    for (int i = 0; i < req->header_count; i++) {
+        if (req->header_keys[i] && strcasecmp(req->header_keys[i], name) == 0) {
+            if (!req->arena_backed) {
+                free(req->header_keys[i]);
+                free(req->header_values[i]);
+            }
+            continue;
+        }
+        req->header_keys[kept] = req->header_keys[i];
+        req->header_values[kept] = req->header_values[i];
+        kept++;
+    }
+    for (int i = kept; i < req->header_count; i++) {
+        req->header_keys[i] = NULL;
+        req->header_values[i] = NULL;
+    }
+    req->header_count = kept;
+}
+
+int http_request_set_path(HttpRequest* req, const char* path) {
+    if (!req || !path) return -1;
+    if (req_own_strings(req) != 0) return -1;
+    char* p = strdup(path);
+    if (!p) return -1;
+    free(req->path);
+    req->path = p;
+    return 0;
+}
+
 /* Every string this parse produces is a copy of part of the request, so the
  * request's own length bounds the bytes they hold. Each also carries a
  * terminator and is rounded up to the arena's alignment, and there are at
@@ -2049,13 +2168,17 @@ static HttpRequest* http_parse_request_n_impl(HttpRequest* req,
     
     // Parse headers
     /* A reused request arrives with these already allocated, which is the
-     * point of reusing it: the arrays are fixed-size and outlive a request
-     * perfectly well. */
-    if (!req->header_keys)
-        req->header_keys = (char**)malloc(sizeof(char*) * HTTP_MAX_HEADERS);
-    if (!req->header_values)
-        req->header_values = (char**)malloc(sizeof(char*) * HTTP_MAX_HEADERS);
+     * point of reusing it: the arrays outlive a request perfectly well. They
+     * have to hold HTTP_MAX_HEADERS, and arrays someone else sized may not:
+     * use_real_ip's append used to realloc them to one past the headers they
+     * held, and the next parse into the request wrote past the end (#3234).
+     * req_header_room grows them; it never shrinks them. */
     req->header_count = 0;
+    if (!req_header_room(req, HTTP_MAX_HEADERS)) {
+        free(req->header_keys);   req->header_keys = NULL;
+        free(req->header_values); req->header_values = NULL;
+        req->header_cap = 0;
+    }
     // If either array failed to allocate, drop both and skip storing headers
     // (the loop below still runs to advance past them to the body) rather than
     // writing strdup results through a NULL array pointer.

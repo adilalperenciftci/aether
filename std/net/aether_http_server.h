@@ -74,6 +74,12 @@ typedef struct {
      * not move anything a C consumer already reads. */
     void* arena;
     int   arena_backed;
+    /* How many slots header_keys and header_values hold, 0 when whoever made
+     * the arrays did not record it (#3234). A parse into a reused request
+     * needs HTTP_MAX_HEADERS of them and grows arrays short of that; an edit
+     * (http_request_set_header) grows them and never shrinks them. Trailing,
+     * as the fields above. */
+    int   header_cap;
 } HttpRequest;
 
 // HTTP Response
@@ -551,6 +557,18 @@ HttpRequest* http_parse_request(const char* raw_request);
 // callers that already have a NUL-terminated buffer.
 HttpRequest* http_parse_request_n(const char* buf, size_t len);
 const char* http_get_header(HttpRequest* req, const char* key);
+/* Edit a request the way its storage requires (#3234), for a middleware that
+ * changes what later code sees: the header arrays grow and never shrink, so a
+ * request parsed into again still has room for HTTP_MAX_HEADERS, and the
+ * strings of an arena-backed request (http_parse_request_arena) move out of
+ * the arena before one is replaced, so nothing hands free() an arena pointer.
+ * set_header replaces the value of the first header named `name` (any case)
+ * or appends one; remove_header drops every header of that name; set_path
+ * replaces the path. Both setters copy their arguments and return 0, or -1
+ * when out of memory, the request unchanged. */
+int  http_request_set_header(HttpRequest* req, const char* name, const char* value);
+void http_request_remove_header(HttpRequest* req, const char* name);
+int  http_request_set_path(HttpRequest* req, const char* path);
 const char* http_get_query_param(HttpRequest* req, const char* key);
 const char* http_get_path_param(HttpRequest* req, const char* key);
 void http_request_free(HttpRequest* req);

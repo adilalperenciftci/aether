@@ -18,6 +18,7 @@
 #include "../../std/net/aether_http_server.h"
 #include "../../std/http/proxy/aether_proxy.h"
 #include "../../std/http/proxy/aether_proxy_internal.h"
+#include "../../std/http/middleware/aether_middleware.h"
 #if !defined(_WIN32)
 #include "../../std/net/aether_http_internal.h"
 #endif
@@ -645,7 +646,89 @@ TEST(http_request_parse_arena) {
     http_arena_free(&tiny);
     http_arena_free(&arena);
 }
+
+/* use_real_ip replaces the X-Real-IP a request carries and use_rewrite its
+ * path (#3234). Both used free() on the string they replaced, which for a
+ * request parsed into an arena is a pointer the allocator never issued, and
+ * left their malloc'd replacements to a reset that does not free an
+ * arena-backed request's strings. */
+TEST(http_request_edit_an_arena_backed_request) {
+    HttpArena arena;
+    ASSERT_EQ(0, http_arena_init(&arena, 16384));
+    HttpRequest req;
+    memset(&req, 0, sizeof(req));
+    const char* raw =
+        "GET /old/x HTTP/1.1\r\nHost: h\r\nX-Real-IP: 198.51.100.1\r\nAccept: */*\r\n\r\n";
+    ASSERT_NOT_NULL(http_parse_request_arena(&req, raw, strlen(raw), &arena));
+    ASSERT_EQ(1, req.arena_backed);
+    req.remote_addr = strdup("127.0.0.1");
+
+    AetherRealIpOpts* real_ip = aether_real_ip_opts_new("", "10.0.0.0/8");
+    ASSERT_NOT_NULL(real_ip);
+    ASSERT_EQ(1, aether_middleware_real_ip(&req, NULL, real_ip));
+    ASSERT_STREQ("127.0.0.1", http_get_header(&req, "X-Real-IP"));
+
+    AetherRewriteOpts* rewrite = aether_rewrite_opts_new();
+    ASSERT_NOT_NULL(rewrite);
+    ASSERT_EQ(0, aether_rewrite_add_rule(rewrite, "/old/", "/new/"));
+    ASSERT_EQ(1, aether_middleware_rewrite(&req, NULL, rewrite));
+    ASSERT_STREQ("/new/x", req.path);
+    ASSERT_STREQ("GET", req.method);
+    ASSERT_STREQ("h", http_get_header(&req, "Host"));
+    ASSERT_STREQ("*/*", http_get_header(&req, "Accept"));
+
+    /* The arena can be reset now: nothing the request holds is in it. */
+    http_arena_reset(&arena);
+    ASSERT_STREQ("/new/x", req.path);
+    ASSERT_STREQ("127.0.0.1", http_get_header(&req, "X-Real-IP"));
+
+    http_request_reset(&req);
+    free(req.header_keys);
+    free(req.header_values);
+    free(req.remote_addr);
+    aether_rewrite_opts_free(rewrite);
+    aether_real_ip_opts_free(real_ip);
+    http_arena_free(&arena);
+}
 #endif  /* !_WIN32 */
+
+/* A request object parsed into again keeps its header arrays, which hold
+ * HTTP_MAX_HEADERS (#3234). use_real_ip, adding the X-Real-IP a request did
+ * not carry, grew them to one past the headers they held, which shrank them,
+ * and the next parse into the same object wrote 50 headers into 4 slots. */
+TEST(http_request_edit_keeps_room_for_a_reparse) {
+    HttpRequest req;
+    memset(&req, 0, sizeof(req));
+    const char* small = "GET /a HTTP/1.1\r\nHost: h\r\nAccept: */*\r\nX-One: 1\r\n\r\n";
+    ASSERT_NOT_NULL(http_parse_request_into(&req, small, strlen(small)));
+    req.remote_addr = strdup("127.0.0.1");
+
+    AetherRealIpOpts* real_ip = aether_real_ip_opts_new("", "10.0.0.0/8");
+    ASSERT_NOT_NULL(real_ip);
+    ASSERT_EQ(1, aether_middleware_real_ip(&req, NULL, real_ip));
+    ASSERT_EQ(4, req.header_count);
+    ASSERT_STREQ("127.0.0.1", http_get_header(&req, "X-Real-IP"));
+
+    char big[8192];
+    int off = snprintf(big, sizeof(big), "GET /b HTTP/1.1\r\n");
+    for (int i = 0; i < 50; i++)
+        off += snprintf(big + off, sizeof(big) - off, "X-H%02d: value-%02d\r\n", i, i);
+    snprintf(big + off, sizeof(big) - off, "\r\n");
+    for (int round = 0; round < 3; round++) {
+        ASSERT_NOT_NULL(http_parse_request_into(&req, big, strlen(big)));
+        ASSERT_EQ(50, req.header_count);
+        ASSERT_STREQ("value-00", http_get_header(&req, "X-H00"));
+        ASSERT_STREQ("value-49", http_get_header(&req, "X-H49"));
+        ASSERT_EQ(1, aether_middleware_real_ip(&req, NULL, real_ip));
+        ASSERT_EQ(51, req.header_count);
+    }
+
+    http_request_reset(&req);
+    free(req.header_keys);
+    free(req.header_values);
+    free(req.remote_addr);
+    aether_real_ip_opts_free(real_ip);
+}
 
 /* A cached response lives as long as its TTL, however long that is. The
  * expiry was stored_at_ms + (long)ttl_sec * 1000L: on Windows, where a `long`
