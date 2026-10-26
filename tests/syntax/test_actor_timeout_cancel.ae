@@ -1,8 +1,19 @@
-// Test: timeout is cancelled when messages arrive
+// Test: a message within the interval stops the countdown, and the countdown
+// starts again once the messages stop (#3162).
+//
+// Pings come every 50 ms for half a second, under a 1000 ms timeout, so it
+// must not fire while they come; the ask that follows sees that. Once they
+// stop, the countdown ends and the timeout fires once: it used to be
+// cancelled for good by the first message, and this test checked that it
+// never fired at all.
 
 message Ping {}
 
-message Report { sink: ptr }
+message Fired {}
+
+message Times { n: int }
+
+extern exit(code: int)
 
 actor Waiter {
     state count = 0
@@ -11,27 +22,33 @@ actor Waiter {
     receive {
         Ping -> {
             count = count + 1
-            println("Got ping ${count}")
         }
-        Report(sink) -> { ref_set(sink, timed_out) }
-    } after 500 -> {
-        println("FAIL: timeout should not fire when messages arrive")
-        timed_out = 1
+        Fired() -> { reply Times { n: timed_out } }
+    } after 1000 -> {
+        timed_out = timed_out + 1
     }
 }
 
 main() {
     w = spawn(Waiter())
-    w ! Ping {}
-    w ! Ping {}
-    wait_for_idle()
-    // The verdict has to reach the exit code: ask the actor whether the
-    // timeout arm ran (the handler cannot return from main).
-    cell = ref(0)
-    w ! Report { sink: cell }
-    wait_for_idle()
-    if ref_get(cell) != 0 {
-        return 1
+    i = 0
+    while i < 10 {
+        w ! Ping {}
+        sleep(50)
+        i = i + 1
     }
-    println("PASS: timeout cancelled by messages")
+    int during = w ? Fired {}
+    if during != 0 {
+        println("FAIL: the timeout fired ${during} time(s) while pings came within its interval")
+        exit(1)
+    }
+    println("PASS: pings within the interval kept the timeout from firing")
+
+    // The ask was a message too: the countdown runs from its end.
+    wait_for_idle()
+    if w.count != 10 || w.timed_out != 1 {
+        println("FAIL: ${w.count} ping(s), the timeout fired ${w.timed_out} time(s) after them, expected 10 and 1")
+        exit(1)
+    }
+    println("PASS: once the messages stopped, the timeout fired once")
 }

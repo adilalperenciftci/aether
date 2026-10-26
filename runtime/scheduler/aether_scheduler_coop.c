@@ -506,7 +506,9 @@ void scheduler_wait(void) {
             int count = atomic_load_explicit(&sched->actor_count, memory_order_relaxed);
             for (int i = 0; i < count; i++) {
                 ActorBase* a = atomic_load_explicit(&table->slots[i], memory_order_relaxed);
-                if (a && a->timeout_ns > 0) {
+                /* Armed, not merely configured (#3162), and not dead. */
+                if (a && a->timeout_ns > 0 && a->last_activity_ns > 0 &&
+                    atomic_load_explicit(&a->dead, memory_order_relaxed) == 0) {
                     has_pending_timeout = 1;
                     break;
                 }

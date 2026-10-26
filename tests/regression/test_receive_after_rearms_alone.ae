@@ -1,0 +1,33 @@
+// A receive timeout counts down again after every message (#3162), in a
+// program with one actor (test_receive_after_rearms.ae runs two). The poller
+// shape of the language reference: each timeout sends Tick to self, and the
+// cycle goes on until the timeout stops sending, at the fifth tick. It
+// ticked once: the first Tick zeroed the interval for good.
+
+message Tick {}
+
+extern exit(code: int)
+
+actor Poller {
+    state ticks = 0
+
+    receive {
+        Tick -> { ticks = ticks + 1 }
+    } after 20 -> {
+        if ticks < 5 {
+            self ! Tick {}
+        }
+    }
+}
+
+main() {
+    println("=== a poller's receive timeout keeps it ticking, alone (#3162) ===")
+    p = spawn(Poller())
+    wait_for_idle()
+    if p.ticks != 5 {
+        println("FAIL: the poller ticked ${p.ticks} time(s), expected 5")
+        exit(1)
+    }
+    println("  PASS: five ticks, then idle")
+    println("All PASS")
+}

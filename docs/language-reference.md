@@ -3294,7 +3294,21 @@ actor Monitor {
 }
 ```
 
-The timeout is one-shot: it is cancelled when any message is received. The countdown starts when the actor's mailbox becomes empty.
+The countdown starts when the actor waits on an empty mailbox: at spawn, and again each time it has handled a message. A message that arrives within the interval stops it, and the next wait starts it from the beginning, so the Monitor above warns every time five seconds pass without a heartbeat, however many came before. The timeout fires once per countdown: when its handler has run, only a message starts the next one. A handler that sends the actor a message keeps a cycle going, as a poller does:
+
+```aether,fragment
+actor Poller {
+    state ticks = 0
+
+    receive {
+        Tick -> { ticks = ticks + 1 }
+    } after 1000 -> {
+        self ! Tick {}
+    }
+}
+```
+
+and a handler that sends nothing leaves the actor idle, so `wait_for_idle()` returns. `wait_for_idle()` waits for every countdown that is running, so a poller that never stops keeps it waiting (#3162).
 
 ### State Variables
 

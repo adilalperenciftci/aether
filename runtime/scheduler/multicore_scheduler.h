@@ -136,10 +136,12 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
      * Set (TAS) by the thread about to call step(); cleared (release) after. \
      * Work-stealing threads that find this set retry next outer iteration. */ \
     atomic_flag step_lock; \
-    /* Timeout support: fire handler if no message within timeout_ns ns. \
-     * 0 = no timeout. */ \
+    /* Receive timeout (#3162): the interval a `receive ... after` names, \
+     * in ns, set at spawn and kept; 0 = the actor has none. */ \
     uint64_t timeout_ns; \
-    /* Timestamp when idle started; 0 = not idle */ \
+    /* When its countdown was armed, 0 while it is not: the spawn and the \
+     * end of each message's handling arm it, a message and the firing \
+     * disarm it (the generated step function does all three). */ \
     uint64_t last_activity_ns; \
     /* Bits (#2517): AETHER_ACTOR_PANICKED once the actor's step() unwound \
      * via aether_panic() or a caught signal, AETHER_ACTOR_RELEASED once it \

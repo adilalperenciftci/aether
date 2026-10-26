@@ -5,8 +5,10 @@
 //   2. `defer release(body)` after each http.get_with_timeout — the
 //      per-iteration response body is released at scope exit, so a
 //      long-running poller doesn't leak memory.
-//   3. `after m_interval_ms -> { … }` — interval pulled from actor
-//      state, not a hardcoded literal.
+//   3. `after interval_ms -> { … }`: interval pulled from actor
+//      state, not a hardcoded literal. The timeout paces the polls: its
+//      countdown starts again after each one, and its arm sends the next
+//      Poll until max_polls, then sends nothing, which ends the cycle.
 //   4. `http.get_with_timeout(url, 2000ms)` — 2s per-call ceiling so
 //      a hung site can't stall the polling actor.
 //
@@ -22,7 +24,6 @@ import std.http
 import std.string
 
 message Poll {}
-message Stop {}
 
 actor SitePollerOne {
     state interval_ms = 100
@@ -42,18 +43,13 @@ actor SitePollerOne {
             } else {
                 println("one poll ${poll_count}: got ${string.length(body)} bytes")
             }
-
-            if poll_count < max_polls {
-                self ! Poll {}
-            } else {
-                self ! Stop {}
-            }
-        }
-        Stop -> {
-            println("one done")
         }
     } after interval_ms -> {
-        self ! Poll {}
+        if poll_count < max_polls {
+            self ! Poll {}
+        } else {
+            println("one done")
+        }
     }
 }
 
@@ -75,18 +71,13 @@ actor SitePollerTwo {
             } else {
                 println("two poll ${poll_count}: got ${string.length(body)} bytes")
             }
-
-            if poll_count < max_polls {
-                self ! Poll {}
-            } else {
-                self ! Stop {}
-            }
-        }
-        Stop -> {
-            println("two done")
         }
     } after interval_ms -> {
-        self ! Poll {}
+        if poll_count < max_polls {
+            self ! Poll {}
+        } else {
+            println("two done")
+        }
     }
 }
 

@@ -2,7 +2,8 @@
 //
 // Demonstrates the `after` clause on receive blocks.
 // The timeout fires if no message arrives within the specified milliseconds.
-// It is one-shot: cancelled when any message is received.
+// A message stops the countdown, and the next wait on an empty mailbox
+// starts it again; once the timeout has fired, only a message starts it.
 
 message Heartbeat {}
 message Status {}

@@ -2338,7 +2338,14 @@ static int has_pending_actor_timeout(void) {
         AetherActorTable* table = actor_table_snapshot(&schedulers[c], &count);
         for (int i = 0; i < count; i++) {
             ActorBase* a = actor_table_read(table, i);
-            if (a && a->timeout_ns > 0) { found = 1; break; }
+            /* Armed, not merely configured: an `after` keeps its interval
+             * once it fired, and is armed again only by a message (#3162).
+             * A dead actor is never stepped, so its countdown never ends. */
+            if (a && a->timeout_ns > 0 && a->last_activity_ns > 0 &&
+                atomic_load_explicit(&a->dead, memory_order_relaxed) == 0) {
+                found = 1;
+                break;
+            }
         }
     }
     reclaim_reader_exit(slot);
