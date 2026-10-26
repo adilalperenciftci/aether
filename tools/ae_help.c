@@ -116,6 +116,9 @@ typedef enum {
     FK_YAML_LIST,         /* `repos: [...]` → repo(...) per entry */
     FK_TOPLEVEL_DSL,      /* builder block at file scope → wrap in main() */
     FK_HELP_MD_HINT,      /* library-author shipped hint */
+    /* #3184: an `error:` line with no code. */
+    FK_UNRESOLVED_IMPORT, /* `error: unresolved import 'x': ...` */
+    FK_COMPILE_ERROR,     /* any other uncoded compile error */
 } FindingKind;
 
 typedef struct {
@@ -260,7 +263,8 @@ static int  load_help_md_for_import(const char* import_name, SourceFile* sf,
                                     Finding* findings, int* count, int max);
 static void apply_doc_cross_links(Finding* findings, int count);
 static void render_human(const Finding* findings, int count, const SourceFile* sf, const HelpFlags* flags);
-static void render_json(const Finding* findings, int count, const SourceFile* sf);
+static void render_json(const Finding* findings, int count, const SourceFile* sf, int compiled);
+static void render_unexplained_failure(const SourceFile* sf, const char* compile_output);
 static int  apply_fix(Finding* findings, int count, SourceFile* sf);
 static int  llm_escalate(const Finding* findings, int count,
                          const SourceFile* sf, const char* weights);
@@ -463,8 +467,8 @@ int ae_help_main(int argc, char** argv) {
      * from its already-structured `error[Eabcd]:` lines. */
     char stderr_buf[64 * 1024];
     stderr_buf[0] = '\0';
+    /* Even a compile that worked may have printed warnings. */
     int compile_rc = run_aetherc_capture(script, stderr_buf, sizeof(stderr_buf));
-    (void)compile_rc; /* Even on success we may have warnings. */
 
     Finding findings[AE_HELP_MAX_FINDINGS];
     int n_findings = parse_aetherc_findings(stderr_buf, findings, AE_HELP_MAX_FINDINGS);
@@ -521,9 +525,17 @@ int ae_help_main(int argc, char** argv) {
     if (flags.fix) {
         exit_code = apply_fix(findings, n_findings, &sf);
     } else if (flags.json) {
-        render_json(findings, n_findings, &sf);
+        render_json(findings, n_findings, &sf, compile_rc == 0);
     } else {
-        render_human(findings, n_findings, &sf, &flags);
+        /* #3184: a compile that failed with nothing ae help can explain
+         * is not "no diagnostics": say it failed, show what it printed,
+         * and exit 1. */
+        if (n_findings == 0 && compile_rc != 0) {
+            render_unexplained_failure(&sf, stderr_buf);
+            exit_code = 1;
+        } else {
+            render_human(findings, n_findings, &sf, &flags);
+        }
     }
 
     if (flags.llm) {
@@ -1139,75 +1151,107 @@ static void extract_quoted_name(const char* msg, char* out, size_t out_size) {
     out[len] = '\0';
 }
 
+/* Where a diagnostic is, from its `  --> file:line:col` line. Windows
+ * MSYS2 paths have three colons (`D:/a/foo.ae:12:5`), the first the drive
+ * letter's, so the numbers are read from the end of the line, the path
+ * ignored. A trailing CR (Windows output) is stripped. */
+static void parse_location(const char* loc, Finding* f) {
+    const char* line_end = loc;
+    while (*line_end && *line_end != '\n') line_end++;
+    const char* tail = line_end;
+    while (tail > loc && (tail[-1] == '\r' || tail[-1] == ' ' || tail[-1] == '\t')) tail--;
+    const char* digit_run_end = tail;
+    while (digit_run_end > loc && digit_run_end[-1] >= '0' && digit_run_end[-1] <= '9') digit_run_end--;
+    /* digit_run_end now points at first digit of col. */
+    if (digit_run_end < tail && digit_run_end > loc && digit_run_end[-1] == ':') {
+        const char* line_digit_end = digit_run_end - 1; /* on the `:` */
+        const char* line_digit_start = line_digit_end;
+        while (line_digit_start > loc && line_digit_start[-1] >= '0' && line_digit_start[-1] <= '9') line_digit_start--;
+        if (line_digit_start < line_digit_end && line_digit_start > loc && line_digit_start[-1] == ':') {
+            f->line = parse_int(&line_digit_start);
+            f->col  = parse_int(&digit_run_end);
+        }
+    }
+}
+
+/* The diagnostics in the compile's output, coded (`error[E0301]: ...`) and
+ * not (`error: unresolved import 'x': ...`, #3184), each at the location
+ * its own `-->` line gives. Only coded headers were read before, so an
+ * unresolved import, often the only error, left nothing and the run said
+ * "no diagnostics" for a file that does not compile. A header is one at the
+ * start of a line; its location is searched for only up to the next. */
 static int parse_aetherc_findings(const char* stderr_buf, Finding* findings, int max) {
     int n = 0;
     const char* p = stderr_buf;
-
     while (*p && n < max) {
-        /* Find the next "error[E" header. */
-        const char* hdr = strstr(p, "error[E");
-        if (!hdr) break;
-        p = hdr + 7;
-        int code = parse_int(&p);
-        if (*p != ']') { continue; }
-        p++; /* ] */
-        while (*p == ':' || *p == ' ') p++;
+        const char* line = p;
+        const char* next = strchr(p, '\n');
+        p = next ? next + 1 : p + strlen(p);
+        /* Past any colour codes the compile put first. */
+        while (*line == '\x1b') {
+            while (*line && *line != 'm' && *line != '\n') line++;
+            if (*line == 'm') line++;
+        }
+        int code = 0;
+        const char* body = NULL;
+        if (strncmp(line, "error[E", 7) == 0) {
+            const char* q = line + 7;
+            code = parse_int(&q);
+            if (*q != ']') continue;
+            body = q + 1;
+        } else if (strncmp(line, "error:", 6) == 0) {
+            body = line + 6;
+        } else {
+            continue;
+        }
+        while (*body == ':' || *body == ' ') body++;
 
         Finding* f = &findings[n];
         memset(f, 0, sizeof(*f));
         f->error_code = code;
-        f->kind = kind_from_error_code(code);
 
-        /* Copy the message up to end-of-line, stripping ANSI codes. */
+        /* The message, to the end of its line, without colour codes or
+         * trailing whitespace. */
         char raw_msg[AE_HELP_MSG_LEN];
         size_t mi = 0;
-        while (*p && *p != '\n' && mi + 1 < sizeof(raw_msg)) {
-            if (*p == '\x1b') { /* ANSI escape */
-                while (*p && *p != 'm') p++;
-                if (*p) p++;
+        const char* m = body;
+        while (*m && *m != '\n' && mi + 1 < sizeof(raw_msg)) {
+            if (*m == '\x1b') {
+                while (*m && *m != 'm') m++;
+                if (*m) m++;
                 continue;
             }
-            raw_msg[mi++] = *p++;
+            raw_msg[mi++] = *m++;
         }
         raw_msg[mi] = '\0';
-        /* Strip trailing whitespace. */
         while (mi > 0 && (raw_msg[mi - 1] == ' ' || raw_msg[mi - 1] == '\t' ||
                           raw_msg[mi - 1] == '\r')) {
             raw_msg[--mi] = '\0';
         }
         safe_strncpy(f->message, raw_msg, sizeof(f->message));
         extract_quoted_name(raw_msg, f->name, sizeof(f->name));
-
-        /* Look for the "  --> file:line:col" location on a nearby line
-         * and extract `line` and `col`. Windows MSYS2 paths have
-         * three colons (`D:/a/foo.ae:12:5`) — the first belongs to
-         * the drive letter, not the line-number separator. POSIX
-         * paths have two colons (`/foo/bar.ae:12:5`). The robust
-         * shape is "parse from the end, ignore the path": find the
-         * line ending, walk back through `\\d+:\\d+`, take those
-         * two numbers. Strip trailing CR if present (Windows line
-         * endings reach us as `\r\n` in popen output). */
-        const char* loc = strstr(p, "-->");
-        if (loc) {
-            const char* line_end = loc;
-            while (*line_end && *line_end != '\n') line_end++;
-            const char* tail = line_end;
-            while (tail > loc && (tail[-1] == '\r' || tail[-1] == ' ' || tail[-1] == '\t')) tail--;
-            const char* digit_run_end = tail;
-            while (digit_run_end > loc && digit_run_end[-1] >= '0' && digit_run_end[-1] <= '9') digit_run_end--;
-            /* digit_run_end now points at first digit of col. */
-            if (digit_run_end < tail && digit_run_end > loc && digit_run_end[-1] == ':') {
-                const char* line_digit_end = digit_run_end - 1; /* on the `:` */
-                const char* line_digit_start = line_digit_end;
-                while (line_digit_start > loc && line_digit_start[-1] >= '0' && line_digit_start[-1] <= '9') line_digit_start--;
-                if (line_digit_start < line_digit_end && line_digit_start > loc && line_digit_start[-1] == ':') {
-                    f->line = parse_int(&line_digit_start);
-                    f->col  = parse_int(&digit_run_end);
-                }
-            }
-            p = loc;
+        if (code) {
+            f->kind = kind_from_error_code(code);
+        } else if (strncmp(raw_msg, "unresolved import", 17) == 0) {
+            f->kind = FK_UNRESOLVED_IMPORT;
+        } else {
+            f->kind = FK_COMPILE_ERROR;
         }
 
+        /* Its location: a `-->` before the next header. */
+        const char* scan = p;
+        while (*scan) {
+            const char* scan_next = strchr(scan, '\n');
+            const char* s2 = scan;
+            while (*s2 == ' ' || *s2 == '\t') s2++;
+            if (strncmp(s2, "-->", 3) == 0) {
+                parse_location(s2, f);
+                break;
+            }
+            if (strncmp(scan, "error", 5) == 0 || strncmp(scan, "warning", 7) == 0) break;
+            if (!scan_next) break;
+            scan = scan_next + 1;
+        }
         n++;
     }
     return n;
@@ -1943,6 +1987,19 @@ static void apply_doc_cross_links(Finding* findings, int count) {
             case FK_TYPE_MISMATCH:
                 link = "docs/type-system.md";
                 break;
+            case FK_UNRESOLVED_IMPORT:
+                link = "docs/module-system-design.md (lib search path)";
+                if (!f->suggestion[0] && f->name[0]) {
+                    /* `import a.b` is a/b/module.ae. */
+                    char as_path[AE_HELP_NAME_LEN];
+                    safe_strncpy(as_path, f->name, sizeof(as_path));
+                    for (char* q = as_path; *q; q++) if (*q == '.') *q = '/';
+                    snprintf(f->suggestion, sizeof(f->suggestion),
+                             "'%s' is in none of those directories: name the one it is in with `--lib <dir>`, "
+                             "or put it at lib/%s/module.ae in the project",
+                             f->name, as_path);
+                }
+                break;
             default: break;
         }
         if (link) safe_strncpy(f->doc_link, link, sizeof(f->doc_link));
@@ -1966,6 +2023,8 @@ static const char* kind_label(FindingKind k) {
         case FK_YAML_LIST:      return "YAML-style list";
         case FK_TOPLEVEL_DSL:   return "top-level DSL block";
         case FK_HELP_MD_HINT:   return "library hint";
+        case FK_UNRESOLVED_IMPORT: return "unresolved import";
+        case FK_COMPILE_ERROR:  return "compile error";
         default:                return "diagnostic";
     }
 }
@@ -2005,6 +2064,22 @@ static void render_human(const Finding* findings, int count, const SourceFile* s
     }
 }
 
+/* A compile that failed while nothing in its output was a finding (#3184):
+ * what it printed, so the reader has the compiler's own words. */
+static void render_unexplained_failure(const SourceFile* sf, const char* compile_output) {
+    printf("ae help: %s does not compile, and none of what the compiler printed is a\n"
+           "finding ae help knows. The compiler printed:\n\n", sf->path);
+    const char* p = compile_output;
+    while (*p) {
+        const char* e = strchr(p, '\n');
+        size_t len = e ? (size_t)(e - p) : strlen(p);
+        if (len > 0 && p[len - 1] == '\r') len--;
+        printf("    %.*s\n", (int)len, p);
+        if (!e) break;
+        p = e + 1;
+    }
+}
+
 /* === Renderer (JSON) =============================================== */
 /* Minimal JSON emitter — no nested objects, all string fields are
  * escaped. */
@@ -2036,10 +2111,14 @@ static void json_escape(const char* in, char* out, size_t out_size) {
     out[oi] = '\0';
 }
 
-static void render_json(const Finding* findings, int count, const SourceFile* sf) {
+/* `compiled` is false when the compile failed, so a tool reading an empty
+ * findings list can tell a clean script from one ae help could not
+ * explain (#3184). */
+static void render_json(const Finding* findings, int count, const SourceFile* sf, int compiled) {
     char esc_path[AE_HELP_PATH_LEN * 2];
     json_escape(sf->path, esc_path, sizeof(esc_path));
-    printf("{\"script\":\"%s\",\"findings\":[", esc_path);
+    printf("{\"script\":\"%s\",\"compiled\":%s,\"findings\":[", esc_path,
+           compiled ? "true" : "false");
     for (int i = 0; i < count; i++) {
         const Finding* f = &findings[i];
         char emsg[AE_HELP_MSG_LEN * 2];

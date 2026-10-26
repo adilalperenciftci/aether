@@ -328,10 +328,16 @@ The pieces, as built in `tools/ae_help.c`:
 
 The error source is `aetherc` itself. Rather than carving a
 "diagnose" mode into the typer, `ae help` runs the real `aetherc` as
-a subprocess, captures its stderr, and parses the already-structured
-`error[Eabcd]: …` lines into findings. This avoids any risk of typer
-regressions from a parallel code path; the tradeoff is that it only
-sees the errors `aetherc` already surfaces.
+a subprocess, with the `--lib` directories it was given (before the
+input, where aetherc reads options), captures its stderr, and parses the
+already-structured error lines into findings: the coded `error[Eabcd]: …`
+ones and the uncoded `error: …` ones, an unresolved import among them,
+which names every directory the compile searched. This avoids any risk of
+typer regressions from a parallel code path; the tradeoff is that it only
+sees the errors `aetherc` already surfaces. A compile that fails with
+nothing ae help can read is reported as such, with what the compiler
+printed, and ae help exits 1; it never says "no diagnostics" about a file
+that does not compile. `--json` carries `"compiled": false` then.
 
 The hint loader walks the imported libraries, finds any
 `<name>.help.md` next to their `module.ae` / source, and parses the

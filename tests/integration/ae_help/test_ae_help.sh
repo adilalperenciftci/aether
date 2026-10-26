@@ -425,6 +425,64 @@ expect_match "a --lib library's misspelt setter gets its did-you-mean" \
     "Did you mean: superuser_token \(in my_lib\)" \
     "$AE" help "$TMPDIR/typo.ae" --lib "$TMPDIR/dsl"
 
+# Case 20: an `error:` line with no code is a finding (#3184). An unresolved
+# import, often the only error, was dropped, and ae help said "no
+# diagnostics" about a file that does not compile. The finding names the
+# directories the compile searched (#3181) and how to point it at one more.
+cat > "$TMPDIR/noimport.ae" <<'EOF'
+import nowhere
+main() {
+    nowhere.go()
+}
+EOF
+expect_match "an unresolved import is a finding, at the import" \
+    "unresolved import at .*noimport\.ae:1:1" \
+    "$AE" help "$TMPDIR/noimport.ae"
+expect_match "the finding names the directories searched" \
+    "no module of that name was found in .*\(where the compile ran\)" \
+    "$AE" help "$TMPDIR/noimport.ae"
+expect_match "and says how to name another" \
+    "'nowhere' is in none of those directories: name the one it is in with \`--lib <dir>\`" \
+    "$AE" help "$TMPDIR/noimport.ae"
+expect_match "--json carries it too, and says the compile failed" \
+    '"compiled":false,"findings":\[\{"kind":"unresolved import"' \
+    "$AE" help "$TMPDIR/noimport.ae" --json
+
+# Case 21: a compile that fails with nothing ae help can read is never "no
+# diagnostics" (#3184): ae help says the file does not compile, shows what
+# the compiler printed, and exits 1. A stand-in compiler (AETHERC) prints
+# what no real diagnostic looks like.
+CC_BIN="${CC:-cc}"
+if command -v "$CC_BIN" >/dev/null 2>&1; then
+    cat > "$TMPDIR/fakec.c" <<'EOF'
+#include <stdio.h>
+int main(void) {
+    fprintf(stderr, "the compiler fell over\n");
+    return 3;
+}
+EOF
+    if "$CC_BIN" -o "$TMPDIR/fakec" "$TMPDIR/fakec.c" >/dev/null 2>&1; then
+        FAKEC="$TMPDIR/fakec"
+        [ -f "$FAKEC.exe" ] && FAKEC="$FAKEC.exe"
+        out=$(AETHERC="$FAKEC" "$AE" help "$TMPDIR/usewidgets.ae" 2>&1)
+        rc=$?
+        if [ "$rc" -eq 1 ] && printf '%s\n' "$out" | grep -q "does not compile" \
+            && printf '%s\n' "$out" | grep -q "    the compiler fell over" \
+            && ! printf '%s\n' "$out" | grep -q "no diagnostics"; then
+            echo "  [PASS] a failed compile with nothing to explain says so, and exits 1"
+            pass=$((pass + 1))
+        else
+            echo "  [FAIL] a failed compile with nothing to explain (rc=$rc):"
+            printf '%s\n' "$out" | sed 's/^/      /'
+            fail=$((fail + 1))
+        fi
+    else
+        echo "  [SKIP] no working C compiler for the stand-in aetherc"
+    fi
+else
+    echo "  [SKIP] no C compiler for the stand-in aetherc"
+fi
+
 echo
 echo "ae_help: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
