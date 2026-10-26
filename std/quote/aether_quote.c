@@ -53,7 +53,7 @@ typedef struct AeQuoteTree_ {
 /* Out of memory while building a tree: nothing sensible can follow, and this
  * file is linked into the compiler too, which has no aether_panic. */
 static void quote_oom(void) {
-    fprintf(stderr, "std.quote: out of memory building a quote's tree\n");
+    fprintf(stderr, "std.quote: out of memory building a quote's tree\n");  /* silent-ok: last line before abort */
     abort();
 }
 

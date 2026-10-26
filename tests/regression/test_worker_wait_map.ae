@@ -55,9 +55,9 @@ initial_of(x: ptr) -> ptr {
 }
 
 main() {
-    idle = worker.wait()
-    if idle != 0 {
-        fail("wait() on an idle pool should deliver nothing, got ${idle}")
+    idle, werr = worker.wait()
+    if idle != 0 || werr != "" {
+        fail("wait() on an idle pool should deliver nothing, got ${idle} '${werr}'")
     }
     println("PASS 3: wait() on an idle pool returns immediately")
 

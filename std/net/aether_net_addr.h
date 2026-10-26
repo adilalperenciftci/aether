@@ -166,15 +166,26 @@ static inline int aether_addr_bind(const char* host, int port, struct sockaddr_s
     return -1;
 }
 
-/* A listening-ready socket for `addr`: SO_REUSEADDR, and IPV6_V6ONLY off for
- * the IPv6 wildcard, so "::" takes IPv4 clients too (as v4-mapped peers).
- * Platforms differ on the default; Windows and the BSDs default to v6-only,
- * so it is set explicitly. Returns the descriptor, or -1. */
+/* A listening-ready socket for `addr`: rebindable while an old connection
+ * sits in TIME_WAIT, but never shared with a live listener, and IPV6_V6ONLY
+ * off for the IPv6 wildcard, so "::" takes IPv4 clients too (as v4-mapped
+ * peers). Platforms differ on the default; Windows and the BSDs default to
+ * v6-only, so it is set explicitly. Returns the descriptor, or -1.
+ *
+ * On POSIX that is SO_REUSEADDR. On Windows SO_REUSEADDR means something
+ * else: it lets a second socket bind a port another process is listening on,
+ * so a server started twice would "succeed" and split the traffic. Windows
+ * rebinds past TIME_WAIT without help, so it gets SO_EXCLUSIVEADDRUSE, and a
+ * taken port fails the bind as it does everywhere else. */
 static inline int aether_addr_listen_socket(const struct sockaddr_storage* addr) {
     int fd = (int)socket(addr->ss_family, SOCK_STREAM, 0);
     if (fd < 0) return -1;
     int opt = 1;
+#ifdef _WIN32
+    setsockopt(fd, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char*)&opt, sizeof opt);
+#else
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof opt);
+#endif
     if (addr->ss_family == AF_INET6) {
         const struct sockaddr_in6* a6 = (const struct sockaddr_in6*)addr;
         static const unsigned char any[16] = {0};

@@ -1,0 +1,27 @@
+// worker.wait() with a main-thread poster installed refuses, and says why in
+// its error, not on stderr (#3131): there the host loop delivers completions,
+// so a wait on that thread would block the thread that has to deliver them.
+
+import std.worker
+import std.string
+
+extern exit(code: int)
+
+main() {
+    ran, err = worker.wait()
+    if ran != 0 || err != "" {
+        println("FAIL a wait with nothing pending gave ${ran}, '${err}'")
+        exit(1)
+    }
+    worker.set_main_poster(| job: ptr | { worker.deliver(job) })
+    ran, err = worker.wait()
+    if ran != -1 {
+        println("FAIL a wait with a poster installed returned ${ran}, expected -1")
+        exit(1)
+    }
+    if string.contains(err, "main-thread poster") == 0 {
+        println("FAIL a refused wait gave the error '${err}'")
+        exit(1)
+    }
+    println("worker wait poster: ok")
+}

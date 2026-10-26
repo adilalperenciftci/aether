@@ -35,7 +35,7 @@ exports(
     http_client_pool_idle_count_raw, http_client_rx_buffer_allocs_raw,
     client_pool_configure, client_pool_disable, client_pool_clear,
     client_pool_idle_count, client_rx_buffer_allocs,
-    http_server_create, http_server_bind_raw, http_server_port, http_server_start_raw,
+    http_server_create, http_server_bind_raw, http_server_error, http_server_port, http_server_start_raw,
     server_set_host,
     http_server_start_background_raw,
     http_server_stop, http_server_free,
@@ -45,7 +45,9 @@ exports(
     http_server_set_h2_concurrent_dispatch_raw, server_set_h2_concurrent_dispatch,
     http_server_drain_connection,
     http_server_shutdown_graceful_raw, server_shutdown_graceful,
-    server_on_start, server_on_stop,
+    http_server_monitor_listening_raw, http_server_monitor_stopped_raw,
+    http_server_monitor_null_raw, http_server_has_monitor,
+    monitor, listening, stopped, console_monitor, null_monitor,
     http_server_set_health_probes_raw, server_set_health_probes,
     http_server_set_access_log_raw, server_set_access_log,
     http_server_set_metrics_raw, server_set_metrics,
@@ -329,6 +331,9 @@ delete(url: string) -> {
 // HTTP Server - lifecycle
 extern http_server_create(port: int) -> ptr
 extern http_server_bind_raw(server: ptr, host: string, port: int) -> int
+// Why the last bind or start failed, "" when it did not (#3131). The server
+// reports through this and the wrappers' error strings, never by printing.
+extern http_server_error(server: ptr) -> string
 // Resolved listening port. After binding with port 0 (OS-assigned),
 // returns the kernel-chosen port so dynamic-port users can discover it;
 // otherwise echoes the requested port. 0 if unbound.
@@ -441,21 +446,72 @@ server_shutdown_graceful(server: ptr, timeout: Duration) -> {
     return http_server_shutdown_graceful_raw(server, timeout.ns)
 }
 
-// Lifecycle hooks (#260 Tier 3). on_start fires once after the listen
-// socket is bound, before the accept loop runs (great place to log
-// "ready" or flip a readiness probe). on_stop fires after the accept
-// loop exits but before sockets close. Both pass the `user_data`
-// pointer to the hook function. Hooks are C function pointers — declare
-// them with @c_callback on the Aether side.
-extern http_server_set_on_start(server: ptr, hook: ptr, user_data: ptr)
-extern http_server_set_on_stop(server: ptr, hook: ptr, user_data: ptr)
+// The server's monitor (#3131). The server prints nothing itself: what it has
+// to say goes to closures the program registers before it starts the server.
+// One closure per event, each with typed arguments:
+//
+//     http.monitor(srv) {
+//         listening() |host: string, port: int| { println("up on ${host}:${port}") }
+//         stopped() |host: string, port: int| { metrics_flush() }
+//     }
+//
+// `monitor` starts an empty monitor, so an event the block does not name says
+// nothing. The stock monitors are console_monitor (the "Server running at"
+// banner) and null_monitor (silence). With no monitor chosen, server_start, a
+// foreground server, uses console_monitor, and server_start_background, an
+// embedded one, uses none.
+//
+// listening fires once the server accepts connections, and stopped when it
+// stops serving, each on the thread that runs the server: the caller's for
+// server_start, the server's own for server_start_background. Both fire in
+// every dispatch mode, pool or actor. listening comes after the server counts
+// as running, so a server_stop issued from it, or once it has fired, is never
+// lost; a host that must not return from its start until the server serves
+// waits for it. To act on the server from an event, capture it in the closure.
+extern http_server_monitor_listening_raw(server: ptr, f: @retain fn)
+extern http_server_monitor_stopped_raw(server: ptr, f: @retain fn)
+extern http_server_monitor_null_raw(server: ptr)
+extern http_server_has_monitor(server: ptr) -> int
+extern string_contains(str: string, substring: string) -> int
 
-server_on_start(server: ptr, hook: ptr, user_data: ptr) {
-    http_server_set_on_start(server, hook, user_data)
+monitor(server: @into ptr) -> ptr {
+    http_server_monitor_null_raw(server)
+    return server
 }
 
-server_on_stop(server: ptr, hook: ptr, user_data: ptr) {
-    http_server_set_on_stop(server, hook, user_data)
+// Inside a monitor block, the server is the block's context.
+listening(_ctx: ptr, f: @keep fn) {
+    if _ctx != null {
+        http_server_monitor_listening_raw(_ctx, f)
+    }
+}
+
+stopped(_ctx: ptr, f: @keep fn) {
+    if _ctx != null {
+        http_server_monitor_stopped_raw(_ctx, f)
+    }
+}
+
+// The banner a foreground server has always printed, from the monitor.
+console_monitor(server: ptr) {
+    http_server_monitor_listening_raw(server, | host: string, port: int | {
+            println("Server running at http://${url_authority(host, port)}")
+            println("Press Ctrl+C to stop\n")
+        })
+}
+
+// A monitor that says nothing, for a foreground server that must keep stdout
+// to itself (a filter, a program whose stdout is data).
+null_monitor(server: ptr) {
+    http_server_monitor_null_raw(server)
+}
+
+// host:port as a URL writes it: an IPv6 address goes in brackets.
+url_authority(host: string, port: int) -> string {
+    if string_contains(host, ":") != 0 {
+        return "[${host}]:${port}"
+    }
+    return "${host}:${port}"
 }
 
 // Health-probe endpoints (#260 Tier 3). Registers two routes:
@@ -787,12 +843,23 @@ extern http_server_drain_connection(server: ptr, client_fd: int)
 
 // Go-style wrappers for server lifecycle. Return "" on success, error
 // string on failure.
+// The error names the reason: "cannot bind 0.0.0.0:8080: Address already in
+// use", "cannot resolve host nosuch.invalid".
 server_bind(server: ptr, host: string, port: int) -> {
     rc = http_server_bind_raw(server, host, port)
     if rc < 0 {
-        return "bind failed"
+        return server_error_or(server, "bind failed")
     }
     return ""
+}
+
+// http_server_error, or `fallback` when the C side recorded no reason.
+server_error_or(server: ptr, fallback: string) -> string {
+    why = http_server_error(server)
+    if why == "" {
+        return fallback
+    }
+    return string_concat(why, "")
 }
 
 // Set the bind host before server_start. Default is "0.0.0.0".
@@ -804,9 +871,12 @@ server_set_host(server: ptr, host: string) -> {
 }
 
 server_start(server: ptr) -> {
+    if http_server_has_monitor(server) == 0 {
+        console_monitor(server)
+    }
     rc = http_server_start_raw(server)
     if rc < 0 {
-        return "server start failed"
+        return server_error_or(server, "server start failed")
     }
     return ""
 }

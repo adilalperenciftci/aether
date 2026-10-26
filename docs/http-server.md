@@ -24,11 +24,17 @@ handle_root(req: ptr, res: ptr, ud: ptr) {
 main() {
     server = http.server_create(8080)
     http.server_get(server, "/", handle_root, 0)
-    http.server_start_raw(server)  // blocks
+    err = http.server_start(server)  // blocks while it serves
+    if err != "" {
+        println("cannot serve: ${err}")
+    }
 }
 ```
 
-Run it: `ae run server.ae`. Hit `http://127.0.0.1:8080/` from any client.
+Run it: `ae run server.ae`. It prints `Server running at http://0.0.0.0:8080`;
+hit `http://127.0.0.1:8080/` from any client. If the port is taken,
+`server_start` returns the reason (`cannot bind 0.0.0.0:8080: Address already
+in use`) and the server prints nothing: see [The monitor](#the-monitor).
 
 ---
 
@@ -812,10 +818,11 @@ workers and the parking lot are done, so the server can be freed at
 once, and another started in the same process. This is the *embedded*
 mode and behaves like a library, not a CLI:
 
-- **No banner.** It does not print `Server running at …` /
-  `Press Ctrl+C to stop` an embedded server is controlled by
-  `http_server_stop`, not a terminal. (Foreground `server_start` still
-  prints the banner.)
+- **No banner.** It has no monitor unless the program gives it one, so
+  it prints nothing: an embedded server is controlled by
+  `http_server_stop`, not a terminal. (Foreground `server_start` gets the
+  console monitor by default, which prints the banner; see
+  [The monitor](#the-monitor).)
 - **Quiet signals.** Its accept/worker threads block async
   signals (`pthread_sigmask` SIGURG, SIGINT, SIGTERM, SIGPIPE, …), so
   the server's threads never intercept a process-directed signal meant
@@ -832,23 +839,55 @@ let the process exit, rather than orphaning it.
 
 ---
 
-## Lifecycle hooks
+## The monitor
+
+The server prints nothing itself. What it has to say goes to a *monitor*:
+closures the program registers before starting the server, one per event,
+each with typed arguments.
 
 ```aether,fragment
-@c_callback on_started(server: ptr, ud: ptr) {
-    println("server is ready")
+http.monitor(server) {
+    listening() |host: string, port: int| { println("up on ${host}:${port}") }
+    stopped() |host: string, port: int| { println("down") }
 }
-@c_callback on_stopped(server: ptr, ud: ptr) {
-    println("server stopped")
-}
-
-http.server_on_start(server, on_started, null)
-http.server_on_stop (server, on_stopped, null)
 ```
 
-`on_start` fires once after the listen socket is bound, before the
-accept loop runs. `on_stop` fires after the accept loop exits, before
-sockets close.
+| Event | Arguments | Fires |
+|---|---|---|
+| `listening` | host, port | once the server accepts connections |
+| `stopped` | host, port | when it stops serving, after `listening` |
+
+Both fire on the thread that runs the server: the caller's for
+`server_start`, the server's own for `server_start_background`, and in
+every dispatch mode, thread pool or actors. `http.monitor` starts an
+empty monitor, so an event the block does not name says nothing.
+
+The monitor is also where a program hooks the server's lifecycle: flip a
+readiness flag, flush logs or metrics on the way down. `listening` fires
+after the server counts as running, so a `server_stop` issued from it,
+or once it has fired, is never lost; a host that must not return from
+its own start until the server serves waits for it. To act on the server
+from an event, capture it:
+
+```aether,fragment
+http.monitor(srv) {
+    listening() |host: string, port: int| { ready_flag = 1 }
+    stopped() |host: string, port: int| { metrics_flush(srv) }
+}
+```
+
+Two stock monitors ship with `std.http`:
+
+- `http.console_monitor(server)` prints `Server running at http://…` and
+  `Press Ctrl+C to stop` when the server starts listening.
+- `http.null_monitor(server)` says nothing, for a foreground server whose
+  stdout is data (a filter, a program printing JSON).
+
+With no monitor chosen, `http.server_start` (a foreground server, where
+someone is watching) uses `console_monitor`, and `server_start_background`
+and the raw `http_server_start_raw` use none. A failed bind or start is
+never printed: `server_bind` and `server_start` return the reason, and
+`http_server_error(server)` reads it after a raw call.
 
 ---
 

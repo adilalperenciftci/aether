@@ -146,15 +146,15 @@ int aether_tracking_report(AetherAllocator* t) {
     if (!t) return -1;
     AetherTracking* st = (AetherTracking*)t;
     if (st->live == 0) {
-        fprintf(stderr, "[tracking] no leaks (0 live allocations)\n");
+        fprintf(stderr, "[tracking] no leaks (0 live allocations)\n");  /* silent-ok: the report asked for */
         return 0;
     }
-    fprintf(stderr, "[tracking] %zu live allocation(s), %zu bytes:\n",
+    fprintf(stderr, "[tracking] %zu live allocation(s), %zu bytes:\n",  /* silent-ok: the report asked for */
             st->live, st->total_bytes);
     for (size_t i = 0; i < st->cap; i++) {
         void* k = st->entries[i].key;
         if (k != TRACK_EMPTY && k != TRACK_TOMB)
-            fprintf(stderr, "  leak #%lld: %zu bytes\n",
+            fprintf(stderr, "  leak #%lld: %zu bytes\n",  /* silent-ok: the report asked for */
                     (long long)st->entries[i].seq, st->entries[i].size);
     }
     return (int)st->live;

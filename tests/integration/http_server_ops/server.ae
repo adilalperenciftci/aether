@@ -1,11 +1,11 @@
-// #260 Tier 3 (Phase F3+F4+F5): graceful shutdown + lifecycle hooks +
+// #260 Tier 3 (Phase F3+F4+F5): graceful shutdown + lifecycle events +
 // health probes test driver.
 //
 // Server on port 18107. Installs:
-//   - on_start hook -> writes "STARTED" to a marker file (the test
-//     runner watches it to know when the accept loop is live —
-//     tighter than the older grep-for-"READY"-in-srv.log pattern).
-//   - on_stop hook  -> writes "STOPPED" to the marker file.
+//   - a monitor whose listening event writes "STARTED" to a marker file
+//     (the test runner watches it to know when the accept loop is live —
+//     tighter than the older grep-for-"READY"-in-srv.log pattern),
+//   - and whose stopped event writes "STOPPED" to the marker file.
 //   - health probes /healthz + /readyz; ready_check toggles based
 //     on a simple env var so the runner can flip it.
 //   - one normal route /work that takes ~200ms (the runner triggers
@@ -24,17 +24,10 @@ extern http_server_bind_raw(server: ptr, host: string, port: int) -> int
 extern http_server_port(server: ptr) -> int
 
 // Marker-file paths come from env so the runner can tee into a tmp dir.
-@c_callback on_started(server: ptr, ud: ptr) {
+mark(text: string) {
     path = os_getenv("MARKER_PATH")
     if path != 0 {
-        fs.write(path, "STARTED\n")
-    }
-}
-
-@c_callback on_stopped(server: ptr, ud: ptr) {
-    path = os_getenv("MARKER_PATH")
-    if path != 0 {
-        fs.write(path, "STOPPED\n")
+        fs.write(path, text)
     }
 }
 
@@ -69,8 +62,10 @@ main() {
     http.server_set_host(raw, "127.0.0.1")
     if raw == 0 { println("FAIL: server_create"); exit(1) }
 
-    http.server_on_start(raw, on_started, null)
-    http.server_on_stop(raw, on_stopped, null)
+    http.monitor(raw) {
+        listening() | host: string, port: int | { mark("STARTED\n") }
+        stopped() | host: string, port: int | { mark("STOPPED\n") }
+    }
 
     e = http.server_set_health_probes(raw, "/healthz", "/readyz", ready_check, null)
     if e != "" { println("FAIL: probes: ${e}"); exit(1) }

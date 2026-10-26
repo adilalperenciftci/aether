@@ -57,7 +57,7 @@ cas_increment(cell: ptr) {
 // on the pool's done signal until pending == 0) — the correct completion barrier.
 // A drain-poll loop can observe a transient pending==0 and return before all jobs
 // have run; worker.wait() does not.
-await_all() { _w = worker.wait() }
+await_all() { worker.wait() }
 
 main() {
     passing = 0
