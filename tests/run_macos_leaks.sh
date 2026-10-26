@@ -142,13 +142,28 @@ check_one() {
     MallocStackLogging=1 run_bounded "$LEAKS_TIMEOUT" leaks --atExit -- "$bin" >"$lk_out" 2>&1
     lrc=$?
     if [ "$lrc" -eq 124 ]; then
+        # Where it stopped, before it is reaped: the program's output so far
+        # and the stacks of every process still running it (the program and
+        # the children it spawned of itself), so a hang names its cause
+        # rather than only its time (#3202).
+        {
+            echo "  [FAIL] $t: leaks(1) TIMED OUT (>${LEAKS_TIMEOUT}s) — program did not exit"
+            echo "      output so far:"
+            tail -20 "$lk_out" | sed 's/^/        /'
+            for pid in $(pgrep -f "$bin" 2>/dev/null); do
+                echo "      stacks of pid $pid: $(ps -o command= -p "$pid" 2>/dev/null)"
+                sample "$pid" 1 2>/dev/null |
+                    sed -n '/^Call graph:/,/^Total number in stack/p' | head -60 |
+                    sed 's/^/        /'
+            done
+        } >"$report"
+        cat "$report"
         # `leaks` runs the target in its own process group, so the
         # run_bounded group-kill above won't reach an orphaned target —
         # reap it by path so a stuck program can't accumulate across the
         # run. (Harmless if already gone.)
         # kill-ok: macOS only, and the target is no job of this shell
         pkill -9 -f "$bin" 2>/dev/null || true
-        echo "  [FAIL] $t: leaks(1) TIMED OUT (>${LEAKS_TIMEOUT}s) — program did not exit"
         : >"$tmpdir/fail_$t"
         return
     fi

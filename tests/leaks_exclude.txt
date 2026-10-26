@@ -10,7 +10,3 @@
 test_run_capture_status
 test_os_run_full
 test_run_argv_heap_string
-# Spawns copies of itself under os.run_supervised; ran in 6 s here until
-# std.os's spawns began waiting for the child's exec (#3170), and now
-# outlasts the 120 s bound while it passes on the macOS legs (#3202).
-test_os_run_supervised
