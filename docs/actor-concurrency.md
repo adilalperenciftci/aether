@@ -174,7 +174,10 @@ An ask (`actor ? Msg {}`) sends its message with a reply slot (`Message._reply_s
 
 - an ask to an actor that is already dead (panicked or released) is not sent;
 - an ask whose message is dropped undelivered (its target died or was released on the way, or the mailbox it waited in was drained at the death) fails as dead;
-- an ask whose handler panics with it in hand fails from the step's panic barrier as "died before it replied".
+- an ask whose handler panics with it in hand fails from the step's panic barrier as "died before it replied";
+- an ask whose handler returns without replying fails when its step ends, as "returned without replying".
+
+The ask a handler holds is part of its thread's step context, with the actor stepping. A step can run inside another (a send steps an idle actor of the same core inline, and a cooperative ask polls until its reply), so each step starts with no ask of its own and gives the enclosing step its context back when it ends: a handler that sends, or asks, before it replies still answers its own asker.
 
 `v, err = actor ? Msg {}` reads the reason (the language reference's Ask Pattern lists them); `v = actor ? Msg {}` gives the reply type's zero value for any of them, as it does at a timeout.
 

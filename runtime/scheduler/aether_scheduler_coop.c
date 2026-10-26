@@ -536,6 +536,22 @@ void scheduler_wait(void) {
 // Poll — process pending messages for all actors (cooperative dispatch)
 // ============================================================================
 
+/* One step with a step context of its own (multicore_scheduler.h). An ask
+ * polls until its reply comes, so a step runs inside the asking one, as on a
+ * core's inline path: it starts with no ask in hand, fails one its handler
+ * left unanswered, and gives the enclosing step its context back. */
+void scheduler_step_actor(ActorBase* actor) {
+    if (!actor || !actor->step) return;
+    void* outer_slot = g_current_reply_slot;
+    void* outer_actor = g_current_step_actor;
+    g_current_reply_slot = NULL;
+    actor->step(actor);
+    ActorReplySlot* held = (ActorReplySlot*)g_current_reply_slot;
+    if (held && !held->reply_ready && !held->failed) held->failed = AETHER_ASK_NO_REPLY;
+    g_current_reply_slot = outer_slot;
+    g_current_step_actor = outer_actor;
+}
+
 int aether_scheduler_poll(int max_per_actor) {
     int total = 0;
     int limit = (max_per_actor <= 0) ? 1024 : max_per_actor;
@@ -556,12 +572,12 @@ int aether_scheduler_poll(int max_per_actor) {
             while (processed < limit) {
                 coop_refill(actor);
                 if (atomic_load_explicit(&actor->mailbox.count, memory_order_acquire) == 0) break;
-                actor->step(actor);
+                scheduler_step_actor(actor);
                 processed++;
             }
         } else if (has_timeout) {
             // No messages but timeout is ticking — call step to check timeout
-            actor->step(actor);
+            scheduler_step_actor(actor);
             processed++;
         }
         total += processed;
@@ -635,6 +651,7 @@ void scheduler_reply_owned(ActorBase* self, void* data, size_t data_size,
                            void (*release)(void*)) {
     (void)self;
     ActorReplySlot* slot = (ActorReplySlot*)g_current_reply_slot;
+    g_current_reply_slot = NULL;   /* answered: the step's end has nothing to fail */
     int delivered = 0;
     if (slot && !slot->timed_out) {
         slot->reply_data = malloc(data_size);

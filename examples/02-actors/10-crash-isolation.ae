@@ -8,8 +8,10 @@
 // does. That is the supervision Aether has today: crashes stay where they
 // happen. Nothing tells another actor that one died yet, so nothing can
 // restart it: links, monitors and supervisors are proposed in #2974 (and
-// docs/structured-concurrency.md), and are not built. Until then, do not
-// ask a dead actor: the ask waits its full timeout and returns zero.
+// docs/structured-concurrency.md), and are not built. An ask is how a
+// caller finds out: `v, err = actor ? Msg {}` ends at once with
+// "the actor is dead" for a dead actor, and with "the actor died before it
+// replied" for one that dies handling the ask.
 //
 // Run: ae run examples/02-actors/10-crash-isolation.ae
 // See: docs/actor-concurrency.md#panic-and-stack-traces

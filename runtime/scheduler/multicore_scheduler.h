@@ -278,6 +278,10 @@ typedef struct {
     pthread_cond_t  park_cond;
     atomic_int      parked;
 
+    // How many asks this core's thread is blocked in (#3220): while one is,
+    // the core runs nothing, so no actor is moved onto it (move_actor).
+    atomic_int      asking;
+
     // Per-core I/O event loop (platform-agnostic: epoll/kqueue/poll)
     AetherIoPoller io_poller;         // Platform I/O poller instance
     AetherIoEntry* io_map;            // fd → actor mapping (heap-allocated, grows on demand)
@@ -389,6 +393,12 @@ void scheduler_actor_thread_exit(ActorBase* actor);
  * nothing to sleep on: the actor is on no core, or no scheduler has been
  * initialized yet. 1 otherwise. */
 int scheduler_actor_thread_park(ActorBase* actor);
+/* One step of `actor` as a core takes it: inside the panic barrier, with a
+ * step context of its own (the ask it handles, answered or failed when the
+ * step ends), and the caller's given back after. What an auto_process
+ * actor's thread steps it with. The caller holds what a core holds to step
+ * it. */
+void scheduler_step_actor(ActorBase* actor);
 /* Puts `msg` in an auto_process actor's inbox and wakes its thread if it
  * sleeps (#2598, #2592). From any thread; the message is counted as sent by
  * the caller. Every send to such an actor ends here. */
@@ -415,6 +425,7 @@ void* scheduler_ask_message(ActorBase* target, void* msg_data, size_t msg_size, 
 #define AETHER_ASK_DEAD       2   /* the actor was dead, or died before the ask reached it */
 #define AETHER_ASK_DIED       3   /* the actor died handling the ask, before it replied */
 #define AETHER_ASK_NO_MEMORY  4   /* the ask could not be made */
+#define AETHER_ASK_NO_REPLY   5   /* the handler returned without replying */
 void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg_size,
                                    int timeout_ms, int* status);
 

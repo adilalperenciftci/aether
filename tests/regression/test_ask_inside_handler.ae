@@ -4,9 +4,9 @@
 // starts on the same core. Since #3090 a steal is made by the victim core's
 // own loop, which waits in the ask, and a send gathered its target onto
 // the sender's core: the inner ask answered only after the outer one had
-// timed out, which read 0 and "ask timed out after 5000 ms". The asking
-// core moves such a target to another core before it waits, and an ask
-// gathers nothing onto the core it blocks.
+// timed out, which read 0 and "ask timed out after 5000 ms". The waiting
+// thread steps such a target itself, and no actor is moved onto a core
+// while it waits in an ask (#3220).
 
 import std.time
 

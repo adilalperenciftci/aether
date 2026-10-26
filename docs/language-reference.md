@@ -3475,21 +3475,32 @@ if err != "" {
 }
 ```
 
+Two names after an ask are always the reply and the reason, whatever the
+reply's type: a reply that is a pair itself is the first name, whole, and is
+destructured from there (`p, err = store ? GetRange {}`, then `lo, hi = p`).
+
 | `err` | when |
 |---|---|
 | `""` | the handler replied |
 | `"ask timed out after 5000 ms"` | no reply within the timeout (default 5 seconds) |
 | `"the actor is dead"` | the actor had died (or was released) before the ask reached it |
 | `"the actor died before it replied"` | the handler panicked with the ask in hand |
+| `"the handler returned without replying"` | the handler that took the ask finished without a `reply` |
 
 An ask to a dead actor, in either form, ends at once rather than after the
-timeout, and so does one whose actor dies before replying.
+timeout, and so does one whose actor dies before replying or whose handler
+returns without a reply: a `reply` answers the ask its own handler took, so
+none can come later.
 
-An ask made inside a handler blocks the asking actor's core until the reply.
-The actor it asks is moved off that core first if it was there, as an actor
-the handler spawned is, so it runs elsewhere and answers (#3196). An actor
-that stays on the waiting core, or a message queued to it, waits for the
-reply too: an asked actor that asks one of those in turn times out (#3197).
+An ask made inside a handler blocks the asking actor's core until the reply,
+and no actor is moved onto that core meanwhile. An asked actor that is the
+core's own (an actor the handler spawned starts there) is stepped by the
+waiting thread itself, as a send steps an idle actor of the core, so it
+answers, and one that asks another of the core's actors in turn has it
+stepped the same way: a chain of asks among one core's actors answers
+(#3196, #3220). The core's other actors wait for the reply, so an asked
+actor on another core that asks one of them in turn waits with it, to the
+timeout (#3197).
 
 ### Reply Statement
 

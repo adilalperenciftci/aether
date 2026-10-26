@@ -62,7 +62,10 @@ void* aether_actor_thread(void* arg) {
             idle = 0;
             atomic_store_explicit(&actor->active, 1, memory_order_relaxed);
             if (actor->step) {
-                actor->step(arg);
+                // As a core steps an actor: an ask its handler leaves
+                // unanswered fails then, and a panic ends the actor, not
+                // the process.
+                scheduler_step_actor(actor);
                 // A step takes one message, as on a core. The send was
                 // counted when it was made, so without the credit
                 // scheduler_wait (and with it scheduler_shutdown) waits
@@ -97,7 +100,7 @@ void* aether_actor_thread(void* arg) {
         if (actor->timeout_ns > 0 && actor->last_activity_ns > 0 && actor->step &&
             aether_now_ns() - actor->last_activity_ns >= actor->timeout_ns) {
             idle = 0;
-            actor->step(arg);
+            scheduler_step_actor(actor);
             continue;
         }
 

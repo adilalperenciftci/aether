@@ -1,0 +1,105 @@
+// A handler that sends to an actor and then asks it gets its reply, round
+// after round, and a chain of asks among one core's actors answers (#3220).
+//
+// The send asked the actor's core to gather it onto the sender's (#3090),
+// and that core moves an actor before it runs its messages: the actor
+// landed, with the ask's message in its mailbox, on the core that waited in
+// the ask and ran nothing, and the round waited out the timeout (two rounds
+// passed, ten failed). Now nothing is moved onto a core while it waits in an
+// ask, and an asked actor of that core is stepped by the waiting thread.
+
+import std.time
+
+extern exit(code: int)
+
+message Poke {}
+message Get {}
+message Value { v: int }
+message Go {}
+message Rounds { n: int }
+
+actor Helper {
+    state pokes = 0
+    receive {
+        Poke() -> { pokes = pokes + 1 }
+        Get() -> { reply Value { v: pokes } }
+    }
+}
+
+actor Front {
+    state helper = null
+    receive {
+        Go() -> { helper = spawn(Helper()) }
+        Rounds(n: k) -> {
+            last = 0
+            i = 0
+            while i < k {
+                helper ! Poke {}
+                int v = helper ? Get {}
+                last = v
+                i = i + 1
+            }
+            reply Value { v: last }
+        }
+    }
+}
+
+// Three levels, each spawned by the one above, so all on one core.
+actor Leaf {
+    receive { Get() -> { reply Value { v: 1 } } }
+}
+
+actor Mid {
+    state leaf = null
+    receive {
+        Go() -> { leaf = spawn(Leaf()) }
+        Get() -> {
+            int v = leaf ? Get {}
+            reply Value { v: v + 10 }
+        }
+    }
+}
+
+actor Top {
+    state mid = null
+    receive {
+        Go() -> {
+            mid = spawn(Mid())
+            mid ! Go {}
+        }
+        Get() -> {
+            int v = mid ? Get {}
+            reply Value { v: v + 100 }
+        }
+    }
+}
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    front = spawn(Front())
+    front ! Go {}
+    wait_for_idle()
+    started = time.now_ms()
+    pokes, err = front ? Rounds { n: 200 }
+    took = time.now_ms() - started
+    // Each Get sees every Poke before it: the last one sees all 200.
+    check(err == "" && pokes == 200, "200 rounds of send, then ask: (${pokes}, \"${err}\")")
+    check(took < 2000, "200 rounds took ${took} ms")
+
+    top = spawn(Top())
+    top ! Go {}
+    wait_for_idle()
+    round = 0
+    while round < 50 {
+        v, cerr = top ? Get {}
+        check(cerr == "" && v == 111, "round ${round} of a three-level chain: (${v}, \"${cerr}\")")
+        round = round + 1
+    }
+    println("PASS")
+}

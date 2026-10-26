@@ -1,0 +1,99 @@
+// A handler answers its own ask whatever it does first (#3205).
+//
+// The ask a handler holds is its thread's step context, and a step can run
+// inside another: a send to an idle actor of the same core steps that actor
+// inline, there and then. The inner step left its own context in place, so
+// a handler that sent before it replied replied to no one, and its asker
+// waited out the 5 s timeout ("ask timed out after 5000 ms"). An ask its
+// handler leaves unanswered now fails when the step ends, with its reason,
+// instead of at the timeout.
+
+import std.time
+
+extern exit(code: int)
+
+message Poke {}
+message Get {}
+message Value { v: int }
+message SendThenReply {}
+message SendAskThenReply {}
+message Silent {}
+
+actor Helper {
+    state pokes = 0
+    receive {
+        Poke() -> { pokes = pokes + 1 }
+        Get() -> { reply Value { v: 10 } }
+    }
+}
+
+actor Front {
+    receive {
+        SendThenReply() -> {
+            helper = spawn(Helper())
+            helper ! Poke {}
+            reply Value { v: 1 }
+        }
+        SendAskThenReply() -> {
+            helper = spawn(Helper())
+            helper ! Poke {}
+            int inner = helper ? Get {}
+            reply Value { v: inner + 2 }
+        }
+        Silent() -> {
+            helper = spawn(Helper())
+            helper ! Poke {}
+        }
+    }
+}
+
+check(label: string, ok: bool) -> int {
+    if !ok {
+        println("  FAIL ${label}")
+        return 1
+    }
+    println("  PASS ${label}")
+    return 0
+}
+
+// Well inside the 5 s timeout; the time is printed only when it is not.
+at_once(label: string, ms: int) -> int {
+    if ms >= 2000 {
+        println("  FAIL ${label}: took ${ms} ms")
+        return 1
+    }
+    println("  PASS ${label}")
+    return 0
+}
+
+main() {
+    println("=== a handler answers its own ask whatever it does first (#3205) ===")
+    fails = 0
+    front = spawn(Front())
+
+    round = 0
+    while round < 5 {
+        t0 = time.now_ms()
+        v, err = front ? SendThenReply {}
+        fails = fails + check("round ${round}: send, then reply: (1, \"\"), got (${v}, \"${err}\")", v == 1 && err == "")
+        fails = fails + at_once("round ${round}: at once", time.now_ms() - t0)
+
+        t1 = time.now_ms()
+        w, werr = front ? SendAskThenReply {}
+        fails = fails + check("round ${round}: send, ask, then reply: (12, \"\"), got (${w}, \"${werr}\")", w == 12 && werr == "")
+        fails = fails + at_once("round ${round}: at once", time.now_ms() - t1)
+        round = round + 1
+    }
+
+    t2 = time.now_ms()
+    s, serr = front ? Silent {}
+    fails = fails + check("no reply: (0, \"the handler returned without replying\"), got (${s}, \"${serr}\")",
+        s == 0 && serr == "the handler returned without replying")
+    fails = fails + at_once("at once, not at the timeout", time.now_ms() - t2)
+
+    if fails > 0 {
+        println("FAIL: ${fails} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

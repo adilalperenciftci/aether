@@ -11,6 +11,7 @@ message Get {}
 message Name {}
 message Boom {}
 message Never {}
+message Slow {}
 message Value { v: int }
 
 extern exit(code: int)
@@ -25,8 +26,15 @@ actor Server {
         Boom() -> {
             panic("boom before the reply")
         }
+        // Returns without a reply: none can come, and the asker learns
+        // that when the step ends (#3205).
         Never() -> {
             n = n + 0
+        }
+        // Replies after the asker's timeout.
+        Slow() -> {
+            sleep(5300)
+            reply Value { v: n }
         }
     }
 }
@@ -86,10 +94,18 @@ main() {
     fails = fails + check("a dead actor, single value: 0, got ${plain}", plain == 0)
     fails = fails + at_once("at once", plain_ms)
 
-    // No reply at all: the timeout, and its reason.
+    // A handler that returns without replying: at once, with its reason.
+    t3 = clock_ns()
     nv, nerr = live ? Never {}
-    fails = fails + check("no reply: (0, \"ask timed out after 5000 ms\"), got (${nv}, \"${nerr}\")",
-        nv == 0 && nerr == "ask timed out after 5000 ms")
+    never_ms = (clock_ns() - t3) / 1000000
+    fails = fails + check("no reply: (0, \"the handler returned without replying\"), got (${nv}, \"${nerr}\")",
+        nv == 0 && nerr == "the handler returned without replying")
+    fails = fails + at_once("at once", never_ms)
+
+    // A reply later than the timeout: the timeout, and its reason.
+    sv, serr = live ? Slow {}
+    fails = fails + check("too late: (0, \"ask timed out after 5000 ms\"), got (${sv}, \"${serr}\")",
+        sv == 0 && serr == "ask timed out after 5000 ms")
 
     if fails > 0 {
         println("FAIL: ${fails} case(s)")
