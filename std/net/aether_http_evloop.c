@@ -256,6 +256,20 @@ static int ev_in_reserve(EvConn* c, size_t extra) {
     return 0;
 }
 
+/* What the proxy exchange built for an attempt, released once the attempt is
+ * over, as the blocking driver releases it after its send: the outbound
+ * request (its copy of the body, its content type, any header past the
+ * arena) and its URL. The exchange's body pointer points into the outbound
+ * request, so not before the upstream answered or failed. Clearing the
+ * exchange used to drop both, every proxied request leaking its URL and one
+ * with a body the copy of it too (#3242). */
+static void ev_release_attempt(EvConn* c) {
+    if (c->px.outbound) http_request_free_raw(c->px.outbound);
+    free(c->px.upstream_url);
+    c->px.outbound = NULL;
+    c->px.upstream_url = NULL;
+}
+
 /* Everything one request owned, released before the next one starts.
  *
  * A connection serves many requests, so anything allocated per request has to
@@ -298,6 +312,7 @@ static void ev_conn_reset_request(EvConn* c) {
      * arrives rather than freed and built again. Except a request the
      * middleware ahead of the proxy ran on, which is that request's own and
      * goes with it (ev_begin_upstream, #3214). */
+    ev_release_attempt(c);
     memset(&c->px, 0, sizeof(c->px));
     if (c->before_proxy && c->req) {
         http_request_free(c->req);
@@ -1069,6 +1084,7 @@ static int ev_expire(EvDriver* d, EvConn* c) {
         c->up_in_poller = 0;
         http_upstream_release(&c->up, 0);   /* never pool a connection mid-answer */
     }
+    ev_release_attempt(c);                  /* the attempt is over (#3242) */
     if (!c->res) return -1;
     http_response_set_status(c->res, 504);
     http_response_set_header(c->res, "X-Aether-Proxy-Error", "upstream_timeout");
@@ -1100,6 +1116,7 @@ static int ev_upstream_failed(EvDriver* d, EvConn* c, const char* why, int relea
     HttpResponse* resp = http_response_alloc_failed(why);
     if (!resp) return -1;
     c->px.resp = resp;
+    ev_release_attempt(c);   /* over; resume may build the next (#3242) */
     if (aether_proxy_exchange_resume(&c->px, 0) == PX_NEED_SEND) {
         return ev_begin_retry(d, c);
     }
@@ -1390,13 +1407,19 @@ static int ev_finish_upstream(EvDriver* d, EvConn* c) {
      * object. Tried before it is built, because building it is the copy this
      * avoids. The receive buffer stays with the connection until the response
      * has been written, so the body can be sent from where it landed. */
+    /* The attempt is over either way below: its outbound request and URL go
+     * (#3242). A retry builds its own. */
     int answered = ev_try_direct(d, c);
-    if (answered) return answered;      /* 1 to write it, -1 to close */
+    if (answered) {
+        ev_release_attempt(c);
+        return answered;                /* 1 to write it, -1 to close */
+    }
 
     HttpResponse* resp = http_response_alloc_empty();
     if (!resp) return -1;
     if (c->x.buf) http_response_fill_from_bytes(resp, c->x.buf, c->x.len);
     c->px.resp = resp;
+    ev_release_attempt(c);
 
     int r = aether_proxy_exchange_resume(&c->px, 0);
     if (r == PX_NEED_SEND) {
