@@ -6298,6 +6298,23 @@ static int starts_return_type_then_body(Parser* parser) {
     return typed;
 }
 
+/* True when the tokens at the cursor are a result type followed by an arrow
+ * body, `-> Point -> p` or `-> (int, int) -> (a, b)` (#3158). An arrow-body
+ * expression is never followed by a second `->`, so a type that parses with
+ * one after it is the written result type. */
+static int starts_return_type_then_arrow(Parser* parser) {
+    int saved_pos = parser->current_token;
+    int saved_suppress = parser->suppress_errors;
+    parser->suppress_errors = 1;
+    Type* t = parse_type(parser);
+    Token* after = peek_token(parser);
+    int typed = t && after && after->type == TOKEN_ARROW;
+    if (t) free_type(t);
+    parser->current_token = saved_pos;
+    parser->suppress_errors = saved_suppress;
+    return typed;
+}
+
 ASTNode* parse_function_definition(Parser* parser) {
     // Erlang-style pattern matching functions!
     // Syntax: 
@@ -6432,7 +6449,9 @@ ASTNode* parse_function_definition(Parser* parser) {
         //   the token(s) between `->` and `{` as a return type and
         //   fall through to the traditional block-body path below.
         int is_typed_return = 0;
-        if (peek) {
+        if (peek && starts_return_type_then_arrow(parser)) {
+            is_typed_return = 1;
+        } else if (peek) {
             switch (peek->type) {
                 case TOKEN_INT:
                 case TOKEN_INT64:
@@ -6637,10 +6656,32 @@ ASTNode* parse_function_definition(Parser* parser) {
                 add_child(clause, expr);
                 add_child(func, clause);
             }
-            // Now expect the traditional block body `{ ... }`.
-            ASTNode* body = parse_block(parser);
-            if (body) {
-                add_child(func, body);
+            if (match_token(parser, TOKEN_ARROW)) {
+                /* #3158: an arrow body after a written result type,
+                 * `square(x: int) -> int -> x * x` or `-> int -> { ... }`.
+                 * The body is the one an untyped arrow body is, and its
+                 * value is returned against the written type, as a block
+                 * body's `return` is. Read as a block body, it was
+                 * "Expected LEFT_BRACE, got ARROW", and the block parser
+                 * then took the rest of the file as the missing block's
+                 * statements: nine errors, the last ones in later
+                 * functions. */
+                if (peek_token(parser) && peek_token(parser)->type == TOKEN_LEFT_BRACE) {
+                    ASTNode* body = parse_block(parser);
+                    arrow_block_return_tail(body);
+                    add_child(func, body);
+                } else {
+                    ASTNode* body_block = parse_arrow_expression_body(parser);
+                    if (body_block) {
+                        add_child(func, body_block);
+                    }
+                }
+            } else {
+                // Now expect the traditional block body `{ ... }`.
+                ASTNode* body = parse_block(parser);
+                if (body) {
+                    add_child(func, body);
+                }
             }
         } else if (peek && peek->type == TOKEN_LEFT_BRACE) {
             // Multi-statement arrow body: -> { stmt1; stmt2; expr }

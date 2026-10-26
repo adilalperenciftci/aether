@@ -1191,6 +1191,34 @@ clamp(x, lo, hi) -> {
 
 This allows complex logic in arrow-style functions without switching to block syntax.
 
+A written result type may come before an arrow body, `-> T -> expr` or
+`-> T -> { ... }`, with any contract clauses between them (#3158). The
+body's value is returned against `T`, as a block body's `return` is: a
+value of another type is E0200 at the value.
+
+```aether,run
+struct Point {
+    x: int
+    y: int
+}
+
+square(x: int) -> int -> x * x
+
+origin() -> Point -> Point { x: 0, y: 0 }
+
+label(n: int) -> string -> {
+    s = "n=${n}"
+    s
+}
+
+main() {
+    println("${square(7)} ${origin().y} ${label(3)}")
+}
+```
+```output
+49 0 n=3
+```
+
 The last statement is the result only when it has a value: an expression, other than a call of a function that returns nothing, or a `match` one of whose arms gives a value. Any other statement there is a statement like any other, and the body ends with it:
 
 - An `if`, a loop, a `switch`, a `try`, a `defer` or a `panic`. A body ending in one has to `return` on every path its own way: `-> { if x > 0 { return 1 } }` is a [missing return](#returning-on-every-path-e0700) when `x` is not positive.
