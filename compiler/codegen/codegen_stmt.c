@@ -8889,6 +8889,14 @@ void generate_value_statement(CodeGenerator* gen, const char* lhs, ASTNode* valu
     print_indent(gen);
     if (type_is_sized_array(t)) {
         emit_array_fill(gen, lhs, value, t);
+    } else if (t && t->kind == TYPE_OPTIONAL && !own_type_owns(gen, t)) {
+        /* #3163: a value going into an optional slot is wrapped, `none` is
+         * the empty optional, as a `let x: T? = v` binding does. An actor's
+         * `state maybe: int? = 4` (or `= none`) is initialised here, and
+         * reached C as an int assigned to an ae_opt_int. An optional that
+         * owns memory (a `string?`) goes through the take below. */
+        fprintf(gen->output, "%s = ", lhs);
+        emit_optional_coerced(gen, value, t);
     } else {
         fprintf(gen->output, "%s = ", lhs);
         if (t && t->kind != TYPE_STRING && own_type_owns(gen, t)) emit_value_take(gen, value, t);

@@ -3298,14 +3298,70 @@ The timeout is one-shot: it is cancelled when any message is received. The count
 
 ### State Variables
 
-State persists across messages:
+State persists across messages. A state takes its type from its value, or
+from a type written as a struct field's is, `state name: T = value` (#3163),
+for every type a field takes: a number of any width, a string, a struct, an
+enum, a tuple, an optional, a fixed-size array, a closure, and an
+`actor_ref`, which holds another actor's reference. The value is checked
+against a written type as a typed binding's is, and a state written with
+no value starts at its type's zero. The type-first form `state int[100]
+history` is accepted too.
 
-```aether,fragment
-actor BankAccount {
-    state balance = 0;
-    state transactions = 0;
-    state int[100] history;
+```aether,run
+message Deposit {
+    amount: int
 }
+
+message Connect {
+    to: actor_ref
+}
+
+message Report {}
+
+message Balance {
+    amount: long
+}
+
+actor Account {
+    state balance: long = 0
+    state history: int[4]
+    state count = 0
+    state auditor: actor_ref = null
+
+    receive {
+        Connect(to) -> {
+            auditor = to
+        }
+        Deposit(amount) -> {
+            balance = balance + amount
+            history[count % 4] = amount
+            count = count + 1
+        }
+        Report -> {
+            auditor ! Balance { amount: balance }
+        }
+    }
+}
+
+actor Auditor {
+    receive {
+        Balance(amount) -> {
+            println("balance ${amount}")
+        }
+    }
+}
+
+main() {
+    a = spawn(Account())
+    a ! Connect { to: spawn(Auditor()) }
+    a ! Deposit { amount: 70 }
+    a ! Deposit { amount: 30 }
+    a ! Report {}
+    wait_for_idle()
+}
+```
+```output
+balance 100
 ```
 
 ### Spawning Actors

@@ -5598,6 +5598,8 @@ ASTNode* parse_actor_definition(Parser* parser) {
                             next_tok->type == TOKEN_FLOAT ||
                             next_tok->type == TOKEN_STRING || next_tok->type == TOKEN_BOOL ||
                             next_tok->type == TOKEN_BYTE || next_tok->type == TOKEN_PTR ||
+                            /* #3163: `state actor_ref next` */
+                            next_tok->type == TOKEN_ACTOR_REF ||
                             /* #2921: a tuple type, `state (string, int) v` */
                             next_tok->type == TOKEN_LEFT_PAREN))) {
                 // Explicit type: state int count = 0  or  state long total = 0
@@ -5608,6 +5610,25 @@ ASTNode* parse_actor_definition(Parser* parser) {
                 if (name) {
                     state_decl = create_ast_node(AST_VARIABLE_DECLARATION, name->value, name->line, name->column);
                     state_decl->node_type = create_type(TYPE_UNKNOWN);
+
+                    /* #3163: `state next: actor_ref = null`, the type
+                     * written as a struct field, a parameter, `let` and a
+                     * module `var` write it, so a state field takes every
+                     * type a field takes. The declaration is the one the
+                     * type-first form makes, `state int n = 0`: the written
+                     * type, then the value checked against it as a typed
+                     * binding's is. It was three "Unexpected token in actor
+                     * body" errors, and an actor_ref could be held only as
+                     * a bare `state next = null`. */
+                    if (match_token(parser, TOKEN_COLON)) {
+                        Type* written = parse_type(parser);
+                        if (written) {
+                            free_type(state_decl->node_type);
+                            state_decl->node_type = written;
+                        } else if (!parser->suppress_errors) {
+                            parser_error(parser, "expected a type after `:` in a state declaration");
+                        }
+                    }
 
                     Token* eq = peek_token(parser);
                     if (match_token(parser, TOKEN_ASSIGN)) {

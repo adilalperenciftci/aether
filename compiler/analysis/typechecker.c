@@ -8011,6 +8011,8 @@ static void reject_duplicate_receive_arms(ASTNode* actor) {
     }
 }
 
+static const char* ret_type_spell(Type* t, char* buf, size_t n);
+
 int typecheck_actor_definition(ASTNode* actor, SymbolTable* table) {
     if (!actor || actor->type != AST_ACTOR_DEFINITION) return 0;
 
@@ -8054,6 +8056,30 @@ int typecheck_actor_definition(ASTNode* actor, SymbolTable* table) {
                     if (it && it->kind != TYPE_UNKNOWN) set_node_type(child, it);
                     else if (it) free_type(it);
                 }
+            } else if (child->node_type && child->child_count > 0 && child->children[0]) {
+                /* #3163: a written type, `state n: int = v` or `state int n
+                 * = v`. The value is checked against it as a typed
+                 * binding's is (`let n: int = v`). Nothing checked it: a
+                 * string given to an int state reached C as "makes integer
+                 * from pointer". */
+                ASTNode* init = child->children[0];
+                typecheck_node(child, actor_table);
+                checked = 1;
+                Type* it = infer_type(init, actor_table);
+                int fits = !it || it->kind == TYPE_UNKNOWN ||
+                           is_assignable(it, child->node_type) ||
+                           (init->type == AST_NULL_LITERAL && type_is_slice(child->node_type));
+                if (!fits) {
+                    char msg[512], want[200], have[200];
+                    snprintf(msg, sizeof(msg),
+                             "Type mismatch in state initialization: '%s' is %s, but this value is %s",
+                             child->value ? child->value : "?",
+                             ret_type_spell(child->node_type, want, sizeof(want)),
+                             ret_type_spell(it, have, sizeof(have)));
+                    type_error_hint(msg, "give the state a value of its written type, or change the type",
+                                    init->line, init->column);
+                }
+                if (it) free_type(it);
             }
             add_symbol(actor_table, child->value, clone_type(child->node_type), 0, 0, 1);
             if (checked) continue;
