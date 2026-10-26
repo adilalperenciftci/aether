@@ -11599,6 +11599,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 char len_name[64] = "_match_len";
                 ValueTemps subject_temps;
                 int has_subject_temps = 0;
+                const char* subject_owner = NULL;   /* a fresh string subject's owner */
+                ScopedStringLocal subject_sl;
 
                 // Wrap match in a block and store the match expression in a temp
                 // to avoid evaluating it multiple times (could have side effects).
@@ -11672,6 +11674,25 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     if (!compares) fprintf(gen->output, " (void)_match_val;");
                     fprintf(gen->output, "\n");
                     if (has_subject_temps) temps_unmap(&subject_temps);
+                    /* A fresh string the match is on (a call's result, an
+                     * ask's reply) is the match's alone: only the arms'
+                     * tests read `_match_val`, so it is freed when the match
+                     * ends, whichever way it ends (#3207). Nothing freed it,
+                     * and each such match leaked its subject. A name of its
+                     * own, so a match nested in an arm frees only its own. */
+                    if (match_expr->node_type && match_expr->node_type->kind == TYPE_STRING &&
+                        is_fresh_heap_string_temp(gen, match_expr)) {
+                        static int match_str_counter = 0;
+                        subject_owner = cg_internf("_match_str%d", match_str_counter++);
+                        print_indent(gen);
+                        fprintf(gen->output, "%s %s = _match_val;\n",
+                                volatile_decl_type(try_volatile_qual_for(gen, subject_owner),
+                                                   "const char*"),
+                                subject_owner);
+                        scoped_string_local_begin(gen, &subject_sl, subject_owner, NULL, 1);
+                        enter_scope(gen);
+                        push_scoped_string_local_free(gen, &subject_sl, stmt->line, stmt->column);
+                    }
                 }
 
                 for (int i = 1; i < stmt->child_count; i++) {
@@ -11779,6 +11800,10 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     print_line(gen, "}");
                 }
 
+                if (subject_owner) {
+                    exit_scope(gen);
+                    scoped_string_local_end(gen, &subject_sl);
+                }
                 if (has_subject_temps) temps_close(gen, &subject_temps, 1);
                 // Close the match scoping block
                 unindent(gen);
@@ -11880,6 +11905,21 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             if (sexpr) generate_expression(gen, sexpr);
             else fprintf(gen->output, "0");
             fprintf(gen->output, ";\n");
+            /* A fresh string subject is the switch's alone, freed when it
+             * ends, as a match's is (#3207). */
+            const char* subject_owner = NULL;
+            ScopedStringLocal subject_sl;
+            if (is_str && is_fresh_heap_string_temp(gen, sexpr)) {
+                static int switch_str_counter = 0;
+                subject_owner = cg_internf("_switch_str%d", switch_str_counter++);
+                print_indent(gen);
+                fprintf(gen->output, "%s %s = _switch_val;\n",
+                        volatile_decl_type(try_volatile_qual_for(gen, subject_owner), "const char*"),
+                        subject_owner);
+                scoped_string_local_begin(gen, &subject_sl, subject_owner, NULL, 1);
+                enter_scope(gen);
+                push_scoped_string_local_free(gen, &subject_sl, stmt->line, stmt->column);
+            }
 
             ASTNode* default_case = NULL;
             int emitted = 0;
@@ -11905,6 +11945,10 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 emit_case_body(gen, default_case, 0);
                 unindent(gen);
                 print_line(gen, "}");
+            }
+            if (subject_owner) {
+                exit_scope(gen);
+                scoped_string_local_end(gen, &subject_sl);
             }
             unindent(gen);
             print_line(gen, "}");
