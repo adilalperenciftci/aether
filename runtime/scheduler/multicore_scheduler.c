@@ -3497,8 +3497,10 @@ void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg
          * ask it makes in turn does the same for its own target, so a chain
          * of asks among this core's actors runs here, bounded in depth as
          * inline steps are. A target that is stepping (the asking actor
-         * itself, higher up this thread) is waited for, to the timeout. */
-        if (asking_core && ask_help_depth < MAX_ASK_HELP_DEPTH &&
+         * itself, higher up this thread) is waited for, to the timeout. One
+         * with a thread of its own is that thread's to step, without the
+         * step lock, whatever core id it reads (#2598). */
+        if (asking_core && ask_help_depth < MAX_ASK_HELP_DEPTH && !target->auto_process &&
             atomic_load_explicit(&target->assigned_core, memory_order_acquire) == current_core_id &&
             atomic_load_explicit(&target->mailbox.count, memory_order_acquire) > 0 &&
             !atomic_load_explicit(&target->dead, memory_order_acquire) &&
