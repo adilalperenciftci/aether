@@ -10,4 +10,6 @@
   runs) and under the program's directory's parent. When none has it, the
   message names every place looked at. `install.sh`, `make install` and
   the release archives install the library. It has a make rule of its
-  own, so an edit to its source or a deleted library rebuilds it (#3177).
+  own, so an edit to its source or a deleted library rebuilds it, and a
+  rebuild that fails leaves no library behind (the old one was kept and
+  reported built) with the compiler's output beside it (#3177).

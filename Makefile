@@ -1991,8 +1991,16 @@ ifneq ($(SANDBOX_PRELOAD),)
 $(SANDBOX_PRELOAD): runtime/libaether_sandbox_preload.c runtime/aether_sandbox_path.h runtime/aether_sandbox_match.h
 	@echo "Building sandbox preload library..."
 	@mkdir -p $(dir $@)
-	@$(CC) -shared -fPIC -o $@ runtime/libaether_sandbox_preload.c $(SANDBOX_PRELOAD_LIBS) 2>/dev/null || true
-	@test -f $@ && echo "✓ Sandbox preload: $@" || echo "⚠ Sandbox preload: build failed (spawn_sandboxed will be unavailable)"
+	@# The old library goes first: a rebuild that failed left it in place and
+	@# reported it built, and install shipped a library its source no longer
+	@# made. A failure is not fatal (spawn_sandboxed is then unavailable),
+	@# and the compiler's output is kept beside it to say why.
+	@rm -f $@
+	@if $(CC) -shared -fPIC -o $@ runtime/libaether_sandbox_preload.c $(SANDBOX_PRELOAD_LIBS) > $@.log 2>&1; then \
+	    rm -f $@.log; echo "✓ Sandbox preload: $@"; \
+	else \
+	    rm -f $@; echo "⚠ Sandbox preload: build failed, see $@.log (spawn_sandboxed will be unavailable)"; \
+	fi
 endif
 
 # Precompiled stdlib archive — runtime + std for user programs.
