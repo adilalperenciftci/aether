@@ -5001,6 +5001,12 @@ names elsewhere.
 
 Note: `state` is context-sensitive, it is a keyword only inside actor bodies. In all other code, `state` can be used as a regular variable name.
 
+Note: `move` is not reserved. It is the operator that hands a `ptr` over
+(`r ! Chunk { data: move buf }`) only before a name on the same line (see
+[isolated.md](isolated.md#move-handing-a-buffer-over-2975)); `fs.move(a, b)`,
+`mem.move(dst, src, n)`, a program's own `move()` and a variable called `move`
+are unaffected.
+
 Note: `quote` is not reserved. It quotes a trailing block only straight after a call's `)` on the same line, followed by `|`, `||`, `{` or `->` (see [quote.md](quote.md)); everywhere else it is an ordinary name, and `std.quote` is a module called `quote`.
 
 Note: **`ptr`, `byte`, `func`, `state` and `after` are usable as ordinary value identifiers**, parameter names, local names, struct field names, struct-literal fields, and field-access targets, *without* the backtick escape. These tokens have meaning only in type position (`ptr`/`byte`), as a declaration head (`func`), or as a statement head (`state`/`after`), none of which overlaps a value position, so a bare `ptr`/`byte`/`func`/`state`/`after` in value position is unambiguously a name:

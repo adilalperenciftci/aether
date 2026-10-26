@@ -140,6 +140,38 @@ grep -rn "http_request_set_timeout" tests/ examples/ std/
 Bare integers at call sites that should now be a domain-typed value are
 the most common miss; check `examples/` too, not just `tests/`.
 
+## Adding a language feature
+
+A new keyword, operator or checker rule touches code nobody on the PR is
+looking at: every program that already uses the word as a name, and every
+construct the new rule has to see through. Before writing the parser change,
+settle these, and write them into the feature's doc section first (the
+`move` section of `docs/isolated.md` is the worked example):
+
+- **Contextual, not reserved.** A new word is recognised only where nothing
+  else can stand (before a name on the same line, at the head of a
+  declaration), and stays an ordinary identifier everywhere else. `state`,
+  `quote`, `enum`/`type`/`fn` and `move` work this way; see the notes under
+  *Keywords* in `docs/language-reference.md`. Grep `std/`, `contrib/`,
+  `tests/` and `examples/` for the word used as a function, variable or field
+  (`mem.move(dst, src, n)` and `fs.move(a, b)` both predate the operator), and
+  add a test that those still compile.
+- **The types it accepts, and a message for the rest.** Say which operand
+  types the feature applies to and refuse every other one with an error of
+  its own, rather than letting it through to do nothing (`move` on an `int`
+  would claim a transfer the runtime never makes). Each refusal gets a
+  negative test.
+- **Every construct a flow-sensitive check must see through.** `if`/`else`,
+  loops (a value consumed in one iteration is gone in the next), `match` and
+  `switch` arms, closures (a capture, and a use inside the closure body),
+  early `return`, `try`/`catch`, and `defer`. A `defer` runs where its block
+  ends, newest first, not where it is written, so a checker evaluates it at
+  the block's exit: `defer bytes.free(b)` followed by `r ! Chunk { data: move b }`
+  is a use after the move, reported against the `defer`.
+- **What is not done yet.** Say so in the doc section, with the issue that
+  tracks it, so the next reader does not take the gap for a bug or build on
+  it.
+
 ## Adding Tests
 
 ### Test Structure
@@ -219,8 +251,10 @@ A test that has never failed has not been shown to work. A green run proves
 the test ran, not that it would notice the bug.
 
 - **A bug-fix test must fail against the unfixed code.** Revert the fix
-  locally (or `git stash` the source change), rebuild, run the new test, and
-  watch it fail with the symptom from the issue. Then restore the fix. Say so
+  locally (copy the changed file aside and restore it afterwards, rather than
+  `git stash`, which can drop staged changes or pop someone else's stash),
+  rebuild, run the new test, and watch it fail with the symptom from the
+  issue. Then restore the fix. Say so
   in one line of the PR description: "fails on main with ..., passes with the
   fix."
 - **Logic changes in a std module: run the mutation tester on it.**

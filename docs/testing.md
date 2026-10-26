@@ -99,6 +99,38 @@ Because a passing run *returns* (rather than exiting), a test that starts
 a long-running actor or server should stop it or end `main()` with an
 explicit `exit(0)`.
 
+## Testing actors
+
+A check inside an actor's `receive` cannot fail the test. A `panic` in a
+handler is caught by the scheduler's per-step barrier: it ends that actor,
+`main()` carries on, and the program exits `0` with nothing on stderr.
+
+Record what the actor saw in its `state`, wait with `wait_for_idle()`, and
+check from `main()`, whose return value is the exit code:
+
+```aether,fragment
+message Check { v: int }
+actor Checker {
+    state seen = 0
+    receive { Check(v) -> { seen = v } }
+}
+
+main() {
+    c = spawn(Checker())
+    c ! Check { v: 2 }
+    wait_for_idle()
+    if c.seen != 2 {
+        println("FAIL: checker saw ${c.seen}")
+        return 1
+    }
+    return 0
+}
+```
+
+Reading an actor's state after `wait_for_idle()` is safe, including for an
+actor a panic ended. Break the handler and confirm the test fails before
+relying on it ("Prove the test can fail" in `CONTRIBUTING.md`).
+
 ## Assertions
 
 Failures are **soft**: a failed assertion records the failure, prints it,
