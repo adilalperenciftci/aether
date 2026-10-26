@@ -9,7 +9,6 @@
 import std.http
 
 extern monitor_actor_mode(server: ptr) -> int
-extern http_server_start_background_raw(server: ptr) -> int
 extern http_server_port(server: ptr) -> int
 extern sleep(ms: int)
 extern exit(code: int)
@@ -30,7 +29,7 @@ main() {
     berr = http.server_bind(s, "127.0.0.1", 0)
     if berr != "" { println("FAIL bind: ${berr}"); exit(1) }
     port = http_server_port(s)
-    if http_server_start_background_raw(s) < 0 { println("FAIL start_background"); exit(1) }
+    if http.server_start_background(s) != "" { println("FAIL start_background"); exit(1) }
 
     waited = 0
     while ref_get(heard_port) == 0 && waited < 250 {

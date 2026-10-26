@@ -47,6 +47,7 @@
     <li><a href="#client_rx_buffer_allocs">client_rx_buffer_allocs</a></li>
     <li><a href="#server_create">server_create</a></li>
     <li><a href="#server_bind_raw">server_bind_raw</a></li>
+    <li><a href="#server_error">server_error</a></li>
     <li><a href="#server_port">server_port</a></li>
     <li><a href="#server_start_raw">server_start_raw</a></li>
     <li><a href="#server_set_host">server_set_host</a></li>
@@ -64,8 +65,15 @@
     <li><a href="#server_drain_connection">server_drain_connection</a></li>
     <li><a href="#server_shutdown_graceful_raw">server_shutdown_graceful_raw</a></li>
     <li><a href="#server_shutdown_graceful">server_shutdown_graceful</a></li>
-    <li><a href="#server_on_start">server_on_start</a></li>
-    <li><a href="#server_on_stop">server_on_stop</a></li>
+    <li><a href="#server_monitor_listening_raw">server_monitor_listening_raw</a></li>
+    <li><a href="#server_monitor_stopped_raw">server_monitor_stopped_raw</a></li>
+    <li><a href="#server_monitor_null_raw">server_monitor_null_raw</a></li>
+    <li><a href="#server_has_monitor">server_has_monitor</a></li>
+    <li><a href="#monitor">monitor</a></li>
+    <li><a href="#listening">listening</a></li>
+    <li><a href="#stopped">stopped</a></li>
+    <li><a href="#console_monitor">console_monitor</a></li>
+    <li><a href="#null_monitor">null_monitor</a></li>
     <li><a href="#server_set_health_probes_raw">server_set_health_probes_raw</a></li>
     <li><a href="#server_set_health_probes">server_set_health_probes</a></li>
     <li><a href="#server_set_access_log_raw">server_set_access_log_raw</a></li>
@@ -417,6 +425,12 @@
       <pre class="usage"><code>server_bind_raw(server, host, port) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">server: ptr, host: string, port: int</span></p>
     </div>
+    <div class="function" id="server_error" data-name="server_error">
+      <h3 class="function-name">server_error <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_error(server) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr</span></p>
+      <p class="doc">Why the last bind or start failed, &quot;&quot; when it did not (#3131). The server reports through this and the wrappers' error strings, never by printing.</p>
+    </div>
     <div class="function" id="server_port" data-name="server_port">
       <h3 class="function-name">server_port <span class="kind">extern</span></h3>
       <pre class="usage"><code>server_port(server) <span class="arrow">-&gt;</span> int</code></pre>
@@ -511,15 +525,54 @@
       <pre class="usage"><code>server_shutdown_graceful(server, timeout) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">server: ptr, timeout: Duration</span></p>
     </div>
-    <div class="function" id="server_on_start" data-name="server_on_start">
-      <h3 class="function-name">server_on_start <span class="kind">fn</span></h3>
-      <pre class="usage"><code>server_on_start(server, hook, user_data)</code></pre>
-      <p class="signature"><span class="sig-params">server: ptr, hook: ptr, user_data: ptr</span></p>
+    <div class="function" id="server_monitor_listening_raw" data-name="server_monitor_listening_raw">
+      <h3 class="function-name">server_monitor_listening_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_monitor_listening_raw(server, f)</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, f: fn</span></p>
+      <p class="doc">The server's monitor (#3131). The server prints nothing itself: what it has to say goes to closures the program registers before it starts the server. One closure per event, each with typed arguments: http.monitor(srv) { listening() |host: string, port: int| { println(&quot;up on ${host}:${port}&quot;) } stopped() |host: string, port: int| { metrics_flush() } } `monitor` starts an empty monitor, so an event the block does not name says nothing. The stock monitors are console_monitor (the &quot;Server running at&quot; banner) and null_monitor (silence). With no monitor chosen, server_start, a foreground server, uses console_monitor, and server_start_background, an embedded one, uses none. listening fires once the server accepts connections, and stopped when it stops serving, each on the thread that runs the server: the caller's for server_start, the server's own for server_start_background. Both fire in every dispatch mode, pool or actor. listening comes after the server counts as running, so a server_stop issued from it, or once it has fired, is never lost; a host that must not return from its start until the server serves waits for it. To act on the server from an event, capture it in the closure.</p>
     </div>
-    <div class="function" id="server_on_stop" data-name="server_on_stop">
-      <h3 class="function-name">server_on_stop <span class="kind">fn</span></h3>
-      <pre class="usage"><code>server_on_stop(server, hook, user_data)</code></pre>
-      <p class="signature"><span class="sig-params">server: ptr, hook: ptr, user_data: ptr</span></p>
+    <div class="function" id="server_monitor_stopped_raw" data-name="server_monitor_stopped_raw">
+      <h3 class="function-name">server_monitor_stopped_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_monitor_stopped_raw(server, f)</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, f: fn</span></p>
+    </div>
+    <div class="function" id="server_monitor_null_raw" data-name="server_monitor_null_raw">
+      <h3 class="function-name">server_monitor_null_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_monitor_null_raw(server)</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr</span></p>
+    </div>
+    <div class="function" id="server_has_monitor" data-name="server_has_monitor">
+      <h3 class="function-name">server_has_monitor <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_has_monitor(server) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr</span></p>
+    </div>
+    <div class="function" id="monitor" data-name="monitor">
+      <h3 class="function-name">monitor <span class="kind">fn</span></h3>
+      <pre class="usage"><code>monitor(server) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr</span></p>
+    </div>
+    <div class="function" id="listening" data-name="listening">
+      <h3 class="function-name">listening <span class="kind">fn</span></h3>
+      <pre class="usage"><code>listening(_ctx, f)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr, f: fn</span></p>
+      <p class="doc">Inside a monitor block, the server is the block's context.</p>
+    </div>
+    <div class="function" id="stopped" data-name="stopped">
+      <h3 class="function-name">stopped <span class="kind">fn</span></h3>
+      <pre class="usage"><code>stopped(_ctx, f)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: ptr, f: fn</span></p>
+    </div>
+    <div class="function" id="console_monitor" data-name="console_monitor">
+      <h3 class="function-name">console_monitor <span class="kind">fn</span></h3>
+      <pre class="usage"><code>console_monitor(server)</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr</span></p>
+      <p class="doc">The banner a foreground server has always printed, from the monitor.</p>
+    </div>
+    <div class="function" id="null_monitor" data-name="null_monitor">
+      <h3 class="function-name">null_monitor <span class="kind">fn</span></h3>
+      <pre class="usage"><code>null_monitor(server)</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr</span></p>
+      <p class="doc">A monitor that says nothing, for a foreground server that must keep stdout to itself (a filter, a program whose stdout is data).</p>
     </div>
     <div class="function" id="server_set_health_probes_raw" data-name="server_set_health_probes_raw">
       <h3 class="function-name">server_set_health_probes_raw <span class="kind">extern</span></h3>
@@ -688,13 +741,13 @@
     </div>
     <div class="function" id="server_bind" data-name="server_bind">
       <h3 class="function-name">server_bind <span class="kind">fn</span></h3>
-      <pre class="usage"><code>server_bind(server, host, port) <span class="arrow">-&gt;</span> string</code></pre>
+      <pre class="usage"><code>server_bind(server, host, port)</code></pre>
       <p class="signature"><span class="sig-params">server: ptr, host: string, port: int</span></p>
-      <p class="doc">Go-style wrappers for server lifecycle. Return &quot;&quot; on success, error string on failure.</p>
+      <p class="doc">Go-style wrappers for server lifecycle. Return &quot;&quot; on success, error string on failure. The error names the reason: &quot;cannot bind 0.0.0.0:8080: Address already in use&quot;, &quot;cannot resolve host nosuch.invalid&quot;.</p>
     </div>
     <div class="function" id="server_start" data-name="server_start">
       <h3 class="function-name">server_start <span class="kind">fn</span></h3>
-      <pre class="usage"><code>server_start(server) <span class="arrow">-&gt;</span> string</code></pre>
+      <pre class="usage"><code>server_start(server)</code></pre>
       <p class="signature"><span class="sig-params">server: ptr</span></p>
     </div>
     <div class="function" id="server_start_background" data-name="server_start_background">

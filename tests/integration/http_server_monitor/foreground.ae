@@ -12,7 +12,6 @@
 import std.http
 import std.os
 
-extern http_server_bind_raw(server: ptr, host: string, port: int) -> int
 extern http_server_port(server: ptr) -> int
 extern sleep(ms: int)
 extern exit(code: int)
@@ -57,7 +56,7 @@ main() {
         }
         _ -> {}
     }
-    if http_server_bind_raw(s, "127.0.0.1", 0) < 0 { println("FAIL bind"); exit(1) }
+    if http.server_bind(s, "127.0.0.1", 0) != "" { println("FAIL bind"); exit(1) }
     stopper = spawn(Stopper())
     stopper ! AskStop { port: http_server_port(s) }
     err = http.server_start(s)
