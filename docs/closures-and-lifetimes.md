@@ -148,7 +148,8 @@ transparently while still stopping at real closures.
 `scope_declares_at_top_level` helper is used by
 `is_top_level_decl_in_function` to walk trailing blocks but NOT
 nested if/for/while blocks, preserving the "fresh body-local in
-nested block" Python-style rule that `calculator-tui` relies on.
+nested block" Python-style rule that the calculator example
+(`examples/07-applications/04-calculator.ae`) relies on.
 
 ## Code layout
 
@@ -596,7 +597,7 @@ Paired tests pin this:
 
 ## Why the UI calculator works
 
-`examples/calculator-tui.ae` uses ref cells for all mutable state and
+`examples/07-applications/04-calculator.ae` uses ref cells for all mutable state and
 builds handlers as anonymous inline closures passed to `box_closure(...)`.
 Ref cells sidestep bug 2 (the closure captures a pointer, read-only from
 its perspective), and anonymous box-wrapped closures sidestep bug 3 (no

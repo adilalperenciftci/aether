@@ -1,10 +1,11 @@
 # Aether examples
 
-A path through Aether, from the first program to actors, servers and C.
-Read them in order: each file teaches one idea, starts by saying what it
-teaches and how to run it, and ends with the exact output it prints. CI
-runs every example that can run and fails when one stops printing what
-it says (`make check-examples`).
+A path through Aether, from the first program to actors, servers, C, the
+sandbox, the tools and whole programs. Read them in order: each file
+teaches one idea, starts by saying what it teaches and how to run it,
+and ends with the exact output it prints. CI runs every example that can
+run and fails when one stops printing what it says (`make
+check-examples`).
 
 Run them from the repository root:
 
@@ -113,6 +114,17 @@ What comes with `ae` besides `run` and `build`.
 | [04-lib-path/main.ae](06-tooling/04-lib-path/main.ae) | `--lib`: the module search path and its order | [Module search path](../docs/module-system-design.md) |
 | [05-ae-help/broken.ae](06-tooling/05-ae-help/broken.ae) | `ae help`: what a configuration script got wrong, and the fix | [ae help](../docs/cic-help.md) |
 | [05-ae-help/fixed.ae](06-tooling/05-ae-help/fixed.ae) | the same script with the fixes applied | [Builder DSL](../docs/closures-and-builder-dsl.md) |
+
+## 7. Programs
+
+Whole programs, each putting several of the ideas above to work.
+
+| Example | What it teaches | Reference |
+|---|---|---|
+| [01-word-count/main.ae](07-applications/01-word-count/main.ae) | a file read, split, sorted and counted | [stdlib reference](../docs/stdlib-reference.md) |
+| [02-chat-room.ae](07-applications/02-chat-room.ae) | actors that keep each other in state and broadcast | [Actor runtime](../docs/actor-concurrency.md) |
+| [03-build-supervisor.ae](07-applications/03-build-supervisor.ae) | `os.run_supervised`: a deadline, a process group, nothing left behind | [stdlib reference](../docs/stdlib-reference.md) |
+| [04-calculator.ae](07-applications/04-calculator.ae) | a terminal UI: a button grid as a DSL, closures over ref cells | [Closures and lifetimes](../docs/closures-and-lifetimes.md) |
 
 ## Writing an example
 

@@ -26,8 +26,8 @@ trap 'rm -rf "$TMPDIR" || true' EXIT
 CORPUS="examples/01-language/01-hello.ae
 examples/01-language/03-strings.ae
 examples/02-actors/03-ask-reply.ae
-examples/applications/chat-room.ae
-examples/applications/task-queue.ae
+examples/07-applications/02-chat-room.ae
+examples/02-actors/07-worker-pool.ae
 std/set/test_set.ae
 std/pqueue/test_pqueue.ae"
 

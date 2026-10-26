@@ -33,7 +33,7 @@ extern notify(event: string, id: long) -> int
 // dlopen + manifest_get()).
 //
 // Idiom (matches the existing Aether builder DSL pattern, e.g.
-// calculator-tui.ae's grid() { btn(...) ... } or tinyweb's
+// 04-calculator.ae's grid() { btn(...) ... } (examples/07-applications) or tinyweb's
 // web_server() { path(...) ... }):
 //
 //     abi() {

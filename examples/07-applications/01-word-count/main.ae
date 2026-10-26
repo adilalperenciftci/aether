@@ -1,0 +1,107 @@
+// Word count: the lines, words and most common words of a text file.
+//
+// A whole program, small: it reads the file named on its command line
+// (std.fs), splits the text into words a character at a time, sorts the
+// words (std.sort) so that equal ones sit together, and counts each run.
+// Then the five most common, ties in alphabetical order. A file that
+// cannot be read is a message and exit status 1. The arrays come from
+// `make` and go with `defer free`; every string is released by the
+// compiler.
+//
+// Run: ae run examples/07-applications/01-word-count/main.ae -- examples/07-applications/01-word-count/sample.md
+// See: docs/language-reference.md
+
+import std.fs
+import std.list
+import std.os
+import std.sort
+import std.string
+
+const TOP = 5
+
+// A letter, a digit or an apostrophe: what a word is made of.
+word_char(c: int) -> bool {
+    return (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 39
+}
+
+// Every word of the text, lower-cased, in the order they appear.
+words_of(text: string, into: ptr) {
+    lower = string.to_lower(text)
+    n = string.length(lower)
+    start = -1
+    for i in 0..n + 1 {
+        inside = i < n && word_char(string.char_at(lower, i))
+        if inside && start < 0 {
+            start = i
+        } else if !inside && start >= 0 {
+            list.add(into, string.substring(lower, start, i))
+            start = -1
+        }
+    }
+}
+
+main() {
+    if os.args_count() < 2 {
+        println("usage: word-count <file>")
+        exit(2)
+    }
+    path = os.args_get(1)
+    text, err = fs.read(path)
+    if err != "" {
+        println("word-count: ${err}")
+        exit(1)
+    }
+
+    found = list.new()
+    defer list.free(found)
+    words_of(text, found)
+    words = make([]string, list.size(found))
+    defer free(words)
+    for i in 0..words.len {
+        w, _ = list.get_string(found, i)
+        words[i] = w
+    }
+    sort.strings(words)
+
+    // Equal words are neighbours now: one entry per run.
+    distinct = make([]string, words.len)
+    defer free(distinct)
+    counts = make([]int, words.len)
+    defer free(counts)
+    kinds = 0
+    for i in 0..words.len {
+        if kinds > 0 && distinct[kinds - 1] == words[i] {
+            counts[kinds - 1] = counts[kinds - 1] + 1
+        } else {
+            distinct[kinds] = words[i]
+            counts[kinds] = 1
+            kinds = kinds + 1
+        }
+    }
+
+    lines = string.seq_length(string.lines(string.trim(text)))
+    println("${lines} lines, ${words.len} words, ${kinds} distinct, ${string.length(text)} bytes")
+    println("most common:")
+    for k in 0..TOP {
+        best = -1
+        for i in 0..kinds {
+            if counts[i] > 0 && (best < 0 || counts[i] > counts[best]) {
+                best = i
+            }
+        }
+        if best < 0 {
+            break
+        }
+        println("  ${counts[best]}  ${distinct[best]}")
+        counts[best] = 0
+    }
+}
+
+// Output:
+// 5 lines, 67 words, 36 distinct, 352 bytes
+// most common:
+//   16  the
+//   4  and
+//   4  mill
+//   4  river
+//   3  miller

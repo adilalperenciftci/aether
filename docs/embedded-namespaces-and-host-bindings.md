@@ -112,7 +112,7 @@ the outermost call is `abi()` (Application Binary Interface, a less-overloaded a
 than "API," which now connotes HTTP-over-JSON). Inside, `describe("name") { ... }` carries
 the nested builders. Every form is a function call with a trailing block, pure Aether,
 no new lexer or parser work, same trailing-block + `_ctx`-injection idiom as
-TinyWeb's `path() { end_point(...) }` or `examples/calculator-tui.ae`'s
+TinyWeb's `path() { end_point(...) }` or `examples/07-applications/04-calculator.ae`'s
 `grid() { btn(...) callback { ... } }`.
 
 ### `aether/placeTrade.ae` (as shipped)
