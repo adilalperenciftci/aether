@@ -17,8 +17,6 @@ import std.http.middleware
 import std.http.proxy
 
 extern exit(code: int)
-extern http_server_bind_raw(server: ptr, host: string, port: int) -> int
-extern http_server_port(server: ptr) -> int
 
 handle_echo(req: ptr, res: ptr, ud: ptr) {
     xff = http.get_header(req, "X-Forwarded-For")
@@ -32,7 +30,7 @@ handle_echo(req: ptr, res: ptr, ud: ptr) {
 // A server, set to 127.0.0.1, bound to a free port and started in the
 // background; its port.
 start(server: ptr) -> int {
-    if http_server_bind_raw(server, "127.0.0.1", 0) < 0 {
+    if http.server_bind(server, "127.0.0.1", 0) != "" {
         println("FAIL: bind")
         exit(1)
     }
@@ -41,7 +39,7 @@ start(server: ptr) -> int {
         println("FAIL: ${err}")
         exit(1)
     }
-    return http_server_port(server)
+    return http.server_port(server)
 }
 
 // GET through a gateway with the given extra headers ("" for none), the

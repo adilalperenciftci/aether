@@ -16,8 +16,6 @@ import std.http.middleware
 import std.http.proxy
 
 extern exit(code: int)
-extern http_server_bind_raw(server: ptr, host: string, port: int) -> int
-extern http_server_port(server: ptr) -> int
 
 handle_ok(req: ptr, res: ptr, ud: ptr) {
     http.response_set_status(res, 200)
@@ -35,7 +33,7 @@ handle_b(req: ptr, res: ptr, ud: ptr) {
 }
 
 start(server: ptr) -> int {
-    if http_server_bind_raw(server, "127.0.0.1", 0) < 0 {
+    if http.server_bind(server, "127.0.0.1", 0) != "" {
         println("FAIL: bind")
         exit(1)
     }
@@ -44,7 +42,7 @@ start(server: ptr) -> int {
         println("FAIL: ${err}")
         exit(1)
     }
-    return http_server_port(server)
+    return http.server_port(server)
 }
 
 // GET /x on a port with an X-Forwarded-For header; "<status> <body>".
