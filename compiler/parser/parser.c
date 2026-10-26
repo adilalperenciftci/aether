@@ -5539,6 +5539,32 @@ static int at_place_destructure(Parser* parser) {
  * ordinary destructure's do. Appends the statements to `block`. */
 static int g_place_destructure_seq = 0;
 
+/* The index operands of a place slot (`a[i]`, `rows[i][j]`, `o.items[i]`),
+ * outermost first, each bound to a hidden local appended to `block` and
+ * read from it by the place. They are evaluated before the destructure
+ * binds anything, as Go does: `xs[i], i = pair()` stores into the element `i`
+ * named before the statement, not the one the statement gives `i`, and an
+ * index with a side effect runs once, before the value. A literal index
+ * reads the same either way and stays. */
+static void hoist_place_indices(ASTNode* place, ASTNode* block, int seq, int* k) {
+    if (!place) return;
+    if (place->type == AST_ARRAY_ACCESS && place->child_count >= 2) {
+        hoist_place_indices(place->children[0], block, seq, k);
+        ASTNode* idx = place->children[1];
+        if (!idx || idx->type == AST_LITERAL) return;
+        char name[48];
+        snprintf(name, sizeof(name), "_ae_dix%d_%d", seq, (*k)++);
+        ASTNode* decl = create_ast_node(AST_VARIABLE_DECLARATION, name, idx->line, idx->column);
+        decl->node_type = create_type(TYPE_UNKNOWN);
+        decl->type_inferred = 1;
+        add_child(decl, idx);
+        add_child(block, decl);
+        place->children[1] = create_ast_node(AST_IDENTIFIER, name, idx->line, idx->column);
+    } else if (place->type == AST_MEMBER_ACCESS && place->child_count >= 1) {
+        hoist_place_indices(place->children[0], block, seq, k);
+    }
+}
+
 static void parse_place_destructure(Parser* parser, ASTNode* block) {
     Token* head = peek_token(parser);
     ASTNode* destructure = create_ast_node(AST_TUPLE_DESTRUCTURE, NULL, head->line, head->column);
@@ -5602,6 +5628,8 @@ static void parse_place_destructure(Parser* parser, ASTNode* block) {
     }
     add_child(destructure, rhs);  // Last child is the RHS
     match_token(parser, TOKEN_SEMICOLON);
+    int hoisted = 0;
+    for (int i = 0; i < np; i++) hoist_place_indices(places[i], block, seq, &hoisted);
     add_child(block, destructure);
     for (int i = 0; i < np; i++) {
         ASTNode* assign = create_ast_node(AST_BINARY_EXPRESSION, "=", places[i]->line, places[i]->column);

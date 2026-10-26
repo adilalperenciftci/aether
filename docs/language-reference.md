@@ -2044,7 +2044,7 @@ The error convention: empty string `""` means no error, non-empty string is the 
 
 Tuple destructuring creates typed local variables. The compiler generates C structs for each unique tuple type (`_tuple_int_string`, etc.).
 
-A slot is a name, `_` (the value is dropped), an element or a field (#3167): `names[0], _ = pair()`, `p.name, p.n = pair()`, `last, counts[1] = pair()`. An element or a field takes its value as `place = value` stores it, ownership included, and the names among the slots bind as they would in a destructure of names only.
+A slot is a name, `_` (the value is dropped), an element or a field (#3167): `names[0], _ = pair()`, `p.name, p.n = pair()`, `last, counts[1] = pair()`. An element or a field takes its value as `place = value` stores it, ownership included, and the names among the slots bind as they would in a destructure of names only. An element's index is evaluated first, left to right and before the value, as in Go: `xs[i], i = pair()` stores into the element `i` named before the statement (#3208).
 
 #### Explicit tuple return type
 

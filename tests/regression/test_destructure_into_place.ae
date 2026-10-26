@@ -39,6 +39,30 @@ shapes(round: int) {
     counts = [0, 0]
     last, counts[1] = pair("q")
     check(last == "q!" && counts[1] == 1, "a local and an element, round ${round}")
+
+    // An index is read before the destructure binds anything (#3208):
+    // `i` is 0 when `xs[i]` is named, so element 0 takes the value, not
+    // the element the statement gives `i`.
+    xs = [0, 0, 0]
+    i = 0
+    xs[i], i = ints(7, 2)
+    check(xs[0] == 7 && xs[2] == 0 && i == 2, "an index named before the statement, round ${round}")
+    // Before the value, too: the value's call sets the cell to 2, and the
+    // index reads it, so an index read after the value names element 2.
+    cell = ref(0)
+    ys = [0, 0, 0]
+    ys[ref_get(cell)], _ = marked(cell, 5)
+    ref_free(cell)
+    check(ys[0] == 5 && ys[2] == 0, "an index runs before the value, round ${round}")
+}
+
+ints(a: int, b: int) -> (int, int) {
+    return a, b
+}
+
+marked(cell: ptr, v: int) -> (int, int) {
+    ref_set(cell, 2)
+    return v, 0
 }
 
 main() {
