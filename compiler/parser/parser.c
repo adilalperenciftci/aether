@@ -1854,11 +1854,45 @@ static ASTNode* parse_primary_expression_inner(Parser* parser) {
                     int column = token->column;
                     advance_token(parser);                       // consume sizeof/offsetof
                     if (!expect_token(parser, TOKEN_LEFT_PAREN)) return NULL;
-                    Token* tyname = expect_token(parser, TOKEN_IDENTIFIER);
-                    if (!tyname) return NULL;
+                    /* #3174: the operand is any type a declaration takes,
+                     * read by the type parser: `sizeof(int)`, `uint32`,
+                     * `ptr`, `*Node`, `int[4]`, a struct. A struct named
+                     * bare keeps its name as the node's value (the C tag
+                     * form codegen and the module merge already handle);
+                     * any other type rides in a type-annotation child. Only
+                     * an identifier was read before: `sizeof(int)` was
+                     * "'int' is a reserved keyword". */
+                    Token* operand_tok = peek_token(parser);
+                    Type* operand = parse_type(parser);
+                    if (!operand) {
+                        if (!parser->suppress_errors && operand_tok) {
+                            aether_error_full(is_offsetof
+                                                  ? "offsetof expects a struct type, then a field"
+                                                  : "sizeof expects a type",
+                                              operand_tok->line, operand_tok->column,
+                                              is_offsetof ? "write offsetof(Point, x)"
+                                                          : "write sizeof(int), sizeof(Point) or sizeof(*Node)",
+                                              NULL, AETHER_ERR_SYNTAX);
+                        }
+                        return NULL;
+                    }
+                    int bare_struct = operand->kind == TYPE_STRUCT && operand->struct_name &&
+                                      !operand->qualifier;
                     ASTNode* node = create_ast_node(
                         is_offsetof ? AST_OFFSETOF : AST_SIZEOF,
-                        tyname->value, line, column);
+                        bare_struct ? operand->struct_name : NULL, line, column);
+                    if (bare_struct && is_offsetof) {
+                        free_type(operand);
+                    } else {
+                        /* A sizeof keeps the type even for a bare name, which
+                         * may turn out to be an enum or a distinct type once
+                         * names are resolved: codegen spells a struct by its
+                         * tag and anything else as its C type. */
+                        ASTNode* ty = create_ast_node(AST_TYPE_ANNOTATION, NULL,
+                                                      operand_tok->line, operand_tok->column);
+                        ty->node_type = operand;
+                        add_child(node, ty);
+                    }
                     node->node_type = create_type(TYPE_INT);
                     if (is_offsetof) {
                         if (!expect_token(parser, TOKEN_COMMA)) {

@@ -1,0 +1,64 @@
+// Regression (#3174): sizeof and offsetof take any type a declaration
+// takes.
+//
+// The bug: the operand was read as a bare identifier, so `sizeof(int)`
+// (and every other keyword type) was "'int' is a reserved keyword and
+// cannot be used as an identifier", and an identifier type that is not a
+// struct (`uint32`, `size_t`) became `sizeof(struct uint32)` in C. Only
+// `sizeof(SomeStruct)` worked. This file did not compile before the fix.
+//
+// What it exercises: the integer widths, the float types, `bool`, `ptr`,
+// `string`, a pointer to a struct, a fixed-size array, a struct, an enum,
+// and offsetof over a struct; each size against what C makes of the type,
+// and `const` initializers built from them.
+
+struct Pair {
+    a: int
+    b: long
+}
+
+struct Node {
+    next: *Node
+    value: int
+}
+
+enum Mode { Idle, Busy }
+
+const PAIR_BYTES = sizeof(Pair)
+const INTS_BYTES = sizeof(int[4])
+
+check(name: string, got: int, want: int) -> int {
+    println("${name} = ${got}")
+    if got == want {
+        return 0
+    }
+    println("FAIL: ${name} should be ${want}")
+    return 1
+}
+
+main() {
+    word = sizeof(ptr)
+    fails = 0
+    fails = fails + check("sizeof(int)", sizeof(int), 4)
+    fails = fails + check("sizeof(long)", sizeof(long), 8)
+    fails = fails + check("sizeof(byte)", sizeof(byte), 1)
+    fails = fails + check("sizeof(uint16)", sizeof(uint16), 2)
+    fails = fails + check("sizeof(uint32)", sizeof(uint32), 4)
+    fails = fails + check("sizeof(uint64)", sizeof(uint64), 8)
+    fails = fails + check("sizeof(float)", sizeof(float), 8)
+    fails = fails + check("sizeof(f32)", sizeof(f32), 4)
+    fails = fails + check("sizeof(int[4])", INTS_BYTES, 16)
+    fails = fails + check("sizeof(*Node) is a word", sizeof(*Node), word)
+    fails = fails + check("sizeof(string) is a word", sizeof(string), word)
+    fails = fails + check("sizeof(Pair)", PAIR_BYTES, 16)
+    fails = fails + check("offsetof(Pair, b)", offsetof(Pair, b), 8)
+    fails = fails + check("offsetof(Node, value) is a word", offsetof(Node, value), word)
+    fails = fails + check("sizeof(Mode)", sizeof(Mode), 4)
+    if sizeof(bool) < 1 {
+        println("FAIL: sizeof(bool)")
+        fails = fails + 1
+    }
+    if fails > 0 {
+        exit(1)
+    }
+}

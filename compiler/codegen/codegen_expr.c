@@ -8090,8 +8090,21 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             // sizeof(TypeName) → C sizeof(struct TypeName). Extern/struct
             // types emit as `struct <Name>` (same convention as
             // `as *StructName`), so the value always tracks the real C
-            // layout.
-            fprintf(gen->output, "((int)sizeof(%s %s))", aether_c_tag(expr->value), expr->value);
+            // layout. #3174: any other type is the C type it lowers to,
+            // an array its element type and length.
+            if (expr->child_count > 0 && expr->children[0] &&
+                expr->children[0]->type == AST_TYPE_ANNOTATION && expr->children[0]->node_type &&
+                !(expr->value && expr->children[0]->node_type->kind == TYPE_STRUCT)) {
+                Type* t = expr->children[0]->node_type;
+                if (type_is_sized_array(t) && t->element_type) {
+                    fprintf(gen->output, "((int)sizeof(%s[%d]))", get_c_type(t->element_type),
+                            t->array_size);
+                } else {
+                    fprintf(gen->output, "((int)sizeof(%s))", get_c_type(t));
+                }
+            } else {
+                fprintf(gen->output, "((int)sizeof(%s %s))", aether_c_tag(expr->value), expr->value);
+            }
             break;
 
         case AST_SCHEMA_OF:
@@ -8102,7 +8115,13 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
 
         case AST_OFFSETOF:
             // offsetof(TypeName, field) → C offsetof(struct TypeName, field).
-            if (expr->child_count >= 1 && expr->children[0]->value) {
+            // #3174: a qualified struct (`gpu.Shader`) rides in a type
+            // child, the field after it.
+            if (expr->child_count >= 2 && expr->children[0]->type == AST_TYPE_ANNOTATION &&
+                expr->children[0]->node_type && expr->children[1]->value) {
+                fprintf(gen->output, "((int)offsetof(%s, %s))",
+                        get_c_type(expr->children[0]->node_type), expr->children[1]->value);
+            } else if (expr->child_count >= 1 && expr->children[0]->value) {
                 fprintf(gen->output, "((int)offsetof(%s %s, %s))", aether_c_tag(expr->value),
                         expr->value, expr->children[0]->value);
             } else {

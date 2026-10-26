@@ -16047,6 +16047,17 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             // Field/type validity is the C compiler's job (offsetof on a
             // bad field is a hard C error), matching the trust-the-author
             // posture of the `as *Struct` cast.
+            /* #3174: an offsetof's type must be a struct; a type child that
+             * is not one (`offsetof(int, x)`) has no fields to measure. */
+            if (expr->type == AST_OFFSETOF && expr->child_count >= 2 &&
+                expr->children[0]->type == AST_TYPE_ANNOTATION &&
+                (!expr->children[0]->node_type ||
+                 expr->children[0]->node_type->kind != TYPE_STRUCT)) {
+                type_error_hint("offsetof takes a struct type: only a struct has fields to measure",
+                                "write offsetof(Point, x) for a struct Point",
+                                expr->children[0]->line, expr->children[0]->column);
+                return 0;
+            }
             set_node_type(expr, create_type(TYPE_INT));
             return 1;
 

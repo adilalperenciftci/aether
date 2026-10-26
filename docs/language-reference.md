@@ -686,6 +686,22 @@ const STR_PADDED      = sizeof(JSString) + 8      // arithmetic over them is ok 
 
 This lets a port that mirrors C structs as `extern struct` overlays centralise its offset/size table as named consts that are **self-verifying by construction**, the C compiler computes each value, so it cannot drift from the real layout, instead of hand-maintaining numeric offsets plus `_Static_assert` drift guards. The general "no function calls in a `const` initializer" rule is unchanged; these two layout builtins are the only carve-out.
 
+`sizeof` takes any type a declaration takes (#3174): a keyword type (`int`, `long`, `float`, `byte`, `bool`, `ptr`, `string`), a width (`uint16`, `uint32`, `f32`, `size_t`), a pointer (`*Node`), a fixed-size array (`int[4]`, its element's size times its length), a struct, an enum or a distinct type, each the size C gives the type it lowers to. `offsetof` takes a struct, bare or qualified (`gpu.Shader`); another type has no fields and is an error at the type.
+
+```aether,run
+struct Pair {
+    a: int
+    b: long
+}
+
+main() {
+    println("${sizeof(int)} ${sizeof(long)} ${sizeof(uint16)} ${sizeof(int[4])} ${sizeof(Pair)} ${offsetof(Pair, b)}")
+}
+```
+```output
+4 8 2 16 16 8
+```
+
 ### Mutable module-level globals
 
 Where a `const` is a fixed value, a module-level `var` is **one persistent, mutable word of state** shared by every function in the module, a PRNG seed, a monotonic counter, a one-slot cache:
