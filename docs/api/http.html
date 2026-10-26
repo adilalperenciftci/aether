@@ -15,8 +15,139 @@
   <input type="text" id="search" placeholder="Search http..." onkeyup="searchModule()">
   <h2>Exports</h2>
   <ul class="function-nav">
-    <li><a href="#this">this</a></li>
-    <li><a href="#module">module</a></li>
+    <li><a href="#get_raw">get_raw</a></li>
+    <li><a href="#get_with_timeout_raw">get_with_timeout_raw</a></li>
+    <li><a href="#get_with_timeout_ns_raw">get_with_timeout_ns_raw</a></li>
+    <li><a href="#post_raw">post_raw</a></li>
+    <li><a href="#put_raw">put_raw</a></li>
+    <li><a href="#delete_raw">delete_raw</a></li>
+    <li><a href="#response_free">response_free</a></li>
+    <li><a href="#response_status_code">response_status_code</a></li>
+    <li><a href="#response_body_str">response_body_str</a></li>
+    <li><a href="#response_headers_str">response_headers_str</a></li>
+    <li><a href="#response_status">response_status</a></li>
+    <li><a href="#response_body">response_body</a></li>
+    <li><a href="#response_headers">response_headers</a></li>
+    <li><a href="#response_error">response_error</a></li>
+    <li><a href="#response_ok">response_ok</a></li>
+    <li><a href="#get">get</a></li>
+    <li><a href="#get_with_timeout">get_with_timeout</a></li>
+    <li><a href="#post">post</a></li>
+    <li><a href="#put">put</a></li>
+    <li><a href="#delete">delete</a></li>
+    <li><a href="#status_text">status_text</a></li>
+    <li><a href="#client_pool_configure_raw">client_pool_configure_raw</a></li>
+    <li><a href="#client_pool_clear_raw">client_pool_clear_raw</a></li>
+    <li><a href="#client_pool_idle_count_raw">client_pool_idle_count_raw</a></li>
+    <li><a href="#client_rx_buffer_allocs_raw">client_rx_buffer_allocs_raw</a></li>
+    <li><a href="#client_pool_configure">client_pool_configure</a></li>
+    <li><a href="#client_pool_disable">client_pool_disable</a></li>
+    <li><a href="#client_pool_clear">client_pool_clear</a></li>
+    <li><a href="#client_pool_idle_count">client_pool_idle_count</a></li>
+    <li><a href="#client_rx_buffer_allocs">client_rx_buffer_allocs</a></li>
+    <li><a href="#server_create">server_create</a></li>
+    <li><a href="#server_bind_raw">server_bind_raw</a></li>
+    <li><a href="#server_port">server_port</a></li>
+    <li><a href="#server_start_raw">server_start_raw</a></li>
+    <li><a href="#server_set_host">server_set_host</a></li>
+    <li><a href="#server_start_background_raw">server_start_background_raw</a></li>
+    <li><a href="#server_stop">server_stop</a></li>
+    <li><a href="#server_free">server_free</a></li>
+    <li><a href="#server_set_tls_raw">server_set_tls_raw</a></li>
+    <li><a href="#server_set_tls">server_set_tls</a></li>
+    <li><a href="#server_set_keepalive_raw">server_set_keepalive_raw</a></li>
+    <li><a href="#server_set_keepalive">server_set_keepalive</a></li>
+    <li><a href="#server_set_h2_raw">server_set_h2_raw</a></li>
+    <li><a href="#server_set_h2">server_set_h2</a></li>
+    <li><a href="#server_set_h2_concurrent_dispatch_raw">server_set_h2_concurrent_dispatch_raw</a></li>
+    <li><a href="#server_set_h2_concurrent_dispatch">server_set_h2_concurrent_dispatch</a></li>
+    <li><a href="#server_drain_connection">server_drain_connection</a></li>
+    <li><a href="#server_shutdown_graceful_raw">server_shutdown_graceful_raw</a></li>
+    <li><a href="#server_shutdown_graceful">server_shutdown_graceful</a></li>
+    <li><a href="#server_on_start">server_on_start</a></li>
+    <li><a href="#server_on_stop">server_on_stop</a></li>
+    <li><a href="#server_set_health_probes_raw">server_set_health_probes_raw</a></li>
+    <li><a href="#server_set_health_probes">server_set_health_probes</a></li>
+    <li><a href="#server_set_access_log_raw">server_set_access_log_raw</a></li>
+    <li><a href="#server_set_access_log">server_set_access_log</a></li>
+    <li><a href="#server_set_metrics_raw">server_set_metrics_raw</a></li>
+    <li><a href="#server_set_metrics">server_set_metrics</a></li>
+    <li><a href="#server_sse">server_sse</a></li>
+    <li><a href="#response_sse_upgrade_raw">response_sse_upgrade_raw</a></li>
+    <li><a href="#sse_send">sse_send</a></li>
+    <li><a href="#sse_send_id">sse_send_id</a></li>
+    <li><a href="#sse_send_full">sse_send_full</a></li>
+    <li><a href="#sse_comment">sse_comment</a></li>
+    <li><a href="#sse_close">sse_close</a></li>
+    <li><a href="#response_upgrade_sse">response_upgrade_sse</a></li>
+    <li><a href="#response_begin_chunked">response_begin_chunked</a></li>
+    <li><a href="#chunked_write">chunked_write</a></li>
+    <li><a href="#chunked_end">chunked_end</a></li>
+    <li><a href="#server_websocket">server_websocket</a></li>
+    <li><a href="#ws_connect">ws_connect</a></li>
+    <li><a href="#ws_client_free">ws_client_free</a></li>
+    <li><a href="#ws_message_length">ws_message_length</a></li>
+    <li><a href="#ws_send_text">ws_send_text</a></li>
+    <li><a href="#ws_send_binary">ws_send_binary</a></li>
+    <li><a href="#ws_recv">ws_recv</a></li>
+    <li><a href="#ws_recv_timeout">ws_recv_timeout</a></li>
+    <li><a href="#ws_poll">ws_poll</a></li>
+    <li><a href="#ws_fd">ws_fd</a></li>
+    <li><a href="#ws_message">ws_message</a></li>
+    <li><a href="#ws_message_bytes">ws_message_bytes</a></li>
+    <li><a href="#ws_close">ws_close</a></li>
+    <li><a href="#server_bind">server_bind</a></li>
+    <li><a href="#server_start">server_start</a></li>
+    <li><a href="#server_start_background">server_start_background</a></li>
+    <li><a href="#server_add_route">server_add_route</a></li>
+    <li><a href="#server_get">server_get</a></li>
+    <li><a href="#server_post">server_post</a></li>
+    <li><a href="#server_put">server_put</a></li>
+    <li><a href="#server_delete">server_delete</a></li>
+    <li><a href="#server_use_middleware">server_use_middleware</a></li>
+    <li><a href="#get_header">get_header</a></li>
+    <li><a href="#get_query_param">get_query_param</a></li>
+    <li><a href="#get_path_param">get_path_param</a></li>
+    <li><a href="#request_free">request_free</a></li>
+    <li><a href="#response_create">response_create</a></li>
+    <li><a href="#response_set_status">response_set_status</a></li>
+    <li><a href="#response_get_status">response_get_status</a></li>
+    <li><a href="#response_set_header">response_set_header</a></li>
+    <li><a href="#response_add_header">response_add_header</a></li>
+    <li><a href="#response_clear_headers">response_clear_headers</a></li>
+    <li><a href="#response_set_body">response_set_body</a></li>
+    <li><a href="#response_set_body_bytes">response_set_body_bytes</a></li>
+    <li><a href="#response_accept_tunnel">response_accept_tunnel</a></li>
+    <li><a href="#response_json">response_json</a></li>
+    <li><a href="#server_response_free">server_response_free</a></li>
+    <li><a href="#server_set_actor_handler">server_set_actor_handler</a></li>
+    <li><a href="#request_body_read_raw">request_body_read_raw</a></li>
+    <li><a href="#get_request_body_read">get_request_body_read</a></li>
+    <li><a href="#get_request_body_read_length">get_request_body_read_length</a></li>
+    <li><a href="#release_request_body_read">release_request_body_read</a></li>
+    <li><a href="#request_body_read">request_body_read</a></li>
+    <li><a href="#request_body_complete">request_body_complete</a></li>
+    <li><a href="#mime_type">mime_type</a></li>
+    <li><a href="#serve_file">serve_file</a></li>
+    <li><a href="#serve_static">serve_static</a></li>
+    <li><a href="#request_method">request_method</a></li>
+    <li><a href="#request_path">request_path</a></li>
+    <li><a href="#request_body">request_body</a></li>
+    <li><a href="#request_body_length">request_body_length</a></li>
+    <li><a href="#request_body_bytes">request_body_bytes</a></li>
+    <li><a href="#request_query">request_query</a></li>
+    <li><a href="#request_remote_addr">request_remote_addr</a></li>
+    <li><a href="#request_remote_port">request_remote_port</a></li>
+    <li><a href="#request_local_addr">request_local_addr</a></li>
+    <li><a href="#request_local_port">request_local_port</a></li>
+    <li><a href="#request_scheme">request_scheme</a></li>
+    <li><a href="#request_is_tls">request_is_tls</a></li>
+    <li><a href="#request_http_version">request_http_version</a></li>
+    <li><a href="#request_header_count">request_header_count</a></li>
+    <li><a href="#request_header_name">request_header_name</a></li>
+    <li><a href="#request_header_value">request_header_value</a></li>
+    <li><a href="#ae_io_cancel">ae_io_cancel</a></li>
+    <li><a href="#await_io">await_io</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -118,13 +249,714 @@
     <p class="import-line"><code>import std.http</code></p>
   </div>
   <div class="functions" id="functions">
-    <div class="function" id="this" data-name="this">
-      <h3 class="function-name">this <span class="kind">fn</span></h3>
-      <pre class="usage"><code>this()</code></pre>
+    <div class="function" id="get_raw" data-name="get_raw">
+      <h3 class="function-name">get_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>get_raw(url) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">url: string</span></p>
     </div>
-    <div class="function" id="module" data-name="module">
-      <h3 class="function-name">module <span class="kind">fn</span></h3>
-      <pre class="usage"><code>module()</code></pre>
+    <div class="function" id="get_with_timeout_raw" data-name="get_with_timeout_raw">
+      <h3 class="function-name">get_with_timeout_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>get_with_timeout_raw(url, timeout_ms) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">url: string, timeout_ms: int</span></p>
+      <p class="doc">http.get with a per-call timeout. 0ns blocks forever (matches http.get's default). Sub-second values are rounded UP to whole seconds because the underlying SO_RCVTIMEO field is integer seconds. Use this any time the target URL isn't local — a hung DNS lookup or unresponsive server otherwise stalls the calling actor's entire message handler.</p>
+    </div>
+    <div class="function" id="get_with_timeout_ns_raw" data-name="get_with_timeout_ns_raw">
+      <h3 class="function-name">get_with_timeout_ns_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>get_with_timeout_ns_raw(url, timeout) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">url: string, timeout: Duration</span></p>
+    </div>
+    <div class="function" id="post_raw" data-name="post_raw">
+      <h3 class="function-name">post_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>post_raw(url, body, content_type) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">url: string, body: string, content_type: string</span></p>
+    </div>
+    <div class="function" id="put_raw" data-name="put_raw">
+      <h3 class="function-name">put_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>put_raw(url, body, content_type) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">url: string, body: string, content_type: string</span></p>
+    </div>
+    <div class="function" id="delete_raw" data-name="delete_raw">
+      <h3 class="function-name">delete_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>delete_raw(url) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">url: string</span></p>
+    </div>
+    <div class="function" id="response_free" data-name="response_free">
+      <h3 class="function-name">response_free <span class="kind">extern</span></h3>
+      <pre class="usage"><code>response_free(response)</code></pre>
+      <p class="signature"><span class="sig-params">response: ptr</span></p>
+    </div>
+    <div class="function" id="response_status_code" data-name="response_status_code">
+      <h3 class="function-name">response_status_code <span class="kind">extern</span></h3>
+      <pre class="usage"><code>response_status_code(response) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">response: ptr</span></p>
+    </div>
+    <div class="function" id="response_body_str" data-name="response_body_str">
+      <h3 class="function-name">response_body_str <span class="kind">extern</span></h3>
+      <pre class="usage"><code>response_body_str(response) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">response: ptr</span></p>
+    </div>
+    <div class="function" id="response_headers_str" data-name="response_headers_str">
+      <h3 class="function-name">response_headers_str <span class="kind">extern</span></h3>
+      <pre class="usage"><code>response_headers_str(response) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">response: ptr</span></p>
+    </div>
+    <div class="function" id="response_status" data-name="response_status">
+      <h3 class="function-name">response_status <span class="kind">extern</span></h3>
+      <pre class="usage"><code>response_status(response) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">response: ptr</span></p>
+      <p class="doc">HTTP Client - response accessors (used by both raw callers and the Go-style wrappers below).</p>
+    </div>
+    <div class="function" id="response_body" data-name="response_body">
+      <h3 class="function-name">response_body <span class="kind">extern</span></h3>
+      <pre class="usage"><code>response_body(response) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">response: ptr</span></p>
+    </div>
+    <div class="function" id="response_headers" data-name="response_headers">
+      <h3 class="function-name">response_headers <span class="kind">extern</span></h3>
+      <pre class="usage"><code>response_headers(response) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">response: ptr</span></p>
+    </div>
+    <div class="function" id="response_error" data-name="response_error">
+      <h3 class="function-name">response_error <span class="kind">extern</span></h3>
+      <pre class="usage"><code>response_error(response) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">response: ptr</span></p>
+    </div>
+    <div class="function" id="response_ok" data-name="response_ok">
+      <h3 class="function-name">response_ok <span class="kind">extern</span></h3>
+      <pre class="usage"><code>response_ok(response) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">response: ptr</span></p>
+    </div>
+    <div class="function" id="get" data-name="get">
+      <h3 class="function-name">get <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get(url)</code></pre>
+      <p class="signature"><span class="sig-params">url: string</span></p>
+      <p class="doc">GET a URL and return the response body. Most common case.</p>
+    </div>
+    <div class="function" id="get_with_timeout" data-name="get_with_timeout">
+      <h3 class="function-name">get_with_timeout <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_with_timeout(url, timeout)</code></pre>
+      <p class="signature"><span class="sig-params">url: string, timeout: Duration</span></p>
+      <p class="doc">GET a URL with a per-call timeout. Same return shape as `get`. Use this for any third-party URL: without it, a hung site stalls the calling actor's whole message handler. 0ns preserves `get`'s &quot;block forever&quot; default; values &lt;1000 are rounded up to 1 second under the hood (the underlying socket-timeout field is integer seconds today).</p>
+    </div>
+    <div class="function" id="post" data-name="post">
+      <h3 class="function-name">post <span class="kind">fn</span></h3>
+      <pre class="usage"><code>post(url, body, content_type)</code></pre>
+      <p class="signature"><span class="sig-params">url: string, body: string, content_type: string</span></p>
+      <p class="doc">POST a body and return the response body.</p>
+    </div>
+    <div class="function" id="put" data-name="put">
+      <h3 class="function-name">put <span class="kind">fn</span></h3>
+      <pre class="usage"><code>put(url, body, content_type)</code></pre>
+      <p class="signature"><span class="sig-params">url: string, body: string, content_type: string</span></p>
+      <p class="doc">PUT a body and return the response body.</p>
+    </div>
+    <div class="function" id="delete" data-name="delete">
+      <h3 class="function-name">delete <span class="kind">fn</span></h3>
+      <pre class="usage"><code>delete(url)</code></pre>
+      <p class="signature"><span class="sig-params">url: string</span></p>
+      <p class="doc">DELETE a URL and return the response body.</p>
+    </div>
+    <div class="function" id="status_text" data-name="status_text">
+      <h3 class="function-name">status_text <span class="kind">fn</span></h3>
+      <pre class="usage"><code>status_text(code) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">code: int</span></p>
+      <p class="doc">The reason phrase registered for a status code (&quot;Not Found&quot; for 404), or &quot;&quot; for a code nobody registered. Names a status a std.http.client response carries as well as the ones the wrappers below report.</p>
+    </div>
+    <div class="function" id="client_pool_configure_raw" data-name="client_pool_configure_raw">
+      <h3 class="function-name">client_pool_configure_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>client_pool_configure_raw(max_idle, max_per_host, idle_ns) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">max_idle: int, max_per_host: int, idle_ns: long</span></p>
+      <p class="doc">HTTP Client — raw ptr-returning externs. These are the escape hatch for code that needs direct access to the underlying HttpResponse struct (e.g. to inspect headers and body together, or to implement custom retry logic). Most callers should use the Go-style wrappers below. Idle connection pool. The client keeps a connection open after a response whose length was definite and reuses it for the next request to the same origin, which is what HTTP/1.1 is designed for: a proxy or a polling client otherwise pays a TCP (and TLS) handshake per request. Reuse is on by default. Connections are keyed by origin, the proxy actually dialled, TLS, and the verification the caller asked for, so a pinned-CA or verification-off connection is never handed to a request that did not ask for it.</p>
+    </div>
+    <div class="function" id="client_pool_clear_raw" data-name="client_pool_clear_raw">
+      <h3 class="function-name">client_pool_clear_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>client_pool_clear_raw()</code></pre>
+    </div>
+    <div class="function" id="client_pool_idle_count_raw" data-name="client_pool_idle_count_raw">
+      <h3 class="function-name">client_pool_idle_count_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>client_pool_idle_count_raw() <span class="arrow">-&gt;</span> int</code></pre>
+    </div>
+    <div class="function" id="client_rx_buffer_allocs_raw" data-name="client_rx_buffer_allocs_raw">
+      <h3 class="function-name">client_rx_buffer_allocs_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>client_rx_buffer_allocs_raw() <span class="arrow">-&gt;</span> long</code></pre>
+    </div>
+    <div class="function" id="client_pool_configure" data-name="client_pool_configure">
+      <h3 class="function-name">client_pool_configure <span class="kind">fn</span></h3>
+      <pre class="usage"><code>client_pool_configure(max_idle, max_per_host, idle) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">max_idle: int, max_per_host: int, idle: Duration</span></p>
+      <p class="doc">Resize the idle connection pool: how many idle connections to keep in total, how many of those may be to one origin, and how long an unused one is kept before it is closed. The defaults are the call below. http.client_pool_configure(64, 8, 15s) Keep the idle time under the upstream's own keep-alive timeout, or the server closes connections while they sit here and every reuse costs a retry.</p>
+    </div>
+    <div class="function" id="client_pool_disable" data-name="client_pool_disable">
+      <h3 class="function-name">client_pool_disable <span class="kind">fn</span></h3>
+      <pre class="usage"><code>client_pool_disable()</code></pre>
+      <p class="doc">Turn connection reuse off and close what is held. Every request then opens its own connection, which is what the client did before reuse existed.</p>
+    </div>
+    <div class="function" id="client_pool_clear" data-name="client_pool_clear">
+      <h3 class="function-name">client_pool_clear <span class="kind">fn</span></h3>
+      <pre class="usage"><code>client_pool_clear()</code></pre>
+      <p class="doc">Close every idle connection. Useful before measuring, and after a change that makes held connections invalid (a new CA, a rotated proxy).</p>
+    </div>
+    <div class="function" id="client_pool_idle_count" data-name="client_pool_idle_count">
+      <h3 class="function-name">client_pool_idle_count <span class="kind">fn</span></h3>
+      <pre class="usage"><code>client_pool_idle_count() <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="doc">How many idle connections are held right now.</p>
+    </div>
+    <div class="function" id="client_rx_buffer_allocs" data-name="client_rx_buffer_allocs">
+      <h3 class="function-name">client_rx_buffer_allocs <span class="kind">fn</span></h3>
+      <pre class="usage"><code>client_rx_buffer_allocs() <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="doc">How many response buffers the client has had to allocate from nothing, over the life of the process. A pooled connection keeps the buffer its last response was read into and lends it to the next, so a run of requests over one kept connection allocates once, not once per request -- which is what this lets a program, or a test, check rather than assume. Responses whose buffer grew past 64 KiB are not kept, so the idle pool cannot pin an outsized body.</p>
+    </div>
+    <div class="function" id="server_create" data-name="server_create">
+      <h3 class="function-name">server_create <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_create(port) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">port: int</span></p>
+      <p class="doc">HTTP Server - lifecycle</p>
+    </div>
+    <div class="function" id="server_bind_raw" data-name="server_bind_raw">
+      <h3 class="function-name">server_bind_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_bind_raw(server, host, port) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, host: string, port: int</span></p>
+    </div>
+    <div class="function" id="server_port" data-name="server_port">
+      <h3 class="function-name">server_port <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_port(server) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr</span></p>
+      <p class="doc">Resolved listening port. After binding with port 0 (OS-assigned), returns the kernel-chosen port so dynamic-port users can discover it; otherwise echoes the requested port. 0 if unbound.</p>
+    </div>
+    <div class="function" id="server_start_raw" data-name="server_start_raw">
+      <h3 class="function-name">server_start_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_start_raw(server) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr</span></p>
+    </div>
+    <div class="function" id="server_set_host" data-name="server_set_host">
+      <h3 class="function-name">server_set_host <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_set_host(server, host) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, host: string</span></p>
+      <p class="doc">Set the bind host before server_start. Default is &quot;0.0.0.0&quot;. Pass &quot;127.0.0.1&quot; to bind loopback only, &quot;::1&quot; for IPv6 loopback, or &quot;::&quot; for every interface of both families (IPv4 clients arrive as IPv4 peers).</p>
+    </div>
+    <div class="function" id="server_start_background_raw" data-name="server_start_background_raw">
+      <h3 class="function-name">server_start_background_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_start_background_raw(server) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr</span></p>
+    </div>
+    <div class="function" id="server_stop" data-name="server_stop">
+      <h3 class="function-name">server_stop <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_stop(server)</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr</span></p>
+    </div>
+    <div class="function" id="server_free" data-name="server_free">
+      <h3 class="function-name">server_free <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_free(server)</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr</span></p>
+    </div>
+    <div class="function" id="server_set_tls_raw" data-name="server_set_tls_raw">
+      <h3 class="function-name">server_set_tls_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_set_tls_raw(server, cert_path, key_path) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, cert_path: string, key_path: string</span></p>
+      <p class="doc">TLS termination (#260 Tier 0). Loads the cert+key (PEM-encoded); after this call every accepted connection completes a TLS handshake before the HTTP parse runs. Returns &quot;&quot; on success, error string otherwise. See server_set_tls below for the Aether-side wrapper.</p>
+    </div>
+    <div class="function" id="server_set_tls" data-name="server_set_tls">
+      <h3 class="function-name">server_set_tls <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_set_tls(server, cert_path, key_path) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, cert_path: string, key_path: string</span></p>
+      <p class="doc">Enable TLS termination on an HTTP server. Both paths must point at PEM-encoded files; the cert and key are validated to match before the server is marked TLS-enabled. Returns &quot;&quot; on success, an error string on failure (file unreadable, parse error, mismatched key, build without OpenSSL). Idempotent — calling twice with the same files is a no-op success; calling with different files re-loads. Example: server = http.server_create(443) err = http.server_set_tls(server, &quot;/etc/ssl/cert.pem&quot;, &quot;/etc/ssl/key.pem&quot;) if err != &quot;&quot; { println(&quot;TLS setup failed: ${err}&quot;); exit(1) } http.server_start(server)</p>
+    </div>
+    <div class="function" id="server_set_keepalive_raw" data-name="server_set_keepalive_raw">
+      <h3 class="function-name">server_set_keepalive_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_set_keepalive_raw(server, enabled, max_requests, idle_ns) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, enabled: int, max_requests: int, idle_ns: long</span></p>
+      <p class="doc">HTTP/1.1 keep-alive (#260 Tier 0). When enabled, the server reads multiple requests off one socket instead of closing after each. max_requests = 0  -&gt; unlimited per connection idle_timeout = 0ns -&gt; use the default 30s SO_RCVTIMEO Returns &quot;&quot; on success.</p>
+    </div>
+    <div class="function" id="server_set_keepalive" data-name="server_set_keepalive">
+      <h3 class="function-name">server_set_keepalive <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_set_keepalive(server, enabled, max_requests, idle_timeout) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, enabled: int, max_requests: int, idle_timeout: Duration</span></p>
+    </div>
+    <div class="function" id="server_set_h2_raw" data-name="server_set_h2_raw">
+      <h3 class="function-name">server_set_h2_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_set_h2_raw(server, max_concurrent_streams) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, max_concurrent_streams: int</span></p>
+      <p class="doc">HTTP/2 (#260 Tier 2). When enabled: - the TLS context advertises &quot;h2&quot; via ALPN with &quot;http/1.1&quot; as the fallback, so HTTP/2-capable clients (curl --http2, browsers, fan-out gateways) negotiate the framed protocol while older clients stay on HTTP/1.1 transparently; - plain (non-TLS) connections honour h2c upgrade requests per RFC 7540 §3.2 (Upgrade: h2c + HTTP2-Settings header); - per-stream dispatch reuses the existing route table, so all middleware / metrics / access logs / health probes / response transformers (gzip, error_pages) apply uniformly across HTTP/1.1 and HTTP/2 traffic. max_concurrent_streams advertises SETTINGS_MAX_CONCURRENT_STREAMS to the peer. Pass 0 for libnghttp2's default (100). Negative values return an error. Returns &quot;&quot; on success or an error string when the build doesn't link libnghttp2 (the rest of the server keeps working in HTTP/1.1-only mode). Example (h2 over TLS): server = http.server_create(443) err1 = http.server_set_tls(server, &quot;cert.pem&quot;, &quot;key.pem&quot;) err2 = http.server_set_h2(server, 0)          // 0 = nghttp2 default if err1 != &quot;&quot; { println(&quot;TLS: ${err1}&quot;); exit(1) } if err2 != &quot;&quot; { println(&quot;h2:  ${err2}&quot;); exit(1) } http.server_start(server)</p>
+    </div>
+    <div class="function" id="server_set_h2" data-name="server_set_h2">
+      <h3 class="function-name">server_set_h2 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_set_h2(server, max_concurrent_streams) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, max_concurrent_streams: int</span></p>
+    </div>
+    <div class="function" id="server_set_h2_concurrent_dispatch_raw" data-name="server_set_h2_concurrent_dispatch_raw">
+      <h3 class="function-name">server_set_h2_concurrent_dispatch_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_set_h2_concurrent_dispatch_raw(server, worker_count) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, worker_count: int</span></p>
+      <p class="doc">Per-stream concurrent dispatch for HTTP/2. When `worker_count` is greater than 0, each h2 connection spawns this many worker threads so multiple streams can run their handlers in parallel. Default 0 = sequential dispatch on the connection thread (legacy behaviour). Returns &quot;&quot; on success, error string otherwise. workers   typical use 0         keep handlers on the connection thread (default) 4         small fan-out — most servers 8–16      heavy fan-out — handler runs DB queries / large I/O &gt;16       diminishing returns; bound by the connection accept queue and the number of physical cores</p>
+    </div>
+    <div class="function" id="server_set_h2_concurrent_dispatch" data-name="server_set_h2_concurrent_dispatch">
+      <h3 class="function-name">server_set_h2_concurrent_dispatch <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_set_h2_concurrent_dispatch(server, worker_count) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, worker_count: int</span></p>
+    </div>
+    <div class="function" id="server_drain_connection" data-name="server_drain_connection">
+      <h3 class="function-name">server_drain_connection <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_drain_connection(server, client_fd)</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, client_fd: int</span></p>
+      <p class="doc">Drain a single accepted connection through the full HTTP lifecycle: optional TLS handshake, request parsing loop with keep-alive, route dispatch, response emission, socket close. This is the building block that user-side actor step functions plug into when running the server in actor-dispatch mode (set via http_server_set_actor_handler) — the actor's step receives a MSG_HTTP_CONNECTION with a client_fd and should call this helper to get the same TLS / keep-alive / route-dispatch behaviour the thread-pool worker path uses. (#260 Tier 0 / Phase C3.)</p>
+    </div>
+    <div class="function" id="server_shutdown_graceful_raw" data-name="server_shutdown_graceful_raw">
+      <h3 class="function-name">server_shutdown_graceful_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_shutdown_graceful_raw(server, timeout_ns) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, timeout_ns: long</span></p>
+      <p class="doc">Graceful shutdown (#260 Tier 3). Stops accepting new connections, then waits up to `timeout` for in-flight ones to finish naturally. Returns &quot;&quot; on clean drain, &quot;timeout&quot; if connections were still active when the deadline passed. Typically wired into a SIGTERM handler in the entry point.</p>
+    </div>
+    <div class="function" id="server_shutdown_graceful" data-name="server_shutdown_graceful">
+      <h3 class="function-name">server_shutdown_graceful <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_shutdown_graceful(server, timeout) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, timeout: Duration</span></p>
+    </div>
+    <div class="function" id="server_on_start" data-name="server_on_start">
+      <h3 class="function-name">server_on_start <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_on_start(server, hook, user_data)</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, hook: ptr, user_data: ptr</span></p>
+    </div>
+    <div class="function" id="server_on_stop" data-name="server_on_stop">
+      <h3 class="function-name">server_on_stop <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_on_stop(server, hook, user_data)</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, hook: ptr, user_data: ptr</span></p>
+    </div>
+    <div class="function" id="server_set_health_probes_raw" data-name="server_set_health_probes_raw">
+      <h3 class="function-name">server_set_health_probes_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_set_health_probes_raw(server, live_path, ready_path, ready_check, user_data) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, live_path: string, ready_path: string, ready_check: ptr, user_data: ptr</span></p>
+      <p class="doc">Health-probe endpoints (#260 Tier 3). Registers two routes: live_path  — always 200 &quot;ok&quot; (process is up) ready_path — calls ready_check (1 -&gt; 200 &quot;ready&quot;, 0 -&gt; 503 &quot;not ready&quot;) Either path may be &quot;&quot; to skip registration. ready_check may be null — in that case ready_path returns 200 too.</p>
+    </div>
+    <div class="function" id="server_set_health_probes" data-name="server_set_health_probes">
+      <h3 class="function-name">server_set_health_probes <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_set_health_probes(server, live_path, ready_path, ready_check, user_data) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, live_path: string, ready_path: string, ready_check: ptr, user_data: ptr</span></p>
+    </div>
+    <div class="function" id="server_set_access_log_raw" data-name="server_set_access_log_raw">
+      <h3 class="function-name">server_set_access_log_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_set_access_log_raw(server, format, output_path) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, format: string, output_path: string</span></p>
+      <p class="doc">Built-in access logger (#260 Tier 3 / F1). format: &quot;combined&quot; or &quot;json&quot;. output_path: file path (opened with &quot;ab&quot; — appends), &quot;-&quot; for stderr, or &quot;&quot; to disable. Returns &quot;&quot; on success.</p>
+    </div>
+    <div class="function" id="server_set_access_log" data-name="server_set_access_log">
+      <h3 class="function-name">server_set_access_log <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_set_access_log(server, format, output_path) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, format: string, output_path: string</span></p>
+    </div>
+    <div class="function" id="server_set_metrics_raw" data-name="server_set_metrics_raw">
+      <h3 class="function-name">server_set_metrics_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_set_metrics_raw(server, metrics_endpoint) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, metrics_endpoint: string</span></p>
+      <p class="doc">Built-in per-route metrics (#260 Tier 3 / F2). Tracks request counts, error rates, latency histograms; exposes the standard Prometheus text format on the configured endpoint (default &quot;/metrics&quot;). Returns &quot;&quot; on success.</p>
+    </div>
+    <div class="function" id="server_set_metrics" data-name="server_set_metrics">
+      <h3 class="function-name">server_set_metrics <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_set_metrics(server, metrics_endpoint) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, metrics_endpoint: string</span></p>
+    </div>
+    <div class="function" id="server_sse" data-name="server_sse">
+      <h3 class="function-name">server_sse <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_sse(server, path, handler, user_data)</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, path: string, handler: ptr, user_data: ptr</span></p>
+    </div>
+    <div class="function" id="response_sse_upgrade_raw" data-name="response_sse_upgrade_raw">
+      <h3 class="function-name">response_sse_upgrade_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>response_sse_upgrade_raw(res) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">res: ptr</span></p>
+    </div>
+    <div class="function" id="sse_send" data-name="sse_send">
+      <h3 class="function-name">sse_send <span class="kind">fn</span></h3>
+      <pre class="usage"><code>sse_send(sse, event_name, data) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">sse: ptr, event_name: string, data: string</span></p>
+    </div>
+    <div class="function" id="sse_send_id" data-name="sse_send_id">
+      <h3 class="function-name">sse_send_id <span class="kind">fn</span></h3>
+      <pre class="usage"><code>sse_send_id(sse, event_name, data, id) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">sse: ptr, event_name: string, data: string, id: string</span></p>
+    </div>
+    <div class="function" id="sse_send_full" data-name="sse_send_full">
+      <h3 class="function-name">sse_send_full <span class="kind">fn</span></h3>
+      <pre class="usage"><code>sse_send_full(sse, event_name, data, id, retry_ms) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">sse: ptr, event_name: string, data: string, id: string, retry_ms: int</span></p>
+      <p class="doc">Full SSE event, including `retry:` -- the spec's own reconnection-backoff field (WHATWG HTML, server-sent events). Without it a client can only use its default backoff and the server has no way to say otherwise, so an SSE surface emitting id/event/data but not retry is incomplete rather than merely minimal. 5 of the 20 Datastar cross-SDK conformance goldens require it, which is how the gap surfaced. `retry_ms` &lt;= 0 omits the field; sse_send and sse_send_id pass 0, so their behaviour is unchanged. Field order on the wire is id, event, retry, data -- retry must precede the blank line that dispatches the event.</p>
+    </div>
+    <div class="function" id="sse_comment" data-name="sse_comment">
+      <h3 class="function-name">sse_comment <span class="kind">fn</span></h3>
+      <pre class="usage"><code>sse_comment(sse, text) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">sse: ptr, text: string</span></p>
+      <p class="doc">An SSE comment (`: text`), which clients ignore: a keep-alive that a proxy dropping idle connections sees as traffic (#3109). 0 when sent, -1 on a closed stream, a failed write or a text with a line break.</p>
+    </div>
+    <div class="function" id="sse_close" data-name="sse_close">
+      <h3 class="function-name">sse_close <span class="kind">fn</span></h3>
+      <pre class="usage"><code>sse_close(sse)</code></pre>
+      <p class="signature"><span class="sig-params">sse: ptr</span></p>
+    </div>
+    <div class="function" id="response_upgrade_sse" data-name="response_upgrade_sse">
+      <h3 class="function-name">response_upgrade_sse <span class="kind">fn</span></h3>
+      <pre class="usage"><code>response_upgrade_sse(res) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">res: ptr</span></p>
+      <p class="doc">Turn an in-flight ordinary response into an SSE stream. `server_sse` registers a whole ROUTE as SSE, which forces the decision before the request is parsed -- so a handler that must be able to answer 400 on a malformed body and only THEN stream cannot use it. This is that seam. Unlike `response_accept_tunnel` this does NOT hand back a raw socket, so it works over TLS: writes go through the connection's own send path. Contract when the handler has already touched `res`: headers set earlier are DISCARDED (the SSE head is fixed, and a stale Content-Length would corrupt the stream), and if a body was already set the upgrade is REFUSED -- that body is data the caller believes it sent. Returns (sse, &quot;&quot;) on success, (null, error) when the response is not on a live connection, has already been taken over, or has a body.</p>
+    </div>
+    <div class="function" id="response_begin_chunked" data-name="response_begin_chunked">
+      <h3 class="function-name">response_begin_chunked <span class="kind">fn</span></h3>
+      <pre class="usage"><code>response_begin_chunked(res) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">res: ptr</span></p>
+    </div>
+    <div class="function" id="chunked_write" data-name="chunked_write">
+      <h3 class="function-name">chunked_write <span class="kind">fn</span></h3>
+      <pre class="usage"><code>chunked_write(stream, data) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">stream: ptr, data: byte[]</span></p>
+      <p class="doc">One chunk holding the bytes of `data`; an empty slice sends nothing. 0 when sent, -1 on a closed stream or a failed write (the client left).</p>
+    </div>
+    <div class="function" id="chunked_end" data-name="chunked_end">
+      <h3 class="function-name">chunked_end <span class="kind">fn</span></h3>
+      <pre class="usage"><code>chunked_end(stream) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">stream: ptr</span></p>
+      <p class="doc">The end of the body. 0 when sent, -1 as chunked_write.</p>
+    </div>
+    <div class="function" id="server_websocket" data-name="server_websocket">
+      <h3 class="function-name">server_websocket <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_websocket(server, path, handler, user_data)</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, path: string, handler: ptr, user_data: ptr</span></p>
+    </div>
+    <div class="function" id="ws_connect" data-name="ws_connect">
+      <h3 class="function-name">ws_connect <span class="kind">fn</span></h3>
+      <pre class="usage"><code>ws_connect(url) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">url: string</span></p>
+      <p class="doc">WebSocket CLIENT: dial a ws:// endpoint and complete the upgrade. The returned handle takes the same verbs as a server-side one -- ws_send_text / ws_recv / ws_message / ws_close -- because the frame codec underneath is shared. The only difference is invisible: RFC 6455 requires a client to mask every frame it sends, and this handle does. Returns null when the URL is malformed, the host is unreachable, the response is not 101, or the Sec-WebSocket-Accept hash does not match the key we sent. That last check matters: without it any 101 would be accepted, including from a server that never saw our handshake. wss:// dials over TLS, reusing the HTTP client's trust store, so the same system CA discovery and TLS floor apply as for https. The peer certificate is verified AND pinned to the host in the URL; a cert with a valid chain but the wrong host is refused. Default port follows the scheme: 80 for ws, 443 for wss. Free with ws_client_free (NOT for server-side handles, which the request loop owns).</p>
+    </div>
+    <div class="function" id="ws_client_free" data-name="ws_client_free">
+      <h3 class="function-name">ws_client_free <span class="kind">fn</span></h3>
+      <pre class="usage"><code>ws_client_free(ws)</code></pre>
+      <p class="signature"><span class="sig-params">ws: ptr</span></p>
+    </div>
+    <div class="function" id="ws_message_length" data-name="ws_message_length">
+      <h3 class="function-name">ws_message_length <span class="kind">extern</span></h3>
+      <pre class="usage"><code>ws_message_length(ws) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">ws: ptr</span></p>
+    </div>
+    <div class="function" id="ws_send_text" data-name="ws_send_text">
+      <h3 class="function-name">ws_send_text <span class="kind">fn</span></h3>
+      <pre class="usage"><code>ws_send_text(ws, text) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">ws: ptr, text: string</span></p>
+    </div>
+    <div class="function" id="ws_send_binary" data-name="ws_send_binary">
+      <h3 class="function-name">ws_send_binary <span class="kind">fn</span></h3>
+      <pre class="usage"><code>ws_send_binary(ws, data) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">ws: ptr, data: byte[]</span></p>
+      <p class="doc">Send one binary frame holding the bytes of `data` (#2301: a byte[] whose length travels with it). Returns the send result, -1 on a closed socket.</p>
+    </div>
+    <div class="function" id="ws_recv" data-name="ws_recv">
+      <h3 class="function-name">ws_recv <span class="kind">fn</span></h3>
+      <pre class="usage"><code>ws_recv(ws) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">ws: ptr</span></p>
+      <p class="doc">Returns: 1 = text frame, 2 = binary, -1 = closed. After 1 or 2, the message is accessible via ws_message (text) and ws_message_bytes (a binary-safe byte[] view). Both are valid until the next ws_recv / ws_send / ws_close call.</p>
+    </div>
+    <div class="function" id="ws_recv_timeout" data-name="ws_recv_timeout">
+      <h3 class="function-name">ws_recv_timeout <span class="kind">fn</span></h3>
+      <pre class="usage"><code>ws_recv_timeout(ws, timeout_ms) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">ws: ptr, timeout_ms: int</span></p>
+      <p class="doc">Bounded receive, for a reader that multiplexes many logical streams over one socket and so cannot park a thread in a blocking ws_recv. A WebDriver-BiDi demux is the motivating shape: one reader routes each frame to either an id-keyed pending-reply table or an event queue, and the caller drives the wait with its own event loop. Returns 1 (text), 2 (binary), -1 (closed) exactly as ws_recv, plus 0 for &quot;nothing arrived in time&quot;. timeout_ms of 0 polls; negative blocks. The timeout bounds the wait for the START of a frame. Once a frame header has been read the rest of that frame is read to completion, because WebSocket framing is a byte stream with no resynchronisation point -- abandoning a half-read frame would leave the next read treating payload as a header. Pings and continuation frames handled during the wait do not restart the clock, so a chatty peer cannot extend the call indefinitely.</p>
+    </div>
+    <div class="function" id="ws_poll" data-name="ws_poll">
+      <h3 class="function-name">ws_poll <span class="kind">fn</span></h3>
+      <pre class="usage"><code>ws_poll(ws, timeout_ms) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">ws: ptr, timeout_ms: int</span></p>
+      <p class="doc">Is a frame readable without blocking? 1 = yes, 0 = timed out, -1 = closed/error. Consumes nothing, so a 1 is always followed by a ws_recv that does not block. This asks all three places bytes can be waiting -- the connection's read buffer, the TLS layer's decrypted-but-unread payload, and the socket -- so unlike polling ws_fd yourself it cannot answer &quot;not ready&quot; while a complete frame is already buffered above the socket.</p>
+    </div>
+    <div class="function" id="ws_fd" data-name="ws_fd">
+      <h3 class="function-name">ws_fd <span class="kind">fn</span></h3>
+      <pre class="usage"><code>ws_fd(ws) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">ws: ptr</span></p>
+      <p class="doc">The underlying socket, for a native event loop (asyncio.add_reader, epoll, kqueue). Returns -1 when closed. CONTRACT -- read this before using it. The descriptor is a readiness HINT, not an authority: a frame can sit in the connection buffer, or decrypted inside the TLS layer, with nothing pending on the socket. An event loop that waits on this fd alone will eventually miss a frame that has already arrived, and then block. The safe pattern is: when your event loop reports the fd readable, drain it dry: draining = 1 while draining == 1 { k = http.ws_recv_timeout(ws, 0)   // never blocks if k == 0 { draining = 0 }        // nothing left; go back to waiting if k &gt; 0 { route(k) } if k &lt; 0 { draining = 0 }         // peer gone } i.e. treat readability as &quot;go look&quot;, and let ws_recv_timeout(ws, 0) be the authority on whether a frame is actually there. If you want one call that answers authoritatively, use ws_poll instead.</p>
+    </div>
+    <div class="function" id="ws_message" data-name="ws_message">
+      <h3 class="function-name">ws_message <span class="kind">fn</span></h3>
+      <pre class="usage"><code>ws_message(ws) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">ws: ptr</span></p>
+    </div>
+    <div class="function" id="ws_message_bytes" data-name="ws_message_bytes">
+      <h3 class="function-name">ws_message_bytes <span class="kind">fn</span></h3>
+      <pre class="usage"><code>ws_message_bytes(ws) <span class="arrow">-&gt;</span> byte[]</code></pre>
+      <p class="signature"><span class="sig-params">ws: ptr</span></p>
+      <p class="doc">The current message as a borrowed byte[] view (#2301): binary-safe, its length is the message length. Valid until the next ws_recv / ws_send / ws_close; copy it out (bytes.from_slice) to keep it.</p>
+    </div>
+    <div class="function" id="ws_close" data-name="ws_close">
+      <h3 class="function-name">ws_close <span class="kind">fn</span></h3>
+      <pre class="usage"><code>ws_close(ws, code, reason)</code></pre>
+      <p class="signature"><span class="sig-params">ws: ptr, code: int, reason: string</span></p>
+    </div>
+    <div class="function" id="server_bind" data-name="server_bind">
+      <h3 class="function-name">server_bind <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_bind(server, host, port) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, host: string, port: int</span></p>
+      <p class="doc">Go-style wrappers for server lifecycle. Return &quot;&quot; on success, error string on failure.</p>
+    </div>
+    <div class="function" id="server_start" data-name="server_start">
+      <h3 class="function-name">server_start <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_start(server) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr</span></p>
+    </div>
+    <div class="function" id="server_start_background" data-name="server_start_background">
+      <h3 class="function-name">server_start_background <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_start_background(server) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr</span></p>
+      <p class="doc">Start a server on a detached native thread. Useful for integration tests and embedding hosts that need multiple local servers in one process without tying up the Aether actor scheduler.</p>
+    </div>
+    <div class="function" id="server_add_route" data-name="server_add_route">
+      <h3 class="function-name">server_add_route <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_add_route(server, method, path, handler, user_data)</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, method: string, path: string, handler: ptr, user_data: ptr</span></p>
+      <p class="doc">HTTP Server - routing. The `user_data` slot is plumbed end-to-end (the C side stores it on the route and passes it back as the 3rd arg of the registered handler). To carry a per-route context — a DB handle, a config struct, an auth scheme — declare a struct, `malloc`+init it, and pass the resulting `ptr` as `user_data`. The handler casts the `ud` arg back via `ud as *YourStruct`. Worked example at `tests/integration/http_handler_user_data/server.ae` and in `docs/http-handler-context.md`. (#633) The slot is per-route, so a server can host routes with distinct contexts without coordination. Passing `0` for `user_data` continues to work — opting in is purely additive.</p>
+    </div>
+    <div class="function" id="server_get" data-name="server_get">
+      <h3 class="function-name">server_get <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_get(server, path, handler, user_data)</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, path: string, handler: ptr, user_data: ptr</span></p>
+    </div>
+    <div class="function" id="server_post" data-name="server_post">
+      <h3 class="function-name">server_post <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_post(server, path, handler, user_data)</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, path: string, handler: ptr, user_data: ptr</span></p>
+    </div>
+    <div class="function" id="server_put" data-name="server_put">
+      <h3 class="function-name">server_put <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_put(server, path, handler, user_data)</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, path: string, handler: ptr, user_data: ptr</span></p>
+    </div>
+    <div class="function" id="server_delete" data-name="server_delete">
+      <h3 class="function-name">server_delete <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_delete(server, path, handler, user_data)</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, path: string, handler: ptr, user_data: ptr</span></p>
+    </div>
+    <div class="function" id="server_use_middleware" data-name="server_use_middleware">
+      <h3 class="function-name">server_use_middleware <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_use_middleware(server, middleware, user_data)</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, middleware: ptr, user_data: ptr</span></p>
+      <p class="doc">HTTP Server - middleware</p>
+    </div>
+    <div class="function" id="get_header" data-name="get_header">
+      <h3 class="function-name">get_header <span class="kind">extern</span></h3>
+      <pre class="usage"><code>get_header(req, name) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">req: ptr, name: string</span></p>
+      <p class="doc">HTTP Request - accessors</p>
+    </div>
+    <div class="function" id="get_query_param" data-name="get_query_param">
+      <h3 class="function-name">get_query_param <span class="kind">extern</span></h3>
+      <pre class="usage"><code>get_query_param(req, name) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">req: ptr, name: string</span></p>
+    </div>
+    <div class="function" id="get_path_param" data-name="get_path_param">
+      <h3 class="function-name">get_path_param <span class="kind">extern</span></h3>
+      <pre class="usage"><code>get_path_param(req, name) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">req: ptr, name: string</span></p>
+    </div>
+    <div class="function" id="request_free" data-name="request_free">
+      <h3 class="function-name">request_free <span class="kind">extern</span></h3>
+      <pre class="usage"><code>request_free(req)</code></pre>
+      <p class="signature"><span class="sig-params">req: ptr</span></p>
+    </div>
+    <div class="function" id="response_create" data-name="response_create">
+      <h3 class="function-name">response_create <span class="kind">extern</span></h3>
+      <pre class="usage"><code>response_create() <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="doc">HTTP Response - building</p>
+    </div>
+    <div class="function" id="response_set_status" data-name="response_set_status">
+      <h3 class="function-name">response_set_status <span class="kind">extern</span></h3>
+      <pre class="usage"><code>response_set_status(res, code)</code></pre>
+      <p class="signature"><span class="sig-params">res: ptr, code: int</span></p>
+    </div>
+    <div class="function" id="response_get_status" data-name="response_get_status">
+      <h3 class="function-name">response_get_status <span class="kind">extern</span></h3>
+      <pre class="usage"><code>response_get_status(res) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">res: ptr</span></p>
+      <p class="doc">The status the response will be sent with (200 until a handler sets one).</p>
+    </div>
+    <div class="function" id="response_set_header" data-name="response_set_header">
+      <h3 class="function-name">response_set_header <span class="kind">extern</span></h3>
+      <pre class="usage"><code>response_set_header(res, name, value)</code></pre>
+      <p class="signature"><span class="sig-params">res: ptr, name: string, value: string</span></p>
+    </div>
+    <div class="function" id="response_add_header" data-name="response_add_header">
+      <h3 class="function-name">response_add_header <span class="kind">extern</span></h3>
+      <pre class="usage"><code>response_add_header(res, name, value)</code></pre>
+      <p class="signature"><span class="sig-params">res: ptr, name: string, value: string</span></p>
+      <p class="doc">Append a header verbatim, even if a header with the same name already exists. Use for protocols that allow/require repeated headers — e.g. SVN's WebDAV uses 13+ `DAV:` headers per response. The replace-on- duplicate behaviour of `set_header` collapses these into the last value, breaking SVN clients. `add_header` preserves order and multiplicity through to the wire serializer.</p>
+    </div>
+    <div class="function" id="response_clear_headers" data-name="response_clear_headers">
+      <h3 class="function-name">response_clear_headers <span class="kind">extern</span></h3>
+      <pre class="usage"><code>response_clear_headers(res)</code></pre>
+      <p class="signature"><span class="sig-params">res: ptr</span></p>
+      <p class="doc">Drop every header on the response, including the `Content-Type` and `Server` defaults injected by http_response_create. Used by VCR's dispatcher to reset to a blank slate before emitting the tape's recorded headers verbatim — record/replay must not have Aether's defaults overlaid on the captured response.</p>
+    </div>
+    <div class="function" id="response_set_body" data-name="response_set_body">
+      <h3 class="function-name">response_set_body <span class="kind">extern</span></h3>
+      <pre class="usage"><code>response_set_body(res, body)</code></pre>
+      <p class="signature"><span class="sig-params">res: ptr, body: string</span></p>
+    </div>
+    <div class="function" id="response_set_body_bytes" data-name="response_set_body_bytes">
+      <h3 class="function-name">response_set_body_bytes <span class="kind">fn</span></h3>
+      <pre class="usage"><code>response_set_body_bytes(res, body)</code></pre>
+      <p class="signature"><span class="sig-params">res: ptr, body: byte[]</span></p>
+      <p class="doc">Set a binary-safe response body: the bytes of `body` (#2301: a byte[] whose length travels with it — a string as `string.bytes(s)`, a `std.bytes` buffer as `bytes.view(buf)`). The server copies it.</p>
+    </div>
+    <div class="function" id="response_accept_tunnel" data-name="response_accept_tunnel">
+      <h3 class="function-name">response_accept_tunnel <span class="kind">fn</span></h3>
+      <pre class="usage"><code>response_accept_tunnel(res) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">res: ptr</span></p>
+    </div>
+    <div class="function" id="response_json" data-name="response_json">
+      <h3 class="function-name">response_json <span class="kind">extern</span></h3>
+      <pre class="usage"><code>response_json(res, json)</code></pre>
+      <p class="signature"><span class="sig-params">res: ptr, json: string</span></p>
+    </div>
+    <div class="function" id="server_response_free" data-name="server_response_free">
+      <h3 class="function-name">server_response_free <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_response_free(res)</code></pre>
+      <p class="signature"><span class="sig-params">res: ptr</span></p>
+    </div>
+    <div class="function" id="server_set_actor_handler" data-name="server_set_actor_handler">
+      <h3 class="function-name">server_set_actor_handler <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_set_actor_handler(server, step_fn, send_fn, spawn_fn, release_fn)</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, step_fn: ptr, send_fn: ptr, spawn_fn: ptr, release_fn: ptr</span></p>
+      <p class="doc">HTTP Server - actor dispatch mode</p>
+    </div>
+    <div class="function" id="request_body_read_raw" data-name="request_body_read_raw">
+      <h3 class="function-name">request_body_read_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>request_body_read_raw(req, offset, max) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">req: ptr, offset: int, max: int</span></p>
+    </div>
+    <div class="function" id="get_request_body_read" data-name="get_request_body_read">
+      <h3 class="function-name">get_request_body_read <span class="kind">extern</span></h3>
+      <pre class="usage"><code>get_request_body_read() <span class="arrow">-&gt;</span> ptr</code></pre>
+    </div>
+    <div class="function" id="get_request_body_read_length" data-name="get_request_body_read_length">
+      <h3 class="function-name">get_request_body_read_length <span class="kind">extern</span></h3>
+      <pre class="usage"><code>get_request_body_read_length() <span class="arrow">-&gt;</span> int</code></pre>
+    </div>
+    <div class="function" id="release_request_body_read" data-name="release_request_body_read">
+      <h3 class="function-name">release_request_body_read <span class="kind">extern</span></h3>
+      <pre class="usage"><code>release_request_body_read()</code></pre>
+    </div>
+    <div class="function" id="request_body_read" data-name="request_body_read">
+      <h3 class="function-name">request_body_read <span class="kind">fn</span></h3>
+      <pre class="usage"><code>request_body_read(req, offset, max) <span class="arrow">-&gt;</span> (string, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">req: ptr, offset: int, max: int</span></p>
+      <p class="doc">Chunked-read access to the request body (#626). Reads up to `max` bytes from `offset` into an owned AetherString. Returns (bytes, n, &quot;&quot;) on success — `n` may be less than `max` at EOF. Returns (&quot;&quot;, 0, error) on failure. RAM-bounded for large uploads (#626). A body larger than the 16 KiB connection buffer is NOT buffered whole: the server parses headers, then this accessor pulls each window straight off the socket. Reads must be sequential (offset advances by the returned `n`, which the loop below does naturally). Small bodies stay fully buffered and support random-access offsets. Either way the loop below is identical — peak server memory for a large PUT is one window per connection, not the whole object. Pair with `request_body_length` to drive the loop: total = http.request_body_length(req) off = 0 while off &lt; total { chunk, n, err = http.request_body_read(req, off, 65536) if err != &quot;&quot; { ...handle... break } if n == 0 { break } fs.pwrite(out_file, string.bytes(chunk)[0..n], off)   // stream to disk off = off + n }</p>
+    </div>
+    <div class="function" id="request_body_complete" data-name="request_body_complete">
+      <h3 class="function-name">request_body_complete <span class="kind">fn</span></h3>
+      <pre class="usage"><code>request_body_complete(req) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">req: ptr</span></p>
+      <p class="doc">#644: has the request body fully arrived? 1 once every declared byte has been received (streaming request: pulled off the wire by request_body_read / request_body; buffered request: always 1). The natural loop terminator for chunked iteration: off = 0 while http.request_body_complete(req) == 0 { chunk, n, err = http.request_body_read(req, off, 65536) if err != &quot;&quot; { ...handle... break } if n == 0 { break } ...consume chunk... off = off + n }</p>
+    </div>
+    <div class="function" id="mime_type" data-name="mime_type">
+      <h3 class="function-name">mime_type <span class="kind">extern</span></h3>
+      <pre class="usage"><code>mime_type(path) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">path: string</span></p>
+    </div>
+    <div class="function" id="serve_file" data-name="serve_file">
+      <h3 class="function-name">serve_file <span class="kind">fn</span></h3>
+      <pre class="usage"><code>serve_file(res, filepath)</code></pre>
+      <p class="signature"><span class="sig-params">res: ptr, filepath: string</span></p>
+      <p class="doc">Go-style wrappers for static file serving. Both return &quot;&quot; implicitly (the underlying externs populate res with status + headers + body / fd; failure paths set 4xx/5xx on res rather than returning an error string). Issue #383 zero-copy: serve_file stages the file via open+fstat when supported, lets the connection writer take the sendfile(2) fast path, and falls back to a buffered read for TLS / HTTP/2 / Range requests / Windows. Callers see identical behaviour either way.</p>
+    </div>
+    <div class="function" id="serve_static" data-name="serve_static">
+      <h3 class="function-name">serve_static <span class="kind">fn</span></h3>
+      <pre class="usage"><code>serve_static(req, res, base_dir)</code></pre>
+      <p class="signature"><span class="sig-params">req: ptr, res: ptr, base_dir: string</span></p>
+    </div>
+    <div class="function" id="request_method" data-name="request_method">
+      <h3 class="function-name">request_method <span class="kind">fn</span></h3>
+      <pre class="usage"><code>request_method(req) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">req: ptr</span></p>
+      <p class="doc">Go-style wrappers for the request field accessors.</p>
+    </div>
+    <div class="function" id="request_path" data-name="request_path">
+      <h3 class="function-name">request_path <span class="kind">fn</span></h3>
+      <pre class="usage"><code>request_path(req) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">req: ptr</span></p>
+    </div>
+    <div class="function" id="request_body" data-name="request_body">
+      <h3 class="function-name">request_body <span class="kind">fn</span></h3>
+      <pre class="usage"><code>request_body(req) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">req: ptr</span></p>
+    </div>
+    <div class="function" id="request_body_length" data-name="request_body_length">
+      <h3 class="function-name">request_body_length <span class="kind">fn</span></h3>
+      <pre class="usage"><code>request_body_length(req) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">req: ptr</span></p>
+    </div>
+    <div class="function" id="request_body_bytes" data-name="request_body_bytes">
+      <h3 class="function-name">request_body_bytes <span class="kind">fn</span></h3>
+      <pre class="usage"><code>request_body_bytes(req) <span class="arrow">-&gt;</span> byte[]</code></pre>
+      <p class="signature"><span class="sig-params">req: ptr</span></p>
+      <p class="doc">The request body as a borrowed byte[] view (#2301): binary-safe, bounded by the real body length. Like request_body it materialises a streaming body first. Valid for the handler's duration. request_body_length is kept separately: on a streaming request it reports the declared length WITHOUT materialising, which the chunked request_body_read loop relies on.</p>
+    </div>
+    <div class="function" id="request_query" data-name="request_query">
+      <h3 class="function-name">request_query <span class="kind">fn</span></h3>
+      <pre class="usage"><code>request_query(req) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">req: ptr</span></p>
+    </div>
+    <div class="function" id="request_remote_addr" data-name="request_remote_addr">
+      <h3 class="function-name">request_remote_addr <span class="kind">fn</span></h3>
+      <pre class="usage"><code>request_remote_addr(req) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">req: ptr</span></p>
+    </div>
+    <div class="function" id="request_remote_port" data-name="request_remote_port">
+      <h3 class="function-name">request_remote_port <span class="kind">fn</span></h3>
+      <pre class="usage"><code>request_remote_port(req) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">req: ptr</span></p>
+    </div>
+    <div class="function" id="request_local_addr" data-name="request_local_addr">
+      <h3 class="function-name">request_local_addr <span class="kind">fn</span></h3>
+      <pre class="usage"><code>request_local_addr(req) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">req: ptr</span></p>
+    </div>
+    <div class="function" id="request_local_port" data-name="request_local_port">
+      <h3 class="function-name">request_local_port <span class="kind">fn</span></h3>
+      <pre class="usage"><code>request_local_port(req) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">req: ptr</span></p>
+    </div>
+    <div class="function" id="request_scheme" data-name="request_scheme">
+      <h3 class="function-name">request_scheme <span class="kind">fn</span></h3>
+      <pre class="usage"><code>request_scheme(req) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">req: ptr</span></p>
+    </div>
+    <div class="function" id="request_is_tls" data-name="request_is_tls">
+      <h3 class="function-name">request_is_tls <span class="kind">fn</span></h3>
+      <pre class="usage"><code>request_is_tls(req) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">req: ptr</span></p>
+    </div>
+    <div class="function" id="request_http_version" data-name="request_http_version">
+      <h3 class="function-name">request_http_version <span class="kind">fn</span></h3>
+      <pre class="usage"><code>request_http_version(req) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">req: ptr</span></p>
+    </div>
+    <div class="function" id="request_header_count" data-name="request_header_count">
+      <h3 class="function-name">request_header_count <span class="kind">fn</span></h3>
+      <pre class="usage"><code>request_header_count(req) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">req: ptr</span></p>
+    </div>
+    <div class="function" id="request_header_name" data-name="request_header_name">
+      <h3 class="function-name">request_header_name <span class="kind">fn</span></h3>
+      <pre class="usage"><code>request_header_name(req, index) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">req: ptr, index: int</span></p>
+    </div>
+    <div class="function" id="request_header_value" data-name="request_header_value">
+      <h3 class="function-name">request_header_value <span class="kind">fn</span></h3>
+      <pre class="usage"><code>request_header_value(req, index) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">req: ptr, index: int</span></p>
+    </div>
+    <div class="function" id="ae_io_cancel" data-name="ae_io_cancel">
+      <h3 class="function-name">ae_io_cancel <span class="kind">extern</span></h3>
+      <pre class="usage"><code>ae_io_cancel(fd)</code></pre>
+      <p class="signature"><span class="sig-params">fd: int</span></p>
+    </div>
+    <div class="function" id="await_io" data-name="await_io">
+      <h3 class="function-name">await_io <span class="kind">fn</span></h3>
+      <pre class="usage"><code>await_io(fd) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">fd: int</span></p>
     </div>
   </div>
 </main>

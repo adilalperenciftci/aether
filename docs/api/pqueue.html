@@ -15,7 +15,15 @@
   <input type="text" id="search" placeholder="Search pqueue..." onkeyup="searchModule()">
   <h2>Exports</h2>
   <ul class="function-nav">
-    <li><a href="#2976">2976</a></li>
+    <li><a href="#new">new</a></li>
+    <li><a href="#push">push</a></li>
+    <li><a href="#pop">pop</a></li>
+    <li><a href="#peek">peek</a></li>
+    <li><a href="#peek_priority">peek_priority</a></li>
+    <li><a href="#size">size</a></li>
+    <li><a href="#is_empty">is_empty</a></li>
+    <li><a href="#clear">clear</a></li>
+    <li><a href="#free">free</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -117,9 +125,58 @@
     <p class="import-line"><code>import std.pqueue</code></p>
   </div>
   <div class="functions" id="functions">
-    <div class="function" id="2976" data-name="2976">
-      <h3 class="function-name">2976 <span class="kind">fn</span></h3>
-      <pre class="usage"><code>2976()</code></pre>
+    <div class="function" id="new" data-name="new">
+      <h3 class="function-name">new <span class="kind">fn</span></h3>
+      <pre class="usage"><code>new() <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="doc">Create an empty queue. Returns null on allocation failure.</p>
+    </div>
+    <div class="function" id="push" data-name="push">
+      <h3 class="function-name">push <span class="kind">fn</span></h3>
+      <pre class="usage"><code>push(pq, priority, item) <span class="arrow">-&gt;</span> bool</code></pre>
+      <p class="signature"><span class="sig-params">pq: ptr, priority: long, item: ptr</span></p>
+      <p class="doc">Enqueue `item` at `priority`. Lower priority values pop first. Returns false on a null queue or allocation failure. The queue keeps the item past the call without owning it: a string goes in as a reference of its own, `string.keep(s)`, given back with `string.release_kept` once it is popped (#2926).</p>
+    </div>
+    <div class="function" id="pop" data-name="pop">
+      <h3 class="function-name">pop <span class="kind">fn</span></h3>
+      <pre class="usage"><code>pop(pq) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">pq: ptr</span></p>
+      <p class="doc">Remove and return the lowest-priority item, or null when empty.</p>
+    </div>
+    <div class="function" id="peek" data-name="peek">
+      <h3 class="function-name">peek <span class="kind">fn</span></h3>
+      <pre class="usage"><code>peek(pq) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">pq: ptr</span></p>
+      <p class="doc">The lowest-priority item without removing it, or null when empty.</p>
+    </div>
+    <div class="function" id="peek_priority" data-name="peek_priority">
+      <h3 class="function-name">peek_priority <span class="kind">fn</span></h3>
+      <pre class="usage"><code>peek_priority(pq) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">pq: ptr</span></p>
+      <p class="doc">Priority of the item `peek` would return. Meaningless when the queue is empty, so check `size` first.</p>
+    </div>
+    <div class="function" id="size" data-name="size">
+      <h3 class="function-name">size <span class="kind">fn</span></h3>
+      <pre class="usage"><code>size(pq) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">pq: ptr</span></p>
+      <p class="doc">Number of queued entries.</p>
+    </div>
+    <div class="function" id="is_empty" data-name="is_empty">
+      <h3 class="function-name">is_empty <span class="kind">fn</span></h3>
+      <pre class="usage"><code>is_empty(pq) <span class="arrow">-&gt;</span> bool</code></pre>
+      <p class="signature"><span class="sig-params">pq: ptr</span></p>
+      <p class="doc">True when nothing is queued.</p>
+    </div>
+    <div class="function" id="clear" data-name="clear">
+      <h3 class="function-name">clear <span class="kind">fn</span></h3>
+      <pre class="usage"><code>clear(pq)</code></pre>
+      <p class="signature"><span class="sig-params">pq: ptr</span></p>
+      <p class="doc">Drop every entry, keeping the queue usable. Items are not freed.</p>
+    </div>
+    <div class="function" id="free" data-name="free">
+      <h3 class="function-name">free <span class="kind">fn</span></h3>
+      <pre class="usage"><code>free(pq)</code></pre>
+      <p class="signature"><span class="sig-params">pq: ptr</span></p>
+      <p class="doc">Release the queue. Items were never owned by it, so free them yourself if they were heap allocated.</p>
     </div>
   </div>
 </main>

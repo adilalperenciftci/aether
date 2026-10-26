@@ -15,7 +15,20 @@
   <input type="text" id="search" placeholder="Search file..." onkeyup="searchModule()">
   <h2>Exports</h2>
   <ul class="function-nav">
-    <li><a href="#below">below</a></li>
+    <li><a href="#open_raw">open_raw</a></li>
+    <li><a href="#close">close</a></li>
+    <li><a href="#read_all_raw">read_all_raw</a></li>
+    <li><a href="#write_raw">write_raw</a></li>
+    <li><a href="#exists">exists</a></li>
+    <li><a href="#delete_raw">delete_raw</a></li>
+    <li><a href="#size_raw">size_raw</a></li>
+    <li><a href="#fd_raw">fd_raw</a></li>
+    <li><a href="#open">open</a></li>
+    <li><a href="#read">read</a></li>
+    <li><a href="#write">write</a></li>
+    <li><a href="#delete">delete</a></li>
+    <li><a href="#size">size</a></li>
+    <li><a href="#fd">fd</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -117,9 +130,83 @@
     <p class="import-line"><code>import std.file</code></p>
   </div>
   <div class="functions" id="functions">
-    <div class="function" id="below" data-name="below">
-      <h3 class="function-name">below <span class="kind">fn</span></h3>
-      <pre class="usage"><code>below()</code></pre>
+    <div class="function" id="open_raw" data-name="open_raw">
+      <h3 class="function-name">open_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>open_raw(path, mode) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">path: string, mode: string</span></p>
+      <p class="doc">Raw ptr/int externs (escape hatch).</p>
+    </div>
+    <div class="function" id="close" data-name="close">
+      <h3 class="function-name">close <span class="kind">extern</span></h3>
+      <pre class="usage"><code>close(file) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">file: ptr</span></p>
+    </div>
+    <div class="function" id="read_all_raw" data-name="read_all_raw">
+      <h3 class="function-name">read_all_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>read_all_raw(file) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">file: ptr</span></p>
+    </div>
+    <div class="function" id="write_raw" data-name="write_raw">
+      <h3 class="function-name">write_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>write_raw(file, data, length) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">file: ptr, data: string, length: int</span></p>
+    </div>
+    <div class="function" id="exists" data-name="exists">
+      <h3 class="function-name">exists <span class="kind">extern</span></h3>
+      <pre class="usage"><code>exists(path) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">path: string</span></p>
+    </div>
+    <div class="function" id="delete_raw" data-name="delete_raw">
+      <h3 class="function-name">delete_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>delete_raw(path) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">path: string</span></p>
+    </div>
+    <div class="function" id="size_raw" data-name="size_raw">
+      <h3 class="function-name">size_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>size_raw(path) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">path: string</span></p>
+      <p class="doc">Size in bytes, as `long` (#1021): the old int surface wrapped files &gt;= 2 GiB to a negative value. Returns -1 on stat failure.</p>
+    </div>
+    <div class="function" id="fd_raw" data-name="fd_raw">
+      <h3 class="function-name">fd_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>fd_raw(file) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">file: ptr</span></p>
+    </div>
+    <div class="function" id="open" data-name="open">
+      <h3 class="function-name">open <span class="kind">fn</span></h3>
+      <pre class="usage"><code>open(path, mode) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">path: string, mode: string</span></p>
+      <p class="doc">Open a file. Returns (handle, &quot;&quot;) on success, (null, error) on failure.</p>
+    </div>
+    <div class="function" id="read" data-name="read">
+      <h3 class="function-name">read <span class="kind">fn</span></h3>
+      <pre class="usage"><code>read(path) <span class="arrow">-&gt;</span> (string, string)</code></pre>
+      <p class="signature"><span class="sig-params">path: string</span></p>
+      <p class="doc">Read the entire contents of a file at `path`. Opens, reads, closes. Returns (content, &quot;&quot;) on success, (&quot;&quot;, error) on failure. This is the convenience form most callers want.</p>
+    </div>
+    <div class="function" id="write" data-name="write">
+      <h3 class="function-name">write <span class="kind">fn</span></h3>
+      <pre class="usage"><code>write(path, content) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">path: string, content: string</span></p>
+      <p class="doc">Write `content` to a file at `path`. Opens in write mode, writes, closes. Returns &quot;&quot; on success, error string on failure.</p>
+    </div>
+    <div class="function" id="delete" data-name="delete">
+      <h3 class="function-name">delete <span class="kind">fn</span></h3>
+      <pre class="usage"><code>delete(path) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">path: string</span></p>
+      <p class="doc">Delete the file at `path`. Returns &quot;&quot; on success, error on failure.</p>
+    </div>
+    <div class="function" id="size" data-name="size">
+      <h3 class="function-name">size <span class="kind">fn</span></h3>
+      <pre class="usage"><code>size(path) <span class="arrow">-&gt;</span> (_0, string)</code></pre>
+      <p class="signature"><span class="sig-params">path: string</span></p>
+      <p class="doc">Return the size of the file at `path` in bytes, as `long` (#1021 — files &gt;= 2 GiB used to wrap negative through the old int surface). Returns (size, &quot;&quot;) on success, (0, error) on failure. The success arm returns FIRST: the first `return` statement pins the inferred tuple slot types, so the `long`-typed arm must come before the int-literal error arm or the size slot narrows back to int.</p>
+    </div>
+    <div class="function" id="fd" data-name="fd">
+      <h3 class="function-name">fd <span class="kind">fn</span></h3>
+      <pre class="usage"><code>fd(handle) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">handle: ptr</span></p>
+      <p class="doc">The OS-level file descriptor inside an open handle, or -1 on a null handle (#1003). Exists for capability plumbing: open through the stdlib, then narrow the descriptor with capsicum.rights_limit(file.fd(handle), ...) before capsicum.enter(). The fd is owned by the handle — do not close it directly; it is released by file_close, which also frees the handle itself, so never call fd() on a handle that has been closed.</p>
     </div>
   </div>
 </main>
