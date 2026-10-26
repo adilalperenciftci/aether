@@ -1,0 +1,90 @@
+// An array of untyped actor references takes a size after `actor_ref`
+// (#3189): `state members: actor_ref[8]` and `actor_ref[MAX]` were parse
+// errors, the size read as actor_ref's type parameter. A type name there
+// is still the parameter (`actor_ref[Member]`, `actor_ref[Member][2]`).
+
+extern exit(code: int)
+
+const MAX = 3
+
+message Ping {
+    n: int
+}
+
+message Count {}
+
+message Total {
+    n: int
+}
+
+actor Member {
+    state got = 0
+    receive {
+        Ping(n) -> {
+            got = got + n
+        }
+        Count() -> {
+            reply Total { n: got }
+        }
+    }
+}
+
+// Each kind of array holds members it spawned and pinged; Count sums what
+// they got, read back through the array.
+actor Room {
+    state plain: actor_ref[2]
+    state sized: actor_ref[MAX]
+    state typed: actor_ref[Member][2]
+    receive {
+        Ping(n) -> {
+            i = 0
+            while i < 2 {
+                plain[i] = spawn(Member())
+                plain[i] ! Ping { n: n }
+                typed[i] = spawn(Member())
+                typed[i] ! Ping { n: n * 10 }
+                i = i + 1
+            }
+            i = 0
+            while i < MAX {
+                sized[i] = spawn(Member())
+                sized[i] ! Ping { n: n * 100 }
+                i = i + 1
+            }
+        }
+        Count() -> {
+            total = 0
+            i = 0
+            while i < 2 {
+                int a = plain[i] ? Count {}
+                int b = typed[i] ? Count {}
+                total = total + a + b
+                i = i + 1
+            }
+            i = 0
+            while i < MAX {
+                int c = sized[i] ? Count {}
+                total = total + c
+                i = i + 1
+            }
+            reply Total { n: total }
+        }
+    }
+}
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    room = spawn(Room())
+    room ! Ping { n: 1 }
+    wait_for_idle()
+    int total = room ? Count {}
+    // 2 * 1 + 2 * 10 + 3 * 100
+    check(total == 322, "every member of the three arrays was reached: ${total}")
+    println("PASS")
+}

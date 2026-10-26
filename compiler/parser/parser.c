@@ -669,6 +669,27 @@ static int parse_array_length(Parser* parser) {
     return (int)v;
 }
 
+/* After `actor_ref`, at its `[`: is that the type parameter
+ * (`actor_ref[Counter]`, `actor_ref[mod.Counter]`), or the start of an
+ * array of untyped references (`actor_ref[]`, `actor_ref[8]`,
+ * `actor_ref[MAX]`, `actor_ref[N + 1]`)? A parameter is a name that is not
+ * an integer `const` of the file; a size starts with a number, a `(`, a
+ * `-` or such a const, and `]` is a dynamic array. Every `[` was read as
+ * a parameter, so `state members: actor_ref[8]` was a parse error at the
+ * 8 (#3189). */
+static int actor_ref_bracket_is_parameter(Parser* parser) {
+    int i = parser->current_token + 1;
+    if (i >= parser->token_count) return 1;
+    Token* t = parser->tokens[i];
+    if (t->type == TOKEN_IDENTIFIER) {
+        if (!parser->int_consts_scanned) scan_int_consts(parser);
+        long long v;
+        return !ce_lookup(parser, t->value, &v);
+    }
+    return t->type != TOKEN_NUMBER && t->type != TOKEN_RIGHT_BRACKET &&
+           t->type != TOKEN_LEFT_PAREN && t->type != TOKEN_MINUS;
+}
+
 // #340: a type may carry a postfix `?` making it optional (`int?`, `string?`,
 // `Vec2?`, `*Node?`). Parse the base type, then wrap once per `?`. In type
 // position `?` is unambiguous (the actor-ask `?` only appears in expressions).
@@ -1252,8 +1273,11 @@ static Type* parse_type_unsuffixed(Parser* parser) {
         }
         case TOKEN_ACTOR_REF:
             advance_token(parser);
-            // Optional type parameter: ActorRef[Type] or bare actor_ref
-            if (peek_token(parser) && peek_token(parser)->type == TOKEN_LEFT_BRACKET) {
+            // Optional type parameter: ActorRef[Type] or bare actor_ref. A
+            // `[` that opens an array instead (`actor_ref[8]`,
+            // `actor_ref[MAX]`, `actor_ref[]`) is the array suffix below.
+            if (peek_token(parser) && peek_token(parser)->type == TOKEN_LEFT_BRACKET &&
+                actor_ref_bracket_is_parameter(parser)) {
                 advance_token(parser); // consume '['
                 Type* actor_type = parse_type(parser);
                 if (!expect_token(parser, TOKEN_RIGHT_BRACKET)) return NULL;

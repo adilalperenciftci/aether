@@ -3335,7 +3335,11 @@ enum, a tuple, an optional, a fixed-size array, a closure, and an
 `actor_ref`, which holds another actor's reference. The value is checked
 against a written type as a typed binding's is, and a state written with
 no value starts at its type's zero. The type-first form `state int[100]
-history` is accepted too.
+history` is accepted too. An array of references takes its size after
+`actor_ref`, a number or a `const` of the file (`state members:
+actor_ref[8]`), and a typed one after its parameter
+(`actor_ref[Member][8]`): a name after `actor_ref[` that is not such a
+`const` is the actor type (#3189).
 
 ```aether,run
 message Deposit {
