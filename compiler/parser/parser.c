@@ -5496,6 +5496,124 @@ static int block_closes(Parser* parser, ASTNode* block) {
     return 1;
 }
 
+/* #3167: is the statement at the current token a destructure with a place
+ * among its slots (`names[0], _ = pair()`, `p.x, n = pair()`)? Its slots,
+ * at bracket depth 0 before a `=` on the statement's line, are each a name
+ * or `_` (one token), or a name followed by `[` or `.`, and one of them is
+ * the latter. A destructure of names only is the ordinary form
+ * (parse_python_style_declaration); anything else is not a destructure. */
+static int at_place_destructure(Parser* parser) {
+    Token* first = peek_token(parser);
+    if (!first) return 0;
+    int line = first->line, depth = 0, commas = 0, places = 0, slot_len = 0;
+    int slot_ok = 1;
+    for (int i = parser->current_token; i < parser->token_count; i++) {
+        Token* t = parser->tokens[i];
+        if (depth == 0 && t->line != line) return 0;
+        if (depth == 0 && (t->type == TOKEN_COMMA || t->type == TOKEN_ASSIGN)) {
+            if (slot_len == 0 || !slot_ok) return 0;
+            if (slot_len > 1) places++;
+            if (t->type == TOKEN_ASSIGN) return commas > 0 && places > 0;
+            commas++;
+            slot_len = 0;
+            slot_ok = 1;
+            continue;
+        }
+        if (slot_len == 0 && !token_is_value_ident(t)) return 0;
+        if (slot_len == 1 && t->type != TOKEN_LEFT_BRACKET && t->type != TOKEN_DOT) slot_ok = 0;
+        if (t->type == TOKEN_LEFT_PAREN || t->type == TOKEN_LEFT_BRACKET) depth++;
+        else if (t->type == TOKEN_RIGHT_PAREN || t->type == TOKEN_RIGHT_BRACKET) depth--;
+        else if (depth == 0 && (t->type == TOKEN_LEFT_BRACE || t->type == TOKEN_RIGHT_BRACE ||
+                                t->type == TOKEN_SEMICOLON))
+            return 0;
+        if (depth < 0) return 0;
+        slot_len++;
+    }
+    return 0;
+}
+
+/* #3167: a destructure into places. Each element or field slot binds a
+ * hidden local of the destructure, and a store `place = local` follows it
+ * in the block, so the place takes the value as any store does, ownership
+ * included, and the names among the slots bind in the block's scope as an
+ * ordinary destructure's do. Appends the statements to `block`. */
+static int g_place_destructure_seq = 0;
+
+static void parse_place_destructure(Parser* parser, ASTNode* block) {
+    Token* head = peek_token(parser);
+    ASTNode* destructure = create_ast_node(AST_TUPLE_DESTRUCTURE, NULL, head->line, head->column);
+    enum { MAX_PLACES = 64 };
+    ASTNode* places[MAX_PLACES];
+    char* hidden[MAX_PLACES];
+    int np = 0;
+    int seq = ++g_place_destructure_seq;
+    for (;;) {
+        Token* t = peek_token(parser);
+        Token* after = peek_ahead(parser, 1);
+        if (t && token_is_value_ident(t) && after &&
+            (after->type == TOKEN_COMMA || after->type == TOKEN_ASSIGN)) {
+            if (strcmp(t->value, "_") != 0 && reject_none_binding(parser, t, "variable name")) break;
+            advance_token(parser);
+            ASTNode* var = create_ast_node(AST_VARIABLE_DECLARATION, t->value, t->line, t->column);
+            var->node_type = create_type(TYPE_UNKNOWN);
+            add_child(destructure, var);
+        } else {
+            ASTNode* place = parse_unary_expression(parser);
+            if (!place || (place->type != AST_ARRAY_ACCESS && place->type != AST_MEMBER_ACCESS) ||
+                np == MAX_PLACES) {
+                if (!parser->suppress_errors && t) {
+                    aether_error_with_code(
+                        "a destructure slot is a name, `_`, an element (`a[i]`) or a field (`o.f`)",
+                        t->line, t->column, AETHER_ERR_SYNTAX);
+                }
+                if (place) free_ast_node(place);
+                break;
+            }
+            char name[48];
+            snprintf(name, sizeof(name), "_ae_dslot%d_%d", seq, np);
+            ASTNode* var = create_ast_node(AST_VARIABLE_DECLARATION, name, place->line, place->column);
+            var->node_type = create_type(TYPE_UNKNOWN);
+            add_child(destructure, var);
+            places[np] = place;
+            hidden[np] = strdup(name);
+            np++;
+        }
+        if (!match_token(parser, TOKEN_COMMA)) break;
+    }
+    Token* eq = peek_token(parser);
+    ASTNode* rhs = NULL;
+    if (eq && eq->type == TOKEN_ASSIGN) {
+        advance_token(parser);
+        int errors_before = aether_error_count();
+        rhs = parse_expression(parser);
+        if (!rhs) missing_operand(parser, eq, errors_before, "a value");
+    } else if (!parser->suppress_errors && eq) {
+        aether_error_with_code("expected `=` after a destructure's slots", eq->line, eq->column,
+                               AETHER_ERR_SYNTAX);
+    }
+    if (!rhs) {
+        /* Recover past the rest of the statement's line. */
+        while (peek_token(parser) && peek_token(parser)->line == head->line &&
+               peek_token(parser)->type != TOKEN_RIGHT_BRACE &&
+               peek_token(parser)->type != TOKEN_EOF) advance_token(parser);
+        free_ast_node(destructure);
+        for (int i = 0; i < np; i++) { free_ast_node(places[i]); free(hidden[i]); }
+        return;
+    }
+    add_child(destructure, rhs);  // Last child is the RHS
+    match_token(parser, TOKEN_SEMICOLON);
+    add_child(block, destructure);
+    for (int i = 0; i < np; i++) {
+        ASTNode* assign = create_ast_node(AST_BINARY_EXPRESSION, "=", places[i]->line, places[i]->column);
+        add_child(assign, places[i]);
+        add_child(assign, create_ast_node(AST_IDENTIFIER, hidden[i], places[i]->line, places[i]->column));
+        ASTNode* stmt = create_ast_node(AST_EXPRESSION_STATEMENT, NULL, places[i]->line, places[i]->column);
+        add_child(stmt, assign);
+        add_child(block, stmt);
+        free(hidden[i]);
+    }
+}
+
 ASTNode* parse_block(Parser* parser) {
     expect_token(parser, TOKEN_LEFT_BRACE);
 
@@ -5549,6 +5667,10 @@ ASTNode* parse_block(Parser* parser) {
                 }
                 continue;
             }
+        }
+        if (at_place_destructure(parser)) {
+            parse_place_destructure(parser, block);
+            continue;
         }
         ASTNode* stmt = parse_statement(parser);
         if (stmt) {
