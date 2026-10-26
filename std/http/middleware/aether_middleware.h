@@ -133,9 +133,10 @@ typedef struct AetherRateLimitOpts AetherRateLimitOpts;
 // bucket is refilled continuously; clients that exceed the rate get a
 // 429 Too Many Requests response with a Retry-After header.
 //
-// Implementation: hash table keyed by the X-Forwarded-For header (or
-// the request path's prefix as a fallback when no IP is available
-// in the request struct). Single mutex protects the table.
+// Implementation: hash table keyed by the peer the request reports,
+// http_request_remote_addr (the connection's, or the client use_real_ip
+// resolved), never a client-sent header (#3173); "anonymous" when there
+// is no IP peer. Single mutex protects the table.
 AetherRateLimitOpts* aether_rate_limit_opts_new(int max_requests, int window_ms);
 void aether_rate_limit_opts_free(AetherRateLimitOpts* opts);
 

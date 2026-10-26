@@ -126,26 +126,14 @@ static const char* cookie_value(HttpRequest* req, const char* name) {
     return NULL;
 }
 
-/* Resolve the client identity for IP_HASH. Mirror the rate-limit
- * middleware's resolution chain so policy is uniform across the
- * stack:  X-Forwarded-For (leftmost) → X-Real-IP → "anonymous". */
+/* The client identity IP_HASH hashes, the rate limiter's (#3173): the
+ * peer the request reports, the connection's or, after use_real_ip, the
+ * client it resolved (#3169). Never a header: keyed on X-Forwarded-For
+ * or X-Real-IP, a client picked its upstream by what it sent. A request
+ * with no IP peer hashes as "anonymous". */
 static const char* client_identity(HttpRequest* req) {
-    const char* xff = http_get_header(req, "X-Forwarded-For");
-    static __thread char buf[64];
-    if (xff && *xff) {
-        size_t i = 0;
-        while (xff[i] == ' ' || xff[i] == '\t') i++;
-        size_t j = 0;
-        while (xff[i] && xff[i] != ',' && j + 1 < sizeof(buf)) {
-            buf[j++] = xff[i++];
-        }
-        /* Trim trailing whitespace. */
-        while (j > 0 && (buf[j - 1] == ' ' || buf[j - 1] == '\t')) j--;
-        if (j > 0) { buf[j] = '\0'; return buf; }
-    }
-    const char* xri = http_get_header(req, "X-Real-IP");
-    if (xri && *xri) return xri;
-    return "anonymous";
+    const char* peer = http_request_remote_addr(req);
+    return (peer && *peer) ? peer : "anonymous";
 }
 
 /* ----- per-algorithm pickers ----- */

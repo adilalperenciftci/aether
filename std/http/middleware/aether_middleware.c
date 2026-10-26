@@ -466,22 +466,19 @@ int aether_middleware_rate_limit(HttpRequest* req, HttpServerResponse* res, void
     AetherRateLimitOpts* o = (AetherRateLimitOpts*)user_data;
     if (!o) return 1;
 
-    /* Best-effort client identifier: prefer X-Forwarded-For (proxy
-     * deployments), then X-Real-IP, then "anonymous". The HTTP
-     * server doesn't currently expose the peer's sockaddr through
-     * HttpRequest; this is an acceptable approximation for a
-     * front-by-default token bucket. */
-    const char* key = http_get_header(req, "X-Forwarded-For");
-    if (!key) key = http_get_header(req, "X-Real-IP");
-    if (!key) key = "anonymous";
-
-    /* Trim to the first comma (X-Forwarded-For can be a chain). */
+    /* The client is the peer the request reports (#3173): the
+     * connection's, or, after use_real_ip, the client it resolved from a
+     * trusted chain (#3169). Never a header: X-Forwarded-For and
+     * X-Real-IP are what the client sends, and keyed on them a client
+     * that sent a fresh value on every request got a fresh bucket and was
+     * never limited. A request with no IP peer (a Unix-domain socket)
+     * shares the "anonymous" bucket. */
+    const char* key = http_request_remote_addr(req);
+    if (!key || !*key) key = "anonymous";
     char keybuf[128];
-    size_t klen = 0;
-    while (*key && *key != ',' && klen + 1 < sizeof(keybuf)) {
-        if (*key != ' ' && *key != '\t') keybuf[klen++] = *key;
-        key++;
-    }
+    size_t klen = strlen(key);
+    if (klen >= sizeof(keybuf)) klen = sizeof(keybuf) - 1;
+    memcpy(keybuf, key, klen);
     keybuf[klen] = '\0';
 
     unsigned int slot = rate_hash(keybuf) % RATE_TABLE_SIZE;

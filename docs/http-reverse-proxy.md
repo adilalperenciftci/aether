@@ -110,7 +110,7 @@ to a primary while other reads fan out to replicas.
 |---|---|---|
 | `round_robin` | atomic counter mod N (skips ineligible upstreams via retry) | default, even distribution, no per-request decision cost |
 | `least_conn` | iterate eligible upstreams; pick smallest in-flight count | upstream response times vary; long-running requests should avoid stacking on one upstream |
-| `ip_hash` | FNV-1a over X-Forwarded-For (or X-Real-IP, or "anonymous") mod N | sticky sessions for clients without explicit cookies; soft sticky, falls back to RR if the natural pick is ineligible |
+| `ip_hash` | FNV-1a over the peer the request reports (`http.request_remote_addr`; after `middleware.use_real_ip`, the client it resolved; "anonymous" with no IP peer) mod N, never a client-sent header (#3173) | sticky sessions for clients without explicit cookies; soft sticky, falls back to RR if the natural pick is ineligible |
 | `weighted_rr` | smooth weighted RR (the algorithm nginx uses) | mixed-capacity backends; produces interleaved sequences (3:1 → A,A,A,B,A,A,A,B) instead of batched |
 | `cookie_hash` | FNV-1a over the value of a configured cookie name (set via `proxy.pool_set_cookie_name`) mod N; falls back to RR if the cookie is absent | application-layer sticky sessions where the client carries a session cookie and the upstream pool has per-instance state |
 

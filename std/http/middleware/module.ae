@@ -202,9 +202,11 @@ use_session_auth(server: ptr,
 // Install a per-IP token-bucket rate limiter. `max_requests` is the
 // burst size; tokens refill continuously over `window_ms`
 // milliseconds. Clients exceeding the rate get 429 + a Retry-After
-// header. Client identity comes from X-Forwarded-For (proxy
-// deployment) → X-Real-IP → "anonymous" — see the C side for the
-// exact resolution chain.
+// header. The client is the peer the request reports
+// (`http.request_remote_addr`): the connection's, or, after
+// `use_real_ip`, the client it resolved. Never a header the client
+// sends, which would let it pick a fresh bucket per request (#3173).
+// A request with no IP peer shares the "anonymous" bucket.
 use_rate_limit(server: ptr, max_requests: int, window_ms: int) -> {
     if max_requests <= 0 || window_ms <= 0 {
         return "rate_limit: max_requests and window_ms must be positive"
