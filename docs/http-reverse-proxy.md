@@ -359,8 +359,10 @@ configuration to do so:
 
 A request the proxy does not own, a health endpoint, an admin route, or
 anything another middleware answers, is handed to the general server path
-along with whatever has already been read from the socket. Routing, middleware
-and handlers behave exactly as they do without the driver: a request the
+along with whatever has already been read from the socket, and a pool worker
+serves the connection from then on, as it does an accepted one: a slow route
+handler never holds up the driver's other connections (#3230). Routing,
+middleware and handlers behave exactly as they do without the driver: a request the
 middleware before the first mount already ran on goes on from the middleware
 after the mount, so none of it runs twice and a rate limiter counts it once.
 

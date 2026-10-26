@@ -900,6 +900,14 @@ static void conn_close(HttpConn* c) {
         c->read_pos = 0;
         c->write_pos = 0;
     }
+    /* A request the proxy event loop handed over that no worker reached:
+     * the pool closes what it queued when it shuts down (#3230). */
+    if (c->pending_req) {
+        http_request_free(c->pending_req);
+        http_server_response_free(c->pending_res);
+        c->pending_req = NULL;
+        c->pending_res = NULL;
+    }
 }
 
 /* Compact the read buffer: shift unconsumed bytes [read_pos,
@@ -6062,12 +6070,31 @@ int http_server_adopt_connection(HttpServer* server, int client_fd,
 static HttpConn* adopt_conn_new(int client_fd, void* ssl,
                                 const char* prebuffered, int prebuffered_len);
 
+/* A connection the proxy event loop gives up goes to a pool worker, as an
+ * accepted one does (#3230). conn_serve runs the route handler, every
+ * middleware after the proxy mount and the wait for the next request; on the
+ * loop's driver thread, where the hand-back used to call it, all of that held
+ * up every other connection the driver had until it returned. The pool is
+ * sized for this (http_pool_worker_count keeps two workers when the loop
+ * runs). Like the accept path, the submit waits while the pool's queue is
+ * full, which is the backpressure that bounds it; without a pool (none could
+ * be started) the connection is served here, as the accept path would. */
+static void adopt_conn_serve(HttpServer* server, HttpConn* conn) {
+#if AETHER_HAS_THREADS
+    if (server->conn_pool) {
+        http_pool_submit_conn((HttpConnectionPool*)server->conn_pool, conn);
+        return;
+    }
+#endif
+    conn_serve(server, conn);
+}
+
 int http_server_adopt_tls_connection(HttpServer* server, int client_fd, void* ssl,
                                      const char* prebuffered, int prebuffered_len) {
     if (!server || client_fd < 0) return -1;
     HttpConn* conn = adopt_conn_new(client_fd, ssl, prebuffered, prebuffered_len);
     if (!conn) return -1;
-    conn_serve(server, conn);
+    adopt_conn_serve(server, conn);
     return 0;
 }
 
@@ -6089,7 +6116,7 @@ int http_server_adopt_request(HttpServer* server, int client_fd, void* ssl,
     conn->pending_res = res;
     conn->pending_from = proxy ? proxy->next : NULL;
     conn->pending_t_start = t_start_us;
-    conn_serve(server, conn);
+    adopt_conn_serve(server, conn);
     return 0;
 }
 

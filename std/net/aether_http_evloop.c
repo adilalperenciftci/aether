@@ -967,7 +967,9 @@ static void ev_release_failed(int fd, void* ssl) {
 }
 
 /* Give the connection to the general server path, with nothing of the
- * current request run here. */
+ * current request run here. A pool worker serves it from then on, as it does
+ * an accepted connection: nothing of the worker path runs on this thread
+ * (#3230). */
 static int ev_hand_back(EvDriver* d, EvConn* c) {
     void* ssl = NULL;
     int fd = ev_release_client(d, c, &ssl);
