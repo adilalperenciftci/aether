@@ -60,6 +60,8 @@
     <li><a href="#server_set_keepalive">server_set_keepalive</a></li>
     <li><a href="#server_set_h2_raw">server_set_h2_raw</a></li>
     <li><a href="#server_set_h2">server_set_h2</a></li>
+    <li><a href="#server_set_multi_accept_raw">server_set_multi_accept_raw</a></li>
+    <li><a href="#server_set_multi_accept">server_set_multi_accept</a></li>
     <li><a href="#server_set_h2_concurrent_dispatch_raw">server_set_h2_concurrent_dispatch_raw</a></li>
     <li><a href="#server_set_h2_concurrent_dispatch">server_set_h2_concurrent_dispatch</a></li>
     <li><a href="#server_drain_connection">server_drain_connection</a></li>
@@ -496,6 +498,17 @@
       <h3 class="function-name">server_set_h2 <span class="kind">fn</span></h3>
       <pre class="usage"><code>server_set_h2(server, max_concurrent_streams) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">server: ptr, max_concurrent_streams: int</span></p>
+    </div>
+    <div class="function" id="server_set_multi_accept_raw" data-name="server_set_multi_accept_raw">
+      <h3 class="function-name">server_set_multi_accept_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_set_multi_accept_raw(server, on) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, on: int</span></p>
+      <p class="doc">Multi-accept (#3194): in actor dispatch mode, one listener per core (up to 16) on the server's one port, each with SO_REUSEPORT and an accept thread of its own, the kernel spreading connections across them. For connection rates where a single accept() is the bottleneck. `on` is 1 or 0; off by default, and thread-pool mode does not use it. Call it before server_start, after server_bind or without it: a bound socket is kept as the first listener and gives the others its port (a port 0's included), and without one a port 0 is resolved once, so server_port reports the port every listener shares. Returns &quot;&quot; on success, or an error where the platform has no SO_REUSEPORT (Windows).</p>
+    </div>
+    <div class="function" id="server_set_multi_accept" data-name="server_set_multi_accept">
+      <h3 class="function-name">server_set_multi_accept <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_set_multi_accept(server, on) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, on: int</span></p>
     </div>
     <div class="function" id="server_set_h2_concurrent_dispatch_raw" data-name="server_set_h2_concurrent_dispatch_raw">
       <h3 class="function-name">server_set_h2_concurrent_dispatch_raw <span class="kind">extern</span></h3>

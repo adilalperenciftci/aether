@@ -460,6 +460,17 @@ const char* http_server_set_tls_raw(HttpServer* server,
 const char* http_server_set_h2_raw(HttpServer* server,
                                    int max_concurrent_streams);
 
+// Multi-accept (#3194): in actor dispatch mode, one listener per core (up
+// to 16) on the server's one port, each with SO_REUSEPORT and an accept
+// thread and poller of its own; the kernel spreads the connections across
+// them. For connection rates where one accept() is the bottleneck. Off by
+// default; thread-pool mode does not use it. A socket server_bind made
+// first is kept as listener 0 and gives the others its port, a port 0's
+// included; without one, a port 0 is resolved once and every listener
+// binds that. "" on success; an error where there is no SO_REUSEPORT
+// (Windows).
+const char* http_server_set_multi_accept_raw(HttpServer* server, int on);
+
 // Per-stream concurrent dispatch for HTTP/2. When `worker_count` > 0,
 // each h2 connection spawns this many worker threads. Stream
 // handlers run on those workers in parallel; the connection thread

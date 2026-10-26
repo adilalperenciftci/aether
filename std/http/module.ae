@@ -42,6 +42,7 @@ exports(
     http_server_set_tls_raw, server_set_tls,
     http_server_set_keepalive_raw, server_set_keepalive,
     http_server_set_h2_raw, server_set_h2,
+    http_server_set_multi_accept_raw, server_set_multi_accept,
     http_server_set_h2_concurrent_dispatch_raw, server_set_h2_concurrent_dispatch,
     http_server_drain_connection,
     http_server_shutdown_graceful_raw, server_shutdown_graceful,
@@ -350,6 +351,22 @@ extern http_server_set_h2_concurrent_dispatch_raw(server: ptr, worker_count: int
 
 server_set_h2_concurrent_dispatch(server: ptr, worker_count: int) -> {
     return http_server_set_h2_concurrent_dispatch_raw(server, worker_count)
+}
+
+// Multi-accept (#3194): in actor dispatch mode, one listener per core (up
+// to 16) on the server's one port, each with SO_REUSEPORT and an accept
+// thread of its own, the kernel spreading connections across them. For
+// connection rates where a single accept() is the bottleneck. `on` is 1 or
+// 0; off by default, and thread-pool mode does not use it. Call it before
+// server_start, after server_bind or without it: a bound socket is kept as
+// the first listener and gives the others its port (a port 0's included),
+// and without one a port 0 is resolved once, so server_port reports the
+// port every listener shares. Returns "" on success, or an error where the
+// platform has no SO_REUSEPORT (Windows).
+extern http_server_set_multi_accept_raw(server: ptr, on: int) -> string
+
+server_set_multi_accept(server: ptr, on: int) -> {
+    return http_server_set_multi_accept_raw(server, on)
 }
 
 // HTTP/1.1 keep-alive (#260 Tier 0). When enabled, the server reads

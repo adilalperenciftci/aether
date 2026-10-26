@@ -129,6 +129,9 @@ const char* http_server_set_tls_raw(HttpServer* s, const char* c, const char* k)
 const char* http_server_set_h2_raw(HttpServer* s, int m) {
     (void)s; (void)m; return "HTTP/2 unavailable: networking not built in";
 }
+const char* http_server_set_multi_accept_raw(HttpServer* s, int on) {
+    (void)s; (void)on; return "multi-accept unavailable: networking not built in";
+}
 const char* http_server_set_h2_concurrent_dispatch_raw(HttpServer* s, int n) {
     (void)s; (void)n; return "HTTP/2 unavailable: networking not built in";
 }
@@ -1082,6 +1085,19 @@ HttpServer* http_server_create(int port) {
     server->ws_routes = NULL;
 
     return server;
+}
+
+/* Multi-accept (#3194). It used to be a bare struct field nothing could set
+ * from Aether or the header. */
+const char* http_server_set_multi_accept_raw(HttpServer* server, int on) {
+    if (!server) return "server is null";
+#if defined(_WIN32) || !defined(SO_REUSEPORT)
+    (void)on;
+    return "multi-accept needs SO_REUSEPORT, which this platform does not have";
+#else
+    server->multi_accept = on ? 1 : 0;
+    return "";
+#endif
 }
 
 const char* http_server_set_keepalive_raw(HttpServer* server,
@@ -5824,6 +5840,24 @@ static int create_reuseport_socket(const char* host, int port, int backlog) {
     return fd;
 }
 
+/* Give back multi-accept's listeners, pollers and arrays: the first
+ * `pollers` pollers were initialised, and every listener that is not -1 is
+ * open. Listener 0 may be the socket server_bind made; it is this mode's
+ * once the mode starts. */
+static void multi_accept_release(HttpServer* server, int n, int pollers) {
+    for (int i = 0; i < pollers; i++) aether_io_poller_destroy(&server->accept_pollers[i]);
+    for (int i = 0; server->accept_listen_fds && i < n; i++) {
+        if (server->accept_listen_fds[i] >= 0) close(server->accept_listen_fds[i]);
+    }
+    free(server->accept_listen_fds);
+    free(server->accept_pollers);
+    free(server->accept_threads);
+    server->accept_listen_fds = NULL;
+    server->accept_pollers = NULL;
+    server->accept_threads = NULL;
+    server->accept_thread_count = 0;
+}
+
 // A worker spawned for one connection (#2509). It runs the server's step,
 // which runs the step the server was given on the connection message and
 // then releases the worker: the connection is finished when that step
@@ -5992,28 +6026,77 @@ static int http_server_serve(HttpServer* server) {
         // Best for very high connection rates where accept() is the bottleneck.
         int n_threads = aether_cpu_available();
         if (n_threads > 16) n_threads = 16;
+        if (n_threads < 1) n_threads = 1;
 
         server->accept_listen_fds = calloc(n_threads, sizeof(int));
         server->accept_pollers = calloc(n_threads, sizeof(AetherIoPoller));
         server->accept_threads = calloc(n_threads, sizeof(pthread_t));
-        if (!server->accept_listen_fds || !server->accept_pollers || !server->accept_threads)
+        if (!server->accept_listen_fds || !server->accept_pollers || !server->accept_threads) {
+            multi_accept_release(server, 0, 0);
             return server_fail(server, "out of memory for the accept threads");
+        }
 
         for (int i = 0; i < n_threads; i++) {
             server->accept_listen_fds[i] = -1;
         }
 
-        for (int i = 0; i < n_threads; i++) {
-            server->accept_listen_fds[i] = create_reuseport_socket(
+        /* Listener 0 fixes the one port every listener binds (#3194).
+         *
+         * A socket the program bound first (server_bind, the usual way to
+         * learn a port 0's number before starting) is listener 0 as it is,
+         * and server->port is already its port. Closing it would reset any
+         * connection waiting in its backlog. It gets SO_REUSEPORT now, which
+         * lets the others bind beside it; Linux puts it in their group when
+         * the first of them listens. It used to be left open and unpolled,
+         * and every listener's bind failed on its port.
+         *
+         * Without one, listener 0 is opened here, and a port 0 is resolved
+         * from it once: each listener used to bind port 0 and get a port of
+         * its own, and http_server_port reported none of them. */
+        char where[300];
+        char why[128];
+        if (server->socket_fd >= 0) {
+            int opt = 1;
+            if (setsockopt(server->socket_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof opt) != 0) {
+                server_fail(server, "cannot set SO_REUSEPORT on the socket bound to %s: %s",
+                            aether_addr_authority(where, sizeof where, server->host, server->port),
+                            socket_error_text(why, sizeof why));
+                multi_accept_release(server, n_threads, 0);
+                return -1;
+            }
+            int fl = fcntl(server->socket_fd, F_GETFL, 0);
+            if (fl >= 0) fcntl(server->socket_fd, F_SETFL, fl | O_NONBLOCK);
+            server->accept_listen_fds[0] = server->socket_fd;
+            server->socket_fd = -1;   /* listener 0's now: closed with the rest */
+        } else {
+            server->accept_listen_fds[0] = create_reuseport_socket(
                 server->host, server->port, server->max_connections);
+            if (server->accept_listen_fds[0] >= 0 && server->port == 0) {
+                struct sockaddr_storage bound;
+                socklen_t blen = sizeof bound;
+                if (getsockname(server->accept_listen_fds[0], (struct sockaddr*)&bound, &blen) == 0)
+                    server->port = aether_addr_port(&bound);
+            }
+        }
+
+        for (int i = 0; i < n_threads; i++) {
+            if (i > 0) {
+                server->accept_listen_fds[i] = create_reuseport_socket(
+                    server->host, server->port, server->max_connections);
+            }
             if (server->accept_listen_fds[i] < 0) {
-                char where[300];
-                return server_fail(server, "cannot open SO_REUSEPORT listener %d on %s", i,
-                                   aether_addr_authority(where, sizeof where, server->host, server->port));
+                server_fail(server, "cannot open SO_REUSEPORT listener %d on %s: %s", i,
+                            aether_addr_authority(where, sizeof where, server->host, server->port),
+                            socket_error_text(why, sizeof why));
+                multi_accept_release(server, n_threads, i);
+                return -1;
             }
 
-            if (aether_io_poller_init(&server->accept_pollers[i]) < 0)
-                return server_fail(server, "cannot start the I/O poller for accept thread %d", i);
+            if (aether_io_poller_init(&server->accept_pollers[i]) < 0) {
+                server_fail(server, "cannot start the I/O poller for accept thread %d", i);
+                multi_accept_release(server, n_threads, i);
+                return -1;
+            }
 
             aether_io_poller_add(&server->accept_pollers[i],
                                  server->accept_listen_fds[i], NULL, AETHER_IO_READ);
@@ -6046,17 +6129,7 @@ static int http_server_serve(HttpServer* server) {
             pthread_join(server->accept_threads[i], NULL);
         }
 
-        for (int i = 0; i < n_threads; i++) {
-            aether_io_poller_destroy(&server->accept_pollers[i]);
-            if (server->accept_listen_fds[i] >= 0) close(server->accept_listen_fds[i]);
-        }
-        free(server->accept_listen_fds);
-        free(server->accept_pollers);
-        free(server->accept_threads);
-        server->accept_listen_fds = NULL;
-        server->accept_pollers = NULL;
-        server->accept_threads = NULL;
-        server->accept_thread_count = 0;
+        multi_accept_release(server, n_threads, n_threads);
 
     } else if (use_actor_mode) {
         // Single-accept with I/O poller (default): one accept thread waits for data
