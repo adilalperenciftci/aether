@@ -40,6 +40,17 @@ check(label: string, ok: bool) -> int {
     return 0
 }
 
+// Whether `ms` is well under the 5 s timeout. The time is printed only when
+// it is not: a PASS line reads the same on every run and at every -O level.
+at_once(label: string, ms: int) -> int {
+    if ms >= 2000 {
+        println("  FAIL ${label}: took ${ms} ms")
+        return 1
+    }
+    println("  PASS ${label}")
+    return 0
+}
+
 main() {
     println("=== an ask that gets no reply says why (#3151) ===")
     fails = 0
@@ -58,7 +69,7 @@ main() {
     died_ms = (clock_ns() - t0) / 1000000
     fails = fails + check("an actor that dies first: (0, \"the actor died before it replied\"), got (${dv}, \"${derr}\")",
         dv == 0 && derr == "the actor died before it replied")
-    fails = fails + check("and the asker learns at once, not at the timeout (${died_ms} ms)", died_ms < 2000)
+    fails = fails + at_once("and the asker learns at once, not at the timeout", died_ms)
 
     // Asked once it is dead.
     t1 = clock_ns()
@@ -66,14 +77,14 @@ main() {
     dead_ms = (clock_ns() - t1) / 1000000
     fails = fails + check("a dead actor: (0, \"the actor is dead\"), got (${gv}, \"${gerr}\")",
         gv == 0 && gerr == "the actor is dead")
-    fails = fails + check("at once (${dead_ms} ms)", dead_ms < 2000)
+    fails = fails + at_once("at once", dead_ms)
 
     // The single-value form: the zero value, still without the wait.
     t2 = clock_ns()
     int plain = dying ? Get {}
     plain_ms = (clock_ns() - t2) / 1000000
-    fails = fails + check("a dead actor, single value: 0 at once, got ${plain} in ${plain_ms} ms",
-        plain == 0 && plain_ms < 2000)
+    fails = fails + check("a dead actor, single value: 0, got ${plain}", plain == 0)
+    fails = fails + at_once("at once", plain_ms)
 
     // No reply at all: the timeout, and its reason.
     nv, nerr = live ? Never {}
