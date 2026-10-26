@@ -66,9 +66,9 @@ main() {
     doc6 = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
     loop4 = [127, 0, 0, 1]
     ips = list_new()
-    list_add_raw(ips, ip(loop6, 16))
-    list_add_raw(ips, ip(doc6, 16))
-    list_add_raw(ips, ip(loop4, 4))
+    _ = list.add(ips, ip(loop6, 16))
+    _ = list.add(ips, ip(doc6, 16))
+    _ = list.add(ips, ip(loop4, 4))
     c = leaf(ips, null)
     failures = 0
 
@@ -92,13 +92,13 @@ main() {
 
     // An address in a dNSName does not authorise that address.
     names = list_new()
-    list_add_raw(names, text("::1", 3))
+    _ = list.add(names, text("::1", 3))
     d = leaf(null, names)
     failures += expect(&d, "::1", 0)
 
     // The families never cross: a 4-byte SAN of 0.0.0.1 is not ::1.
     short = list_new()
-    list_add_raw(short, ip([0, 0, 0, 1], 4))
+    _ = list.add(short, ip([0, 0, 0, 1], 4))
     e = leaf(short, null)
     failures += expect(&e, "::1", 0)
 

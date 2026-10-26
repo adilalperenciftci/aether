@@ -53,7 +53,7 @@ set_opt(_ctx: ptr, key: string, value: string) {
 }
 
 add_flag(_ctx: ptr, flag: string) {
-    list_add_raw(_ctx, flag)
+    _ = list.add(_ctx, flag)
 }
 
 ret_value(n: int) -> int {

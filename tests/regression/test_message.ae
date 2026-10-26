@@ -30,8 +30,8 @@ main() {
 
     // ---- plain interpolation ------------------------------------------
     args = map_new()
-    map_put_raw(args, "name", "Ada")
-    map_put_raw(args, "count", "3")
+    _ = map_put(args, "name", "Ada")
+    _ = map_put(args, "count", "3")
     f = f + ck(format("en", "Hello {name}, you have {count} messages.", args),
         "Hello Ada, you have 3 messages.", "simple interpolation")
 
@@ -47,26 +47,26 @@ main() {
     // ---- plural ---------------------------------------------------------
     // The `one`/`other` split is the whole point of the plural form.
     one = map_new()
-    map_put_raw(one, "n", "1")
+    _ = map_put(one, "n", "1")
     f = f + ck(format("en", "{n, plural, one {# item} other {# items}}", one),
         "1 item", "plural one")
     map_free(one)
 
     many = map_new()
-    map_put_raw(many, "n", "5")
+    _ = map_put(many, "n", "5")
     f = f + ck(format("en", "{n, plural, one {# item} other {# items}}", many),
         "5 items", "plural other")
     map_free(many)
 
     // ---- select ---------------------------------------------------------
     she = map_new()
-    map_put_raw(she, "g", "female")
+    _ = map_put(she, "g", "female")
     f = f + ck(format("en", "{g, select, male {he} female {she} other {they}}", she),
         "she", "select matches a branch")
     map_free(she)
 
     other = map_new()
-    map_put_raw(other, "g", "nonbinary")
+    _ = map_put(other, "g", "nonbinary")
     f = f + ck(format("en", "{g, select, male {he} female {she} other {they}}", other),
         "they", "select falls through to other")
     map_free(other)

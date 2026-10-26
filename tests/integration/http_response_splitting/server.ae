@@ -3,8 +3,6 @@
 
 import std.http
 
-extern http_server_start_raw(server: ptr) -> int
-
 handle(req: ptr, res: ptr, ud: ptr) {
     http.response_set_status(res, 200)
     http.response_set_header(res, "Content-Type", "text/plain")
@@ -19,5 +17,5 @@ main() {
     // each new executable listening there opens a firewall prompt (#2639).
     http.server_set_host(s, "127.0.0.1")
     http.server_get(s, "/", handle, 0)
-    _ = http_server_start_raw(s)
+    _ = http.server_start(s)
 }

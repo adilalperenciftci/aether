@@ -1,58 +1,54 @@
-// Test: fs_glob pattern matching and dir_list iteration
+// Test: fs.glob pattern matching and dir_list iteration, through std.fs's
+// public functions (#3166). Each check fails the test; it used to print a
+// line on success and exit 0 either way.
 
 import std.fs
 
+extern exit(code: int)
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
 main() {
     // Exact match: find this test file
-    results = fs_glob_raw("tests/syntax/test_glob.ae")
-    if dir_list_count(results) == 1 {
-        println("exact match found")
-    }
-    if dir_list_get(results, 0) == "tests/syntax/test_glob.ae" {
-        println("exact path correct")
-    }
-    dir_list_free(results)
+    results, err = fs.glob("tests/syntax/test_glob.ae")
+    check(err == "", "an exact pattern globs: ${err}")
+    check(fs.dir_list_count(results) == 1, "an exact match is one file")
+    check(fs.dir_list_get(results, 0) == "tests/syntax/test_glob.ae", "the exact path comes back")
+    fs.dir_list_free(results)
 
-    // Wildcard: find test_arg* and test_glob*
-    wild = fs_glob_raw("tests/syntax/test_glob*.ae")
-    if dir_list_count(wild) >= 1 {
-        println("wildcard found files")
-    }
-    dir_list_free(wild)
+    // Wildcard: test_glob*.ae matches this file and its siblings
+    wild, werr = fs.glob("tests/syntax/test_glob*.ae")
+    check(werr == "" && fs.dir_list_count(wild) >= 1, "a wildcard finds files")
+    fs.dir_list_free(wild)
 
-    // No matches: nonexistent pattern
-    empty = fs_glob_raw("tests/syntax/zzz_nonexistent_*.xyz")
-    if dir_list_count(empty) == 0 {
-        println("no match returns empty")
-    }
-    dir_list_free(empty)
+    // No matches: an empty list, not an error
+    empty, eerr = fs.glob("tests/syntax/zzz_nonexistent_*.xyz")
+    check(eerr == "" && fs.dir_list_count(empty) == 0, "no match is an empty list")
+    fs.dir_list_free(empty)
 
-    // Null pattern
-    bad = fs_glob_raw(null)
-    if bad == null {
-        println("null pattern returns null")
-    }
+    // A null pattern reads as "" (#3129) and matches nothing
+    bad, berr = fs.glob(null)
+    check(berr == "" && fs.dir_list_count(bad) == 0, "a null pattern matches nothing")
+    fs.dir_list_free(bad)
 
-    // Recursive **: find .ae files under tests/
-    recursive = fs_glob_raw("tests/**/*.ae")
-    count = dir_list_count(recursive)
-    if count > 5 {
-        println("recursive found many files")
-    }
-    dir_list_free(recursive)
+    // Recursive **: the .ae files under tests/
+    recursive, rerr = fs.glob("tests/**/*.ae")
+    check(rerr == "" && fs.dir_list_count(recursive) > 5, "a recursive pattern finds many files")
+    fs.dir_list_free(recursive)
 
-    // dir_list_get out of bounds
-    one = fs_glob_raw("tests/syntax/test_glob.ae")
-    oob = dir_list_get(one, 999)
-    if oob == null {
-        println("out of bounds is null")
-    }
-    dir_list_free(one)
+    // dir_list_get out of bounds is null
+    one, oerr = fs.glob("tests/syntax/test_glob.ae")
+    check(oerr == "", "the exact pattern globs again")
+    check(fs.dir_list_get(one, 999) == null, "an index out of bounds is null")
+    fs.dir_list_free(one)
 
-    // dir_list_count on null
-    if dir_list_count(null) == 0 {
-        println("count null is zero")
-    }
+    // dir_list_count of a null list is zero
+    check(fs.dir_list_count(null) == 0, "a null list counts zero")
 
     println("glob ok")
 }

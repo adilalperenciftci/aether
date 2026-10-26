@@ -7,11 +7,6 @@
 import std.http
 
 extern exit(code: int)
-// Use raw form: actor receive handlers can't cleanly discard the
-// wrapper's string return without an unused-result warning.
-extern http_server_start_raw(server: ptr) -> int
-extern http_server_bind_raw(server: ptr, host: string, port: int) -> int
-extern http_server_port(server: ptr) -> int
 
 @c_callback echo_handler(req: ptr, ws: ptr, ud: ptr) {
     // Echo every message until the peer closes (ws_recv returns -1)
@@ -35,7 +30,7 @@ extern http_server_port(server: ptr) -> int
 message StartSrv { raw: ptr }
 actor SrvActor {
     state s = 0
-    receive { StartSrv(raw) -> { s = raw; http_server_start_raw(raw) } }
+    receive { StartSrv(raw) -> { s = raw; _ = http.server_start(raw) } }
 }
 
 main() {
@@ -48,11 +43,11 @@ main() {
     // server_start reuses a socket the caller already bound, so this also
     // means READY is printed AFTER the listen socket exists rather than
     // before it, which is what the fixed sleep in the runner was covering.
-    if http_server_bind_raw(raw, "127.0.0.1", 0) < 0 {
+    if http.server_bind(raw, "127.0.0.1", 0) != "" {
         println("FAIL: bind")
         exit(1)
     }
-    println("READY ${http_server_port(raw)}")
+    println("READY ${http.server_port(raw)}")
 
     a = spawn(SrvActor())
     a ! StartSrv { raw: raw }

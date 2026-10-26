@@ -27,18 +27,18 @@ fail(msg: string) {
 
 // The shape that worked: assign, then return.
 via_assign() -> Box {
-    b = Box { a: intarr.intarr_new_raw(4) }
+    b = Box { a: intarr.intarr_new_raw(4) } // raw-ok: a prefixed export in a struct literal, the shape #1383 broke
     return b
 }
 
 // The shape that did not: the literal directly in return position.
 via_return() -> Box {
-    return Box { a: intarr.intarr_new_raw(4) }
+    return Box { a: intarr.intarr_new_raw(4) } // raw-ok: as above, in return position
 }
 
 // A bare return of the same call, for completeness.
 bare_return() -> ptr {
-    return intarr.intarr_new_raw(4)
+    return intarr.intarr_new_raw(4) // raw-ok: as above, a bare return
 }
 
 main() {
@@ -60,7 +60,7 @@ main() {
 
     // An export that carries NO module prefix resolves to its own C symbol,
     // not <module>_<name>. Same fallback, opposite direction.
-    argv = os.aether_argv_raw()
+    argv = os.aether_argv_raw() // raw-ok: a bare-named export, the escape hatch the reference documents
     if argv == null { fail("os.aether_argv_raw returned null") }
     println("PASS 4: a bare-named export still resolves")
 

@@ -139,7 +139,7 @@ fn mk_leaf_times(nb: string, na: string) -> tls13_cert.LeafCert {
 // A LeafCert carrying a single SAN dNSName (for hostname tests).
 fn mk_leaf_san(name: string) -> tls13_cert.LeafCert {
     lf = tls13_cert.LeafCert { tbs: null, tbs_len: 0, sig_alg_oid: null, signature: null, signature_len: 0, spki_algo_oid: null, spki_key: null, spki_key_len: 0, issuer: null, issuer_len: 0, subject: null, subject_len: 0, not_before: null, not_before_len: 0, not_after: null, not_after_len: 0, dns_names: list_new() }
-    list_add_raw(lf.dns_names, str_to_bytes(name))
+    _ = list.add(lf.dns_names, str_to_bytes(name))
     return lf
 }
 
@@ -293,7 +293,7 @@ main() {
     tls13_cert.parse_certificate(bytes.view(elf_der)[0..435], &elf)
     tls13_cert.parse_certificate(bytes.view(ess_der)[0..438], &ess)
     trust = list_new()
-    list_add_raw(trust, &eca)
+    _ = list.add(trust, &eca)
     // Legit leaf chains to its CA.
     if string.equals(tls13_cert.chain_verify(&elf, trust), "") == 1 {
         println("ok   CA-signed leaf chains to anchor")
@@ -340,8 +340,8 @@ main() {
     tls13_cert.parse_certificate(bytes.view(cp_root), &croot)
     tls13_cert.parse_certificate(bytes.view(cp_int), &cint)
     tls13_cert.parse_certificate(bytes.view(cp_leaf), &cleaf)
-    canchors = list_new(); list_add_raw(canchors, &croot)
-    cinters = list_new(); list_add_raw(cinters, &cint)
+    canchors = list_new(); _ = list.add(canchors, &croot)
+    cinters = list_new(); _ = list.add(cinters, &cint)
     cempty = list_new()
     if string.equals(tls13_cert.chain_verify_path(&cleaf, cinters, canchors), "") == 1 {
         println("ok   leaf->intermediate->root path verified")
@@ -368,8 +368,8 @@ main() {
     tls13_cert.parse_certificate(bytes.view(p3_root), &p3r)
     tls13_cert.parse_certificate(bytes.view(p3_int), &p3i)
     tls13_cert.parse_certificate(bytes.view(p3_leaf), &p3l)
-    p3anchors = list_new(); list_add_raw(p3anchors, &p3r)
-    p3inters = list_new(); list_add_raw(p3inters, &p3i)
+    p3anchors = list_new(); _ = list.add(p3anchors, &p3r)
+    p3inters = list_new(); _ = list.add(p3inters, &p3i)
     if string.equals(tls13_cert.chain_verify_path(&p3l, p3inters, p3anchors), "") == 1 {
         println("ok   P-256 leaf <- P-384/SHA-384 intermediate <- P-384 root verified")
     } else { println("FAIL P-384 chain hop rejected"); total_ok = 0 }

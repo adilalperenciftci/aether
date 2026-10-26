@@ -15,9 +15,6 @@
 import std.http
 
 extern exit(code: int)
-extern http_server_start_raw(server: ptr) -> int
-extern http_server_bind_raw(server: ptr, host: string, port: int) -> int
-extern http_server_port(server: ptr) -> int
 
 // The redirect targets name this server's OWN port, and it now binds port 0,
 // so the port is only known after the bind. Held here so the handlers can
@@ -70,12 +67,12 @@ main() {
     // server_start reuses a socket the caller already bound, so this also
     // means READY is printed AFTER the listen socket exists rather than
     // before it, which is what the fixed sleep in the runner was covering.
-    if http_server_bind_raw(s, "127.0.0.1", 0) < 0 {
+    if http.server_bind(s, "127.0.0.1", 0) != "" {
         println("FAIL: bind")
         exit(1)
     }
-    g_port = http_server_port(s)
+    g_port = http.server_port(s)
     println("READY ${g_port}")
-    http_server_start_raw(s)
+    _ = http.server_start(s)
     exit(0)
 }

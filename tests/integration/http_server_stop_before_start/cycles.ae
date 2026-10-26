@@ -6,7 +6,6 @@
 // if it does not finish, and checks the time a stop takes.
 import std.http
 
-extern http_server_start_background_raw(server: ptr) -> int
 extern exit(code: int)
 
 main() {
@@ -18,7 +17,7 @@ main() {
             exit(1)
         }
         http.server_set_host(s, "127.0.0.1")
-        if http_server_start_background_raw(s) < 0 {
+        if http.server_start_background(s) != "" {
             println("FAIL: start_background")
             exit(1)
         }

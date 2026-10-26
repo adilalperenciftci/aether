@@ -54,6 +54,6 @@ main() {
     if r[0] <= 32 { fail("realpath index read a header byte: got ${r[0]}") }
     println("PASS 4: realpath still indexes correctly")
 
-    _ = fs.file_delete_raw(path)
+    _ = fs.delete(path)
     println("=== All cases passed ===")
 }

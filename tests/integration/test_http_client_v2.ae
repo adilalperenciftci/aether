@@ -23,9 +23,6 @@ import std.string
 import std.json
 
 extern exit(code: int)
-// Use raw form: actor receive handlers can't cleanly discard the
-// wrapper's string return without an unused-result warning.
-extern http_server_start_raw(server: ptr) -> int
 // `sleep(ms)` is a built-in Aether primitive — declaring it as
 // `extern` here triggers a conflicting-types error at C codegen
 // time because Aether's `int` parameter renders as `int` while
@@ -189,7 +186,7 @@ actor SrvActor {
     receive {
         StartSrv(raw) -> {
             s = raw
-            http_server_start_raw(raw)
+            _ = http.server_start(raw)
         }
     }
 }

@@ -52,6 +52,6 @@ main() {
     bytes.free(b)
     bytes.free(b2)
 
-    _ = fs.file_delete_raw(path)
+    _ = fs.delete(path)
     println("=== All cases passed ===")
 }

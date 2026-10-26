@@ -1,5 +1,5 @@
-// No std or contrib file calls a raw C binding another module declares
-// (#3107).
+// No file calls a raw C binding another module declares (#3107), or
+// declares one of a module's again outside it (#3166).
 //
 // A std module binds C through `*_raw` externs and builds its public
 // functions on them: the error results, the ownership of what is stored,
@@ -9,14 +9,21 @@
 // public functions.
 //
 // This reads every .ae file under the given directories, collects the
-// `*_raw` externs each module directory declares, and reports each call of
+// `*_raw` externs each directory declares (a directory with a module.ae is
+// a module, and owns its bindings), and reports each call of
 // one (`name_raw(`, `mod.name_raw(`) or selective import of one
 // (`import std.x(name_raw)`) from a file whose own directory does not
-// declare it. A name the file's directory declares is its own binding, and
+// own it, and each extern outside a module that declares a module's
+// binding again. A name the file's directory declares is its own binding
+// when no module declares it (a test's or an example's own C), and
 // a `*_raw` name no module declares as an extern (a helper function of the
 // file) is not a binding at all. Comments and string literals are skipped.
 //
 //     check [--exclude DIR]... [--expect N] DIR...
+//
+// A line that carries `// raw-ok: <why>` is a test of the raw binding
+// itself (a documented escape hatch such as `os.aether_argv_raw`, or the
+// name resolution of one) and is not reported.
 //
 // Exits 1 on a call it reports; with --expect, unless exactly N were found
 // (the self-test over tests/raw_calls/fixture). `make check-raw-calls` runs
@@ -207,9 +214,38 @@ declares(decls: ptr, name: string, dir: string) -> int {
     return list_has(decls, "${name} ${dir}")
 }
 
-// The directories that declare extern `name`, for the report.
-declarers(decls: ptr, name: string) -> string {
+// Does a module directory (one with a module.ae) declare extern `name`?
+module_declares(decls: ptr, modules: ptr, name: string) -> int {
+    n = collections.string_list_size(modules)
+    i = 0
+    while i < n {
+        if declares(decls, name, collections.string_list_get(modules, i)) == 1 {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// Is `name` the binding of `dir` itself? A module's raw bindings are its
+// own; a directory that is no module (a test, an example) owns one only
+// when no module declares it, its own C. One a module declares, written
+// again outside it, is that module's binding re-declared (#3166).
+owns(decls: ptr, modules: ptr, name: string, dir: string) -> int {
+    if declares(decls, name, dir) == 0 {
+        return 0
+    }
+    if list_has(modules, dir) == 1 {
+        return 1
+    }
+    return 1 - module_declares(decls, modules, name)
+}
+
+// The directories that own extern `name`, for the report: the modules that
+// declare it, or every directory when no module does.
+declarers(decls: ptr, modules: ptr, name: string) -> string {
     out = ""
+    only_modules = module_declares(decls, modules, name)
     n = collections.string_list_size(decls)
     prefix = "${name} "
     i = 0
@@ -217,6 +253,10 @@ declarers(decls: ptr, name: string) -> string {
         d = collections.string_list_get(decls, i)
         if string.starts_with(d, prefix) == 1 {
             dir = string.substring(d, string.length(prefix), string.length(d))
+            if only_modules == 1 && list_has(modules, dir) == 0 {
+                i = i + 1
+                continue
+            }
             if out == "" {
                 out = dir
             } else {
@@ -282,13 +322,18 @@ main() {
         i = i + 1
     }
 
-    // Pass 1: every `*_raw` extern and the directory that declares it.
+    // Pass 1: every `*_raw` extern and the directory that declares it, and
+    // which directories are modules.
     decls = collections.string_list_new()
     names = collections.string_list_new()
+    modules = collections.string_list_new()
     nf = collections.string_list_size(files)
     i = 0
     while i < nf {
         p = collections.string_list_get(files, i)
+        if string.ends_with(p, "/module.ae") == 1 && list_has(modules, dir_of(p)) == 0 {
+            collections.string_list_add(modules, dir_of(p))
+        }
         text, rerr = fs.read(p)
         if rerr != "" {
             say("raw calls: cannot read ${p}: ${rerr}")
@@ -314,7 +359,8 @@ main() {
         i = i + 1
     }
 
-    // Pass 2: every use of one from a directory that does not declare it.
+    // Pass 2: every use of one from a directory that does not own it, and
+    // every re-declaration of a module's binding outside the module.
     found = 0
     i = 0
     while i < nf {
@@ -325,16 +371,30 @@ main() {
         nl = collections.string_list_size(lines)
         k = 0
         while k < nl {
-            code = code_of(collections.string_list_get(lines, k))
-            if extern_name(code) == "" {
+            line = collections.string_list_get(lines, k)
+            code = code_of(line)
+            declared = extern_name(code)
+            // `// raw-ok: <why>` on the line: a test of the raw binding itself
+            // (a documented escape hatch, or the name resolution of one).
+            if string.contains(line, "// raw-ok:") == 1 {
+                k = k + 1
+                continue
+            }
+            if declared != "" {
+                if string.ends_with(declared, "_raw") == 1 &&
+                owns(decls, modules, declared, dir) == 0 {
+                    say("${p}:${k + 1}: ${declared} re-declares the raw C binding of ${declarers(decls, modules, declared)}; import that module and call its public function")
+                    found = found + 1
+                }
+            } else {
                 uses = raw_uses(code)
                 nu = collections.string_list_size(uses)
                 u = 0
                 while u < nu {
                     name = collections.string_list_get(uses, u)
                     if list_has(names, name) == 1 &&
-                    declares(decls, name, dir) == 0 {
-                        say("${p}:${k + 1}: ${name} is the raw C binding of ${declarers(decls, name)}; call that module's public function")
+                    owns(decls, modules, name, dir) == 0 {
+                        say("${p}:${k + 1}: ${name} is the raw C binding of ${declarers(decls, modules, name)}; call that module's public function")
                         found = found + 1
                     }
                     u = u + 1
@@ -347,7 +407,7 @@ main() {
         i = i + 1
     }
 
-    say("raw calls: ${nf} Aether files, ${collections.string_list_size(names)} raw bindings: ${found} call(s) from another module")
+    say("raw calls: ${nf} Aether files, ${collections.string_list_size(names)} raw bindings: ${found} use(s) of another module's binding")
     if expect >= 0 {
         if found != expect {
             say("raw calls: the self-test expected ${expect}")

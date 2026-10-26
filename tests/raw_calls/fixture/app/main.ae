@@ -1,0 +1,13 @@
+// Fixture for tests/raw_calls/check.ae: a program outside any module (no
+// module.ae here) that binds lib's C itself (#3166). The re-declaration and
+// the call after it count (marked COUNTS); a binding of its own C, which no
+// module declares, does not.
+
+extern lib_open_raw(path: string) -> ptr // COUNTS: re-declares lib's binding
+extern app_shim_raw(x: int) -> int
+
+main() {
+    h = lib_open_raw("x") // COUNTS: a call of the re-declared binding
+    n = app_shim_raw(1) // its own C
+    println("${n}")
+}

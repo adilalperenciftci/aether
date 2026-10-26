@@ -12,8 +12,6 @@ import std.tcp
 import std.string
 
 extern exit(code: int)
-extern http_server_start_background_raw(server: ptr) -> int
-extern http_server_port(server: ptr) -> int
 
 handle_ping(req: ptr, res: ptr, ud: ptr) {
     http.response_set_body(res, "pong")
@@ -57,12 +55,12 @@ main() {
     }
     http.server_set_host(s, "127.0.0.1")
     http.server_get(s, "/ping", handle_ping, 0)
-    http_server_start_background_raw(s)
+    _ = http.server_start_background(s)
     port = 0
     tries = 0
     while port == 0 && tries < 100 {
         sleep(20)
-        port = http_server_port(s)
+        port = http.server_port(s)
         tries = tries + 1
     }
     if port == 0 {

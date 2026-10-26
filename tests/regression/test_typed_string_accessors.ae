@@ -62,7 +62,7 @@ main() {
     ln, lnerr = list.get_string(null, 0)
     check(ln == null && lnerr == "null list", "null list")
 
-    p = list_get_raw(l, 1)
+    p = list.at(l, 1)
     t, terr = string.from_ptr(p)
     check(t == "bc" && terr == "", "from_ptr string")
     u, uerr = string.from_ptr(inner)

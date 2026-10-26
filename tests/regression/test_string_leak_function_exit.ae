@@ -24,7 +24,7 @@
 //      valid even under allocator pressure.
 //
 //   4. **Escape via @retain on a key.** Same shape as case 3
-//      but exercising `map_put_raw`'s `key: @retain string`
+//      but exercising `map_put`'s `key: @retain string`
 //      annotation. Storing a heap-allocated key into a map and
 //      reading it back after the caller's frame is gone proves
 //      the escape walker propagates the @retain marker through
@@ -116,7 +116,7 @@ main() {
     string_list_free(L)
     println("  PASS 3: @retain on string_list_add survives caller exit")
 
-    // --- Case 4: @retain on map_put_raw's key ---
+    // --- Case 4: @retain on map_put's key ---
     M = build_map_with_retained_key()
     k4 = 0
     while k4 < 100 {
@@ -131,11 +131,11 @@ main() {
     }
     // Reclaim the map: map_free releases the @retain key and frees the
     // bucket array + struct. The stored value here is the map itself
-    // (an unowned `ptr` value — map_put_raw does not set value_owned),
+    // (an unowned `ptr` value — map_put does not set value_owned),
     // so map_free does NOT touch it: no double-free of the self-
     // reference. A well-behaved program frees what it allocates.
     map_free(M)
-    println("  PASS 4: @retain on map_put_raw key survives caller exit")
+    println("  PASS 4: @retain on map_put key survives caller exit")
 
     // --- Case 5: mixed heap + literal tuple destructure ---
     // The position-0 var must get a function-exit defer-free
@@ -169,6 +169,6 @@ build_list_with_retained_heap() -> ptr {
 build_map_with_retained_key() -> ptr {
     m = map_new()
     k = string.concat("computed-", "key") // heap-allocated key
-    map_put_raw(m, k, m) // @retain on key
+    _ = collections.map_put(m, k, m) // the map retains the key
     return m
 }

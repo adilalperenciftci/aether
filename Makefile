@@ -2843,7 +2843,7 @@ help:
 	@echo "  make check-docs       - Compile the documentation's complete examples"
 	@echo "  make check-tests      - The test suite can fail: verdicts reach the exit code, prune list is consistent, every std module has tests, listeners bind loopback, shell tests end background programs through server_jobs.sh and compare files with same_bytes, test programs write temp files under names of their own and ask the build for the platform"
 	@echo "  make check-extern-widths - Every extern bound to C in this tree agrees with the C definition on each width; no plain C long in a bound signature"
-	@echo "  make check-raw-calls     - No std or contrib file calls a raw C binding another module declares"
+	@echo "  make check-raw-calls     - No file calls or re-declares a raw C binding another module declares"
 	@echo "  make check-examples      - Every example builds clean and prints the output it says it prints"
 	@echo "  make check-contrib-modules - Type-check every non-host contrib module"
 	@echo "  make check-changelog  - Validate changelog fragments, catch a release-fold"
@@ -3133,10 +3133,10 @@ RAW_CALLS_CHECKER := $(BUILD_DIR)/raw_calls/check$(EXE_EXT)
 check-raw-calls: compiler ae stdlib
 	@mkdir -p $(BUILD_DIR)/raw_calls
 	@./$(BUILD_DIR)/ae$(EXE_EXT) build tests/raw_calls/check.ae -o $(RAW_CALLS_CHECKER)
-	@./$(RAW_CALLS_CHECKER) --expect 4 tests/raw_calls/fixture \
+	@./$(RAW_CALLS_CHECKER) --expect 6 tests/raw_calls/fixture \
 	    > $(BUILD_DIR)/raw_calls/self_test.log 2>&1 || \
 	    { cat $(BUILD_DIR)/raw_calls/self_test.log; exit 1; }
-	@./$(RAW_CALLS_CHECKER) std contrib
+	@./$(RAW_CALLS_CHECKER) --exclude tests/raw_calls/fixture std contrib tests examples
 
 # -----------------------------------------------------------------
 # Examples (#3105): examples/ is the path a learner follows, so each example

@@ -14,8 +14,6 @@ import std.http
 import std.http.client
 import std.string
 
-extern http_server_start_background_raw(server: ptr) -> int
-extern http_server_port(server: ptr) -> int
 extern http_server_free(server: ptr)
 extern sleep(ms: int)
 extern exit(code: int)
@@ -27,7 +25,7 @@ serve_once(round: int) -> int {
         return 0
     }
     http.server_set_host(s, "127.0.0.1")
-    if http_server_start_background_raw(s) < 0 {
+    if http.server_start_background(s) != "" {
         println("FAIL: start_background in round ${round}")
         http_server_free(s)
         return 0
@@ -36,7 +34,7 @@ serve_once(round: int) -> int {
     tries = 0
     while p <= 0 && tries < 50 {
         sleep(20)
-        p = http_server_port(s)
+        p = http.server_port(s)
         tries = tries + 1
     }
     if p <= 0 {

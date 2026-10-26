@@ -46,7 +46,7 @@ actor Shard {
             // Compute into one variable and reply ONCE at the end of the
             // handler. A single trailing reply is the robust ask pattern.
             result = 0 - 1 // ABSENT sentinel
-            v = map_get_raw(store, key)
+            v = map.lookup(store, key)
             if v != null {
                 n, _ = string.to_int(v)
                 result = n

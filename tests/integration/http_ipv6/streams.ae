@@ -17,7 +17,7 @@ import std.http
 import std.http.client
 import std.cryptography.tls13_server
 import std.cryptography.tls13_client
-import std.net
+import std.tcp
 import std.string
 import std.os
 
@@ -43,10 +43,10 @@ fail(what: string) {
 // A port nothing is listening on, for the server to take. Asked of ::1, and
 // in practice free on 127.0.0.1 as well.
 free_port() -> int {
-    probe = net.tcp_listen_on_raw("::1", 0)
-    if probe == null { return 0 }
-    port = net.tcp_server_port_raw(probe)
-    _ = net.tcp_server_close(probe)
+    probe, err = tcp.listen_on("::1", 0)
+    if err != "" { return 0 }
+    port = tcp.server_port(probe)
+    _ = tcp.server_close(probe)
     return port
 }
 

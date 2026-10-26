@@ -14,8 +14,6 @@ import std.http.client
 import std.io
 import std.string
 
-extern http_server_start_background_raw(server: ptr) -> int
-extern http_server_port(server: ptr) -> int
 extern sleep(ms: int)
 extern exit(code: int)
 
@@ -23,11 +21,11 @@ main() {
     s = http.server_create(0)
     if s == 0 { println("FAIL: server_create"); exit(1) }
     http.server_set_host(s, "127.0.0.1")
-    rc = http_server_start_background_raw(s)
-    if rc < 0 { println("FAIL: start_background"); exit(1) }
+    serr = http.server_start_background(s)
+    if serr != "" { println("FAIL: start_background: ${serr}"); exit(1) }
     sleep(200)
 
-    p = http_server_port(s)
+    p = http.server_port(s)
     if p <= 0 { println("FAIL: port unresolved"); http.server_stop(s); exit(1) }
 
     // Prove it actually serves (the default 404 route still responds).
