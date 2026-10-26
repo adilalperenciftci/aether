@@ -83,6 +83,10 @@ extern AETHER_TLS int current_core_id;
 // the slot decref with the ask/reply machinery below.
 extern void aether_free_message(void* msg_data);
 static void reply_slot_decref(ActorReplySlot* slot);
+static void reply_slot_fail(ActorReplySlot* slot, int why);
+/* The reply slot of the ask the stepping actor holds (defined with the
+ * ask/reply machinery below), for a death that leaves it unanswered. */
+extern AETHER_TLS void* g_current_reply_slot;
 
 // --------------------------------------------------------------------------
 // aether_step_safe — call actor->step() inside a sigsetjmp barrier.
@@ -130,6 +134,14 @@ static inline void aether_step_safe(ActorBase* actor) {
     atomic_fetch_or_explicit(&actor->dead, AETHER_ACTOR_PANICKED, memory_order_release);
     atomic_store_explicit(&actor->active, 0, memory_order_release);
 
+    /* The ask it was handling, if it had not replied (#3151): its asker
+     * learns now that no reply is coming, instead of at its timeout. */
+    if (g_current_reply_slot) {
+        ActorReplySlot* held = (ActorReplySlot*)g_current_reply_slot;
+        g_current_reply_slot = NULL;
+        reply_slot_fail(held, AETHER_ASK_DIED);
+    }
+
     // Drain any pending messages so scheduler_wait() sees counters converge.
     // Without this the dead actor's mailbox keeps mailbox.count > 0 forever,
     // scheduler threads skip the actor (dead check), and sent > processed
@@ -139,7 +151,7 @@ static inline void aether_step_safe(ActorBase* actor) {
     while (mailbox_receive(&actor->mailbox, &_discard)) {
         if (_discard.payload_ptr) aether_free_message(_discard.payload_ptr);
         if (_discard.zerocopy.owned && _discard.zerocopy.data) free(_discard.zerocopy.data);
-        if (_discard._reply_slot) reply_slot_decref((ActorReplySlot*)_discard._reply_slot);
+        if (_discard._reply_slot) reply_slot_fail((ActorReplySlot*)_discard._reply_slot, AETHER_ASK_DEAD);
         drained++;
     }
     if (drained > 0) {
@@ -523,7 +535,7 @@ void scheduler_actor_thread_deliver(ActorBase* actor, Message msg) {
                         "it is dropped\n", actor->id);
         if (msg.payload_ptr) aether_free_message(msg.payload_ptr);
         if (msg.zerocopy.owned && msg.zerocopy.data) free(msg.zerocopy.data);
-        if (msg._reply_slot) reply_slot_decref((ActorReplySlot*)msg._reply_slot);
+        if (msg._reply_slot) reply_slot_fail((ActorReplySlot*)msg._reply_slot, AETHER_ASK_DEAD);
         atomic_fetch_add_explicit(&schedulers[0].messages_processed, 1, memory_order_relaxed);
         return;
     }
@@ -1299,7 +1311,7 @@ uint64_t scheduler_released_sends(void) {
 static void release_undelivered(Message* msg) {
     if (msg->payload_ptr) aether_free_message(msg->payload_ptr);
     if (msg->zerocopy.owned && msg->zerocopy.data) free(msg->zerocopy.data);
-    if (msg->_reply_slot) reply_slot_decref((ActorReplySlot*)msg->_reply_slot);
+    if (msg->_reply_slot) reply_slot_fail((ActorReplySlot*)msg->_reply_slot, AETHER_ASK_DEAD);
 }
 
 static void send_to_dead_actor(ActorBase* actor, Message* msg) {
@@ -1382,7 +1394,7 @@ static void actor_free_now(ActorBase* actor) {
     while (mailbox_receive(&actor->mailbox, &discard)) {
         if (discard.payload_ptr) aether_free_message(discard.payload_ptr);
         if (discard.zerocopy.owned && discard.zerocopy.data) free(discard.zerocopy.data);
-        if (discard._reply_slot) reply_slot_decref((ActorReplySlot*)discard._reply_slot);
+        if (discard._reply_slot) reply_slot_fail((ActorReplySlot*)discard._reply_slot, AETHER_ASK_DEAD);
         drained++;
     }
     if (drained > 0) {
@@ -1402,7 +1414,7 @@ static void actor_free_now(ActorBase* actor) {
             for (int k = 0; k < got; k++) {
                 if (spill[k].payload_ptr) aether_free_message(spill[k].payload_ptr);
                 if (spill[k].zerocopy.owned && spill[k].zerocopy.data) free(spill[k].zerocopy.data);
-                if (spill[k]._reply_slot) reply_slot_decref((ActorReplySlot*)spill[k]._reply_slot);
+                if (spill[k]._reply_slot) reply_slot_fail((ActorReplySlot*)spill[k]._reply_slot, AETHER_ASK_DEAD);
             }
             left += got;
         }
@@ -1551,7 +1563,7 @@ static inline int has_pending_cross_core(Scheduler* sched) {
 static void scheduler_drop_dead_message(Scheduler* sched, Message* msg) {
     if (msg->payload_ptr) aether_free_message(msg->payload_ptr);
     if (msg->zerocopy.owned && msg->zerocopy.data) free(msg->zerocopy.data);
-    if (msg->_reply_slot) reply_slot_decref((ActorReplySlot*)msg->_reply_slot);
+    if (msg->_reply_slot) reply_slot_fail((ActorReplySlot*)msg->_reply_slot, AETHER_ASK_DEAD);
     atomic_fetch_add_explicit(&sched->messages_processed, 1, memory_order_relaxed);
 }
 
@@ -3360,11 +3372,31 @@ static void reply_slot_decref(ActorReplySlot* slot) {
     }
 }
 
-void* scheduler_ask_message(ActorBase* target, void* msg_data, size_t msg_size, int timeout_ms) {
+/* An ask that can get no reply (#3151): its message was dropped (a dead or
+ * released target, a mailbox drained at death) or the actor died handling
+ * it. The asker is woken with the reason instead of waiting out its timeout,
+ * and the reference held for the reply goes. */
+static void reply_slot_fail(ActorReplySlot* slot, int why) {
+    pthread_mutex_lock(&slot->mutex);
+    if (!slot->reply_ready && !slot->failed) {
+        slot->failed = why;
+        pthread_cond_signal(&slot->cond);
+    }
+    pthread_mutex_unlock(&slot->mutex);
+    reply_slot_decref(slot);
+}
+
+void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg_size,
+                                   int timeout_ms, int* status) {
+    int why_dummy;
+    if (!status) status = &why_dummy;
+    *status = AETHER_ASK_DEAD;
     if (!target || !msg_data) return NULL;
+    /* A dead actor answers nothing: no message, no wait (#3151). */
+    if (atomic_load_explicit(&target->dead, memory_order_acquire)) return NULL;
 
     ActorReplySlot* slot = (ActorReplySlot*)calloc(1, sizeof(ActorReplySlot));
-    if (!slot) return NULL;
+    if (!slot) { *status = AETHER_ASK_NO_MEMORY; return NULL; }
 
     pthread_mutex_init(&slot->mutex, NULL);
     pthread_cond_init(&slot->cond, NULL);
@@ -3387,18 +3419,26 @@ void* scheduler_ask_message(ActorBase* target, void* msg_data, size_t msg_size, 
     }
 
     pthread_mutex_lock(&slot->mutex);
-    while (!slot->reply_ready) {
+    while (!slot->reply_ready && !slot->failed) {
         if (pthread_cond_timedwait(&slot->cond, &slot->mutex, &ts) == ETIMEDOUT) break;
     }
     void* result = slot->reply_ready ? slot->reply_data : NULL;
-
-    if (!slot->reply_ready) {
+    if (slot->reply_ready) {
+        *status = AETHER_ASK_REPLIED;
+    } else if (slot->failed) {
+        *status = slot->failed;
+    } else {
         slot->timed_out = 1;
+        *status = AETHER_ASK_TIMED_OUT;
     }
     pthread_mutex_unlock(&slot->mutex);
 
     reply_slot_decref(slot);
     return result;
+}
+
+void* scheduler_ask_message(ActorBase* target, void* msg_data, size_t msg_size, int timeout_ms) {
+    return scheduler_ask_message_status(target, msg_data, msg_size, timeout_ms, NULL);
 }
 
 void scheduler_reply_owned(ActorBase* self, void* data, size_t data_size,

@@ -13357,7 +13357,24 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
 
             // Typecheck the RHS
             typecheck_expression(rhs, table);
-            Type* rhs_type = infer_type(rhs, table);
+            Type* rhs_type = NULL;
+            if (rhs->type == AST_SEND_ASK && var_count == 2) {
+                /* `v, err = actor ? Msg {}` (#3151): the reply and why there
+                 * is none, "" when it came, in the result convention. The
+                 * ask node carries the pair, which tells codegen to build
+                 * it; a reply of no known type is an int, as codegen reads
+                 * one. */
+                Type* reply = infer_type(rhs, table);
+                if (!reply || reply->kind == TYPE_UNKNOWN) {
+                    if (reply) free_type(reply);
+                    reply = create_type(TYPE_INT);
+                }
+                rhs_type = create_tuple_type(2, reply, create_type(TYPE_STRING));
+                if (rhs->node_type) free_type(rhs->node_type);
+                rhs->node_type = clone_type(rhs_type);
+            } else {
+                rhs_type = infer_type(rhs, table);
+            }
 
             // Verify RHS is a tuple with matching element count
             if (!rhs_type || rhs_type->kind != TYPE_TUPLE) {

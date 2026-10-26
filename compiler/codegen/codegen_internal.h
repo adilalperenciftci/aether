@@ -172,6 +172,10 @@ void emit_seq_take(CodeGenerator* gen, ASTNode* e);
  * temp lifetime wrap (ArgDrainSub) to detect heap-returning
  * function calls in argument position. */
 int is_heap_string_expr(CodeGenerator* gen, ASTNode* expr);
+
+/* An ask's timeout in milliseconds: the one it carries, else 5000 (#3151:
+ * the ask and the err its (value, err) form gives name the same). */
+int ask_timeout_ms(ASTNode* ask);
 /* #2750: a call of an Aether function returning `string?` (handed over
  * owned, #2740), and `!` / `??` over one; a heap string nobody else holds
  * (a call, an interpolation, an `or`, such an unwrap) that the expression

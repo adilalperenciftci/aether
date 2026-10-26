@@ -3446,13 +3446,32 @@ outlives the handler's own scope, and the asker owns it: it is reclaimed at
 scope exit like any other owned string, and freeing it by hand is not
 required.
 
-If the handler does not call `reply` within the timeout (default 5 seconds), `?`
-returns 0.
+An ask that gets no reply gives the reply type's zero value (`0`, `""`).
+Destructured into two names, it says why, in the result convention: the reply
+and `""`, or the zero value and the reason (#3151):
+
+```aether,fragment
+size, err = store ? GetSize {}
+if err != "" {
+    println("no size: ${err}")
+}
+```
+
+| `err` | when |
+|---|---|
+| `""` | the handler replied |
+| `"ask timed out after 5000 ms"` | no reply within the timeout (default 5 seconds) |
+| `"the actor is dead"` | the actor had died (or was released) before the ask reached it |
+| `"the actor died before it replied"` | the handler panicked with the ask in hand |
+
+An ask to a dead actor, in either form, ends at once rather than after the
+timeout, and so does one whose actor dies before replying.
 
 ### Reply Statement
 
 The `reply` statement sends a response back to the waiting `?` caller. Omitting
-`reply` in a handler that was invoked via `?` causes the caller to time out.
+`reply` in a handler that was invoked via `?` causes the caller to time out
+(`err` is `"ask timed out after 5000 ms"` in the two-name form above).
 
 Actors respond using the `reply` statement:
 

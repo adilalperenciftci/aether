@@ -9525,8 +9525,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
          * field's type), and `out` is returned so the call site reads it
          * as that type: a closure reply (16 bytes) round-trips as on the
          * GCC path; a missing reply leaves the zero. */
-        print_line(gen, "static void* _aether_ask_helper(ActorBase* target, void* msg, size_t msg_size, int timeout_ms, size_t field_offset, size_t field_size, void (*release)(void*), void* out) {");
-        print_line(gen, "    void* reply = scheduler_ask_message(target, msg, msg_size, timeout_ms);");
+        /* `status`, NULL or the AETHER_ASK_* why no reply came (#3151). */
+        print_line(gen, "static void* _aether_ask_helper(ActorBase* target, void* msg, size_t msg_size, int timeout_ms, size_t field_offset, size_t field_size, void (*release)(void*), void* out, int* status) {");
+        print_line(gen, "    void* reply = scheduler_ask_message_status(target, msg, msg_size, timeout_ms, status);");
         print_line(gen, "    if (!reply) return out;");
         print_line(gen, "    memcpy(out, (char*)reply + field_offset, field_size);");
         print_line(gen, "    if (release) { memset((char*)reply + field_offset, 0, field_size); release(reply); }");

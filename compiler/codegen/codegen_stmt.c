@@ -7704,6 +7704,13 @@ static TuplePosOwn tuple_pos_own(CodeGenerator* gen, ASTNode* rhs, ASTNode* call
     po.is_closure = pt && pt->kind == TYPE_FUNCTION && !pt->is_fnptr;
     po.closure_owned = po.is_closure && rhs && rhs->type == AST_FUNCTION_CALL &&
                        !call_is_extern(gen, rhs);
+    /* `v, err = actor ? Msg {}` (#3151): the reply was copied for the
+     * asker, who owns it as a single ask's binding does; the reason is a
+     * literal the pair lends. */
+    if (rhs && rhs->type == AST_SEND_ASK) {
+        po.is_heap = po.is_string && j == 0;
+        po.closure_owned = po.is_closure && j == 0;
+    }
     return po;
 }
 
@@ -9043,10 +9050,34 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             const char* tuple_type_name = rhs_type ? get_c_type(rhs_type) : "_tuple_unknown";
             static int tuple_tmp_counter = 0;
             int tmp_id = tuple_tmp_counter++;
-            print_indent(gen);
-            fprintf(gen->output, "%s _tup%d = ", tuple_type_name, tmp_id);
-            generate_expression(gen, rhs);
-            fprintf(gen->output, ";\n");
+            if (rhs->type == AST_SEND_ASK && rhs_type && rhs_type->kind == TYPE_TUPLE &&
+                rhs_type->tuple_count == 2) {
+                /* `v, err = actor ? Msg {}` (#3151): the ask writes why no
+                 * reply came, and the pair is its value and the reason, ""
+                 * when it replied. The reasons are literals the pair lends. */
+                int to = ask_timeout_ms(rhs);
+                print_indent(gen);
+                fprintf(gen->output, "int _ask_st%d = 0;\n", tmp_id);
+                print_indent(gen);
+                fprintf(gen->output, "%s _ask_v%d = ", get_c_type(rhs_type->tuple_types[0]), tmp_id);
+                gen->ask_status_var = cg_internf("_ask_st%d", tmp_id);
+                generate_expression(gen, rhs);
+                gen->ask_status_var = NULL;
+                fprintf(gen->output, ";\n");
+                print_indent(gen);
+                fprintf(gen->output,
+                        "%s _tup%d = { _ask_v%d, _ask_st%d == AETHER_ASK_REPLIED ? \"\" : "
+                        "_ask_st%d == AETHER_ASK_TIMED_OUT ? \"ask timed out after %d ms\" : "
+                        "_ask_st%d == AETHER_ASK_DEAD ? \"the actor is dead\" : "
+                        "_ask_st%d == AETHER_ASK_DIED ? \"the actor died before it replied\" : "
+                        "\"out of memory\" };\n",
+                        tuple_type_name, tmp_id, tmp_id, tmp_id, tmp_id, to, tmp_id, tmp_id);
+            } else {
+                print_indent(gen);
+                fprintf(gen->output, "%s _tup%d = ", tuple_type_name, tmp_id);
+                generate_expression(gen, rhs);
+                fprintf(gen->output, ";\n");
+            }
 
             /* Per-position heap-ness lookup for the destructure
              * (issue #420). For each tuple position `j`, decide

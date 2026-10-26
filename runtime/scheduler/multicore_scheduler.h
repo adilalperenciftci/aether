@@ -42,6 +42,7 @@ typedef struct {
     size_t             reply_size;   // size of reply_data
     volatile int       reply_ready;  // 1 when reply has been set
     volatile int       timed_out;    // 1 when asker has given up
+    volatile int       failed;       // AETHER_ASK_DEAD / _DIED: no reply can come (#3151)
     pthread_mutex_t    mutex;        // protects reply_ready / timed_out / cond
     pthread_cond_t     cond;         // signalled by scheduler_reply()
     atomic_int         refcount;     // starts at 2 (asker + actor); freed when hits 0
@@ -402,8 +403,20 @@ void scheduler_set_actor_park_ms(int ms);
 void scheduler_set_core_park_ms(int ms);
 
 // Ask/reply: send a message and block until a reply arrives or timeout.
-// Returns malloc'd reply payload on success (caller must free), NULL on timeout.
+// Returns malloc'd reply payload on success (caller must free), NULL when
+// there is none.
 void* scheduler_ask_message(ActorBase* target, void* msg_data, size_t msg_size, int timeout_ms);
+
+/* Why an ask got no reply (#3151), the *status scheduler_ask_message_status
+ * gives: `v, err = actor ? Msg {}` turns it into err. An ask to a dead actor
+ * ends at once; one whose actor dies with it in hand ends when it dies. */
+#define AETHER_ASK_REPLIED    0
+#define AETHER_ASK_TIMED_OUT  1   /* no reply within timeout_ms */
+#define AETHER_ASK_DEAD       2   /* the actor was dead, or died before the ask reached it */
+#define AETHER_ASK_DIED       3   /* the actor died handling the ask, before it replied */
+#define AETHER_ASK_NO_MEMORY  4   /* the ask could not be made */
+void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg_size,
+                                   int timeout_ms, int* status);
 
 // Reply to the pending ask (called from inside an actor's receive handler).
 // data/data_size describe the reply payload; it is copied internally.

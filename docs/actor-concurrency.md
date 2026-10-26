@@ -168,6 +168,16 @@ void _aether_step_ActorName(ActorName* self) {
 }
 ```
 
+### Asking
+
+An ask (`actor ? Msg {}`) sends its message with a reply slot (`Message._reply_slot`) and blocks on the slot until the handler's `reply` fills it or the timeout passes. When no reply can come, the slot says why and the asker returns at once, not at the timeout (#3151):
+
+- an ask to an actor that is already dead (panicked or released) is not sent;
+- an ask whose message is dropped undelivered (its target died or was released on the way, or the mailbox it waited in was drained at the death) fails as dead;
+- an ask whose handler panics with it in hand fails from the step's panic barrier as "died before it replied".
+
+`v, err = actor ? Msg {}` reads the reason (the language reference's Ask Pattern lists them); `v = actor ? Msg {}` gives the reply type's zero value for any of them, as it does at a timeout.
+
 ## Actor Timeouts
 
 The `after` clause on a `receive` block fires a handler if no message arrives within a given number of milliseconds:

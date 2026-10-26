@@ -5682,6 +5682,12 @@ void emit_message_field_init(CodeGenerator* gen, MessageFieldDef* fdef, ASTNode*
 }
 
 // Emit a send target expression with the correct C cast.
+int ask_timeout_ms(ASTNode* ask) {
+    if (ask && ask->child_count >= 3 && ask->children[2] && ask->children[2]->value)
+        return atoi(ask->children[2]->value);
+    return 5000;
+}
+
 // Actor refs produce (ActorBase*)(expr) directly.
 // Int/int64 values (actor refs stored in int message fields or state) need
 // (ActorBase*)(intptr_t)(expr) to avoid pointer-width conversion warnings.
@@ -11908,6 +11914,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             if (expr->child_count >= 2) {
                 ASTNode* target = expr->children[0];
                 ASTNode* message = expr->children[1];
+                /* #3151: where `v, err = actor ? Msg {}` wants this ask's
+                 * status, as `&var`; an ask inside the message's fields is
+                 * not this one. */
+                const char* ask_status = gen->ask_status_var
+                    ? cg_internf("&%s", gen->ask_status_var) : "NULL";
+                gen->ask_status_var = NULL;
                 
                 if (message && message->type == AST_MESSAGE_CONSTRUCTOR) {
                     MessageDef* msg_def = lookup_message(gen->message_registry, message->value);
@@ -11958,11 +11970,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             }
                         }
 
-                        int timeout_ms = 5000;
-                        if (expr->child_count >= 3 && expr->children[2] &&
-                            expr->children[2]->value) {
-                            timeout_ms = atoi(expr->children[2]->value);
-                        }
+                        int timeout_ms = ask_timeout_ms(expr);
 
                         /* #2528: the reply's release, one rule for both
                          * paths: a reply message that owns strings or
@@ -12006,9 +12014,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             }
                         }
 
-                        fprintf(gen->output, "void* _ask_r = scheduler_ask_message(");
+                        fprintf(gen->output, "void* _ask_r = scheduler_ask_message_status(");
                         emit_send_target(gen, target, "ActorBase*", "ask");
-                        fprintf(gen->output, ", &_msg, sizeof(%s), %d); ", message->value, timeout_ms);
+                        fprintf(gen->output, ", &_msg, sizeof(%s), %d, %s); ", message->value, timeout_ms,
+                                ask_status);
 
                         if (reply_msg_name && reply_field) {
                             fprintf(gen->output, "%s _ask_val = _ask_r ? ((%s*)_ask_r)->%s : %s; ",
@@ -12071,10 +12080,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         }
                         fprintf(gen->output, ", sizeof(%s), %d, ", message->value, timeout_ms);
                         if (reply_msg_name && reply_field) {
-                            fprintf(gen->output, "offsetof(%s, %s), sizeof(%s), %s, (void*)&(%s){0}))",
-                                    reply_msg_name, reply_field, c_type, reply_release, c_type);
+                            fprintf(gen->output, "offsetof(%s, %s), sizeof(%s), %s, (void*)&(%s){0}, %s))",
+                                    reply_msg_name, reply_field, c_type, reply_release, c_type, ask_status);
                         } else {
-                            fprintf(gen->output, "0, sizeof(%s), NULL, (void*)&(%s){0}))", c_type, c_type);
+                            fprintf(gen->output, "0, sizeof(%s), NULL, (void*)&(%s){0}, %s))", c_type, c_type,
+                                    ask_status);
                         }
                         fprintf(gen->output, "\n#endif\n");
                     } else {

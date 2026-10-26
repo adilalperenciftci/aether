@@ -350,6 +350,11 @@ typedef struct {
     // MSVC compat: counter for ask-operator temp variables (_ask_result_N)
     int ask_temp_counter;
 
+    /* #3151: the C int the next ask expression writes its status to
+     * (AETHER_ASK_*), set by `v, err = actor ? Msg {}` for its ask alone;
+     * NULL for an ask whose failure reads as the zero value. */
+    const char* ask_status_var;
+
     // Counter for message-send array hoist variables (_aether_arr_N). Every
     // `msg ! Foo { field: [a, b, c] }` with a composite array field
     // allocates a `static const T _aether_arr_N[] = {...}` at the send
