@@ -1047,6 +1047,11 @@ enum {
 };
 int http_request_head_check(const char* head, const char* hdr_end,
                             long* content_length, int* chunked);
+// The worker path's per-connection read buffer: a request head has to end
+// within it, or the connection is closed, and a body larger than it is
+// streamed rather than buffered (#626). The proxy event loop bounds the head
+// it reads by the same size (#3237).
+#define HTTP_CONN_BUF_CAP (16 * 1024)
 //
 // 1 when a middleware is registered ahead of the first proxy mount.
 int http_server_has_before_proxy(HttpServer* server);

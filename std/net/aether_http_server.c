@@ -402,8 +402,8 @@ static void pt_server_close(void* c) {
  * lost between handle_one_request calls. Without this, the
  * single-request implementation's "read up to \r\n\r\n then free"
  * pattern silently drops anything past the first request's body
- * boundary in the same recv. */
-#define HTTP_CONN_BUF_CAP (16 * 1024)
+ * boundary in the same recv. Its size, HTTP_CONN_BUF_CAP, is in the
+ * header, where the proxy event loop reads it too (#3237). */
 
 /* The parser copies the request line into a fixed buffer; this is that size,
  * kept here so the check that answers 414 and the buffer that must hold the

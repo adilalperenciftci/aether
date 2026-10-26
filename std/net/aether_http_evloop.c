@@ -373,9 +373,11 @@ static void ev_conn_close(EvDriver* d, EvConn* c) {
  * match it: a driver that decided differently would accept a request the
  * other rejects. Headers end at a blank line, then exactly the body the
  * framing declares. 1: a whole request is here; 0: more is needed; -1: its
- * framing is the worker path's to answer or decode (#3228, #3233).
+ * framing is the worker path's to answer or decode (#3228, #3233), or it is
+ * larger than this driver buffers (#3237). `body_limit` is the largest body
+ * the proxy forwards.
  */
-static int ev_request_complete(EvConn* c, size_t* out_total) {
+static int ev_request_complete(EvConn* c, size_t body_limit, size_t* out_total) {
     if (c->in_len == 0) return 0;
     c->in[c->in_len] = '\0';
 
@@ -393,7 +395,15 @@ static int ev_request_complete(EvConn* c, size_t* out_total) {
          * client sends. Length-bounded rather than trusting the NUL. */
         const char* found = http_find_header_end(c->in + from, c->in_len - from);
         c->in_scanned = c->in_len;
-        if (!found) return 0;
+        if (!found) {
+            /* A head that has not ended within the worker path's connection
+             * buffer is one that path closes the connection on. This driver
+             * grew its buffer for as long as the client kept sending, which a
+             * client could do without end (#3237); the worker path takes the
+             * connection, with what was read, and does what it does. */
+            if (c->in_len + 1 >= HTTP_CONN_BUF_CAP) return -1;
+            return 0;
+        }
         c->in_hdr_end = (size_t)((found + 4) - c->in);
     }
 
@@ -413,6 +423,12 @@ static int ev_request_complete(EvConn* c, size_t* out_total) {
     int chunked = 0;
     if (http_request_head_check(c->in, hdr_end, &declared, &chunked) != HTTP_HEAD_OK || chunked)
         return -1;
+    /* The body is read whole before anything looks at the request, so a
+     * declared length is what this driver will hold: 2 GiB declared, and it
+     * set out to buffer 2 GiB (#3237). One longer than the proxy forwards
+     * goes to the worker path, which streams a body that size and where the
+     * proxy refuses it, 502, without reading it. */
+    if ((size_t)declared > body_limit) return -1;
     if (c->in_len < header_bytes + (size_t)declared) return 0;
     *out_total = header_bytes + (size_t)declared;
     return 1;
@@ -707,7 +723,9 @@ static int ev_step_read_request(EvDriver* d, EvConn* c) {
             if (!c->t_start_us && d->loop->server->request_hook_chain)
                 c->t_start_us = http_server_clock_us();
             size_t total = 0;
-            int complete = ev_request_complete(c, &total);
+            AetherProxyOpts* opts = (AetherProxyOpts*)http_server_proxy_opts(d->loop->server);
+            size_t body_limit = opts ? (size_t)opts->max_body_bytes : 0;
+            int complete = ev_request_complete(c, body_limit, &total);
             /* Framing this driver cannot resolve: the worker path has the
              * answer for it (a 400 for a length that is no length), so the
              * connection goes there with the bytes read, rather than being

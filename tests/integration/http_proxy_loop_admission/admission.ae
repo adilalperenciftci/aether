@@ -214,6 +214,16 @@ main() {
     bad = bad + both("a request line over 2 KiB", ports,
         "GET ${long_path} HTTP/1.1\r\nHost: x\r\n\r\n", "414 request line is too long\r\n closed")
 
+    // #3237: what a request may make the server hold. A head that has not
+    // ended in 16 KiB closes the connection; a body declared larger than the
+    // proxy forwards is refused before it is read, so this one is never
+    // sent.
+    endless = string.pad_end("GET /p HTTP/1.1\r\nHost: x\r\nX-Big: ", 40000, 98)
+    bad = bad + both("a head that does not end in 16 KiB", ports, endless, "(no answer) closed")
+    bad = bad + both("a body declared over the proxy's cap", ports,
+        "POST /p HTTP/1.1\r\nHost: x\r\nContent-Length: 1000000\r\n\r\nabc",
+        "502 request body exceeds proxy cap\n open")
+
     http.server_stop(worker_gw)
     http.server_stop(loop_gw)
     http.server_stop(upstream)

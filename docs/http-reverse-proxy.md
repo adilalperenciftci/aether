@@ -359,7 +359,10 @@ configuration to do so:
 - connection upgrades and tunnels
 - streaming request bodies
 - a chunked request body, which the worker path decodes (#3228), and any
-  request the worker path refuses (#3233)
+  request the worker path refuses (#3233, #3236)
+- a request body larger than the mount's body cap, which the worker path
+  streams and the proxy refuses unread, and a head that has not ended in
+  16 KiB, which it closes on: the driver never buffers more (#3237)
 
 A request the proxy does not own, a health endpoint, an admin route, or
 anything another middleware answers, is handed to the general server path
