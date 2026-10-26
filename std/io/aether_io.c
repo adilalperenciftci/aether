@@ -537,9 +537,29 @@ _tuple_ptrstr_io io_fd_read_line_tuple(int fd) {
  * a console mode. */
 #ifdef _WIN32
 #include <windows.h>
+#ifdef _MSC_VER
+/* A descriptor that is not open makes the CRT's _get_osfhandle call the
+ * invalid-parameter handler, which under MSVC ends the process by default:
+ * io.is_terminal(9) ended a program instead of answering false. One that
+ * does nothing is installed for this call, on this thread. MinGW's runtimes
+ * (msvcrt and UCRT alike) install a quiet one at startup and return -1. */
+static void io_ignore_invalid_parameter(const wchar_t* expr, const wchar_t* func,
+                                        const wchar_t* file, unsigned int line,
+                                        uintptr_t reserved) {
+    (void)expr; (void)func; (void)file; (void)line; (void)reserved;
+}
+#endif
+
 int io_is_terminal_raw(int fd) {
     if (fd < 0) return 0;
+#ifdef _MSC_VER
+    _invalid_parameter_handler prev =
+        _set_thread_local_invalid_parameter_handler(io_ignore_invalid_parameter);
+#endif
     intptr_t h = _get_osfhandle(fd);
+#ifdef _MSC_VER
+    _set_thread_local_invalid_parameter_handler(prev);
+#endif
     if (h == -1) return 0;
     DWORD mode = 0;
     return GetConsoleMode((HANDLE)h, &mode) ? 1 : 0;
