@@ -3692,6 +3692,7 @@ static const char* walkup_rebase(const char* path) {
 }
 
 static void ae_set_env(const char* name, const char* value);
+static void ae_unset_env(const char* name);
 
 /* An environment variable holding a path, or a list of them, with each
  * relative entry re-based onto where the command was typed: the user set
@@ -3734,6 +3735,10 @@ static void remember_entered_from(void) {
     for (char* q = g_entered_from; *q; q++) if (*q == '\\') *q = '/';
     rebase_env_paths("AETHER_CACHE_DIR", 0);
     rebase_env_paths("AETHER_LIB_DIR", 1);
+    /* The compiler runs from the project root; its diagnostics name each
+     * file from where the command was typed (#3215: `sub/bad.ae` was no
+     * path the user could open from sub/). */
+    ae_set_env("AETHER_DISPLAY_FROM", g_entered_from);
 }
 
 /* #3181: enter the project directory named on the command line (`ae run
@@ -3788,6 +3793,7 @@ static void rebase_typed_lib_dirs(void) {
  * relative to the project root, as a relative AETHER_CACHE_DIR makes it. */
 static void leave_project_keeping(char* path, size_t size) {
     if (!g_entered_from[0]) return;
+    ae_unset_env("AETHER_DISPLAY_FROM");   /* the compiler's, not the program's */
     if (path && path[0] && !path_is_absolute_any(path)) {
         char root[1024];
         if (getcwd(root, sizeof(root))) {
@@ -9655,6 +9661,7 @@ static int cmd_build(int argc, char** argv) {
                     g_entered_from[0] = '\0';
                     g_walkup_sub[0] = '\0';
                     g_manifest_located = 0;
+                    ae_unset_env("AETHER_DISPLAY_FROM");
                 }
                 int rc_lib = (rc_exe == 0) ? cmd_build(argc, dup_lib) : 0;
                 free(dup_exe); free(dup_lib);
@@ -12957,6 +12964,9 @@ int main(int argc, char** argv) {
     SetConsoleCP(CP_UTF8);
     atexit(ae_console_restore);
 #endif
+    /* Set only once this command enters a project to compile it; one an
+     * enclosing ae left in the environment names another directory. */
+    ae_unset_env("AETHER_DISPLAY_FROM");
 
     if (argc < 2) {
         print_usage();

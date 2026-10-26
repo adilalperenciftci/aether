@@ -76,6 +76,11 @@ void aether_error_full(const char* message, int line, int column,
                        AetherErrorCode code);
 
 // Terminal color support: disabled by NO_COLOR env var or non-tty stderr
+/* `path` as the user should see it: relative to the directory the command
+ * was typed in, when `ae` compiles from a project root it entered
+ * (AETHER_DISPLAY_FROM). Returns `path` or `buf`. */
+const char* aether_display_path(const char* path, char* buf, size_t cap);
+
 const char* aether_color_reset(void);
 const char* aether_color_red(void);
 const char* aether_color_yellow(void);

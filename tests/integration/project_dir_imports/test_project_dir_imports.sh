@@ -171,4 +171,39 @@ case "$line" in
         ;;
 esac
 
+# A diagnostic names its file from where the command was typed (#3215): the
+# compile runs from the project root, and named it from there (`src/oops.ae`
+# for the oops.ae typed in src/), a path that does not exist where the user
+# stands.
+cat > "$TMP/app/src/oops.ae" <<'EOF'
+main() {
+    x: int = "not a number"
+}
+EOF
+out="$(cd "$TMP/app/src" && "$AE" check oops.ae 2>&1)"
+loc="$(printf '%s\n' "$out" | grep -m1 -- '-->' | sed 's/^ *--> *//; s/:[0-9]*:[0-9]*$//')"
+hint="$(printf '%s\n' "$out" | grep -m1 'hint: run `ae help')"
+case "$loc|$hint" in
+    "oops.ae|"*"ae help oops.ae"*)
+        echo "  [PASS] a diagnostic names the file as typed in the project's subdirectory"
+        ;;
+    *)
+        echo "  [FAIL] diagnostic path from app/src: '$loc', hint '$hint':"
+        printf '%s\n' "$out" | sed 's/^/        /' | head -8
+        fail=1
+        ;;
+esac
+mkdir -p "$TMP/badtype/src"
+cp "$TMP/bad/aether.toml" "$TMP/badtype/aether.toml"
+cp "$TMP/app/src/oops.ae" "$TMP/badtype/src/main.ae"
+out="$(cd "$TMP/elsewhere" && "$AE" run ../badtype 2>&1)"
+loc="$(printf '%s\n' "$out" | grep -m1 -- '-->' | sed 's/^ *--> *//; s/:[0-9]*:[0-9]*$//')"
+if [ "$loc" = "../badtype/src/main.ae" ]; then
+    echo "  [PASS] a diagnostic names a named project's file from where the command was typed"
+else
+    echo "  [FAIL] diagnostic path for ae run ../badtype: '$loc':"
+    printf '%s\n' "$out" | sed 's/^/        /' | head -8
+    fail=1
+fi
+
 exit $fail

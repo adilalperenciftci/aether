@@ -367,11 +367,12 @@ static void report_compilation_failure(const char* input_path) {
     fprintf(stderr, "aborting: %d error(s) found\n", n);
     if (getenv("AETHER_NO_HELP_HINT")) return;
     if (input_path && input_path[0]) {
+        char shown[4096];
         fprintf(stderr,
                 "hint: run `ae help %s` for actionable suggestions "
                 "(Levenshtein matches, YAML/HCL→call-form, missing imports). "
                 "Suppress with AETHER_NO_HELP_HINT=1.\n",
-                input_path);
+                aether_display_path(input_path, shown, sizeof shown));
     }
 }
 
