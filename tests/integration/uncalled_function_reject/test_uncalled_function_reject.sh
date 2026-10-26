@@ -89,6 +89,26 @@ main() {
 AE
 expect_reject qualified qualified.ae my_lib.serve 4:5
 
+# A block arm's last name is its value only in a match that gives a value
+# (test_issue3037_match_function_value.ae); in a match used as a statement
+# it calls nothing either.
+cat > arm.ae <<'AE'
+serve() {
+    println("serving")
+}
+
+main() {
+    k = 1
+    match k {
+        1 -> {
+            serve
+        }
+        _ -> {}
+    }
+}
+AE
+expect_reject arm arm.ae serve 9:13
+
 # The form the grammar means runs the block and then the builder.
 cat > called.ae <<'AE'
 builder serve() {

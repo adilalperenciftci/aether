@@ -180,8 +180,10 @@ tests/integration/link_directive_build/
 tests/integration/long_long_extern/
 tests/integration/malloc_literal_struct_cast_warn/
 tests/integration/match_arm_unreachable/
+tests/integration/message_field_published/
 tests/integration/message_trace/
 tests/integration/missing_return/
+tests/integration/module_fn_c_symbol/
 tests/integration/module_extern_auto_unwrap/
 tests/integration/module_import_not_transitive/
 tests/integration/module_leaf_collision/

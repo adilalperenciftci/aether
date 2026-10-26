@@ -13346,8 +13346,12 @@ static int check_return_statement(ASTNode* ret, SymbolTable* table) {
  * port(1) }` read that way, the name and then a bare block, compiled
  * without a word, and the builder never ran. The name, bare or qualified
  * (`my_lib.serve`), is an error at it. */
+/* The expression a value match's block arm yields, while that block is
+ * checked: the arm's value, which a statement that is only a name may be. */
+static ASTNode* g_arm_yield = NULL;
+
 static int report_uncalled_function(ASTNode* e, SymbolTable* table) {
-    if (!e) return 0;
+    if (!e || e == g_arm_yield) return 0;
     char shown[256];
     Symbol* sym = NULL;
     if (e->type == AST_IDENTIFIER && e->value) {
@@ -15365,7 +15369,13 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                                     ? match_arm_value(body) : NULL;
                     int nested = yields && yields->type == AST_MATCH_STATEMENT;
                     if (nested) tc_push_value_match(yields);
+                    /* The block's last expression is the arm's value, not a
+                     * statement: a function's name there gives the function
+                     * (#3037), and is no call left out (#3188). */
+                    ASTNode* yield_before = g_arm_yield;
+                    if (yields) g_arm_yield = yields;
                     typecheck_statement(body, arm_table);
+                    g_arm_yield = yield_before;
                     if (nested) tc_pop_value_match();
                 }
 
