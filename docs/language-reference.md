@@ -2636,7 +2636,9 @@ enums are never compatible with each other.
 
 Where the expected type is already a known enum, a member may be written **bare**,
 without the enum prefix. This applies to a function argument, a typed
-initializer, an assignment, a return, and either side of an enum comparison:
+initializer, an assignment, a return, and either side of an enum comparison,
+and to the value of each arm of a `match` or an `if` in one of those places,
+since such a value is converted arm by arm (#3156):
 
 ```aether,fragment
 paint(c: Color) -> string { ... }
@@ -2646,6 +2648,14 @@ let c: Direction = North     // typed initializer
 c = South                    // assignment
 if c == North { ... }        // comparison (either order)
 heading() -> Direction { return West }   // return
+flip(d: Direction) -> Direction {
+    return match d {         // each arm's value, too
+        North -> South
+        South -> North
+        _ -> d
+    }
+}
+let e: Direction = if c == North { East } else { West }
 ```
 
 A real binding always wins: if a variable named `North` is in scope, `North`

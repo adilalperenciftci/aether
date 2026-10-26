@@ -1,0 +1,69 @@
+// A bare enum member as the value of a match arm or an if-expression branch,
+// where the value's expected type is the enum (#3156). The arms convert as a
+// binding would, so the enum reaches each one; all six arm values here were
+// "Undefined variable".
+
+extern exit(code: int)
+
+enum Dir { N, E, S, W }
+
+flip(d: Dir) -> Dir {
+    return match d {
+        N -> S
+        S -> N
+        E -> W
+        W -> E
+    }
+}
+
+pick(c: bool) -> Dir {
+    return if c { N } else { E }
+}
+
+turn(d: Dir) -> Dir {
+    return d
+}
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    check(flip(Dir.N) == Dir.S, "a returned match")
+    check(flip(Dir.E) == Dir.W, "a returned match, another arm")
+    check(pick(true) == Dir.N, "a returned if, then")
+    check(pick(false) == Dir.E, "a returned if, else")
+
+    let a: Dir = match Dir.N {
+        N -> E
+        _ -> W
+    }
+    check(a == Dir.E, "a typed binding of a match")
+
+    let b: Dir = if a == Dir.E { S } else { N }
+    check(b == Dir.S, "a typed binding of an if")
+
+    // An argument, and an assignment to an enum local.
+    check(turn(if b == Dir.S { W } else { N }) == Dir.W, "an argument")
+    b = match a {
+        E -> N
+        _ -> S
+    }
+    check(b == Dir.N, "an assignment")
+
+    // A block arm gives its last expression.
+    c = Dir.W
+    let d: Dir = match c {
+        W -> {
+            println("west")
+            E
+        }
+        _ -> N
+    }
+    check(d == Dir.E, "a block arm's value")
+
+    println("PASS")
+}

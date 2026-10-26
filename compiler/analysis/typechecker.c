@@ -5829,9 +5829,43 @@ static int enum_has_member(const char* ename, const char* member) {
 // Guards keep it non-breaking: only a bare AST_IDENTIFIER that is not already an
 // enum value and whose name does NOT resolve to a real binding is coerced, so an
 // actual variable of that name always wins.
+/* Does the `match` arm pattern `pat` bind `name`? */
+static int pattern_binds_name(ASTNode* pat, const char* name) {
+    if (!pat || !name) return 0;
+    if (pat->type == AST_PATTERN_VARIABLE && pat->value && !strcmp(pat->value, name)) return 1;
+    for (int i = 0; i < pat->child_count; i++)
+        if (pattern_binds_name(pat->children[i], name)) return 1;
+    return 0;
+}
+
 static int coerce_bare_enum_member(ASTNode* expr, Type* expected, SymbolTable* table) {
-    if (!expr || expr->type != AST_IDENTIFIER || !expr->value) return 0;
-    if (!expected || expected->kind != TYPE_ENUM || !expected->struct_name) return 0;
+    if (!expr || !expected || expected->kind != TYPE_ENUM || !expected->struct_name) return 0;
+    /* #3156: a `match` or an `if` that gives the value gives it arm by arm,
+     * each converted as a binding of it would be, so the enum reaches the
+     * value of every arm: `return match d { N -> E  E -> N }` and `return if
+     * c { N } else { E }` were "Undefined variable 'E'". An arm whose pattern
+     * binds the name keeps its binding. */
+    if (expr->type == AST_MATCH_STATEMENT || expr->type == AST_IF_EXPRESSION) {
+        int any = 0;
+        /* children[0] is the scrutinee or the condition. */
+        for (int i = 1; i < expr->child_count; i++) {
+            ASTNode* arm = expr->children[i];
+            if (!arm) continue;
+            ASTNode* body = arm;
+            if (expr->type == AST_MATCH_STATEMENT) {
+                if (arm->type != AST_MATCH_ARM || arm->child_count < 2) continue;
+                body = arm->children[1];
+            }
+            ASTNode* v = tc_arm_value(body);
+            if (!v) continue;
+            if (expr->type == AST_MATCH_STATEMENT && v->type == AST_IDENTIFIER &&
+                pattern_binds_name(arm->children[0], v->value))
+                continue;
+            any |= coerce_bare_enum_member(v, expected, table);
+        }
+        return any;
+    }
+    if (expr->type != AST_IDENTIFIER || !expr->value) return 0;
     if (expr->node_type && expr->node_type->kind == TYPE_ENUM) return 0;
     if (!enum_has_member(expected->struct_name, expr->value)) return 0;
     if (table && lookup_symbol(table, expr->value)) return 0;  // a real binding wins
@@ -9481,15 +9515,6 @@ static Type* call_result_decl_type(ASTNode* program, ASTNode* call) {
 
 static int call_keeps_arg(ASTNode* program, ASTNode* call, int i) {
     return call_arg_mode(program, call, i) == FN_MODE_KEEP;
-}
-
-/* Does the `match` arm pattern `pat` bind `name`? */
-static int pattern_binds_name(ASTNode* pat, const char* name) {
-    if (!pat || !name) return 0;
-    if (pat->type == AST_PATTERN_VARIABLE && pat->value && !strcmp(pat->value, name)) return 1;
-    for (int i = 0; i < pat->child_count; i++)
-        if (pattern_binds_name(pat->children[i], name)) return 1;
-    return 0;
 }
 
 /* The borrowed parameters `e` is, is a view of, or holds (a struct, tuple
