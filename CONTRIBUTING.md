@@ -494,15 +494,21 @@ Anticipate the CI permutations while writing the feature, not after the
 first red build. A few patterns the stdlib and existing tests use:
 
 **1. Detect the platform at the top of a test and skip the parts that
-don't apply.** Aether programs can read `$OS` it's set to `Windows_NT`
-on both MSYS2 and mingw-w64 (cmd.exe inherits it, bash picks it up). This
-is cleaner than probing a stub function because the SKIP message
-self-documents *why*:
+don't apply.** Ask the build, never the environment: an Aether program
+compares `os.platform()` (compiled into the binary, `"windows"` on Windows),
+and a shell test cases on `uname -s` (`MINGW*|MSYS*|CYGWIN*` on Windows).
+The `OS=Windows_NT` variable is not a test of the platform: a shell started
+without the user's environment, such as an MSYS2 login shell run from Git
+Bash, does not carry it, and the test then takes its POSIX branch on Windows
+and fails (#3119, #3160). `make check-tests` rejects a `getenv("OS")` in a
+program and a read of `$OS` in a shell script that never sets it. This is
+cleaner than probing a stub function because the SKIP message self-documents
+*why*:
 
 ```aether
 import std.os
 main() {
-    if os_getenv("OS") == "Windows_NT" {
+    if os.platform() == "windows" {
         println("SKIP os_which: Windows backend not yet implemented")
         return
     }
