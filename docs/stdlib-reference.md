@@ -38,7 +38,7 @@ header comment is the authoritative description.
 | `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 148 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
 | `std.hash` | Fast non-cryptographic hashes and checksums: FNV, MurmurHash3, SipHash, CRC-32. | 6 | [guide](../std/hash/README.md) · [source](../std/hash/module.ae) |
 | `std.host` | Primitives for Aether scripts embedded in a host application. | 14 | [guide](../std/host/README.md) · [source](../std/host/module.ae) |
-| `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 142 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
+| `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 140 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
 | `std.http1` | Pure-Aether HTTP/1.1 response reader (RFC 9112). | 14 | [guide](../std/http1/README.md) · [source](../std/http1/module.ae) |
 | `std.intarr` | Fixed-size packed-int buffer. | 15 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
 | `std.intmap` | Hash map from `long` keys to `long` values, for integer-keyed counting and lookup. | 12 | [guide](../std/intmap/README.md) · [source](../std/intmap/module.ae) |

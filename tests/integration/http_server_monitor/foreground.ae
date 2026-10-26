@@ -4,23 +4,49 @@
 //   null     null_monitor: nothing is printed
 //   own      the program's monitor replaces the banner
 //
-// Each server stops itself from its on_start hook, so server_start returns
-// without a client. The driving shell test reads stdout.
+// The monitor is what is under test, so the server is not stopped from it: a
+// client actor asks /stop, which only a serving server answers, and the
+// handler stops the server, so server_start returns. The driving shell test
+// reads stdout.
 
 import std.http
 import std.os
 
+extern http_server_bind_raw(server: ptr, host: string, port: int) -> int
+extern http_server_port(server: ptr) -> int
+extern sleep(ms: int)
 extern exit(code: int)
 
-@c_callback stop_at_once(server: ptr, ud: ptr) {
-    http.server_stop(server)
+stop_handler(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_body(res, "stopping")
+    http.server_stop(ud)
+}
+
+message AskStop { port: int }
+actor Stopper {
+    state asked = 0
+    receive {
+        AskStop(port) -> {
+            tries = 0
+            done = 0
+            while done == 0 && tries < 250 {
+                body, err = http.get("http://127.0.0.1:${port}/stop")
+                if err == "" { done = 1 } else {
+                    sleep(20)
+                    tries = tries + 1
+                }
+            }
+            asked = done
+        }
+    }
 }
 
 main() {
     mode = os.getenv("MONITOR_MODE")
     s = http.server_create(0)
     http.server_set_host(s, "127.0.0.1")
-    http.server_on_start(s, stop_at_once, null)
+    http.server_get(s, "/stop", stop_handler, s)
     match mode {
         "null" -> { http.null_monitor(s) }
         "own" -> {
@@ -31,6 +57,9 @@ main() {
         }
         _ -> {}
     }
+    if http_server_bind_raw(s, "127.0.0.1", 0) < 0 { println("FAIL bind"); exit(1) }
+    stopper = spawn(Stopper())
+    stopper ! AskStop { port: http_server_port(s) }
     err = http.server_start(s)
     if err != "" { println("FAIL start: ${err}"); exit(1) }
     http.server_free(s)

@@ -29,4 +29,18 @@ OWN stopped
 FG-DONE"
 [ "$OUT" = "$EXPECT" ] || { echo "$OUT"; fail "the program's monitor did not replace the banner, or its events came out of order"; }
 
+# Actor dispatch mode starts on a path of its own (POSIX-only); the monitor's
+# events fire there too.
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) ;;
+    *)
+        TMPDIR="$(mktemp -d)"; trap 'rm -rf "$TMPDIR"' EXIT
+        AETHER_HOME="$ROOT" "$AE" build "$SCRIPT_DIR/actor_mode.ae" -o "$TMPDIR/actor_mode" \
+            --extra "$SCRIPT_DIR/actor_shim.c" >"$TMPDIR/build.log" 2>&1 \
+            || { cat "$TMPDIR/build.log"; fail "the actor-mode program did not build"; }
+        OUT="$("$TMPDIR/actor_mode" 2>&1)" || { echo "$OUT"; fail "actor dispatch: the monitor's events did not fire"; }
+        [ "$OUT" = "ACTOR-MONITOR-OK" ] || { echo "$OUT"; fail "actor dispatch printed something of its own"; }
+        ;;
+esac
+
 echo "  [PASS] http_server_monitor: the server reports through its monitor, banner by default, silent on request"

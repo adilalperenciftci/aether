@@ -64,8 +64,6 @@ const char* http_server_set_keepalive_raw(HttpServer* s, int e, int m, int64_t i
 }
 void http_server_drain_connection(HttpServer* s, int fd) { (void)s; (void)fd; }
 const char* http_server_shutdown_graceful_raw(HttpServer* s, int64_t t) { (void)s; (void)t; return ""; }
-void http_server_set_on_start(HttpServer* s, HttpLifecycleHook h, void* u) { (void)s; (void)h; (void)u; }
-void http_server_set_on_stop (HttpServer* s, HttpLifecycleHook h, void* u) { (void)s; (void)h; (void)u; }
 const char* http_server_set_health_probes_raw(HttpServer* s, const char* lp, const char* rp,
                                               HttpReadyCheck rc, void* ud) {
     (void)s; (void)lp; (void)rp; (void)rc; (void)ud; return "";
@@ -979,10 +977,6 @@ HttpServer* http_server_create(int port) {
     server->keep_alive_max = 0;
     server->keep_alive_idle_ms = 0;
     server->response_transformer_chain = NULL;
-    server->on_start = NULL;
-    server->on_start_user_data = NULL;
-    server->on_stop = NULL;
-    server->on_stop_user_data = NULL;
     server->ready_check = NULL;
     server->ready_check_user_data = NULL;
     atomic_init(&server->inflight_connections, 0);
@@ -1029,20 +1023,8 @@ const char* http_server_set_keepalive_raw(HttpServer* server,
 }
 
 // =================================================================
-// #260 Tier 3: graceful shutdown + lifecycle hooks + health probes
+// #260 Tier 3: graceful shutdown + health probes
 // =================================================================
-
-void http_server_set_on_start(HttpServer* server, HttpLifecycleHook hook, void* user_data) {
-    if (!server) return;
-    server->on_start = hook;
-    server->on_start_user_data = user_data;
-}
-
-void http_server_set_on_stop(HttpServer* server, HttpLifecycleHook hook, void* user_data) {
-    if (!server) return;
-    server->on_stop = hook;
-    server->on_stop_user_data = user_data;
-}
 
 // ---- The monitor (#3131) ----
 // The server says nothing itself: what it reports goes to closures the
@@ -6021,13 +6003,6 @@ static int http_server_serve(HttpServer* server) {
 
         monitor_listening(server);
 
-        /* on_start lifecycle hook (#260 Tier 3). Fires once after
-         * the listen socket is bound, before the accept loop runs.
-         * Typical use: log "ready", flip a readiness probe to 200. */
-        if (server->on_start) {
-            server->on_start(server, server->on_start_user_data);
-        }
-
 #if AETHER_HAS_THREADS
         /* The proxy driver, when this server proxies and its connections are
          * plain HTTP. One driver per core is the shape that removes the cost:
@@ -6113,14 +6088,6 @@ static int http_server_serve(HttpServer* server) {
         http_park_destroy((HttpParkLot*)server->park_lot);
         server->park_lot = NULL;
 #endif
-
-        /* on_stop lifecycle hook fires after the accept loop exits
-         * but BEFORE socket cleanup (so the hook still sees a live
-         * server struct). Typical use: flush logs, snapshot
-         * metrics, flip readiness probe to 503. */
-        if (server->on_stop) {
-            server->on_stop(server, server->on_stop_user_data);
-        }
     }
 
     return 0;

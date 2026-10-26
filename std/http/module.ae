@@ -45,7 +45,6 @@ exports(
     http_server_set_h2_concurrent_dispatch_raw, server_set_h2_concurrent_dispatch,
     http_server_drain_connection,
     http_server_shutdown_graceful_raw, server_shutdown_graceful,
-    server_on_start, server_on_stop,
     http_server_monitor_listening_raw, http_server_monitor_stopped_raw,
     http_server_monitor_null_raw, http_server_has_monitor,
     monitor, listening, stopped, console_monitor, null_monitor,
@@ -447,23 +446,6 @@ server_shutdown_graceful(server: ptr, timeout: Duration) -> {
     return http_server_shutdown_graceful_raw(server, timeout.ns)
 }
 
-// Lifecycle hooks (#260 Tier 3). on_start fires once after the listen
-// socket is bound, before the accept loop runs (great place to log
-// "ready" or flip a readiness probe). on_stop fires after the accept
-// loop exits but before sockets close. Both pass the `user_data`
-// pointer to the hook function. Hooks are C function pointers — declare
-// them with @c_callback on the Aether side.
-extern http_server_set_on_start(server: ptr, hook: ptr, user_data: ptr)
-extern http_server_set_on_stop(server: ptr, hook: ptr, user_data: ptr)
-
-server_on_start(server: ptr, hook: ptr, user_data: ptr) {
-    http_server_set_on_start(server, hook, user_data)
-}
-
-server_on_stop(server: ptr, hook: ptr, user_data: ptr) {
-    http_server_set_on_stop(server, hook, user_data)
-}
-
 // The server's monitor (#3131). The server prints nothing itself: what it has
 // to say goes to closures the program registers before it starts the server.
 // One closure per event, each with typed arguments:
@@ -481,7 +463,11 @@ server_on_stop(server: ptr, hook: ptr, user_data: ptr) {
 //
 // listening fires once the server accepts connections, and stopped when it
 // stops serving, each on the thread that runs the server: the caller's for
-// server_start, the server's own for server_start_background.
+// server_start, the server's own for server_start_background. Both fire in
+// every dispatch mode, pool or actor. listening comes after the server counts
+// as running, so a server_stop issued from it, or once it has fired, is never
+// lost; a host that must not return from its start until the server serves
+// waits for it. To act on the server from an event, capture it in the closure.
 extern http_server_monitor_listening_raw(server: ptr, f: @retain fn)
 extern http_server_monitor_stopped_raw(server: ptr, f: @retain fn)
 extern http_server_monitor_null_raw(server: ptr)

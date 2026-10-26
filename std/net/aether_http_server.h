@@ -151,7 +151,6 @@ typedef struct HttpMiddlewareNode {
 // fields. Their full type definitions appear with the related
 // public functions below.
 struct HttpServer; /* forward, for hook signatures */
-typedef void (*HttpLifecycleHook)(struct HttpServer* server, void* user_data);
 typedef int  (*HttpReadyCheck)(void* user_data);
 
 // An Aether closure as an extern receives it (`@retain fn(...)`): the code
@@ -228,12 +227,6 @@ typedef struct HttpServer {
     // handler, before serialization. See
     // http_server_use_response_transformer above.
     struct HttpResponseTransformerNode* response_transformer_chain;
-
-    // Lifecycle hooks (#260 Tier 3). NULL == not installed.
-    HttpLifecycleHook on_start;
-    void* on_start_user_data;
-    HttpLifecycleHook on_stop;
-    void* on_stop_user_data;
 
     // Health probes (#260 Tier 3). When non-zero, the route table
     // will already have routes registered for live/ready_path — the
@@ -588,15 +581,6 @@ void http_server_set_actor_handler(HttpServer* server, void (*step_fn)(void*),
 // this on SIGTERM in their entry point. Sub-millisecond precision is
 // rounded down internally to ms (the drain spin-wait is ms-granular).
 const char* http_server_shutdown_graceful_raw(HttpServer* server, int64_t timeout_ns);
-
-// Lifecycle hooks (#260 Tier 3). on_start fires once after the
-// listen socket is bound but before the accept loop runs (good
-// place to log "ready" or set readiness probes). on_stop fires
-// after the accept loop exits but before sockets close (good place
-// to flush logs, snapshot metrics). HttpLifecycleHook typedef
-// declared earlier so the HttpServer struct could carry the field.
-void http_server_set_on_start(HttpServer* server, HttpLifecycleHook hook, void* user_data);
-void http_server_set_on_stop (HttpServer* server, HttpLifecycleHook hook, void* user_data);
 
 // Health-probe endpoints (#260 Tier 3). Registers two routes:
 //   `live_path`  always returns 200 "ok"  (process is up)

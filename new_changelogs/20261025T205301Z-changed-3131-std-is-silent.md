@@ -19,3 +19,11 @@
   another process is listening on, so a server started twice "succeeded" and
   shared the port. Windows now gets `SO_EXCLUSIVEADDRUSE` (POSIX keeps
   `SO_REUSEADDR`), and the bind fails with the reason as on Linux and macOS.
+- **`http.server_on_start` / `http.server_on_stop` are gone: the monitor's
+  `listening` and `stopped` events replace them.** The hooks fired only on the
+  thread-pool path, never for a server in actor dispatch mode; the monitor
+  fires on every path. `listening` keeps the hook's guarantee that the server
+  already counts as running, so a stop issued from it, or after it, is never
+  lost. A hook that needed the server pointer captures it in the closure.
+  The C setters `http_server_set_on_start` / `http_server_set_on_stop` and
+  the `HttpLifecycleHook` type are removed too.

@@ -858,9 +858,23 @@ http.monitor(server) {
 | `stopped` | host, port | when it stops serving, after `listening` |
 
 Both fire on the thread that runs the server: the caller's for
-`server_start`, the server's own for `server_start_background`.
-`http.monitor` starts an empty monitor, so an event the block does not
-name says nothing.
+`server_start`, the server's own for `server_start_background`, and in
+every dispatch mode, thread pool or actors. `http.monitor` starts an
+empty monitor, so an event the block does not name says nothing.
+
+The monitor is also where a program hooks the server's lifecycle: flip a
+readiness flag, flush logs or metrics on the way down. `listening` fires
+after the server counts as running, so a `server_stop` issued from it,
+or once it has fired, is never lost; a host that must not return from
+its own start until the server serves waits for it. To act on the server
+from an event, capture it:
+
+```aether,fragment
+http.monitor(srv) {
+    listening() |host: string, port: int| { ready_flag = 1 }
+    stopped() |host: string, port: int| { metrics_flush(srv) }
+}
+```
 
 Two stock monitors ship with `std.http`:
 
@@ -874,26 +888,6 @@ someone is watching) uses `console_monitor`, and `server_start_background`
 and the raw `http_server_start_raw` use none. A failed bind or start is
 never printed: `server_bind` and `server_start` return the reason, and
 `http_server_error(server)` reads it after a raw call.
-
----
-
-## Lifecycle hooks
-
-```aether,fragment
-@c_callback on_started(server: ptr, ud: ptr) {
-    println("server is ready")
-}
-@c_callback on_stopped(server: ptr, ud: ptr) {
-    println("server stopped")
-}
-
-http.server_on_start(server, on_started, null)
-http.server_on_stop (server, on_stopped, null)
-```
-
-`on_start` fires once after the listen socket is bound, before the
-accept loop runs. `on_stop` fires after the accept loop exits, before
-sockets close.
 
 ---
 
