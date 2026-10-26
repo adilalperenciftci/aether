@@ -16277,7 +16277,26 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 int fnptr_to_ptr = operand->kind == TYPE_FUNCTION && operand->is_fnptr &&
                                    expr->node_type->kind == TYPE_PTR &&
                                    !expr->node_type->element_type;
-                if (!same && !numeric && !bs_cast && !fnptr_to_ptr) {
+                /* #3157: an enum is a distinct type over int, so `as` takes it
+                 * to an integer scalar (`byte` included) and an integer to
+                 * it, the conversion a binding makes on its own. Two
+                 * different enums never convert: `same` (one kind) let
+                 * `Color.Red as Direction` through. */
+                TypeKind tk = expr->node_type->kind;
+                int enum_cast = (operand->kind == TYPE_ENUM &&
+                                 (is_integer_scalar(tk) || tk == TYPE_BYTE)) ||
+                                (tk == TYPE_ENUM &&
+                                 (is_integer_scalar(operand->kind) || operand->kind == TYPE_BYTE));
+                if (operand->kind == TYPE_ENUM && tk == TYPE_ENUM &&
+                    !types_equal(operand, expr->node_type)) {
+                    char msg[256];
+                    snprintf(msg, sizeof(msg),
+                        "cannot cast %s to %s with `as`: two different enums never convert; "
+                        "go through the integer on purpose, `(v as int) as %s`, if the "
+                        "values line up", type_spelled(operand), type_spelled(expr->node_type),
+                        type_spelled(expr->node_type));
+                    type_error(msg, expr->line, expr->column);
+                } else if (!same && !numeric && !bs_cast && !fnptr_to_ptr && !enum_cast) {
                     char msg[220];
                     snprintf(msg, sizeof(msg),
                         "cannot cast %s to %s with `as`: a value cast converts "

@@ -610,7 +610,7 @@ Aether has **no general-purpose cast operator**. The `as` keyword is reserved fo
 - `expr as Name` where `Name` is a named function-pointer type (`type Name = fn(...) -> R` or `cfn Name(...) -> R`), the same function-pointer cast under a name (see [§ Named C function-pointer types](#named-c-function-pointer-types-type-name--fnt1-t2---r) below)
 - `expr as T[]` typed-array view cast (reinterpret a raw pointer as an unbounded `T[]` slice; see [§ Slices](#slices-t))
 
-After `as` the parser also accepts a primitive **value cast**: `n as int` and other numeric casts compile and run, and a cast between a distinct type and its base type is allowed too. Casts the type system can't justify (for example `buf as string` or `p as ptr`) still parse, but are rejected at type-check with `E0200`, wherever they appear (a `return` value included), use a named helper for those. The `*StructName`, `fn(...) -> R`, and `T[]` forms remain available. Other primitive conversions:
+After `as` the parser also accepts a primitive **value cast**: `n as int` and other numeric casts compile and run, and a cast between a distinct type and its base type is allowed too, an enum and an integer included (`Direction.West as int`, `3 as Direction`; two different enums never convert, #3157). Casts the type system can't justify (for example `buf as string` or `p as ptr`) still parse, but are rejected at type-check with `E0200`, wherever they appear (a `return` value included), use a named helper for those. The `*StructName`, `fn(...) -> R`, and `T[]` forms remain available. Other primitive conversions:
 
 | From → To | How |
 |---|---|
