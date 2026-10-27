@@ -50,18 +50,23 @@ main() {
         }
     }
 
+    // The hints print once the server is listening: tw_start blocks until
+    // the server stops, so anything after it runs at shutdown.
+    http.monitor(tinyweb.http_server(server)) {
+        listening() |host: string, port: int| {
+            println("Server running! Try:")
+            println("  curl http://localhost:${port}/foo/bar")
+            println("  curl http://localhost:${port}/users/alice")
+            println("  curl -X POST -d 'hello' http://localhost:${port}/echo")
+            println("  curl http://localhost:${port}/api/test/42")
+            println("\nPress Ctrl+C to stop.")
+        }
+    }
+
     println("Starting server on localhost:8080...")
     result = tinyweb.tw_start(server)
-
-    if result == "" {
-        println("Server running! Try:")
-        println("  curl http://localhost:8080/foo/bar")
-        println("  curl http://localhost:8080/users/alice")
-        println("  curl -X tinyweb.POST -d 'hello' http://localhost:8080/echo")
-        println("  curl http://localhost:8080/api/test/42")
-        println("\nPress Ctrl+C to stop.")
-    } else {
-        println("ERROR: Failed to start server (code ${result})")
+    if result != "" {
+        println("ERROR: Failed to start server: ${result}")
     }
 
     tinyweb.tw_stop(server)

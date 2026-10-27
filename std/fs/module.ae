@@ -501,18 +501,18 @@ write(path: string, content: string) -> {
     // The 'b' is a no-op on POSIX, so this is verbatim-bytes on every platform.
     handle = file_open_raw(path, "wb")
     if handle == 0 {
-        return "cannot open file for writing"
+        return fs_error_message(path, "cannot open file for writing")
     }
     length = string_length(content)
     ok = file_write_raw(handle, content, length)
-    // The bytes can sit in the handle's buffer until the close flushes
-    // them, so a full disk shows only there (#3179).
-    closed = file_close_raw(handle)
     if ok == 0 {
-        return "write failed"
+        err = fs_error_message(path, "write failed")
+        file_close_raw(handle)
+        return err
     }
+    closed = file_close_raw(handle)
     if closed < 0 {
-        return "close failed: buffered data was not written"
+        return fs_error_message(path, "close failed: buffered data was not written")
     }
     return ""
 }
@@ -825,7 +825,7 @@ write_binary(path: string, data: byte[]) -> string {
     }
     ok = fs_write_binary_raw(path, data, data.len)
     if ok == 0 {
-        return "binary write failed"
+        return fs_error_message(path, "binary write failed")
     }
     return ""
 }
@@ -846,7 +846,7 @@ write_atomic(path: string, data: byte[]) -> {
     }
     ok = fs_write_atomic_raw(path, data, data.len)
     if ok == 0 {
-        return "atomic write failed"
+        return fs_error_message(path, "atomic write failed")
     }
     return ""
 }
@@ -858,7 +858,9 @@ write_atomic(path: string, data: byte[]) -> {
 rename(from: string, to: string) -> {
     ok = fs_rename_raw(from, to)
     if ok == 0 {
-        return "rename failed"
+        // Both paths: the reason can be the destination's (a missing
+        // directory, no write permission there) as well as the source's.
+        return fs_error_message("${from} -> ${to}", "rename failed")
     }
     return ""
 }
