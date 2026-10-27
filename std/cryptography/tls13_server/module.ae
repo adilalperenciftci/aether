@@ -702,6 +702,14 @@ fn free_cert_chain(chain: ptr) {
 
 // ---- @extern C entry points ----
 
+// Linked in: std.http's server_set_tls_backend(server, "aether") asks
+// this before choosing the pure server, so a program that forgot the import
+// gets an error then instead of a failed handshake per connection (#1298).
+@c_callback("aether_pure_tls_server_available")
+pure_tls_server_available() -> int {
+    return 1
+}
+
 // Consumes fd on every path; a successful connection owns it until close_conn.
 @c_callback("aether_pure_tls_server_accept")
 pure_tls_server_accept(fd: int, cert_path: string, key_path: string) -> ptr {

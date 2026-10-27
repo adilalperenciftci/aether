@@ -283,6 +283,10 @@ int http_request_set_insecure_raw(HttpClientRequest* req, int on);
 // verification ON. Strictly stronger than set_insecure. Per-connection (never
 // touches the shared SSL_CTX); NULL/empty clears the pin. `path` is copied.
 int http_request_set_cafile_raw(HttpClientRequest* req, const char* path);
+/* "aether" / "openssl" / "" (default) for this request (#1298). 0 on success;
+ * -1 null request, -2 unknown name, -3 no OpenSSL in this build, -4 the
+ * pure-Aether client is not linked. */
+int http_request_set_tls_backend_raw(HttpClientRequest* req, const char* name);
 
 // Enable streaming response bodies for THIS request (#1004). When on (non-zero),
 // http_send_raw returns a response whose body is NOT buffered: it carries an

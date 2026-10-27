@@ -203,6 +203,8 @@ typedef struct HttpServer {
     int tls_enabled;
     void* tls_ctx;
     int is_pure_tls;
+    int tls_backend;            /* 0 default (AETHER_PURE_TLS, then the build),
+                                 * 1 "aether", 2 "openssl": server_set_tls_backend (#1298) */
     char* cert_path;
     char* key_path;
 
@@ -452,11 +454,16 @@ const char* http_server_set_keepalive_raw(HttpServer* server,
 // handshake error. Idempotent — calling twice with the same files is
 // a no-op success; calling with different files re-loads.
 //
-// When the build does not include OpenSSL (AETHER_HAS_OPENSSL undef),
-// returns "TLS unavailable: built without OpenSSL".
+// When the build does not include OpenSSL (AETHER_HAS_OPENSSL undef), the
+// pure-Aether server terminates TLS (import std.cryptography.tls13_server).
 const char* http_server_set_tls_raw(HttpServer* server,
                                     const char* cert_path,
                                     const char* key_path);
+
+// Choose the TLS backend (#1298): "aether", "openssl" or "" (the default:
+// AETHER_PURE_TLS, then OpenSSL where it is built in). Returns "" or why the
+// backend cannot be used (not built in, or the pure server not linked).
+const char* http_server_set_tls_backend_raw(HttpServer* server, const char* name);
 
 // Enable HTTP/2 (#260 Tier 2). When enabled:
 //   - the TLS context advertises "h2" via ALPN (with "http/1.1" as

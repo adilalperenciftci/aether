@@ -61,9 +61,18 @@ if err != "" {
 
 **Two backends.** OpenSSL is the default wherever it is compiled in. The other
 is a pure-Aether TLS 1.3 implementation with no OpenSSL dependency at all,
-selected with `AETHER_PURE_TLS=1`, and used automatically when the build has
-no OpenSSL, which is what lets a cross-compiled binary (`ae build --target=…`,
-which links none) serve HTTPS at all.
+used automatically when the build has no OpenSSL, which is what lets a
+cross-compiled binary (`ae build --target=…`, which links none) serve HTTPS at
+all. A program chooses explicitly with `http.server_set_tls_backend(server,
+"aether")` (or `"openssl"`, or `""` for the default); `AETHER_PURE_TLS=1`
+moves a whole process onto the pure stack, and an explicit choice wins over
+it. `server_set_tls_backend` returns an error string when the backend is not
+built in or not linked (#1298):
+
+```aether,fragment
+err = http.server_set_tls_backend(server, "aether")
+if err != "" { println("TLS backend: ${err}"); return }
+```
 
 The pure backend is **opt-in at the application**, because it reads the
 certificate and key itself and so needs filesystem capability that a plain
@@ -110,7 +119,22 @@ returning an empty body. (`std.http.client` does not import it for you:
 `--emit=lib --with=net` reject every `std.http.client` user, the same reason
 the server side is opt-in.)
 
-In a build that HAS OpenSSL, `AETHER_PURE_TLS=1` (the variable that already
+**Choosing the client backend per request.** `client.set_tls_backend(req,
+"aether")` sends this request through the pure client, `"openssl"` through
+OpenSSL, `""` back to the default (OpenSSL where it is built in, unless
+`AETHER_PURE_TLS=1`); the choice wins over the environment variable, and
+pooled connections are kept apart per backend. It returns an error string
+for a backend that cannot be used: `"openssl"` in a build without OpenSSL,
+`"aether"` without `import std.cryptography.tls13_client`, an unknown name
+(#1298).
+
+```aether,fragment
+req = client.request("GET", "https://example.com/")
+err = client.set_tls_backend(req, "aether")
+if err != "" { println("TLS backend: ${err}"); return }
+```
+
+In a build that HAS OpenSSL, `AETHER_PURE_TLS=1` (the variable that also
 selects the pure server) moves client requests onto the pure client as well,
 provided the program imports it (otherwise the request fails, naming the
 import). That is how the pure path is tested on every platform, not only in

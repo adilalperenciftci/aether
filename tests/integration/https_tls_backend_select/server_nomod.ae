@@ -1,0 +1,11 @@
+// server_set_tls_backend(server, "aether") in a program that does NOT link the
+// pure TLS server: the call itself must refuse, naming the import (#1298).
+
+import std.http
+
+main() {
+    raw = http.server_create(0)
+    err = http.server_set_tls_backend(raw, "aether")
+    println("BACKEND-ERR: ${err}")
+    http.server_free(raw)
+}

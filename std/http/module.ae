@@ -40,6 +40,7 @@ exports(
     http_server_start_background_raw,
     http_server_stop, http_server_free,
     http_server_set_tls_raw, server_set_tls,
+    http_server_set_tls_backend_raw, server_set_tls_backend,
     http_server_set_keepalive_raw, server_set_keepalive,
     http_server_set_h2_raw, server_set_h2,
     http_server_set_multi_accept_raw, server_set_multi_accept,
@@ -299,6 +300,23 @@ extern http_server_set_tls_raw(server: ptr, cert_path: string, key_path: string)
 //     http.server_start(server)
 server_set_tls(server: ptr, cert_path: string, key_path: string) -> {
     return http_server_set_tls_raw(server, cert_path, key_path)
+}
+
+// Choose the server's TLS backend (#1298): "openssl", or "aether", the
+// pure-Aether TLS 1.3 server (std.cryptography.tls13_server); "" returns to
+// the default, which is OpenSSL wherever it is built in and the pure server
+// where it is not or when AETHER_PURE_TLS=1. A choice made here wins over
+// both. Call it before server_start, before or after server_set_tls (it
+// re-applies the certificate and key). The pure server must be linked:
+// `import std.cryptography.tls13_server` in the program. Returns "" or why
+// the backend cannot be used.
+//
+//     err = http.server_set_tls_backend(server, "aether")
+//     if err != "" { println("TLS backend: ${err}"); exit(1) }
+extern http_server_set_tls_backend_raw(server: ptr, name: string) -> string
+
+server_set_tls_backend(server: ptr, backend: string) -> string {
+    return http_server_set_tls_backend_raw(server, backend)
 }
 
 // HTTP/2 (#260 Tier 2). When enabled:

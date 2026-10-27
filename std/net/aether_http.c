@@ -119,6 +119,7 @@ int http_request_set_timeout_ns_raw(HttpClientRequest* r, int64_t ns) { (void)r;
 int http_request_set_follow_redirects_raw(HttpClientRequest* r, int n) { (void)r; (void)n; return -1; }
 int http_request_set_insecure_raw(HttpClientRequest* r, int on) { (void)r; (void)on; return -1; }
 int http_request_set_cafile_raw(HttpClientRequest* r, const char* p) { (void)r; (void)p; return -1; }
+int http_request_set_tls_backend_raw(HttpClientRequest* r, const char* n) { (void)r; (void)n; return -1; }
 int http_request_use_env_proxy_raw(HttpClientRequest* r, int on) { (void)r; (void)on; return -1; }
 int http_request_use_http_proxy_raw(HttpClientRequest* r, const char* u) { (void)r; (void)u; return -1; }
 int http_request_ignore_http_proxy_raw(HttpClientRequest* r) { (void)r; return -1; }
@@ -284,22 +285,20 @@ void aether_pure_tls_client_set_error(const char* msg) {
     pt_client_last_err[n] = '\0';
 }
 
-/* Which TLS client backend an https request uses.
+/* Which TLS client backend an https request uses (#1298).
  *
- * A build without OpenSSL has only the pure-Aether client. A build WITH it
- * keeps OpenSSL as the default and switches to the pure client when
- * AETHER_PURE_TLS is 1 or true -- the same variable that already selects the
- * pure TLS server (aether_http_server.c), so one setting moves a process onto
- * the pure stack in both directions. Read per request rather than cached, so
- * the pool key and the dial always agree on the answer for a given request. */
-static int http_client_use_pure_tls(void) {
-#ifndef AETHER_HAS_OPENSSL
-    return 1;
-#else
-    const char* v = getenv("AETHER_PURE_TLS");
-    return v && (strcmp(v, "1") == 0 || strcasecmp(v, "true") == 0);
-#endif
-}
+ * A request names one with http_request_set_tls_backend_raw ("aether" or
+ * "openssl"). Otherwise: a build without OpenSSL has only the pure-Aether
+ * client; a build WITH it keeps OpenSSL as the default and switches to the
+ * pure client when AETHER_PURE_TLS is 1 or true -- the same variable that
+ * selects the pure TLS server (aether_http_server.c), so one setting moves a
+ * process onto the pure stack in both directions. Read per request rather
+ * than cached, so the pool key and the dial always agree on the answer for a
+ * given request. Defined after struct HttpClientRequest. */
+#define HTTP_TLS_BACKEND_DEFAULT 0
+#define HTTP_TLS_BACKEND_AETHER  1
+#define HTTP_TLS_BACKEND_OPENSSL 2
+static int http_client_use_pure_tls(const HttpClientRequest* req);
 
 #ifdef AETHER_HAS_OPENSSL
     #include <openssl/ssl.h>
@@ -1345,7 +1344,21 @@ struct HttpClientRequest {
      *   PROXY_MODE_DIRECT (0)   default: no proxy */
     int   proxy_mode;
     char* proxy_url;     /* owned; set only for PROXY_MODE_EXPLICIT */
+    int   tls_backend;   /* HTTP_TLS_BACKEND_*: DEFAULT follows AETHER_PURE_TLS
+                          * and the build; AETHER or OPENSSL is the program's
+                          * choice for this request (set_tls_backend, #1298). */
 };
+
+static int http_client_use_pure_tls(const HttpClientRequest* req) {
+    if (req && req->tls_backend == HTTP_TLS_BACKEND_AETHER) return 1;
+    if (req && req->tls_backend == HTTP_TLS_BACKEND_OPENSSL) return 0;
+#ifndef AETHER_HAS_OPENSSL
+    return 1;
+#else
+    const char* v = getenv("AETHER_PURE_TLS");
+    return v && (strcmp(v, "1") == 0 || strcasecmp(v, "true") == 0);
+#endif
+}
 
 /* Proxy-mode ladder (see struct HttpClientRequest.proxy_mode). */
 #define PROXY_MODE_DIRECT   0
@@ -1560,6 +1573,34 @@ int http_request_set_cafile_raw(HttpClientRequest* req, const char* path) {
     free(req->cafile);
     req->cafile = (path && *path) ? strdup(path) : NULL;
     return 0;
+}
+
+/* Choose THIS request's TLS client backend (#1298): "aether" (the pure-Aether
+ * TLS 1.3 client, std.cryptography.tls13_client) or "openssl"; "" goes back to
+ * the default (OpenSSL where it is built in, unless AETHER_PURE_TLS selects
+ * the pure client). The choice is part of the pooled connection's identity.
+ * Returns 0; -1 on a null request; -2 for any other name; -3 when the build
+ * has no OpenSSL; -4 when the pure client is not linked into the program. */
+int http_request_set_tls_backend_raw(HttpClientRequest* req, const char* name) {
+    if (!req) return -1;
+    if (!name || !*name) {
+        req->tls_backend = HTTP_TLS_BACKEND_DEFAULT;
+        return 0;
+    }
+    if (strcmp(name, "aether") == 0) {
+        if (!pt_client_available()) return -4;
+        req->tls_backend = HTTP_TLS_BACKEND_AETHER;
+        return 0;
+    }
+    if (strcmp(name, "openssl") == 0) {
+#ifdef AETHER_HAS_OPENSSL
+        req->tls_backend = HTTP_TLS_BACKEND_OPENSSL;
+        return 0;
+#else
+        return -3;
+#endif
+    }
+    return -2;
 }
 
 /* #1004: enable streaming response bodies for THIS request. When on, the
@@ -2330,11 +2371,17 @@ static void ae_set_err(char** out_err, const char* msg) {
  * Split out of http_request_internal so a pooled connection that turns out to
  * be dead can be redialled without duplicating any of this (#1653). */
 /* Why HTTPS cannot run in this program, or NULL when it can: the
- * pure-Aether client is selected (AETHER_PURE_TLS=1, or a build without
- * OpenSSL) but not linked. The program's to fix, and known before any
- * network is touched. */
-static const char* http_tls_backend_missing(void) {
-    if (!http_client_use_pure_tls() || pt_client_available()) return NULL;
+ * pure-Aether client is selected (set_tls_backend "aether", AETHER_PURE_TLS=1,
+ * or a build without OpenSSL) but not linked. The program's to fix, and known
+ * before any network is touched. (set_tls_backend itself refuses "aether"
+ * when the client is not linked; this catches the other two routes.) */
+static const char* http_tls_backend_missing(const HttpClientRequest* req) {
+    if (!http_client_use_pure_tls(req) || pt_client_available()) return NULL;
+    if (req && req->tls_backend == HTTP_TLS_BACKEND_AETHER) {
+        return "set_tls_backend(\"aether\") selects the pure-Aether TLS client, "
+               "but it is not linked into this program. Add "
+               "`import std.cryptography.tls13_client` to the program.";
+    }
 #ifdef AETHER_HAS_OPENSSL
     return "AETHER_PURE_TLS selects the pure-Aether TLS client, but it is "
            "not linked into this program. Add "
@@ -2454,10 +2501,10 @@ static int http_dial(HttpClientRequest* req, AetherAddrList* addrs,
      * Verification is the pure client's own: certificate chain to a trusted
      * anchor, validity window, and hostname/SAN pinned to `host`. set_insecure
      * skips it; set_cafile pins a couriered bundle. */
-    if (use_tls && http_client_use_pure_tls()) {
+    if (use_tls && http_client_use_pure_tls(req)) {
         /* http_request_internal has said so before dialling; a dial from
          * anywhere else must not reach the handshake without a client. */
-        const char* missing = http_tls_backend_missing();
+        const char* missing = http_tls_backend_missing(req);
         if (missing) {
             close(sockfd);
             ae_set_err(out_err, missing);
@@ -3482,7 +3529,7 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
      * connect failed first (a server not up yet, a loaded machine) the
      * request reported "connection failed" instead. */
     if (use_tls) {
-        const char* missing = http_tls_backend_missing();
+        const char* missing = http_tls_backend_missing(req);
         if (missing) {
             free(path);
             response->error = string_new(missing);
@@ -3555,7 +3602,7 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
     /* The TLS backend is part of a connection's identity: 1 = OpenSSL,
      * 2 = pure-Aether. A pooled OpenSSL connection must never serve a request
      * that asked for the pure client, or the reverse. */
-    int tls_kind = use_tls ? (http_client_use_pure_tls() ? 2 : 1) : 0;
+    int tls_kind = use_tls ? (http_client_use_pure_tls(req) ? 2 : 1) : 0;
     http_pool_key(pool_key, sizeof(pool_key), host, port, tls_kind,
                   dial_host, dial_port, req->insecure, req->cafile);
     /* A streaming response hands the transport to the caller, who may abandon
