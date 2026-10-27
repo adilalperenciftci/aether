@@ -1,4 +1,4 @@
-// Wycheproof adversarial vectors: ECDH over the NIST prime curves, public
+// Wycheproof adversarial vectors: ECDH over P-256, P-384 and P-521, public
 // keys as bare uncompressed points (EcdhEcpointTest, #3291).
 //
 // Each case gives a private scalar, the peer's point "04 || x || y" and the
@@ -14,6 +14,8 @@
 // Every case runs (no stride): an ECDH is a few milliseconds now.
 
 import std.cryptography.p256
+import std.cryptography.p384
+import std.cryptography.p521
 import std.fs
 import std.json
 import std.bytes
@@ -78,6 +80,8 @@ fn to_hex(b: ptr) -> string {
 }
 
 fn curve_ecdh(curve: string, priv: ptr, x: ptr, y: ptr) -> ptr {
+    if curve == "secp384r1" { return p384.ecdh(priv, x, y) }
+    if curve == "secp521r1" { return p521.ecdh(priv, x, y) }
     return p256.ecdh(priv, x, y)
 }
 
@@ -156,6 +160,8 @@ fn run_file(path: string, curve: string, l: int) -> int {
 main() {
     failed = 0
     failed = failed + run_file("tests/vectors/wycheproof/ecdh_secp256r1_ecpoint_test.json", "secp256r1", 32)
+    failed = failed + run_file("tests/vectors/wycheproof/ecdh_secp384r1_ecpoint_test.json", "secp384r1", 48)
+    failed = failed + run_file("tests/vectors/wycheproof/ecdh_secp521r1_ecpoint_test.json", "secp521r1", 66)
     if failed > 0 { exit(1) }
     println("ALL PASS")
 }

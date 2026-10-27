@@ -9,6 +9,9 @@ import std.bytes
 import std.string
 import std.cryptography.ct
 import std.cryptography.p256
+import std.cryptography.p384
+import std.cryptography.p521
+import std.cryptography.secp256k1
 import std.cryptography.sha2
 
 extern ct_shim_available() -> int
@@ -135,6 +138,78 @@ fn p256_cases() -> int {
     return fails
 }
 
+// ---- P-384, P-521, secp256k1: sign (RFC 6979) and ECDH on G ----
+
+fn p384_cases() -> int {
+    fails = 0
+    // RFC 6979 A.2.6, SHA-384, "sample".
+    d = hb("6B9D3DAD2E1B8C1C05B19875B6659F4DE23C3B667BF297BA9AA47740787137D896D5724E4C70A825F872C9EA60D2EDF5")
+    secret(d)
+    m = ascii("sample")
+    h = digest("sha384", m)
+    r, s = p384.ecdsa_sign(d, h)
+    fails = fails + check("p384 ecdsa_sign r", r, "94EDBB92A5ECB8AAD4736E56C691916B3F88140666CE9FA73D64C4EA95AD133C81A648152E44ACF96E36DD1E80FABE46")
+    fails = fails + check("p384 ecdsa_sign s", s, "99EF4AEB15F178CEA1FE40DB2603138F130E740A19624526203B6351D0A3A94FA329C145786E679E7B82C71A38628AC8")
+    // ECDH with G as the peer: the shared x is the public key's x.
+    gx = hb("aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a385502f25dbf55296c3a545e3872760ab7")
+    gy = hb("3617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f0b8c00a60b1ce1d7e819d7a431d7c90ea0e5f")
+    z = p384.ecdh(d, gx, gy)
+    fails = fails + check("p384 ecdh", z, "EC3A4E415B4E19A4568618029F427FA5DA9A8BC4AE92E02E06AAE5286B300C64DEF8F0EA9055866064A254515480BC13")
+    bytes.free(d); bytes.free(m); bytes.free(h); bytes.free(r); bytes.free(s)
+    bytes.free(gx); bytes.free(gy); bytes.free(z)
+    return fails
+}
+
+fn p521_cases() -> int {
+    fails = 0
+    // RFC 6979 A.2.7, SHA-512, "sample".
+    d = hb("00FAD06DAA62BA3B25D2FB40133DA757205DE67F5BB0018FEE8C86E1B68C7E75CAA896EB32F1F47C70855836A6D16FCC1466F6D8FBEC67DB89EC0C08B0E996B83538")
+    secret(d)
+    m = ascii("sample")
+    h = digest("sha512", m)
+    r, s = p521.ecdsa_sign(d, h)
+    fails = fails + check("p521 ecdsa_sign r", r, "00C328FAFCBD79DD77850370C46325D987CB525569FB63C5D3BC53950E6D4C5F174E25A1EE9017B5D450606ADD152B534931D7D4E8455CC91F9B15BF05EC36E377FA")
+    fails = fails + check("p521 ecdsa_sign s", s, "00617CCE7CF5064806C467F678D3B4080D6F1CC50AF26CA209417308281B68AF282623EAA63E5B5C0723D8B8C37FF0777B1A20F8CCB1DCCC43997F1EE0E44DA4A67A")
+    gx = hb("00c6858e06b70404e9cd9e3ecb662395b4429c648139053fb521f828af606b4d3dbaa14b5e77efe75928fe1dc127a2ffa8de3348b3c1856a429bf97e7e31c2e5bd66")
+    gy = hb("011839296a789a3bc0045c8a5fb42c7d1bd998f54449579b446817afbd17273e662c97ee72995ef42640c550b9013fad0761353c7086a272c24088be94769fd16650")
+    z = p521.ecdh(d, gx, gy)
+    fails = fails + check("p521 ecdh", z, "01894550D0785932E00EAA23B694F213F8C3121F86DC97A04E5A7167DB4E5BCD371123D46E45DB6B5D5370A7F20FB633155D38FFA16D2BD761DCAC474B9A2F5023A4")
+    bytes.free(d); bytes.free(m); bytes.free(h); bytes.free(r); bytes.free(s)
+    bytes.free(gx); bytes.free(gy); bytes.free(z)
+    return fails
+}
+
+fn secp256k1_cases() -> int {
+    fails = 0
+    // bitcoinjs-lib's RFC 6979 vector: r is fixed by the nonce (s is checked
+    // by verifying, since that vector gives s in the low-S form).
+    d = hb("69ec59eaa1f4f2e36b639716b7c30ca86d9a5375c7b38d8918bd9c0ebc80ba64")
+    secret(d)
+    m = ascii("Computer science is no more about computers than astronomy is about telescopes.")
+    h = sha256(m)
+    r, s = secp256k1.ecdsa_sign(d, h)
+    fails = fails + check("secp256k1 ecdsa_sign r", r, "7186363571d65e084e7f02b0b77c3ec44fb1b257dee26274c38c928986fea45d")
+    public(s)
+    px, py = secp256k1.scalar_mult_base(d)
+    public(px)
+    public(py)
+    if secp256k1.ecdsa_verify(px, py, h, r, s) == 1 {
+        println("ok   secp256k1 ecdsa_sign s verifies")
+    } else {
+        println("FAIL secp256k1 ecdsa_sign s does not verify")
+        fails = fails + 1
+    }
+    // ECDH: 2 * G.
+    two = hb("0000000000000000000000000000000000000000000000000000000000000002")
+    secret(two)
+    gx = hb("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+    gy = hb("483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8")
+    z = secp256k1.ecdh(two, gx, gy)
+    fails = fails + check("secp256k1 ecdh", z, "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5")
+    bytes.free(d); bytes.free(m); bytes.free(h); bytes.free(r); bytes.free(s); bytes.free(px); bytes.free(py)
+    bytes.free(two); bytes.free(gx); bytes.free(gy); bytes.free(z)
+    return fails
+}
 main() {
     ct.set_declassify_hook(ct_shim_declassify_hook() as DeclassifyHook)
     if ct_shim_available() == 1 {
@@ -144,6 +219,9 @@ main() {
     }
     fails = 0
     fails = fails + p256_cases()
+    fails = fails + p384_cases()
+    fails = fails + p521_cases()
+    fails = fails + secp256k1_cases()
     if fails > 0 {
         println("${fails} FAILED")
         exit(1)

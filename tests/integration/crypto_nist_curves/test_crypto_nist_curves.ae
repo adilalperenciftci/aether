@@ -1,16 +1,53 @@
 // Validate std.cryptography.p384 + p521 (NIST P-384 / P-521 ECDH+ECDSA)
-// against the published 2*G doubling vectors plus an ECDSA sign/verify
-// round-trip with tamper rejection.
+// against the published 2*G doubling vectors, RFC 6979 deterministic ECDSA
+// (appendix A.2.6 and A.2.7, every SHA-2 digest of both messages), a
+// sign/verify round trip with tamper rejection, and the input checks:
+// private keys outside [1, n-1] and public points off the curve (#3291).
 import std.cryptography.p384
 import std.cryptography.p521
+import std.cryptography.sha2
 import std.bytes
 import std.string
 import std.io
 
 hv(c: int) -> int { if c >= 48 { if c <= 57 { return c - 48 } } if c >= 97 { if c <= 102 { return c - 87 } } if c >= 65 { if c <= 70 { return c - 55 } } return 0 }
 hb(h: string) -> ptr { n = string.length(h); b = bytes.new(n / 2); i = 0; while i < n { bytes.set(b, i / 2, hv(string_char_at_n(h, n, i)) * 16 + hv(string_char_at_n(h, n, i + 1))); i = i + 2 } return b }
-bh(b: ptr) -> string { d = "0123456789abcdef"; o = ""; n = bytes.length(b); i = 0; while i < n { v = bytes.get(b, i); o = string.concat(o, string.concat(string.substring(d, (v / 16) & 15, ((v / 16) & 15) + 1), string.substring(d, v & 15, (v & 15) + 1))); i = i + 1 } return o }
-ck(lbl: string, got: string, want: string) -> int { if got == want { println("ok   ${lbl}"); return 0 } println("FAIL ${lbl}"); println("  got:  ${got}"); println("  want: ${want}"); return 1 }
+bh(b: ptr) -> string { if b == null { return "(null)" } d = "0123456789abcdef"; o = ""; n = bytes.length(b); i = 0; while i < n { v = bytes.get(b, i); o = string.concat(o, string.concat(string.substring(d, (v / 16) & 15, ((v / 16) & 15) + 1), string.substring(d, v & 15, (v & 15) + 1))); i = i + 1 } return o }
+ck(lbl: string, got: string, want: string) -> int { if got == string.to_lower(want) { println("ok   ${lbl}"); return 0 } println("FAIL ${lbl}"); println("  got:  ${got}"); println("  want: ${want}"); return 1 }
+
+fn digest(algo: string, msg: string) -> ptr {
+    n = string.length(msg)
+    m = bytes.new(n)
+    i = 0
+    while i < n {
+        bytes.set(m, i, string_char_at_n(msg, n, i))
+        i = i + 1
+    }
+    ctx, _e = sha2.new(algo)
+    sha2.update(ctx, bytes.view(m))
+    bytes.free(m)
+    return sha2.final_bytes(ctx)
+}
+
+fn rfc6979_p384(x: ptr, ux: ptr, uy: ptr, algo: string, msg: string, want_r: string, want_s: string) -> int {
+    h = digest(algo, msg)
+    r, s = p384.ecdsa_sign(x, h)
+    fails = ck("p384 rfc6979 ${algo} \"${msg}\" r", bh(r), want_r)
+    fails = fails + ck("p384 rfc6979 ${algo} \"${msg}\" s", bh(s), want_s)
+    if p384.ecdsa_verify(ux, uy, h, r, s) != 1 { println("FAIL p384 rfc6979 ${algo} \"${msg}\" does not verify"); fails = fails + 1 }
+    bytes.free(h); bytes.free(r); bytes.free(s)
+    return fails
+}
+
+fn rfc6979_p521(x: ptr, ux: ptr, uy: ptr, algo: string, msg: string, want_r: string, want_s: string) -> int {
+    h = digest(algo, msg)
+    r, s = p521.ecdsa_sign(x, h)
+    fails = ck("p521 rfc6979 ${algo} \"${msg}\" r", bh(r), want_r)
+    fails = fails + ck("p521 rfc6979 ${algo} \"${msg}\" s", bh(s), want_s)
+    if p521.ecdsa_verify(ux, uy, h, r, s) != 1 { println("FAIL p521 rfc6979 ${algo} \"${msg}\" does not verify"); fails = fails + 1 }
+    bytes.free(h); bytes.free(r); bytes.free(s)
+    return fails
+}
 
 main() {
     fails = 0
@@ -20,24 +57,113 @@ main() {
     x384, y384 = p384.scalar_mult_base(two384)
     fails = fails + ck("p384 2G x", bh(x384), "08d999057ba3d2d969260045c55b97f089025959a6f434d651d207d19fb96e9e4fe0e86ebe0e64f85b96a9c75295df61")
     fails = fails + ck("p384 2G y", bh(y384), "8e80f1fa5b1b3cedb7bfe8dffd6dba74b275d875bc6cc43e904e505f256ab4255ffd43e94d39e22d61501e700a940e80")
+
+    // --- P-384: RFC 6979 A.2.6 ---
+    x6 = hb("6B9D3DAD2E1B8C1C05B19875B6659F4DE23C3B667BF297BA9AA47740787137D896D5724E4C70A825F872C9EA60D2EDF5")
+    ux6, uy6 = p384.scalar_mult_base(x6)
+    fails = fails + ck("p384 rfc6979 Ux", bh(ux6), "EC3A4E415B4E19A4568618029F427FA5DA9A8BC4AE92E02E06AAE5286B300C64DEF8F0EA9055866064A254515480BC13")
+    fails = fails + ck("p384 rfc6979 Uy", bh(uy6), "8015D9B72D7D57244EA8EF9AC0C621896708A59367F9DFB9F54CA84B3F1C9DB1288B231C3AE0D4FE7344FD2533264720")
+    fails = fails + rfc6979_p384(x6, ux6, uy6, "sha224", "sample",
+        "42356E76B55A6D9B4631C865445DBE54E056D3B3431766D0509244793C3F9366450F76EE3DE43F5A125333A6BE060122",
+        "9DA0C81787064021E78DF658F2FBB0B042BF304665DB721F077A4298B095E4834C082C03D83028EFBF93A3C23940CA8D")
+    fails = fails + rfc6979_p384(x6, ux6, uy6, "sha256", "sample",
+        "21B13D1E013C7FA1392D03C5F99AF8B30C570C6F98D4EA8E354B63A21D3DAA33BDE1E888E63355D92FA2B3C36D8FB2CD",
+        "F3AA443FB107745BF4BD77CB3891674632068A10CA67E3D45DB2266FA7D1FEEBEFDC63ECCD1AC42EC0CB8668A4FA0AB0")
+    fails = fails + rfc6979_p384(x6, ux6, uy6, "sha384", "sample",
+        "94EDBB92A5ECB8AAD4736E56C691916B3F88140666CE9FA73D64C4EA95AD133C81A648152E44ACF96E36DD1E80FABE46",
+        "99EF4AEB15F178CEA1FE40DB2603138F130E740A19624526203B6351D0A3A94FA329C145786E679E7B82C71A38628AC8")
+    fails = fails + rfc6979_p384(x6, ux6, uy6, "sha512", "sample",
+        "ED0959D5880AB2D869AE7F6C2915C6D60F96507F9CB3E047C0046861DA4A799CFE30F35CC900056D7C99CD7882433709",
+        "512C8CCEEE3890A84058CE1E22DBC2198F42323CE8ACA9135329F03C068E5112DC7CC3EF3446DEFCEB01A45C2667FDD5")
+    fails = fails + rfc6979_p384(x6, ux6, uy6, "sha224", "test",
+        "E8C9D0B6EA72A0E7837FEA1D14A1A9557F29FAA45D3E7EE888FC5BF954B5E62464A9A817C47FF78B8C11066B24080E72",
+        "07041D4A7A0379AC7232FF72E6F77B6DDB8F09B16CCE0EC3286B2BD43FA8C6141C53EA5ABEF0D8231077A04540A96B66")
+    fails = fails + rfc6979_p384(x6, ux6, uy6, "sha256", "test",
+        "6D6DEFAC9AB64DABAFE36C6BF510352A4CC27001263638E5B16D9BB51D451559F918EEDAF2293BE5B475CC8F0188636B",
+        "2D46F3BECBCC523D5F1A1256BF0C9B024D879BA9E838144C8BA6BAEB4B53B47D51AB373F9845C0514EEFB14024787265")
+    fails = fails + rfc6979_p384(x6, ux6, uy6, "sha384", "test",
+        "8203B63D3C853E8D77227FB377BCF7B7B772E97892A80F36AB775D509D7A5FEB0542A7F0812998DA8F1DD3CA3CF023DB",
+        "DDD0760448D42D8A43AF45AF836FCE4DE8BE06B485E9B61B827C2F13173923E06A739F040649A667BF3B828246BAA5A5")
+    fails = fails + rfc6979_p384(x6, ux6, uy6, "sha512", "test",
+        "A0D5D090C9980FAF3C2CE57B7AE951D31977DD11C775D314AF55F76C676447D06FB6495CD21B4B6E340FC236584FB277",
+        "976984E59B4C77B0E8E4460DCA3D9F20E07B9BB1F63BEEFAF576F6B2E8B224634A2092CD3792E0159AD9CEE37659C736")
+
+    // --- P-384 round trip, tamper, refusals ---
     d384 = hb("c838b85253ef8dc7394fa5808a5183981c7deef5a69ba8f4f2117ffea39cfcd90e95f6cbc854abacab701d50c1f3cf24")
     h384 = hb("0102030405060708010203040506070801020304050607080102030405060708010203040506070801020304050607aa")
-    k384 = hb("dc6b44036989a196e39d1cdac000812f4bdd8b2db41bb33af51372585ebd1db63f0ce8275aa1fd45e2d2a735f8749359")
     px384, py384 = p384.scalar_mult_base(d384)
-    r384, s384 = p384.ecdsa_sign(d384, h384, k384)
+    r384, s384 = p384.ecdsa_sign(d384, h384)
     if p384.ecdsa_verify(px384, py384, h384, r384, s384) == 1 { println("ok   p384 sign/verify") } else { println("FAIL p384 sign/verify"); fails = fails + 1 }
+    bytes.set(h384, 0, 0)
+    if p384.ecdsa_verify(px384, py384, h384, r384, s384) == 0 { println("ok   p384 tamper rejected") } else { println("FAIL p384 tamper accepted"); fails = fails + 1 }
+    off384 = hb("8e80f1fa5b1b3cedb7bfe8dffd6dba74b275d875bc6cc43e904e505f256ab4255ffd43e94d39e22d61501e700a940e81")
+    if p384.ecdh(d384, x384, off384) == null && p384.public_key_valid(x384, off384) == 0 && p384.public_key_valid(x384, y384) == 1 {
+        println("ok   p384 refuses an off-curve point")
+    } else { println("FAIL p384 accepted an off-curve point"); fails = fails + 1 }
+    z384 = hb("000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000")
+    zr, zs = p384.ecdsa_sign(z384, h384)
+    if zr == null && zs == null && p384.private_key_valid(z384) == 0 && p384.private_key_valid(d384) == 1 {
+        println("ok   p384 refuses a zero key")
+    } else { println("FAIL p384 signed with a zero key"); fails = fails + 1 }
 
     // --- P-521: priv=2 -> 2G ---
     two521 = hb("000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002")
     x521, y521 = p521.scalar_mult_base(two521)
     fails = fails + ck("p521 2G x", bh(x521), "00433c219024277e7e682fcb288148c282747403279b1ccc06352c6e5505d769be97b3b204da6ef55507aa104a3a35c5af41cf2fa364d60fd967f43e3933ba6d783d")
     fails = fails + ck("p521 2G y", bh(y521), "00f4bb8cc7f86db26700a7f3eceeeed3f0b5c6b5107c4da97740ab21a29906c42dbbb3e377de9f251f6b93937fa99a3248f4eafcbe95edc0f4f71be356d661f41b02")
+
+    // --- P-521: RFC 6979 A.2.7 ---
+    x7 = hb("00FAD06DAA62BA3B25D2FB40133DA757205DE67F5BB0018FEE8C86E1B68C7E75CAA896EB32F1F47C70855836A6D16FCC1466F6D8FBEC67DB89EC0C08B0E996B83538")
+    ux7, uy7 = p521.scalar_mult_base(x7)
+    fails = fails + ck("p521 rfc6979 Ux", bh(ux7), "01894550D0785932E00EAA23B694F213F8C3121F86DC97A04E5A7167DB4E5BCD371123D46E45DB6B5D5370A7F20FB633155D38FFA16D2BD761DCAC474B9A2F5023A4")
+    fails = fails + ck("p521 rfc6979 Uy", bh(uy7), "00493101C962CD4D2FDDF782285E64584139C2F91B47F87FF82354D6630F746A28A0DB25741B5B34A828008B22ACC23F924FAAFBD4D33F81EA66956DFEAA2BFDFCF5")
+    fails = fails + rfc6979_p521(x7, ux7, uy7, "sha224", "sample",
+        "01776331CFCDF927D666E032E00CF776187BC9FDD8E69D0DABB4109FFE1B5E2A30715F4CC923A4A5E94D2503E9ACFED92857B7F31D7152E0F8C00C15FF3D87E2ED2E",
+        "0050CB5265417FE2320BBB5A122B8E1A32BD699089851128E360E620A30C7E17BA41A666AF126CE100E5799B153B60528D5300D08489CA9178FB610A2006C254B41F")
+    fails = fails + rfc6979_p521(x7, ux7, uy7, "sha256", "sample",
+        "01511BB4D675114FE266FC4372B87682BAECC01D3CC62CF2303C92B3526012659D16876E25C7C1E57648F23B73564D67F61C6F14D527D54972810421E7D87589E1A7",
+        "004A171143A83163D6DF460AAF61522695F207A58B95C0644D87E52AA1A347916E4F7A72930B1BC06DBE22CE3F58264AFD23704CBB63B29B931F7DE6C9D949A7ECFC")
+    fails = fails + rfc6979_p521(x7, ux7, uy7, "sha384", "sample",
+        "01EA842A0E17D2DE4F92C15315C63DDF72685C18195C2BB95E572B9C5136CA4B4B576AD712A52BE9730627D16054BA40CC0B8D3FF035B12AE75168397F5D50C67451",
+        "01F21A3CEE066E1961025FB048BD5FE2B7924D0CD797BABE0A83B66F1E35EEAF5FDE143FA85DC394A7DEE766523393784484BDF3E00114A1C857CDE1AA203DB65D61")
+    fails = fails + rfc6979_p521(x7, ux7, uy7, "sha512", "sample",
+        "00C328FAFCBD79DD77850370C46325D987CB525569FB63C5D3BC53950E6D4C5F174E25A1EE9017B5D450606ADD152B534931D7D4E8455CC91F9B15BF05EC36E377FA",
+        "00617CCE7CF5064806C467F678D3B4080D6F1CC50AF26CA209417308281B68AF282623EAA63E5B5C0723D8B8C37FF0777B1A20F8CCB1DCCC43997F1EE0E44DA4A67A")
+    fails = fails + rfc6979_p521(x7, ux7, uy7, "sha224", "test",
+        "01C7ED902E123E6815546065A2C4AF977B22AA8EADDB68B2C1110E7EA44D42086BFE4A34B67DDC0E17E96536E358219B23A706C6A6E16BA77B65E1C595D43CAE17FB",
+        "0177336676304FCB343CE028B38E7B4FBA76C1C1B277DA18CAD2A8478B2A9A9F5BEC0F3BA04F35DB3E4263569EC6AADE8C92746E4C82F8299AE1B8F1739F8FD519A4")
+    fails = fails + rfc6979_p521(x7, ux7, uy7, "sha256", "test",
+        "000E871C4A14F993C6C7369501900C4BC1E9C7B0B4BA44E04868B30B41D8071042EB28C4C250411D0CE08CD197E4188EA4876F279F90B3D8D74A3C76E6F1E4656AA8",
+        "00CD52DBAA33B063C3A6CD8058A1FB0A46A4754B034FCC644766CA14DA8CA5CA9FDE00E88C1AD60CCBA759025299079D7A427EC3CC5B619BFBC828E7769BCD694E86")
+    fails = fails + rfc6979_p521(x7, ux7, uy7, "sha384", "test",
+        "014BEE21A18B6D8B3C93FAB08D43E739707953244FDBE924FA926D76669E7AC8C89DF62ED8975C2D8397A65A49DCC09F6B0AC62272741924D479354D74FF6075578C",
+        "0133330865C067A0EAF72362A65E2D7BC4E461E8C8995C3B6226A21BD1AA78F0ED94FE536A0DCA35534F0CD1510C41525D163FE9D74D134881E35141ED5E8E95B979")
+    fails = fails + rfc6979_p521(x7, ux7, uy7, "sha512", "test",
+        "013E99020ABF5CEE7525D16B69B229652AB6BDF2AFFCAEF38773B4B7D08725F10CDB93482FDCC54EDCEE91ECA4166B2A7C6265EF0CE2BD7051B7CEF945BABD47EE6D",
+        "01FBD0013C674AA79CB39849527916CE301C66EA7CE8B80682786AD60F98F7E78A19CA69EFF5C57400E3B3A0AD66CE0978214D13BAF4E9AC60752F7B155E2DE4DCE3")
+
+    // --- P-521 round trip (a 64-byte SHA-512 digest, as it is), refusals ---
     d521 = hb("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123")
-    h521 = hb("0102030405060708010203040506070801020304050607080102030405060708010203040506070801020304050607080102030405060708010203040506070801020a")
-    k521 = hb("00abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab01")
+    h521 = digest("sha512", "P-521 round trip")
     px521, py521 = p521.scalar_mult_base(d521)
-    r521, s521 = p521.ecdsa_sign(d521, h521, k521)
+    r521, s521 = p521.ecdsa_sign(d521, h521)
     if p521.ecdsa_verify(px521, py521, h521, r521, s521) == 1 { println("ok   p521 sign/verify") } else { println("FAIL p521 sign/verify"); fails = fails + 1 }
+    bytes.set(h521, 0, bytes.get(h521, 0) ^ 1)
+    if p521.ecdsa_verify(px521, py521, h521, r521, s521) == 0 { println("ok   p521 tamper rejected") } else { println("FAIL p521 tamper accepted"); fails = fails + 1 }
+    off521 = hb("00f4bb8cc7f86db26700a7f3eceeeed3f0b5c6b5107c4da97740ab21a29906c42dbbb3e377de9f251f6b93937fa99a3248f4eafcbe95edc0f4f71be356d661f41b03")
+    if p521.ecdh(d521, x521, off521) == null && p521.public_key_valid(x521, off521) == 0 && p521.public_key_valid(x521, y521) == 1 {
+        println("ok   p521 refuses an off-curve point")
+    } else { println("FAIL p521 accepted an off-curve point"); fails = fails + 1 }
+    // A 66-byte scalar with bit 521 set is past n.
+    big521 = hb("0200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001")
+    if p521.private_key_valid(big521) == 0 && p521.ecdh(big521, x521, y521) == null { println("ok   p521 refuses a key past n") } else { println("FAIL p521 accepted a key past n"); fails = fails + 1 }
+
+    bytes.free(two384); bytes.free(x384); bytes.free(y384); bytes.free(x6); bytes.free(ux6); bytes.free(uy6)
+    bytes.free(d384); bytes.free(h384); bytes.free(px384); bytes.free(py384); bytes.free(r384); bytes.free(s384)
+    bytes.free(off384); bytes.free(z384)
+    bytes.free(two521); bytes.free(x521); bytes.free(y521); bytes.free(x7); bytes.free(ux7); bytes.free(uy7)
+    bytes.free(d521); bytes.free(h521); bytes.free(px521); bytes.free(py521); bytes.free(r521); bytes.free(s521)
+    bytes.free(off521); bytes.free(big521)
 
     if fails == 0 { println("ALL PASS"); return }
     println("FAILURES"); exit(1)

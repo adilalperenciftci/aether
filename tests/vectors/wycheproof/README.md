@@ -9,7 +9,8 @@ byte-identical at this commit when the pin was advanced for wave 5.) The
 ML-KEM encapsulation and semi-expanded decapsulation files
 (`mlkem_*_encaps_test.json`, `mlkem_*_semi_expanded_decaps_test.json`) were
 added later from the same commit, for the FIPS 203 input checks (#2482), and
-so were the ECDH files (`ecdh_secp*_ecpoint_test.json`), for the
+so were the ECDH files (`ecdh_secp*_ecpoint_test.json`,
+`ecdh_secp256k1_webcrypto_test.json`), for the
 invalid-curve checks (#3291).
 
 Wycheproof is the adversarial complement to the RFC/NIST known-answer
