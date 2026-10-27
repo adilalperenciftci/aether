@@ -1,6 +1,25 @@
 #include "codegen_internal.h"
 #include <string.h>
 
+/* The message name of the `_` arm's handler, `<Actor>_handle__aether_any`:
+ * no message can be named so, `_aether` names being the compiler's. */
+#define RECEIVE_ANY_HANDLER "_aether_any"
+
+/* Whether `actor` has a `_` receive arm (#3289). */
+static int actor_has_wildcard_arm(ASTNode* actor) {
+    for (int i = 0; i < actor->child_count; i++) {
+        ASTNode* rs = actor->children[i];
+        if (!rs || rs->type != AST_RECEIVE_STATEMENT) continue;
+        for (int j = 0; j < rs->child_count; j++) {
+            ASTNode* arm = rs->children[j];
+            if (arm && arm->type == AST_RECEIVE_ARM && arm->child_count >= 2 &&
+                arm->children[0] && arm->children[0]->type == AST_WILDCARD_PATTERN)
+                return 1;
+        }
+    }
+    return 0;
+}
+
 // Helper: given the receive-arm pattern, return 1 if the identifier name `rhs_name`
 // binds a pattern field whose message-def type_kind is TYPE_PTR or TYPE_STRING.
 // "Bound name" is either pf->value or its first PATTERN_VARIABLE child's value
@@ -544,12 +563,17 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                     }
                 }
 
-                // Generate handler if we found a pattern
-                if (pattern && pattern->type == AST_MESSAGE_PATTERN) {
-                    MessageDef* msg_def = lookup_message(gen->message_registry, pattern->value);
-                    if (msg_def) {
+                // Generate handler if we found a pattern. The `_` arm's
+                // handler takes every message type no other arm names
+                // (#3289); it binds nothing.
+                int wildcard = pattern && pattern->type == AST_WILDCARD_PATTERN;
+                if (pattern && (pattern->type == AST_MESSAGE_PATTERN || wildcard)) {
+                    MessageDef* msg_def = wildcard ? NULL
+                                                   : lookup_message(gen->message_registry, pattern->value);
+                    const char* handler_msg = wildcard ? RECEIVE_ANY_HANDLER : pattern->value;
+                    if (msg_def || wildcard) {
                         print_line(gen, "static AETHER_HOT void %s_handle_%s(%s* self, void* _msg_data) {",
-                                  actor->value, pattern->value, actor->value);
+                                  actor->value, handler_msg, actor->value);
                         indent(gen);
                         /* #2498: the handler is a defer scope, as a function
                          * body is, opened before the pattern bindings so a
@@ -593,10 +617,14 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                         for (int k = 0; k < pattern->child_count; k++)
                             if (pattern->children[k] &&
                                 pattern->children[k]->type == AST_PATTERN_FIELD) binds_field = 1;
-                        print_line(gen, binds_field ? "%s* _pattern = (%s*)_msg_data;"
-                                                    : "%s* _pattern = (%s*)_msg_data; (void)_pattern;",
-                                   pattern->value, pattern->value);
-                        mark_var_declared(gen, "_pattern");
+                        if (wildcard) {
+                            print_line(gen, "(void)_msg_data;");
+                        } else {
+                            print_line(gen, binds_field ? "%s* _pattern = (%s*)_msg_data;"
+                                                        : "%s* _pattern = (%s*)_msg_data; (void)_pattern;",
+                                       pattern->value, pattern->value);
+                            mark_var_declared(gen, "_pattern");
+                        }
 
                         // This arm's Route 1 promoted names (published
                         // below). The synthetic name matches what
@@ -929,6 +957,9 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
         print_line(gen, "// COMPUTED GOTO DISPATCH - 15-30%% faster than switch");
         print_line(gen, "static void* dispatch_table[256] = {");
         indent(gen);
+        /* An actor whose only arm is `_` names no message: C11 has no
+         * empty initializer. */
+        if (pattern_count == actor_has_wildcard_arm(actor)) print_line(gen, "0");
 
         // Generate dispatch table with labels (GCC/Clang path)
         for (int i = 0; i < actor->child_count; i++) {
@@ -1004,8 +1035,12 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
         print_line(gen, "default: break;");
         print_line(gen, "}");
         print_line(gen, "#endif");
-        /* A type it has no handler for is dropped, its payload with what
+        /* A type no arm names goes to the `_` arm when there is one
+         * (#3289), recorded as a named arm's payload is for a panic out of
+         * it; then, handled or not, it is dropped, its payload with what
          * its fields own (#3142). */
+        if (actor_has_wildcard_arm(actor))
+            emit_handler_on_payload(gen, actor->value, RECEIVE_ANY_HANDLER);
         print_line(gen, "aether_message_drop(&self->_aether_base, &msg);");
         emit_timeout_rearm(gen, timeout_arm);
         print_line(gen, "return;  // Unknown message type");

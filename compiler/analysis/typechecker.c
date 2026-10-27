@@ -7986,11 +7986,30 @@ static ASTNode* receive_arm_message_pattern(ASTNode* arm) {
 static void reject_duplicate_receive_arms(ASTNode* actor) {
     ASTNode* seen[256];
     int seen_count = 0;
+    ASTNode* first_wildcard = NULL;
     for (int i = 0; i < actor->child_count; i++) {
         ASTNode* rs = actor->children[i];
         if (!rs || rs->type != AST_RECEIVE_STATEMENT) continue;
         for (int j = 0; j < rs->child_count; j++) {
-            ASTNode* pattern = receive_arm_message_pattern(rs->children[j]);
+            ASTNode* arm = rs->children[j];
+            /* One `_` arm takes every message no other arm names (#3289);
+             * a second never runs. */
+            if (arm && arm->type == AST_RECEIVE_ARM && arm->child_count >= 2 && arm->children[0] &&
+                arm->children[0]->type == AST_WILDCARD_PATTERN) {
+                if (first_wildcard) {
+                    char msg[320];
+                    snprintf(msg, sizeof(msg),
+                             "this `_` arm can never run: the `_` arm at line %d already "
+                             "receives every message of actor '%s' that no other arm names",
+                             first_wildcard->line, actor->value ? actor->value : "?");
+                    type_error_code_hint(msg, "keep one `_` arm", arm->line, arm->column,
+                                         AETHER_ERR_ACTOR_ERROR);
+                } else {
+                    first_wildcard = arm;
+                }
+                continue;
+            }
+            ASTNode* pattern = receive_arm_message_pattern(arm);
             if (!pattern || !pattern->value) continue;
             ASTNode* first = NULL;
             for (int s = 0; s < seen_count && !first; s++)
@@ -8009,6 +8028,56 @@ static void reject_duplicate_receive_arms(ASTNode* actor) {
             }
         }
     }
+}
+
+/* #385: the actor a reference's type names, a `spawn(A())` result or a
+ * reference typed `actor_ref[A]`; NULL for a bare `actor_ref`, which is the
+ * dynamic escape and stays unchecked. */
+static ASTNode* actor_ref_target_actor(Type* t, SymbolTable* table) {
+    if (!t || t->kind != TYPE_ACTOR_REF || !t->element_type ||
+        t->element_type->kind != TYPE_STRUCT || !t->element_type->struct_name)
+        return NULL;
+    Symbol* s = lookup_symbol(table, t->element_type->struct_name);
+    return s && s->node && s->node->type == AST_ACTOR_DEFINITION ? s->node : NULL;
+}
+
+/* #385: whether `actor` takes messages named `msg`: an arm names it, or a
+ * `_` arm takes every message no arm names (#3289). */
+static int actor_receives_message(ASTNode* actor, const char* msg) {
+    for (int i = 0; i < actor->child_count; i++) {
+        ASTNode* rs = actor->children[i];
+        if (!rs || rs->type != AST_RECEIVE_STATEMENT) continue;
+        for (int j = 0; j < rs->child_count; j++) {
+            ASTNode* arm = rs->children[j];
+            if (arm && arm->type == AST_RECEIVE_ARM && arm->child_count >= 2 && arm->children[0] &&
+                arm->children[0]->type == AST_WILDCARD_PATTERN)
+                return 1;
+            ASTNode* pattern = receive_arm_message_pattern(arm);
+            if (pattern && pattern->value && strcmp(pattern->value, msg) == 0) return 1;
+        }
+    }
+    return 0;
+}
+
+/* #385: a send or an ask of a message that the target actor has no arm
+ * for, where the target's type names its actor, is refused: at run time the
+ * message is dropped (an ask's caller waits for nothing). A bare
+ * `actor_ref` is not checked. */
+static void reject_unhandled_send(ASTNode* target, ASTNode* message, SymbolTable* table) {
+    if (!target || !message || message->type != AST_MESSAGE_CONSTRUCTOR || !message->value) return;
+    Type* t = infer_type(target, table);
+    ASTNode* actor = actor_ref_target_actor(t, table);
+    if (t) free_type(t);
+    if (!actor || actor_receives_message(actor, message->value)) return;
+    char msg[400], hint[400];
+    snprintf(msg, sizeof(msg),
+             "actor '%s' has no receive arm for '%s', so this message would be dropped",
+             actor->value ? actor->value : "?", message->value);
+    snprintf(hint, sizeof(hint),
+             "add an arm for `%s` (or a `_` arm) to '%s', or send through a bare `actor_ref`, "
+             "which is not checked",
+             message->value, actor->value ? actor->value : "?");
+    type_error_code_hint(msg, hint, message->line, message->column, AETHER_ERR_ACTOR_ERROR);
 }
 
 static const char* ret_type_spell(Type* t, char* buf, size_t n);
@@ -15011,6 +15080,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
 
                 // Validate field value types match declared field types
                 typecheck_message_constructor(message, table);
+                reject_unhandled_send(actor_ref, message, table);   /* #385 */
             }
             return 1;
         }
@@ -17525,6 +17595,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
 
                 // Validate field value types match declared field types
                 typecheck_message_constructor(message, table);
+                reject_unhandled_send(actor_ref, message, table);   /* #385 */
             }
             set_node_type(expr, create_type(TYPE_VOID));
             return 1;
@@ -17549,6 +17620,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                         return 0;
                     }
                     typecheck_message_constructor(message, table);
+                    reject_unhandled_send(expr->children[0], message, table);   /* #385 */
                 } else {
                     typecheck_expression(message, table);
                 }

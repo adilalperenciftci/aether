@@ -1,0 +1,69 @@
+// A receive arm `_ -> { ... }` takes every message no other arm of the
+// actor names (#3289).
+//
+// The bug: the language reference documented the `_` arm, and it parsed and
+// type-checked, but codegen built handlers and the dispatch only from arms
+// that name a message. A message with no named arm was dropped, so the
+// wildcard body never ran, and an actor whose only arm is `_` had none.
+// Pre-fix this exits 1 at the first check. The fix gives the `_` arm a
+// handler of its own and dispatches every unnamed message type to it; the
+// message is then released as a handled one is (its string field here,
+// which the macOS leaks gate would report), and an ask the body does not
+// answer fails at once, as one a named arm does not answer does.
+
+message Known { n: int }
+message Note { text: string }
+message Ping {}
+message Count {}
+
+actor Box {
+    state known = 0
+    state other = 0
+
+    receive {
+        Known(n) -> { known = known + n }
+        Count() -> { reply known * 100 + other }
+        _ -> { other = other + 1 }
+    }
+}
+
+// Only a `_` arm: every message reaches it.
+actor Sink {
+    state seen = 0
+
+    receive {
+        _ -> { seen = seen + 1 }
+    }
+}
+
+main() {
+    b = spawn(Box())
+    b ! Known { n: 3 }
+    b ! Note { text: "a note the wildcard drops, ${3}" }
+    b ! Ping {}
+    b ! Known { n: 4 }
+    got = b ? Count {}
+    if got != 702 {
+        println("FAIL: the `_` arm saw the wrong messages: ${got}, expected 702")
+        exit(1)
+    }
+
+    // An ask that only the `_` arm takes, which does not reply: it fails
+    // at once rather than after the timeout.
+    _v, err = b ? Ping {}
+    if err != "the handler returned without replying" {
+        println("FAIL: an ask the `_` arm took ended with '${err}'")
+        exit(1)
+    }
+
+    s = spawn(Sink())
+    s ! Note { text: "one" }
+    s ! Known { n: 1 }
+    s ! Ping {}
+    wait_for_idle()
+    if s.seen != 3 {
+        println("FAIL: an actor with only a `_` arm saw ${s.seen} of 3 messages")
+        exit(1)
+    }
+    println("receive wildcard arm: all checks passed (3)")
+}

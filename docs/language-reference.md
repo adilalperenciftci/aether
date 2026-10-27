@@ -3426,6 +3426,24 @@ counter ! Increment { amount: 10 }
 counter ! Reset {}
 ```
 
+A send, or an ask, of a message the target actor has no receive arm for is
+a compile error (E0600) wherever the target's type names its actor: the
+result of `spawn(Counter())`, and a parameter, field or result typed
+`actor_ref[Counter]` (#385). At run time such a message would be dropped. An
+actor with a `_` arm (see [Wildcard Handler](#wildcard-handler)) takes every
+message. A bare `actor_ref` names no actor and is not checked: it is the way
+to send a message chosen at run time, and the type of references that come
+from a registry or a map.
+
+```aether,fragment
+w = spawn(Writer())     // Writer has an arm for Open only
+w ! Close {}            // error: actor 'Writer' has no receive arm for 'Close'
+```
+
+A function can take or return a typed reference, `close_it(w:
+actor_ref[Writer])` or `-> actor_ref[Writer]`, and a `spawn` result passes
+where one is wanted.
+
 ### Ask Pattern (Request-Reply)
 
 The `?` operator sends a message and blocks until the actor replies. The compiler
@@ -3537,6 +3555,15 @@ receive {
     _ -> { println("unknown message") }
 }
 ```
+
+The `_` arm runs for every message type that no other arm of the actor
+names, wherever it stands among the arms, and binds nothing; the message is
+then released as a handled one is (#3289). An ask that only the `_` arm
+takes, and that it does not answer with `reply`, fails at once with `"the
+handler returned without replying"`. An actor has at most one `_` arm: a
+second can never run, and is an error. An actor without one drops a message
+no arm names, which is why a send of such a message, where the compiler
+knows the actor, is refused (see [Sending Messages](#sending-messages-fire-and-forget)).
 
 ---
 
@@ -4757,7 +4784,7 @@ An error stops the build and prints its code, `error[E0301]: ...`, with the sour
 | `E0303` | A name the module does not export |
 | `E0304` | A name hidden in this scope by `hide` or `seal except` ([hide and seal](hide-and-seal.md)) |
 | `E0305` | A module exports two names that answer to one short name, `add` beside `aether_set_add` or `join` beside `string_join`: one name per operation ([module-system-design.md](module-system-design.md)) |
-| `E0600` | An actor rule, such as a closure in a handler writing the actor's state |
+| `E0600` | An actor rule, such as a closure in a handler writing the actor's state, a send of a message the target actor has no arm for, or a second `_` arm |
 | `E0700` | Missing return: control can reach the end of a function whose result is not void ([Returning on every path](#returning-on-every-path-e0700)) |
 | `E0701` | A `select()` with no value for a platform (`linux:`, `windows:`, `macos:`) and no `other:` fallback ([named-args-and-select.md](named-args-and-select.md#missing-platform-is-a-compile-error)) |
 | `E0800` | A construct a quote cannot hold: a closure, `callback` or block inside one, `defer`, `try`, `panic`, an actor operation, `match`, string interpolation, `new`, an array literal ([quote.md](quote.md#what-a-quote-may-contain-and-the-errors)) |
