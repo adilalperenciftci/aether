@@ -3016,6 +3016,80 @@ static void reject_pointer_argument(ASTNode* call, ASTNode* arg, Type* arg_type,
     type_error(emsg, arg->line, arg->column);
 }
 
+/* Does this call leave a `_ctx`-first callee's `_ctx` to be injected? A
+ * builder's block supplies it, so the call gives one argument fewer than the
+ * parameters (`input("order", "map")` for `input(_ctx, name, type)`), or
+ * ends in a trailing block that no parameter takes (`vstack(4) { ... }` is
+ * one argument and a block for two parameters). An extern's parameters are
+ * plain identifiers, which has_ctx_first_param does not read, so the name is
+ * looked for directly. */
+static int ctx_injected_by_block(ASTNode* fn, ASTNode* call) {
+    int first = -1;
+    for (int i = 0; i < fn->child_count && first < 0; i++) {
+        if (is_call_param(fn, fn->children[i])) first = i;
+    }
+    if (first < 0 || !fn->children[first]->value ||
+        strcmp(fn->children[first]->value, "_ctx") != 0)
+        return 0;
+    int expected = 0;
+    int limit = fn->type == AST_EXTERN_FUNCTION ? fn->child_count : fn->child_count - 1;
+    for (int i = 0; i < limit; i++) {
+        if (is_call_param(fn, fn->children[i])) expected++;
+    }
+    int non_closure = 0;
+    for (int i = 0; i < call->child_count; i++) {
+        if (call->children[i] && call->children[i]->type != AST_CLOSURE) non_closure++;
+    }
+    return call->child_count == expected - 1 || non_closure == expected - 1;
+}
+
+/* A float or a bool passed to a `ptr` parameter. Argument checking is
+ * lenient, so `f(p: ptr)` called as `f(0.1)` passed `ae check` and only the C
+ * compiler refused it ("passing 'double' to parameter of incompatible type
+ * 'void *'"). An int still goes to a `ptr` (C's `(void*)(intptr_t)` idiom for
+ * a value held in a container) and so does a string (its characters, or the
+ * AetherString for an `@aether` parameter), so neither is refused in general.
+ * The one place they are is a builder's `_ctx`: it is filled from the
+ * enclosing block, never from a value, and an argument landing there means
+ * the call gave one too many (aether-ui's `text_color(_ctx, r, g, b)` called
+ * with four floats in a trailing block fills every parameter, so no `_ctx`
+ * is injected and `0.1` falls into it). A literal 0 stays: it is `null`. */
+static void reject_scalar_for_ptr_argument(ASTNode* call, ASTNode* arg, Type* arg_type,
+                                           Type* param_type, int index,
+                                           const char* param_name) {
+    if (!arg_type || !param_type || param_type->kind != TYPE_PTR) return;
+    /* A `_ctx` is only reached with an argument when the call names it: an
+     * injected one has no argument slot. */
+    int is_ctx = param_name && strcmp(param_name, "_ctx") == 0 && index == 1;
+    const char* what = NULL;
+    switch (arg_type->kind) {
+        case TYPE_FLOAT: case TYPE_FLOAT32: what = "a float"; break;
+        case TYPE_BOOL: what = "a bool"; break;
+        default: break;
+    }
+    if (!what && is_ctx) {
+        int zero = arg->type == AST_LITERAL && arg->value && strcmp(arg->value, "0") == 0;
+        if (arg_type->kind == TYPE_STRING) what = "a string";
+        /* Only a literal: a local that holds a handle (`row = hstack(...)`)
+         * is inferred an int, and is passed as `_ctx` on purpose. */
+        else if (arg_type->kind == TYPE_INT && arg->type == AST_LITERAL && !zero)
+            what = "an int";
+    }
+    if (!what) return;
+    char emsg[512];
+    snprintf(emsg, sizeof(emsg),
+             "Argument %d '%s' of '%s': expected %s, got %s (%s)",
+             index, param_name ? param_name : "?", call->value ? call->value : "?",
+             type_name(param_type), type_name(arg_type), what);
+    if (is_ctx)
+        type_error_hint(emsg,
+                        "too many arguments? `_ctx` is supplied by the enclosing block; "
+                        "leave it out and pass only the arguments after it",
+                        arg->line, arg->column);
+    else
+        type_error(emsg, arg->line, arg->column);
+}
+
 /* An optional is never unwrapped implicitly (is_type_compatible's #340
  * rule): a binding or a `return` of a `T?` where a `T` goes is refused, and
  * so is an argument. Lenient, argument checking passed a `string?` to a
@@ -20986,6 +21060,19 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                     reject_fn_mode_argument(table, call, darg, da, param_type, arg_slot + 1, param->value);
                     reject_struct_argument(call, darg, da, param_type, arg_slot + 1, param->value);
                     reject_pointer_argument(call, darg, da, param_type, arg_slot + 1, param->value);
+                    /* A builder's `_ctx` that the trailing block injects has no
+                     * argument, and the arguments after it sit one slot earlier
+                     * than this loop's position (`vstack(4) { ... }` is one
+                     * argument and a block for two parameters). */
+                    int blk_inj = ctx_injected_by_block(symbol->node, call);
+                    if (!blk_inj) {
+                        reject_scalar_for_ptr_argument(call, darg, da, param_type, arg_slot + 1, param->value);
+                    } else if (arg_slot >= 1 && call->children[arg_slot - 1]) {
+                        ASTNode* sarg = call->children[arg_slot - 1];
+                        Type* sa = infer_type(sarg, table);
+                        reject_scalar_for_ptr_argument(call, sarg, sa, param_type, arg_slot, param->value);
+                        if (sa) free_type(sa);
+                    }
                     reject_sized_array_argument(call, darg, da, param_type, arg_slot + 1, param->value);
                     int nominal = param_type->distinct_name || (da && da->distinct_name) ||
                                   param_type->kind == TYPE_BITSTRUCT ||
