@@ -611,7 +611,7 @@ static int ev_next_timeout_ms(EvDriver* d, int cap_ms) {
 static void ev_arm_deadline(EvDriver* d, EvConn* c);
 static int  ev_expire(EvDriver* d, EvConn* c);
 static int  ev_hand_back(EvDriver* d, EvConn* c);
-static int  ev_hand_to_tls(EvDriver* d, EvConn* c);
+static int  ev_hand_to_worker(EvDriver* d, EvConn* c);
 static int  ev_watch_upstream(EvDriver* d, EvConn* c);
 static void ev_lend_rxbuf(EvConn* c);
 static int  ev_respond_from(EvDriver* d, EvConn* c);
@@ -1072,14 +1072,16 @@ static int ev_begin_retry_ex(EvDriver* d, EvConn* c, int next_addr) {
     int port = 0, use_tls = 0;
     if (!url || !parse_url_alloc(url, host, sizeof(host), &port, &path, &use_tls))
         return -1;
-    if (use_tls) { free(path); return ev_hand_to_tls(d, c); }   /* #3231 */
+    if (use_tls) { free(path); return ev_hand_to_worker(d, c); }   /* #3231 */
 
     int fresh = c->dial_fresh;
     c->dial_fresh = 0;
     int fd = next_addr ? http_upstream_redial(host, port, &c->up)
-                       : http_upstream_acquire_ex(host, port, !fresh, &c->up);
+                       : http_upstream_acquire_nb(host, port, !fresh, &c->up);
     if (fd < 0) {
         free(path);
+        /* A name to look up, which this thread must not wait on (#3267). */
+        if (http_upstream_needs_lookup(&c->up)) return ev_hand_to_worker(d, c);
         return ev_upstream_failed(d, c, "connection failed", 0);
     }
 
@@ -1204,15 +1206,18 @@ static int ev_hand_over(EvDriver* d, EvConn* c) {
     return ev_hand_over_from(d, c, 0);
 }
 
-/* The proxy picked an https upstream, which this driver cannot dial: it has
- * no TLS client, and it used to close the client's connection with nothing
- * written (#3231). A server with one is not served here at all
- * (http_server_evloop_serves); one added while this request was on its way,
- * or picked by a retry, lands here. The pick goes back, and the request goes
- * to the worker path, whose client speaks TLS: from the mount itself when
- * the middleware ahead of it already ran here, else with its bytes, as if
- * this driver had never read it. */
-static int ev_hand_to_tls(EvDriver* d, EvConn* c) {
+/* The proxy picked an upstream this driver cannot dial without waiting. An
+ * https one: it has no TLS client, and it used to close the client's
+ * connection with nothing written (#3231); a server with one is not served
+ * here at all (http_server_evloop_serves), so one added while this request
+ * was on its way, or picked by a retry, lands here. Or one whose name has to
+ * be looked up, which would stop every connection this driver holds while
+ * the resolver answers (#3267); the worker path's dial looks it up and
+ * leaves the answer for this driver's next requests. The pick goes back,
+ * and the request goes to the worker path: from the mount itself when the
+ * middleware ahead of it already ran here, else with its bytes, as if this
+ * driver had never read it. */
+static int ev_hand_to_worker(EvDriver* d, EvConn* c) {
     aether_proxy_exchange_abandon(&c->px);
     ev_release_attempt(c);
     if (!c->before_proxy) return ev_hand_back(d, c);
@@ -1424,11 +1429,14 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
         return -1;
     /* this driver dials plain HTTP only: an https upstream is the worker
      * path's (#3231) */
-    if (use_tls) { free(path); return ev_hand_to_tls(d, c); }   /* #3231 */
+    if (use_tls) { free(path); return ev_hand_to_worker(d, c); }   /* #3231 */
 
-    int fd = http_upstream_acquire(host, port, &c->up);
+    /* Never a name lookup on this thread: a numeric address or a name some
+     * dial resolved lately, else the worker path dials (#3267). */
+    int fd = http_upstream_acquire_nb(host, port, 1, &c->up);
     if (fd < 0) {
         free(path);
+        if (http_upstream_needs_lookup(&c->up)) return ev_hand_to_worker(d, c);
         return ev_upstream_failed(d, c, "connection failed", 0);
     }
 

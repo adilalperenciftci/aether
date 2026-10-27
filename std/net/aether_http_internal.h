@@ -125,6 +125,11 @@ struct HttpUpstreamConnOpaque {
      * for a pooled connection, and for a name with one address. */
     char dial_host[128];
     int  dial_port;
+    /* A dial that may not wait on a name lookup (http_upstream_acquire_nb,
+     * the proxy event loop's), and whether one failed for want of one: the
+     * name was neither numeric nor resolved lately (#3267). */
+    int  no_lookup;
+    int  needs_lookup;
     char pool_key[512];
 };
 

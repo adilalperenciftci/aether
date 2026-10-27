@@ -1,0 +1,126 @@
+// The proxy event loop never waits on a name lookup (#3267).
+//
+// The loop dialled a fresh upstream connection with getaddrinfo on its
+// driver thread, so a name the resolver was slow to answer, seconds for one
+// that does not exist, stopped every connection that driver held. Now an
+// upstream's name is looked up when it is added to its pool, and the loop
+// dials a numeric address, or a name the server has looked up (and looks up
+// again every ten seconds while it is in use, on a thread of its own),
+// itself; a request whose name needs a lookup goes to the worker path, whose
+// dial waits on the resolver instead and leaves the answer for the loop.
+//
+// Two gateways, on one kept connection each. One proxies to "localhost",
+// looked up as its upstream was added: its request stays on the loop. The
+// other proxies to a name in .invalid, which never resolves (RFC 6761): its
+// request goes to the worker path, which answers 502 and serves the
+// connection from then on, so the loop holds none of its connections. On a
+// platform without the loop (Windows) every connection is the worker path's
+// and the checks hold as they are. Every server listens on 127.0.0.1 and a
+// port the kernel picks.
+
+import std.http
+import std.http.proxy
+import std.string
+import std.tcp
+
+extern exit(code: int)
+extern http_server_evloop_active(server: ptr) -> int
+extern http_server_evloop_connections(server: ptr) -> int
+
+handle_p(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_body(res, "p")
+}
+
+start(server: ptr) -> int {
+    if http.server_bind(server, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    err = http.server_start_background(server)
+    if err != "" {
+        println("FAIL: ${err}")
+        exit(1)
+    }
+    return http.server_port(server)
+}
+
+gateway(up_url: string) -> ptr {
+    s = http.server_create(0)
+    http.server_set_host(s, "127.0.0.1")
+    merr = proxy.mount_simple(s, "/", up_url, 5)
+    if merr != "" {
+        println("FAIL: mount: ${merr}")
+        exit(1)
+    }
+    return s
+}
+
+// One GET on `sock`, which stays open; the status code. Thirty seconds, for
+// a resolver slow to say a name does not exist.
+get(sock: ptr) -> string {
+    tcp.write(sock, "GET /p HTTP/1.1\r\nHost: x\r\n\r\n")
+    wire = ""
+    tries = 0
+    while tries < 300 && string.index_of(wire, "\r\n\r\n") < 0 {
+        ready, _perr = tcp.poll(sock, 100)
+        if ready {
+            chunk, rerr = tcp.read(sock, 4096)
+            if rerr != "" || string.length(chunk) == 0 {
+                tries = 300
+            } else {
+                wire = string.concat(wire, chunk)
+            }
+        }
+        tries = tries + 1
+    }
+    if string.length(wire) < 12 {
+        return "none"
+    }
+    return string.substring(wire, 9, 12)
+}
+
+main() {
+    println("=== the event loop never waits on a name lookup (#3267) ===")
+    upstream = http.server_create(0)
+    http.server_set_host(upstream, "127.0.0.1")
+    http.server_get(upstream, "/p", handle_p, 0)
+    up_port = start(upstream)
+
+    labels = ["a name looked up as the upstream was added", "a name that does not resolve"]
+    urls = ["http://localhost:${up_port}", "http://nohost.invalid:9"]
+    statuses = ["200", "502"]
+    held_after = [1, 0]
+    bad = 0
+    i = 0
+    while i < 2 {
+        s = gateway(urls[i])
+        port = start(s)
+        sleep(100)
+        sock, cerr = tcp.connect("127.0.0.1", port)
+        if cerr != "" {
+            println("FAIL: connect")
+            exit(1)
+        }
+        got = get(sock)
+        sleep(100)
+        held = http_server_evloop_active(s)
+        has_loop = http_server_evloop_connections(s) > 0
+        tcp.close(sock)
+        if got != statuses[i] || (has_loop && held != held_after[i]) {
+            println("  FAIL ${labels[i]}: got ${got} with ${held} on the loop, expected ${statuses[i]} with ${held_after[i]}")
+            bad = bad + 1
+        } else {
+            println("  PASS ${labels[i]}")
+        }
+        http.server_stop(s)
+        i = i + 1
+    }
+
+    http.server_stop(upstream)
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

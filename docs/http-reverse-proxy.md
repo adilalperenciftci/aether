@@ -378,6 +378,11 @@ configuration to do so:
   the cores, eight at least): its total is the worker path's, not the cap
   times every connection a client opens (#3263). Every connection keeps at
   most 64 KiB of buffers between requests, on either path (#3262).
+- a request whose upstream name the server has not looked up: the driver
+  never waits on a resolver. An upstream's name is looked up as it is added
+  to its pool and again every ten seconds while it is in use, on a thread of
+  its own, and the driver dials from that answer; a name with none (one that
+  does not resolve) goes to the worker path, whose dial waits (#3267)
 - a server that terminates TLS with the pure-Aether stack (`AETHER_PURE_TLS=1`,
   or a build without OpenSSL): the driver's TLS is OpenSSL's (#3256)
 - a server whose first proxy mount has an https upstream: the driver dials

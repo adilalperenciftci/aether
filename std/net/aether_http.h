@@ -412,6 +412,21 @@ int  http_upstream_connected(HttpUpstreamConn* c);
  * the same state http_upstream_acquire leaves one, or -1. */
 int  http_upstream_has_next(HttpUpstreamConn* c);
 int  http_upstream_redial(const char* host, int port, HttpUpstreamConn* c);
+/* http_upstream_acquire_ex that never waits on a name lookup, for a caller
+ * that must not block (the proxy event loop, #3267): a fresh dial goes ahead
+ * for a numeric address, or a name a dial has looked up (kept fresh by a
+ * thread of its own every ten seconds while it is in use), and otherwise
+ * fails with http_upstream_needs_lookup set, for the caller to give the
+ * request to a path that can wait. A redial of such a connection does the
+ * same. */
+int  http_upstream_acquire_nb(const char* host, int port, int allow_pool,
+                              HttpUpstreamConn* out);
+int  http_upstream_needs_lookup(const HttpUpstreamConn* c);
+/* Look up the name in an http:// URL now, blocking, so a no-lookup dial
+ * finds it from then on (the proxy pool calls it as an upstream is added).
+ * A no-op for a numeric address, https, and where there is no proxy event
+ * loop, Windows among them (#3267). */
+void http_upstream_resolve_ahead(const char* url);
 void http_upstream_release(HttpUpstreamConn* c, int keep);
 /* Whether a response head lets its connection carry another request: not
  * when it says Connection: close, nor when it is HTTP/1.0 without a
