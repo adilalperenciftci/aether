@@ -1,0 +1,300 @@
+// #3302: std.tar reads pax and GNU archives. The reader refused every
+// archive git archive, GitHub and GitLab serve: they open with a pax global
+// header (typeflag 'g'), which stopped it with "unsupported entry type
+// flag", and GNU tar's magic ("ustar", two spaces, a NUL) failed the format
+// check. Paths past ustar's 255 bytes, which pax 'x' headers and GNU 'L'
+// and 'K' entries carry before the entry they name, could not be read, nor
+// a pax size. Each archive here is built byte by byte; before the fix the
+// first reader_next on any of them failed. The bounds on metadata entries
+// (1 MiB each, 64 before an entry) are checked too.
+import std.bytes
+import std.fs
+import std.mem
+import std.os
+import std.string
+import std.tar
+
+extern exit(code: int)
+
+check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// An octal field of `width` bytes: digits, then a NUL.
+put_octal(buf: ptr, at: int, width: int, value: long) {
+    var v = value
+    var i = width - 2
+    while i >= 0 {
+        bytes.set(buf, at + i, 48 + (v % 8) as int)
+        v = v / 8
+        i = i - 1
+    }
+    bytes.set(buf, at + width - 1, 0)
+}
+
+// A 512-byte header at `at`: POSIX ustar magic, or GNU's when `gnu`.
+put_header(buf: ptr, at: int, name: string, size: long, typeflag: int, link: string, gnu: bool) {
+    bytes.copy_from_string(buf, at, name, string.length(name))
+    put_octal(buf, at + 100, 8, 420 as long)
+    put_octal(buf, at + 108, 8, 0 as long)
+    put_octal(buf, at + 116, 8, 0 as long)
+    put_octal(buf, at + 124, 12, size)
+    put_octal(buf, at + 136, 12, 0 as long)
+    bytes.set(buf, at + 156, typeflag)
+    bytes.copy_from_string(buf, at + 157, link, string.length(link))
+    bytes.copy_from_string(buf, at + 257, "ustar", 5)
+    if gnu {
+        bytes.set(buf, at + 262, 32)
+        bytes.set(buf, at + 263, 32)
+        bytes.set(buf, at + 264, 0)
+    } else {
+        bytes.set(buf, at + 262, 0)
+        bytes.set(buf, at + 263, 48)
+        bytes.set(buf, at + 264, 48)
+    }
+    // The checksum counts its own field as spaces.
+    var sum: long = 0
+    var i = 0
+    while i < 512 {
+        if i >= 148 && i < 156 {
+            sum = sum + 32
+        } else {
+            sum = sum + bytes.get(buf, at + i)
+        }
+        i = i + 1
+    }
+    put_octal(buf, at + 148, 7, sum)
+    bytes.set(buf, at + 155, 32)
+}
+
+// A pax record: `<length> <key>=<value>\n`, the length counting itself.
+pax_record(key: string, value: string) -> string {
+    body = " ${key}=${value}\n"
+    var len = string.length(body) + 1
+    var digits = string.length("${len}")
+    while string.length("${len}") + string.length(body) != len {
+        len = string.length(body) + digits
+        digits = string.length("${len}")
+    }
+    return "${len}${body}"
+}
+
+// The archive so far, `at` bytes, with its two end blocks, written to `path`.
+finish(buf: ptr, at: int, path: string) {
+    s = bytes.to_string(buf, at + 1024)
+    fs.write_binary(path, string.bytes(s)[0..at + 1024])
+}
+
+// A metadata entry (header and payload) at `at`; the offset after it.
+put_meta(buf: ptr, at: int, typeflag: int, payload: string, gnu: bool) -> int {
+    n = string.length(payload)
+    name = "././@LongLink"
+    if typeflag == 120 || typeflag == 103 {
+        name = "PaxHeader"
+    }
+    put_header(buf, at, name, n as long, typeflag, "", gnu)
+    bytes.copy_from_string(buf, at + 512, payload, n)
+    return at + 512 + ((n + 511) / 512) * 512
+}
+
+// A regular file entry holding `data` at `at`; the offset after it.
+put_file(buf: ptr, at: int, name: string, data: string, gnu: bool) -> int {
+    n = string.length(data)
+    put_header(buf, at, name, n as long, 48, "", gnu)
+    bytes.copy_from_string(buf, at + 512, data, n)
+    return at + 512 + ((n + 511) / 512) * 512
+}
+
+new_archive(size: int) -> ptr {
+    buf = bytes.new(size)
+    var i = 0
+    while i < size {
+        bytes.set(buf, i, 0)
+        i = i + 1
+    }
+    return buf
+}
+
+// The name and the bytes of the archive's one entry.
+read_one(path: string) -> (string, string, string) {
+    r, err = tar.reader_open(path)
+    if err != "" {
+        return "", "", err
+    }
+    ok, nerr = tar.reader_next(r)
+    if nerr != "" || ok != 1 {
+        tar.reader_close(r)
+        return "", "", "next: ${nerr}"
+    }
+    name = string.copy(tar.entry_name(r))
+    chunk, _n, rerr = tar.entry_read(r, 4096)
+    data = string.copy(chunk)
+    if rerr != "" {
+        tar.reader_close(r)
+        return "", "", "read: ${rerr}"
+    }
+    _ok, eerr = tar.reader_next(r)
+    tar.reader_close(r)
+    if eerr != "" {
+        return "", "", "end: ${eerr}"
+    }
+    return name, data, ""
+}
+
+// The error reader_next gives on the archive.
+next_error(path: string) -> string {
+    r, err = tar.reader_open(path)
+    if err != "" {
+        return err
+    }
+    _ok, nerr = tar.reader_next(r)
+    out = string.copy(nerr)
+    tar.reader_close(r)
+    return out
+}
+
+// Every archive above, read again.
+reread(dir: string) {
+    _n1, _d1, _e1 = read_one("${dir}/global.tar")
+    _n2, _d2, _e2 = read_one("${dir}/pax_path.tar")
+    _n3, _d3, _e3 = read_one("${dir}/gnu_long.tar")
+    r, _oerr = tar.reader_open("${dir}/gnu_link.tar")
+    _ok, _lerr = tar.reader_next(r)
+    tar.reader_close(r)
+    _f = next_error("${dir}/bad_record.tar")
+    _g = next_error("${dir}/huge_meta.tar")
+    _h = next_error("${dir}/meta_run.tar")
+    _t = next_error("${dir}/cut_meta.tar")
+}
+
+long_path() -> string {
+    var p = "top"
+    var i = 0
+    while i < 30 {
+        p = "${p}/directory_${i}"
+        i = i + 1
+    }
+    return "${p}/file.txt"
+}
+
+main() {
+    dir = "${os.temp_dir()}/aether_tar_pax_${os.getpid()}"
+    fs.mkdir_p(dir)
+    deep = long_path()
+    check(string.length(deep) > 255, "the long path fits ustar")
+
+    // git archive's shape: a pax global header, then the entries.
+    a = new_archive(8192)
+    at = put_meta(a, 0, 103, pax_record("comment", "0123456789abcdef0123456789abcdef01234567"), false)
+    at = put_file(a, at, "repo/hello.txt", "hello\n", false)
+    finish(a, at, "${dir}/global.tar")
+    bytes.free(a)
+    name, data, err = read_one("${dir}/global.tar")
+    check(err == "", "pax global header: ${err}")
+    check(name == "repo/hello.txt" && data == "hello\n", "pax global header: entry ${name}")
+
+    // A pax 'x' header names the next entry past 255 bytes, and gives its size.
+    b = new_archive(8192)
+    at = put_meta(b, 0, 120, "${pax_record("path", deep)}${pax_record("size", "5")}${pax_record("mtime", "1700000000.5")}", false)
+    at = put_file(b, at, "short_name_ignored", "12345", false)
+    finish(b, at, "${dir}/pax_path.tar")
+    bytes.free(b)
+    name, data, err = read_one("${dir}/pax_path.tar")
+    check(err == "", "pax path: ${err}")
+    check(name == deep, "pax path: got ${name}")
+    check(data == "12345", "pax size: got ${data}")
+
+    // GNU tar: its magic, and an 'L' entry with the long name.
+    c = new_archive(8192)
+    at = put_meta(c, 0, 76, "${deep}\x00", true)
+    at = put_file(c, at, "././@LongLink", "gnu\n", true)
+    finish(c, at, "${dir}/gnu_long.tar")
+    bytes.free(c)
+    name, data, err = read_one("${dir}/gnu_long.tar")
+    check(err == "", "GNU long name: ${err}")
+    check(name == deep && data == "gnu\n", "GNU long name: got ${name}")
+
+    // A GNU 'K' entry gives a symlink its target.
+    d = new_archive(8192)
+    at = put_meta(d, 0, 75, "${deep}\x00", true)
+    put_header(d, at, "link", 0 as long, 50, "short", true)
+    at = at + 512
+    finish(d, at, "${dir}/gnu_link.tar")
+    bytes.free(d)
+    r, oerr = tar.reader_open("${dir}/gnu_link.tar")
+    check(oerr == "", "GNU long link: open ${oerr}")
+    ok, lerr = tar.reader_next(r)
+    check(lerr == "" && ok == 1, "GNU long link: ${lerr}")
+    check(tar.entry_kind(r) == tar.KIND_SYMLINK && tar.entry_link_name(r) == deep, "GNU long link: target ${tar.entry_link_name(r)}")
+    tar.reader_close(r)
+
+    // tar.extract writes what the metadata names.
+    e = new_archive(8192)
+    at = put_meta(e, 0, 103, pax_record("comment", "abc"), false)
+    put_header(e, at, "pkg/", 0 as long, 53, "", false)
+    at = at + 512
+    at = put_meta(e, at, 120, pax_record("path", "pkg/a_name_the_header_could_hold_but_pax_gives.txt"), false)
+    at = put_file(e, at, "pkg/x.txt", "pax\n", false)
+    finish(e, at, "${dir}/extract.tar")
+    bytes.free(e)
+    xerr = tar.extract("${dir}/extract.tar", "${dir}/out", tar.default_extract_options())
+    check(xerr == "", "extract: ${xerr}")
+    got, _rerr = fs.read("${dir}/out/pkg/a_name_the_header_could_hold_but_pax_gives.txt")
+    check(got == "pax\n", "extract: got ${got}")
+    check(fs.exists("${dir}/out/pkg/x.txt") == 0, "extract: the header's own name was written")
+
+    // A record whose length overruns the header is refused.
+    f = new_archive(4096)
+    at = put_meta(f, 0, 120, "99 path=x\n", false)
+    at = put_file(f, at, "x", "", false)
+    finish(f, at, "${dir}/bad_record.tar")
+    bytes.free(f)
+    ferr = next_error("${dir}/bad_record.tar")
+    check(string.contains(ferr, "malformed pax record"), "bad record: got '${ferr}'")
+
+    // A metadata entry past 1 MiB is refused before it is read.
+    g = new_archive(2048)
+    put_header(g, 0, "PaxHeader", 2097152 as long, 120, "", false)
+    finish(g, 512, "${dir}/huge_meta.tar")
+    bytes.free(g)
+    gerr = next_error("${dir}/huge_meta.tar")
+    check(string.contains(gerr, "metadata entry larger than"), "huge metadata: got '${gerr}'")
+
+    // So is a run of more than 64 metadata entries.
+    h = new_archive(70 * 1024 + 4096)
+    at = 0
+    var k = 0
+    while k < 70 {
+        at = put_meta(h, at, 103, pax_record("comment", "c"), false)
+        k = k + 1
+    }
+    at = put_file(h, at, "x", "", false)
+    finish(h, at, "${dir}/meta_run.tar")
+    bytes.free(h)
+    herr = next_error("${dir}/meta_run.tar")
+    check(string.contains(herr, "metadata entries before an entry"), "metadata run: got '${herr}'")
+
+    // A metadata entry cut short is refused.
+    t = new_archive(2048)
+    put_header(t, 0, "PaxHeader", 600 as long, 120, "", false)
+    s = bytes.to_string(t, 800)
+    fs.write_binary("${dir}/cut_meta.tar", string.bytes(s)[0..800])
+    bytes.free(t)
+    terr = next_error("${dir}/cut_meta.tar")
+    check(string.contains(terr, "truncated metadata entry"), "cut metadata: got '${terr}'")
+
+    // What the metadata entries leave behind is released, on the error
+    // paths too (measured where the heap count is exact).
+    reread(dir)
+    grown = mem.steady_growth(|| { reread(dir) }, 5)
+    if mem.heap_in_use_exact() && grown != 0 {
+        println("FAIL: the heap grew ${grown} bytes per round of reads")
+        exit(1)
+    }
+
+    fs.remove_tree(dir)
+    println("ok")
+}

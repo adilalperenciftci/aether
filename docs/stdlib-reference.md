@@ -82,7 +82,7 @@ header comment is the authoritative description.
 | `std.strbuilder` | Amortised-O(1) string building. | 18 | [guide](../std/strbuilder/README.md) · [source](../std/strbuilder/module.ae) |
 | `std.string` | Managed strings: construction, search, slicing, case, split and join. | 100 | [full section](#strings-stdstring) |
 | `std.sync` | Atomic 64-bit integer cell (load, store, add, sub, compare-and-swap) for refcounts and lock-free reclamation. | 7 | [guide](../std/sync/README.md) · [source](../std/sync/module.ae) |
-| `std.tar` | Streaming POSIX ustar archives: reader and writer. | 24 | [full section](#posix-ustar-archives-stdtar) |
+| `std.tar` | Streaming tar archives: a ustar writer, a ustar, pax and GNU reader. | 24 | [full section](#posix-ustar-archives-stdtar) |
 | `std.tcp` | TCP sockets, re-exported from `std.net`. | 38 | [guide](../std/tcp/README.md) · [source](../std/tcp/module.ae) |
 | `std.udp` | Datagram sockets for game networking: non-blocking bind, send_to, recv_from, poll, and address values. | 40 | [guide](../std/udp/README.md) · [source](../std/udp/module.ae) |
 | `std.time` | Civil date and time over Unix epoch seconds (UTC). | 22 | [guide](../std/time/README.md) · [source](../std/time/module.ae) |
@@ -2039,11 +2039,24 @@ on a newline first.
 
 ## POSIX ustar archives (`std.tar`)
 
-`std.tar` reads, writes, and safely extracts uncompressed POSIX ustar archives.
-It supports regular files, directories, symbolic links, permission modes,
-modification times, ustar prefix/name splitting, header checksums, payload
-padding, and the two-record end marker. Reader payloads and writer source files
-are transferred in bounded chunks; no entry-sized allocation is made.
+`std.tar` reads, writes, and safely extracts uncompressed POSIX ustar archives,
+and reads the pax and GNU archives other tools write (`git archive`'s, and the
+tarballs GitHub and GitLab serve). It supports regular files, directories,
+symbolic links, permission modes, modification times, ustar prefix/name
+splitting, header checksums, payload padding, and the two-record end marker.
+Reader payloads and writer source files are transferred in bounded chunks; no
+entry-sized allocation is made.
+
+The reader takes a pax extended header (`x`) or a GNU long name or long link
+entry (`L`, `K`) as metadata for the entry after it, which it does not report
+on its own: a pax `path`, `linkpath` or `size` replaces the header's name, link
+target or size, so a path past ustar's 255 bytes or a size past 8 GiB reads
+whole. The other pax keys (times, owners, the character set) are not used. A
+pax global header (`g`) is read past: none of its records changes what
+extraction writes, and `git archive` only puts the commit id there. GNU tar's
+`ustar  ` magic is accepted beside POSIX's. A metadata entry holds at most
+1 MiB, and at most 64 come before an entry, so a hostile archive cannot make
+the reader allocate or loop without bound.
 
 ```aether
 import std.tar
@@ -2089,9 +2102,9 @@ the two modules import together. Reading needs
 filesystem-read capability; writing and extraction need filesystem-write
 capability under the normal `--emit=lib` sandbox checks.
 
-This is deliberately POSIX ustar support, not general TAR support. The iterator
-reports hard links, devices, FIFOs, GNU/PAX records, sparse entries, base-256
-numbers, and unknown type flags as `KIND_OTHER`; extraction rejects them rather
+The writer writes POSIX ustar only. The iterator reports hard links, devices,
+FIFOs, GNU sparse entries, base-256 numbers, and unknown type flags as
+`KIND_OTHER`; extraction rejects them rather
 than treating them as files. Invalid UTF-8 names are rejected. Gzip, zstd, xz,
 and bzip2 are separate formats/layers and are not inferred from suffixes.
 Symlink creation and metadata preservation remain platform-dependent; no
