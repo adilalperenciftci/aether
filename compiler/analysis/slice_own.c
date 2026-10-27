@@ -50,6 +50,9 @@ struct Local {
     int scoped_out;     /* a view of its buffer is bound outside its scope */
     int viewed;         /* a view of its buffer is bound to a local */
     int mutated;        /* re-bound, moved, freed, grown, or a row replaced */
+    int first_view;     /* the earliest point a view of its buffer is taken */
+    int last_mut;       /* the latest point it is mutated */
+    int self_view;      /* re-bound to a view of what it held */
     Local** srcs;       /* the locals a binding copies it from */
     int nsrcs, srcs_cap;
     Kind kind;
@@ -134,7 +137,8 @@ typedef struct {
  * result (res), or stored where it outlives the call (store). */
 typedef struct {
     int n;
-    unsigned char* res;
+    unsigned char* res;      /* a view of the buffer itself */
+    unsigned char* res_deep; /* what its elements hold (a struct copied out) */
     unsigned char* store;
 } Summary;
 
@@ -145,6 +149,7 @@ typedef struct Frame {
     int nlocals, cap;
     PtrMap uses;         /* identifier -> the local it names */
     PtrMap binds;        /* binding node -> the local it binds */
+    PtrMap row_ok;       /* row stores that release the row they replace */
     const StrMap* outer; /* the names of the frames a closure is written in */
 } Frame;
 
@@ -999,13 +1004,18 @@ static void rewrite_value_at(Ctx* c, Frame* f, ASTNode** slot, Use use, int ret)
              * it did before ownership, unless a view of it may outlive the
              * call. */
             else if (ret && l && l->kind == K_LOCALVIEW) wrap(slot, "__slice_take");
-            else if (ret && l && l->kind == K_OTHER && !l->pinned) return;
+            else if (ret == 1 && l && l->kind == K_OTHER && !l->pinned) return;
+            /* A field, a tuple part or a message field holds what it is
+             * given, as before ownership, and the program frees it: the
+             * place it came from is kept (the escape analysis), so it is
+             * not lent. */
+            else if (ret == 2) return;
             else wrap(slot, "__slice_lend");
             return;
         }
         case AST_MEMBER_ACCESS: case AST_ARRAY_ACCESS:
             rewrite(c, f, slot);
-            wrap(slot, "__slice_lend");
+            if (ret != 2) wrap(slot, "__slice_lend");
             return;
         default:
             rewrite(c, f, slot);
@@ -1140,17 +1150,29 @@ static void rewrite(Ctx* c, Frame* f, ASTNode** slot) {
             for (int i = 0; i < n->child_count; i++)
                 if (n->children[i]) rewrite_value_at(c, f, &n->children[i], C_MOVE, 1);
             return;
+        case AST_STRUCT_LITERAL: case AST_TUPLE_LITERAL: case AST_MESSAGE_CONSTRUCTOR:
+            for (int i = 0; i < n->child_count; i++) {
+                ASTNode** slot2 = &n->children[i];
+                if (!*slot2) continue;
+                if (((*slot2)->type == AST_ASSIGNMENT || (*slot2)->type == AST_FIELD_INIT) &&
+                    (*slot2)->child_count > 0)
+                    slot2 = &(*slot2)->children[(*slot2)->child_count - 1];
+                rewrite_value_at(c, f, slot2, C_MOVE, 2);
+            }
+            return;
         case AST_BINARY_EXPRESSION:
             if (n->value && strcmp(n->value, "=") == 0 && n->child_count == 2) {
                 rewrite(c, f, &n->children[0]);
-                rewrite_value(c, f, &n->children[1], C_MOVE);
+                rewrite_value_at(c, f, &n->children[1], C_MOVE,
+                                 n->children[0]->type == AST_MEMBER_ACCESS ? 2 : 0);
                 /* An element of a slice of slices owns its slice: the store
                  * drops the one it replaces. */
                 ASTNode* lhs = n->children[0];
                 ASTNode* base = lhs;
                 while (base->type == AST_ARRAY_ACCESS && base->child_count > 0) base = base->children[0];
                 if (lhs->type == AST_ARRAY_ACCESS && type_is_slice(lhs->node_type) &&
-                    base->type == AST_IDENTIFIER && owns(pm_get(&f->uses, base)) &&
+                    base->type == AST_IDENTIFIER &&
+                    (owns(pm_get(&f->uses, base)) || pm_get(&f->row_ok, n)) &&
                     lhs->child_count == 2 && type_is_slice(lhs->children[0]->node_type) &&
                     pure_place(lhs)) {
                     ASTNode* v = n->children[1];
@@ -1198,6 +1220,7 @@ static Summary* summary_of(Ctx* c, ASTNode* def) {
     sm = (Summary*)calloc(1, sizeof(Summary));
     sm->n = n;
     sm->res = (unsigned char*)calloc((size_t)(n ? n : 1), 1);
+    sm->res_deep = (unsigned char*)calloc((size_t)(n ? n : 1), 1);
     sm->store = (unsigned char*)calloc((size_t)(n ? n : 1), 1);
     pm_put(&c->sums, def, (Local*)(void*)sm);
     return sm;
@@ -1219,11 +1242,38 @@ static int owner_ish(const Local* l) {
 }
 
 typedef struct {
+    ASTNode* store;
+    Local* base;
+    int seq;
+} RowStore;
+
+/* A root set has a bit for each local (a view of its buffer) and, after
+ * them, one for each parameter's elements (what the caller's buffer holds,
+ * copied out: a struct read from it, not a view of it). */
+typedef struct {
     Ctx* c;
     Frame* f;
-    int n;
+    int n;      /* bits in a root set: 2 * nl */
+    int nl;     /* the frame's locals */
     int grew;
+    /* Points of the walk, in the order the source runs straight through:
+     * a view taken in a loop counts from the start of the outermost loop it
+     * is in, since a later pass still holds it. */
+    int seq;
+    int loop_start;
+    RowStore* rows;
+    int nrows, rows_cap;
 } Esc;
+
+static void note_view(Esc* e, Local* x) {
+    int at = e->loop_start >= 0 ? e->loop_start : e->seq;
+    if (at < x->first_view) x->first_view = at;
+}
+
+static void note_mut(Esc* e, Local* x) {
+    x->mutated = 1;
+    if (e->seq > x->last_mut) x->last_mut = e->seq;
+}
 
 static void set_or(Esc* e, unsigned char* d, const unsigned char* s) {
     for (int i = 0; i < e->n; i++) d[i] |= s[i];
@@ -1241,6 +1291,21 @@ static void view_roots(Esc* e, ASTNode* x, unsigned char* out) {
             out[l->idx] = 1;
             set_or(e, out, l->roots);
         }
+        return;
+    }
+    roots_of(e, x, out);
+}
+
+/* The roots of a value copied out of `x`'s elements (a struct, a tuple, a
+ * number): what they hold, not `x`'s buffer. */
+static void deep_roots(Esc* e, ASTNode* x, unsigned char* out) {
+    if (x && x->type == AST_NAMED_ARG && x->child_count > 0) x = x->children[0];
+    if (x && x->type == AST_IDENTIFIER) {
+        Local* l = pm_get(&e->f->uses, x);
+        if (!l) return;
+        if (l->param) out[e->nl + l->idx] = 1;
+        else if (!owner_ish(l)) out[l->idx] = 1;
+        set_or(e, out, l->roots);
         return;
     }
     roots_of(e, x, out);
@@ -1282,8 +1347,16 @@ static void roots_of(Esc* e, ASTNode* x, unsigned char* out) {
             set_or(e, out, l->roots);
             return;
         }
-        case AST_SLICE_EXPR: case AST_MEMBER_ACCESS: case AST_ARRAY_ACCESS:
+        case AST_SLICE_EXPR:
             if (x->child_count > 0) view_roots(e, x->children[0], out);
+            return;
+        case AST_MEMBER_ACCESS: case AST_ARRAY_ACCESS:
+            /* A row of a slice of slices, or a slice field, is a view into
+             * memory its holder owns; a struct copied out holds only what
+             * the element holds. */
+            if (x->child_count == 0) return;
+            if (type_is_slice(x->node_type)) view_roots(e, x->children[0], out);
+            else deep_roots(e, x->children[0], out);
             return;
         case AST_FUNCTION_CALL: {
             if (is_append(e->c, x)) {
@@ -1299,8 +1372,10 @@ static void roots_of(Esc* e, ASTNode* x, unsigned char* out) {
             ASTNode* d = call_def(e->c, x);
             if (!d) return;   /* an extern or a builtin keeps nothing */
             Summary* sm = summary_of(e->c, d);
-            for (int i = 0; i < x->child_count && i < sm->n; i++)
+            for (int i = 0; i < x->child_count && i < sm->n; i++) {
                 if (sm->res[i]) view_roots(e, x->children[i], out);
+                else if (sm->res_deep[i]) deep_roots(e, x->children[i], out);
+            }
             return;
         }
         case AST_SLICE_FROM_ARRAY: case AST_PTR_AS_ARRAY_CAST: case AST_LITERAL:
@@ -1372,7 +1447,7 @@ static void sink_store(Esc* e, const unsigned char* r) {
     Summary* sm = e->f->owner->type == AST_CLOSURE ? NULL : summary_of(e->c, e->f->owner);
     for (int i = 0; i < e->n; i++) {
         if (!r[i]) continue;
-        Local* x = e->f->locals[i];
+        Local* x = e->f->locals[i % e->nl];
         if (x->param && !x->keep) {
             if (sm && x->pidx >= 0 && x->pidx < sm->n && !sm->store[x->pidx]) {
                 sm->store[x->pidx] = 1;
@@ -1380,6 +1455,7 @@ static void sink_store(Esc* e, const unsigned char* r) {
             }
         } else {
             x->pinned = 1;
+            note_view(e, x);
         }
     }
 }
@@ -1388,31 +1464,37 @@ static void sink_return(Esc* e, const unsigned char* r) {
     Summary* sm = e->f->owner->type == AST_CLOSURE ? NULL : summary_of(e->c, e->f->owner);
     for (int i = 0; i < e->n; i++) {
         if (!r[i]) continue;
-        Local* x = e->f->locals[i];
+        Local* x = e->f->locals[i % e->nl];
         if (x->param && !x->keep) {
-            if (sm && x->pidx >= 0 && x->pidx < sm->n && !sm->res[x->pidx]) {
-                sm->res[x->pidx] = 1;
+            unsigned char* bit = !sm || x->pidx < 0 || x->pidx >= sm->n ? NULL
+                                 : i < e->nl ? &sm->res[x->pidx] : &sm->res_deep[x->pidx];
+            if (bit && !*bit) {
+                *bit = 1;
                 e->c->changed = 1;
             }
             /* A closure's result goes where its caller puts it. */
             if (!sm) x->pinned = 1;
         } else {
             x->pinned = 1;
+            note_view(e, x);
         }
     }
 }
 
 /* A binding of `l` to what `r` views. */
 static void sink_bind(Esc* e, Local* l, const unsigned char* r) {
-    for (int i = 0; i < e->n; i++) {
+    for (int i = 0; i < e->nl; i++) {
         if (!r[i]) continue;
         Local* x = e->f->locals[i];
         if (x == l) {
             x->viewed = 1;
-            x->mutated = 1;   /* re-bound to a view of what it held */
+            x->self_view = 1;   /* re-bound to a view of what it held */
+            note_view(e, x);
+            note_mut(e, x);
             continue;
         }
         x->viewed = 1;
+        note_view(e, x);
         if (l->depth < x->depth || l->param) x->scoped_out = 1;
     }
 }
@@ -1423,7 +1505,7 @@ static void sinks_value(Esc* e, ASTNode* x, Use use) {
     if (!x) return;
     if (x->type == AST_IDENTIFIER) {
         Local* l = pm_get(&e->f->uses, x);
-        if (l && use == C_MOVE && type_is_slice(x->node_type)) l->mutated = 1;
+        if (l && use == C_MOVE && type_is_slice(x->node_type)) note_mut(e, l);
         return;
     }
     sinks(e, x, use);
@@ -1435,6 +1517,14 @@ static void sinks(Esc* e, ASTNode* n, Use use) {
     /* A closure value carries what it captures (roots_of), so it is judged
      * where the value goes, as a struct holding the same views would be. */
     if (is_frame(n)) return;
+    e->seq++;
+    if ((n->type == AST_WHILE_LOOP || n->type == AST_FOR_LOOP) && e->loop_start < 0) {
+        e->loop_start = e->seq;
+        for (int i = 0; i < n->child_count; i++)
+            if (n->children[i]) sinks_value(e, n->children[i], child_use(n, i));
+        e->loop_start = -1;
+        return;
+    }
     unsigned char* r = (unsigned char*)calloc((size_t)nn, 1);
     switch (n->type) {
         case AST_VARIABLE_DECLARATION: {
@@ -1443,7 +1533,7 @@ static void sinks(Esc* e, ASTNode* n, Use use) {
                 roots_of(e, n->children[0], r);
                 if (l) {
                     sink_bind(e, l, r);
-                    if (l->decl != n) l->mutated = 1;
+                    if (l->decl != n) note_mut(e, l);
                 } else {
                     sink_store(e, r);   /* a module-level `var`, a state field */
                 }
@@ -1468,11 +1558,20 @@ static void sinks(Esc* e, ASTNode* n, Use use) {
             if (n->value && strcmp(n->value, "=") == 0 && n->child_count == 2) {
                 Local* l = store_base(e, n->children[0]);
                 roots_of(e, n->children[1], r);
+                if (n->children[0]->type == AST_MEMBER_ACCESS) sink_store(e, r);
                 if (l) {
                     sink_bind(e, l, r);
                     if (n->children[0]->type == AST_ARRAY_ACCESS &&
-                        type_is_slice(n->children[0]->node_type))
-                        l->mutated = 1;   /* a row replaced */
+                        type_is_slice(n->children[0]->node_type)) {
+                        note_mut(e, l);   /* a row replaced */
+                        if (e->nrows == e->rows_cap) {
+                            e->rows_cap = e->rows_cap ? e->rows_cap * 2 : 8;
+                            e->rows = (RowStore*)realloc(e->rows,
+                                                         (size_t)e->rows_cap * sizeof(RowStore));
+                        }
+                        RowStore rs = {n, l, e->seq};
+                        e->rows[e->nrows++] = rs;
+                    }
                 } else {
                     sink_store(e, r);
                 }
@@ -1496,7 +1595,9 @@ static void sinks(Esc* e, ASTNode* n, Use use) {
             free(r);
             return;
         case AST_MESSAGE_CONSTRUCTOR: case AST_SEND_FIRE_FORGET: case AST_SEND_ASK:
-        case AST_REPLY_STATEMENT:
+        case AST_REPLY_STATEMENT: case AST_STRUCT_LITERAL: case AST_TUPLE_LITERAL:
+            /* What a field, a tuple part or a message holds the program
+             * frees by hand (it is not lent): what it views is kept. */
             roots_of(e, n, r);
             sink_store(e, r);
             break;
@@ -1504,7 +1605,7 @@ static void sinks(Esc* e, ASTNode* n, Use use) {
             if (is_free(n) || is_append(e->c, n) || is_push(n)) {
                 ASTNode* xs = n->children[0];
                 Local* l = xs && xs->type == AST_IDENTIFIER ? pm_get(&e->f->uses, xs) : NULL;
-                if (l) l->mutated = 1;
+                if (l) note_mut(e, l);
                 for (int i = 0; i < n->child_count; i++) sinks_value(e, n->children[i], C_BORROW);
                 free(r);
                 return;
@@ -1538,21 +1639,43 @@ static void sinks(Esc* e, ASTNode* n, Use use) {
  * the roots of every local, the frame's Summary, and the owners a view of
  * whose buffer may outlive them, left to the program. */
 static void escape_frame(Ctx* c, Frame* f) {
-    Esc e = {c, f, f->nlocals, 0};
-    int nn = f->nlocals ? f->nlocals : 1;
-    for (int i = 0; i < f->nlocals; i++)
+    Esc e;
+    memset(&e, 0, sizeof(e));
+    e.c = c;
+    e.f = f;
+    e.nl = f->nlocals;
+    e.n = 2 * f->nlocals;
+    e.loop_start = -1;
+    int nn = e.n ? e.n : 1;
+    for (int i = 0; i < f->nlocals; i++) {
         f->locals[i]->roots = (unsigned char*)calloc((size_t)nn, 1);
+        f->locals[i]->first_view = 0x7fffffff;
+        f->locals[i]->last_mut = -1;
+    }
     for (int pass = 0; pass < 8; pass++) {
         e.grew = 0;
         roots_pass(&e, f->body);
         if (!e.grew) break;
     }
     sinks(&e, f->body, C_BORROW);
+    /* A row replaced before any view of its slice is taken (in the order
+     * the code runs, a loop's views counted from its start) releases the
+     * row it replaces: nothing can view that row. */
+    for (int i = 0; i < e.nrows; i++) {
+        RowStore* rs = &e.rows[i];
+        if (owner_ish(rs->base) && rs->seq < rs->base->first_view)
+            pm_put(&f->row_ok, rs->store, rs->base);
+    }
+    free(e.rows);
+    /* Mutated while a view of it may be held: a view taken before the
+     * mutation, or in a loop around it, or the local itself re-bound to a
+     * view of what it held. A view taken only after every mutation is not. */
     for (int i = 0; i < f->nlocals; i++) {
         Local* l = f->locals[i];
         if (!owner_ish(l)) continue;
+        int held = l->viewed && (l->self_view || l->last_mut > l->first_view);
         if (l->pinned) l->kind = K_PINNED;
-        else if (l->scoped_out || (l->viewed && l->mutated)) l->kind = K_LOCALVIEW;
+        else if (l->scoped_out || held) l->kind = K_LOCALVIEW;
     }
 }
 
@@ -1652,6 +1775,7 @@ done:
     free(f.locals);
     pm_free(&f.uses);
     pm_free(&f.binds);
+    pm_free(&f.row_ok);
     strmap_free(&top.names);
 }
 
@@ -1720,6 +1844,7 @@ int check_slice_ownership(ASTNode* program) {
         if (!c.sums.keys[i]) continue;
         Summary* sm = (Summary*)(void*)c.sums.vals[i];
         free(sm->res);
+        free(sm->res_deep);
         free(sm->store);
         free(sm);
     }

@@ -247,6 +247,65 @@ main() {
 }
 AE
 
+# Views that keep a buffer for good, as before ownership (they leak by
+# design, so the leak gate's regression tests do not hold them): a view a
+# function hands back kept in a local of an outer scope, and a view held
+# while its owner is bound again. Released, each read back the filler.
+cat > "$TMP/kept.ae" <<'AE'
+around(k: int) -> int[] {
+    out = make([]int, 4)
+    for i in 0..4 {
+        out[i] = k * 10 + i
+    }
+    return out
+}
+
+churn() -> int {
+    t = 0
+    for r in 0..64 {
+        b = make([]int, 4)
+        for i in 0..4 {
+            b[i] = -7
+        }
+        t = t + b[0]
+    }
+    return t
+}
+
+first_two(xs: int[]) -> int[] {
+    return xs[0..2]
+}
+
+kept_view(n: int) -> int {
+    int[] last = []
+    for k in 0..n {
+        xs = around(k)
+        last = first_two(xs)
+    }
+    churn()
+    return last[0] + last[1]
+}
+
+rebound_view() -> int {
+    xs = around(5)
+    v = xs[1..3]
+    xs = around(6)
+    churn()
+    return v[0] + v[1] + xs[0]
+}
+
+main() {
+    println("kept ${kept_view(5)} ${rebound_view()}")
+}
+AE
+out=$(cd "$TMP" && AETHER_HOME="$ROOT" "$AE" run kept.ae 2>&1)
+case "$out" in
+    *"kept 81 163"*) ;;
+    *) echo "  [FAIL] kept: not \"kept 81 163\":"
+       echo "$out" | sed 's/^/        /'
+       fails=$((fails + 1)) ;;
+esac
+
 # The heap does not grow: 200 rounds of buffers released at scope exit (a
 # make buffer, one pushed and moved, rows of a slice of slices replaced,
 # buffers of strings in a loop left by `break`), 256 KB each, against the
