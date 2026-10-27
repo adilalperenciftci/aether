@@ -108,6 +108,32 @@ main() { println("ok") }
 EOF
 expect_accept "arithmetic on const RHS still compiles" $AE_TMP/ae_const_ok2.ae
 
+# Case 6: a struct literal of constants is a constant, so a const array of
+# them compiles; one field that is a call keeps it rejected.
+cat > $AE_TMP/ae_const_ok3.ae << 'EOF2'
+struct XY { x: int, y: int }
+const PTS[] = [XY { x: 1, y: 2 }, XY { x: 3, y: -4 }]
+const ORIGIN = XY { x: 0, y: 0 }
+main() { println("ok") }
+EOF2
+expect_accept "const array / const of constant struct literals compile" $AE_TMP/ae_const_ok3.ae
+
+cat > $AE_TMP/ae_const_bad4.ae << 'EOF2'
+struct XY { x: int, y: int }
+f() -> int { return 1 }
+const PTS[] = [XY { x: 1, y: 2 }, XY { x: f(), y: 4 }]
+main() { println("ok") }
+EOF2
+expect_reject "const array of struct literal with a call field" $AE_TMP/ae_const_bad4.ae
+
+cat > $AE_TMP/ae_const_bad5.ae << 'EOF2'
+struct XY { x: int, y: int }
+f() -> int { return 1 }
+const ORIGIN = XY { x: 0, y: f() }
+main() { println("ok") }
+EOF2
+expect_reject "const struct literal with a call field" $AE_TMP/ae_const_bad5.ae
+
 rm -f $AE_TMP/ae_const_bad*.ae $AE_TMP/ae_const_ok*.ae \
       $AE_TMP/ae_const_reject_out $AE_TMP/ae_const_ok_out $AE_TMP/ae_const_ok_fold.ae
 

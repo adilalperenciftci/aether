@@ -413,6 +413,8 @@ const char* const_array_elem_c_type(Type* t) {
         case TYPE_PTR:     return "void*";
         case TYPE_BYTE:    return "unsigned char";
         case TYPE_BOOL:    return "_Bool";
+        /* A struct element is the struct's C type (`const PTS[] = [XY {...}]`). */
+        case TYPE_STRUCT:  return get_c_type(t);
         default:           return "int";
     }
 }
@@ -7169,12 +7171,77 @@ static void emit_sandbox_trust_wrappers(CodeGenerator* gen, ASTNode* program) {
 }
 
 
+static void emit_static_struct_init_at(CodeGenerator* gen, ASTNode* lit, int depth);
+static void emit_static_value_init_at(CodeGenerator* gen, ASTNode* v, int depth);
+
 /* #2590: a module-level `var` of a struct type set to a struct literal of
  * constants, as an initializer list: `{ .a = 0, .b = 0 }`, which C takes for
  * a file-scope static where the compound literal `(T){ ... }` is not a
  * constant. A field holding another such literal nests the same way; fields
  * left out, string trackers among them, start at zero. */
 static void emit_static_struct_init(CodeGenerator* gen, ASTNode* lit) {
+    emit_static_struct_init_at(gen, lit, 0);
+}
+
+/* The program's file-scope `const` named `name` whose value is a struct
+ * literal of constants (`const ORIGIN = XY { x: 0, y: 0 }`), or NULL. */
+static ASTNode* file_scope_struct_const(ASTNode* program, const char* name) {
+    for (int i = 0; program && name && i < program->child_count; i++) {
+        ASTNode* cd = program->children[i];
+        if (cd && cd->type == AST_EXPORT_STATEMENT && cd->child_count > 0) cd = cd->children[0];
+        if (!cd || cd->type != AST_CONST_DECLARATION || !cd->value || cd->child_count == 0 ||
+            strcmp(cd->value, name) != 0) continue;
+        if (cd->annotation) return NULL;
+        return cd->children[0] && cd->children[0]->type == AST_STRUCT_LITERAL ? cd : NULL;
+    }
+    return NULL;
+}
+
+/* A value in a static's initializer: a struct literal of constants as its
+ * initializer list, and a struct `const` it names as that constant's own
+ * list, since the `static const` object is not a constant expression to C
+ * (#2799). Anything else as its expression. */
+static void emit_static_value_init_at(CodeGenerator* gen, ASTNode* v, int depth) {
+    if (v && v->type == AST_STRUCT_LITERAL) {
+        emit_static_struct_init_at(gen, v, depth);
+        return;
+    }
+    ASTNode* named = (v && v->type == AST_IDENTIFIER && depth < 64)
+                         ? file_scope_struct_const(gen->program, v->value) : NULL;
+    if (named) {
+        emit_static_struct_init_at(gen, named->children[0], depth + 1);
+        return;
+    }
+    generate_expression(gen, v);
+}
+
+void emit_static_value_init(CodeGenerator* gen, ASTNode* v) {
+    emit_static_value_init_at(gen, v, 0);
+}
+
+/* A `const` array whose elements are structs, `[XY { x: 1, y: 2 }, ...]`:
+ * each element as its initializer list. The compound literal a struct
+ * literal is elsewhere (`(XY){ ... }`) is not a constant to ISO C, so a
+ * static array of them was refused. Other arrays keep their expression. */
+void emit_static_array_init(CodeGenerator* gen, ASTNode* arr, Type* elem_type) {
+    if (!arr || arr->type != AST_ARRAY_LITERAL || !elem_type ||
+        elem_type->kind != TYPE_STRUCT) {
+        generate_expression(gen, arr);
+        return;
+    }
+    int saved = gen->in_const_init;
+    if (!saved) gen->in_const_init = 1;
+    fprintf(gen->output, "{ ");
+    for (int i = 0; i < arr->child_count; i++) {
+        if (i > 0) fprintf(gen->output, ", ");
+        emit_static_value_init(gen, arr->children[i]);
+    }
+    if (arr->child_count == 0) fprintf(gen->output, "0");
+    fprintf(gen->output, " }");
+    gen->in_const_init = saved;
+}
+
+static void emit_static_struct_init_at(CodeGenerator* gen, ASTNode* lit, int depth) {
     /* A header-defined struct's string field is C's `const char*`: a plain
      * C literal, not the AetherString an Aether field holds. */
     int c_imported = lit->value && aether_is_c_import_struct(lit->value);
@@ -7196,8 +7263,9 @@ static void emit_static_struct_init(CodeGenerator* gen, ASTNode* lit) {
         }
         if (emitted++ > 0) fprintf(gen->output, ", ");
         fprintf(gen->output, ".%s = ", fi->value);
-        if (v->type == AST_STRUCT_LITERAL) {
-            emit_static_struct_init(gen, v);
+        if (v->type == AST_STRUCT_LITERAL ||
+            (v->type == AST_IDENTIFIER && file_scope_struct_const(gen->program, v->value))) {
+            emit_static_value_init_at(gen, v, depth + 1);
         } else if (c_imported && v->type == AST_LITERAL && v->value &&
                    v->node_type && v->node_type->kind == TYPE_STRING) {
             emit_c_string_literal(gen, v->value);
@@ -10061,7 +10129,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                                   ? cd->node_type->element_type : NULL;
                 const char* ctype = elem_type ? const_array_elem_c_type(elem_type) : "const char*";
                 fprintf(gen->output, "static const %s %s[] = ", ctype, cd->value);
-                generate_expression(gen, cd->children[0]);
+                emit_static_array_init(gen, cd->children[0], elem_type);
                 fprintf(gen->output, ";\n");
             } else if (cd->annotation && strcmp(cd->annotation, "global_var") == 0) {
                 // #701: mutable module-level global -> file-scope static.
@@ -10087,6 +10155,15 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                 /* get_c_type already says `const char*` for strings; avoid
                  * emitting a duplicate `const const`. */
                 int already_const = strncmp(ctype, "const ", 6) == 0;
+                if (cd->children[0]->type == AST_STRUCT_LITERAL) {
+                    /* A struct `const` of constants: its literal as an
+                     * initializer list, which C takes for a static where
+                     * the compound literal is not a constant. */
+                    fprintf(gen->output, "static const %s %s = ", ctype, cd->value);
+                    emit_static_value_init(gen, cd->children[0]);
+                    fprintf(gen->output, ";\n");
+                    continue;
+                }
                 if (cd->node_type && cd->node_type->kind == TYPE_OPTIONAL) {
                     /* #2807: an optional's constant is its own struct, as
                      * a module `var`'s is (#2800): `{0}` for `none`, a

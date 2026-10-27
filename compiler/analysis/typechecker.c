@@ -2271,8 +2271,12 @@ static int is_const_expression(ASTNode* expr, SymbolTable* table) {
  * compile-time constant (literal, const identifier, folded const
  * expression, or a whitelisted pure-conversion call). Used by the
  * array_const branch of the const-declaration typecheck. */
+static int is_const_struct_literal(ASTNode* e, SymbolTable* table);
 static int is_const_array_element(ASTNode* elem, SymbolTable* table) {
-    return is_const_expression(elem, table);
+    /* A struct literal of constants is one too: the element is emitted as
+     * its initializer list (emit_static_value_init), `{ .x = 1 }`, which C
+     * takes inside a static array's initializer. */
+    return is_const_expression(elem, table) || is_const_struct_literal(elem, table);
 }
 
 /* #3113: does `e` name only literals and the program's `const`s, as this
@@ -13695,6 +13699,14 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                                           init->value && strcmp(et->struct_name, init->value) == 0 &&
                                           is_const_struct_literal(init, table));
                     }
+                    /* A `const` of a struct type set to a struct literal of
+                     * constants is a constant too: a `static const T` with
+                     * the literal as its initializer list (codegen's
+                     * emit_static_value_init), as a module `var` takes it
+                     * (#2590). */
+                    if (!is_struct_init && !stmt->annotation && struct_typed &&
+                        is_const_struct_literal(init, table))
+                        is_struct_init = 1;
                     /* #2807: so is an optional `const`'s `none`. */
                     if (!is_struct_init && !stmt->annotation && dt && dt->kind == TYPE_OPTIONAL &&
                         init->type == AST_NONE_LITERAL)

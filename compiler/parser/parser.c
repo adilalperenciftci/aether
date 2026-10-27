@@ -3495,7 +3495,13 @@ static ASTNode* parse_statement_inner(Parser* parser) {
                 if (elem_type) {
                     node->node_type = create_array_type(clone_type(elem_type), cval->child_count);
                 } else {
-                    node->node_type = create_array_type(create_type(TYPE_PTR), cval->child_count);
+                    /* Unknown, not `ptr`, as at module level: an element with
+                     * no type yet (a struct literal, `-1`) is typed by
+                     * inference, and the declaration takes the literal's
+                     * type once it is (its array_fix). As `ptr`, `[XY {...}]`
+                     * was refused as structs in an array of pointers. */
+                    node->node_type = create_array_type(create_type(TYPE_UNKNOWN), cval->child_count);
+                    node->type_inferred = 1;
                 }
             } else {
                 if (cval->node_type) {

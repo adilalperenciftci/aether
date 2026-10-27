@@ -122,6 +122,10 @@ void print_line(CodeGenerator* gen, const char* format, ...);
 void codegen_maybe_emit_line(CodeGenerator* gen, const ASTNode* node);
 const char* get_c_type(Type* type);
 const char* const_array_elem_c_type(Type* t);
+/* A struct literal of constants (or a struct `const` naming one) as a
+ * static's initializer list; a struct-element `const` array's initializer. */
+void emit_static_value_init(CodeGenerator* gen, ASTNode* v);
+void emit_static_array_init(CodeGenerator* gen, ASTNode* arr, Type* elem_type);
 /* The C element type of a lane vector C's own operators apply to (f32x4,
  * f64x2, i32x4, i64x2, i16x8), NULL otherwise; and whether a scalar of `kind`
  * splats across one (converted to that element type first). */

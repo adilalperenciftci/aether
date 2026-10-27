@@ -1,0 +1,40 @@
+// Test: a struct literal whose fields are all compile-time constants is a
+// constant: a `const` array of them, and a lone `const ORIGIN = XY {...}`.
+// Fields may be other consts, negatives, strings or nested constant struct
+// literals. Both were refused with E0200 ("const initializer must be a
+// compile-time constant expression"); a lookup table of records had to be
+// parallel arrays.
+
+struct XY { x: int, y: int }
+struct Named { name: string, at: XY, w: float }
+
+const BASE = 10
+const PTS[] = [XY { x: 1, y: 2 }, XY { x: 3, y: -4 }, XY { x: BASE, y: BASE * 2 }]
+const ORIGIN = XY { x: 0, y: 0 }
+const HOME = XY { x: BASE, y: -1 }
+const NAMED[] = [
+    Named { name: "a", at: XY { x: 5, y: 6 }, w: 1.5 },
+    Named { name: "b", at: HOME, w: -2.5 }
+]
+
+sum_pts() -> int {
+    const LOCAL[] = [XY { x: 7, y: 8 }, XY { x: 9, y: 10 }]
+    return LOCAL[0].x + LOCAL[1].y
+}
+
+main() {
+    println(PTS[0].x) // expect: 1
+    println(PTS[1].y) // expect: -4
+    println(PTS[2].y) // expect: 20
+    println(ORIGIN.x + ORIGIN.y) // expect: 0
+    println(HOME.y) // expect: -1
+    println(NAMED[0].name) // expect: a
+    println(NAMED[0].at.y) // expect: 6
+    println(NAMED[1].at.x) // expect: 10
+    w = NAMED[1].w
+    println(w) // expect: -2.500000
+    println(sum_pts()) // expect: 17
+    total = 0
+    for (i = 0; i < 3; i++) { total += PTS[i].x }
+    println(total) // expect: 14
+}

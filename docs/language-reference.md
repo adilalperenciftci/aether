@@ -663,6 +663,7 @@ const CRC16TAB: uint16[256] = [ 0x0000, 0x1021, /* ... */ ]   // element type pi
 ```
 
 - `const NAME[] = [...]` infers the element type from the literals (`int` for integer literals).
+- `const NAME[] = [Pt { x: 1, y: 2 }, ...]` is a table of records: a struct literal whose fields are all constants (literals, negatives, strings, other consts, nested such literals) is a constant, and so is a lone `const ORIGIN = Pt { x: 0, y: 0 }`. A field that is a call is the same compile error as any other non-constant initializer.
 - `const NAME: T[N] = [...]` pins the C element type, `T` may be `uint8` / `uint16` / `uint32` / `uint64` / `int` / `long` so e.g. a CRC16 table emits `static const uint16_t NAME[256]` rather than a 4×-wider `int[]`, and matches a C header that expects the packed type. Integer literals narrow to the chosen element type (the explicit, compile-time-constant intent, like `byte b = 5`). Indexed access (`NAME[i]`) reads the table directly; the array is read-only.
 
 **The RHS of `const` must be a compile-time constant expression.** Allowed forms: literals (int / float / bool / string / null), other consts referenced by name, unary / binary expressions over those, and string interpolation where every interpolated value is itself const. **Function calls are rejected** at typecheck time:
