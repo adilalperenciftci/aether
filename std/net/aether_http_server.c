@@ -3122,6 +3122,17 @@ int http_server_evloop_serves(HttpServer* server) {
     if (!server) return 0;
     HttpMiddlewareNode* proxy = server_proxy_node(server);
     if (!proxy) return 0;
+    /* The loop carries a client's TLS through OpenSSL only. A server on the
+     * pure-Aether stack (AETHER_PURE_TLS=1, or a build without OpenSSL) has
+     * no OpenSSL context: the loop closed every connection it took for one,
+     * and a build without OpenSSL read the TLS bytes as HTTP (#3256). */
+    if (server->tls_enabled) {
+#ifdef AETHER_HAS_OPENSSL
+        if (server->is_pure_tls || !server->tls_ctx) return 0;
+#else
+        return 0;
+#endif
+    }
     /* The loop dials plain HTTP only; a mount with an https upstream is the
      * worker path's, whose client speaks TLS (#3231). */
     if (!aether_proxy_upstreams_all_plain((const AetherProxyOpts*)proxy->user_data)) return 0;

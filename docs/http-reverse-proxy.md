@@ -371,6 +371,8 @@ configuration to do so:
   is never read as the next request (#3255), and a head that has not ended in
   16 KiB, which it refuses with 431 (#3252): the driver never buffers more
   (#3237)
+- a server that terminates TLS with the pure-Aether stack (`AETHER_PURE_TLS=1`,
+  or a build without OpenSSL): the driver's TLS is OpenSSL's (#3256)
 - a server whose first proxy mount has an https upstream: the driver dials
   plain HTTP only, and the worker path's client speaks TLS. An https
   upstream added while the server runs moves it there from the next
