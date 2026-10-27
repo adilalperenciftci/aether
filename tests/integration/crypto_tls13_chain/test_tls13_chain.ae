@@ -10,7 +10,8 @@
 // pathLenConstraint, extendedKeyUsage for the purpose, name constraints, an
 // unknown critical extension, and validity at a chosen time; then what the
 // x509-limbo corpus showed missing (#1298): weak and explicit-curve keys, a
-// wildcard under an excluded subtree, and the max_depth bound. The
+// wildcard under an excluded subtree, the max_depth bound, and a leaf whose
+// keyUsage does not allow signing (#3309). The
 // signature algorithms it showed missing are crypto_tls13_sig_algs (#3307).
 //
 // The fixtures are a PKI made once with openssl (`req -new`, `x509 -req
@@ -269,6 +270,13 @@ main() {
     fails = fails + check("*.other.com under excluded bar.example.com", chain_result(pem_wildok(), pem_icaex(), at, server), 1)
     fails = fails + check("max_depth 0 with one intermediate", depth_result(pem_leaf(), pem_ica(), 0), 0)
     fails = fails + check("max_depth 1 with one intermediate", depth_result(pem_leaf(), pem_ica(), 1), 1)
+
+    // A CA certificate (keyUsage keyCertSign and cRLSign, no
+    // digitalSignature) as the leaf: TLS signs with the leaf's key, so it is
+    // refused for either purpose, as OpenSSL refuses it (#3309).
+    fails = fails + check("a CA certificate as the leaf, for a server", chain_result(pem_ica(), "", at, server), 0)
+    fails = fails + check("a CA certificate as the leaf, for a client", chain_result(pem_ica(), "", at, tls13_cert.PURPOSE_CLIENT), 0)
+    fails = fails + check("a leaf with keyUsage digitalSignature", chain_result(pem_leaf(), pem_ica(), at, server), 1)
 
     if fails > 0 {
         println("tls13_chain: ${fails} FAILURES")

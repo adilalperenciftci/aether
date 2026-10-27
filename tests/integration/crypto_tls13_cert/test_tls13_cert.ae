@@ -372,9 +372,13 @@ main() {
     if string.equals(tls13_cert.validate_chain(&cleaf, cempty, canchors, at3, tls13_cert.PURPOSE_SERVER, -1), "") != 1 {
         println("ok   leaf without intermediate rejected")
     } else { println("FAIL leaf-alone accepted"); total_ok = 0 }
-    if string.equals(tls13_cert.validate_chain(&cint, cempty, canchors, at3, tls13_cert.PURPOSE_SERVER, -1), "") == 1 {
-        println("ok   intermediate chains directly to root")
-    } else { println("FAIL intermediate->root rejected"); total_ok = 0 }
+    // The intermediate chains straight to the root, but its keyUsage is
+    // keyCertSign only, so it is no TLS leaf (#3309): refused for that, and
+    // not for want of a path.
+    ir = tls13_cert.validate_chain(&cint, cempty, canchors, at3, tls13_cert.PURPOSE_SERVER, -1)
+    if string.contains(ir, "keyUsage") == 1 {
+        println("ok   intermediate chains to root, refused as a TLS leaf (${ir})")
+    } else { println("FAIL intermediate as leaf: ${ir}"); total_ok = 0 }
     if tls13_cert.leaf_is_ca(&cint) == 1 {
         println("ok   intermediate has basicConstraints cA=TRUE")
     } else { println("FAIL intermediate missing cA=TRUE"); total_ok = 0 }

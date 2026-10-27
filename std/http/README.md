@@ -164,8 +164,9 @@ SHA-512; ECDSA on P-256, P-384 or P-521; Ed25519), every key is one of those
 (RSA of at least 2048 bits, named curves only), every certificate is inside
 its validity period, every issuer below the anchor is a version 3 CA
 (basicConstraints cA) allowed to sign certificates (keyUsage keyCertSign
-when keyUsage is present) within its pathLenConstraint, the leaf and every
-issuer that lists extendedKeyUsage allow serverAuth (a leaf without
+when keyUsage is present) within its pathLenConstraint, the leaf's keyUsage
+(when present) allows digitalSignature, which TLS 1.3 signs with, the leaf
+and every issuer that lists extendedKeyUsage allow serverAuth (a leaf without
 extendedKeyUsage is valid for any purpose, as RFC 5280 says and as OpenSSL
 and Go's crypto/x509 read it: the backend a program runs on must not change
 which chains it accepts), every issuer's name

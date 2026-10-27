@@ -2500,6 +2500,10 @@ const MAX_CHAIN_DEPTH = 8
 //     `purpose` (PURPOSE_SERVER: id-kp-serverAuth, PURPOSE_CLIENT:
 //     id-kp-clientAuth); anyExtendedKeyUsage alone does not (RFC 5280
 //     4.2.1.12 lets an application that needs a purpose refuse it);
+//   - the leaf's keyUsage, when present, allows digitalSignature: both
+//     purposes sign a TLS 1.3 CertificateVerify with its key (RFC 8446
+//     4.4.2.2), and OpenSSL refuses such a leaf as an unsuitable purpose
+//     (#3309);
 //   - every issuer's name constraints (the anchor's too) permit, and do not
 //     exclude, the names of every certificate below it that is the leaf or
 //     not self-issued: dNSName (a wildcard SAN is excluded when any name it
@@ -2533,6 +2537,7 @@ const CHAIN_NAME_CONSTRAINT = 10
 const CHAIN_NOT_V3 = 11
 const CHAIN_BUDGET = 12
 const CHAIN_BAD_KEY = 13
+const CHAIN_LEAF_KEY_USAGE = 14
 
 // Signature checks one path search may spend: a set of cross-signed
 // intermediates can otherwise make the search exponential (x509-limbo's
@@ -2572,6 +2577,7 @@ fn chain_error(code: int) -> string {
     if code == CHAIN_NOT_V3 { return "an issuing certificate is not version 3" }
     if code == CHAIN_BUDGET { return "too many candidate paths or name comparisons: path building gave up" }
     if code == CHAIN_BAD_KEY { return "a certificate in the chain has an unsupported or weak public key" }
+    if code == CHAIN_LEAF_KEY_USAGE { return "the certificate's keyUsage does not allow signing (digitalSignature), which TLS needs" }
     return "certificate does not chain to a trusted anchor"
 }
 
@@ -2996,6 +3002,7 @@ validate_chain(leaf: *LeafCert, intermediates: ptr, anchors: ptr, at: string, pu
     e = ext_code(leaf)
     if e != 0 { return chain_error(e) }
     if purpose_ok(leaf, purpose) == 0 { return chain_error(CHAIN_PURPOSE) }
+    if leaf.has_key_usage == 1 && (leaf.key_usage & KU_DIGITAL_SIGNATURE) == 0 { return chain_error(CHAIN_LEAF_KEY_USAGE) }
     if cert_time_ok(leaf, at_key) == 0 { return chain_error(CHAIN_VALIDITY) }
     md = max_depth
     if md < 0 { md = MAX_CHAIN_DEPTH }
