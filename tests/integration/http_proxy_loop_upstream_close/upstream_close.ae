@@ -21,10 +21,6 @@ import std.string
 import std.tcp
 
 extern exit(code: int)
-// The upstream connections the HTTP client pool holds idle, and a way to
-// empty it between cases.
-extern http_client_pool_idle_count_raw() -> int
-extern http_client_pool_clear_raw()
 
 handle_up(req: ptr, res: ptr, ud: ptr) {
     http.response_set_status(res, 200)
@@ -109,10 +105,10 @@ main() {
         s = gateway(up_url, g)
         port = start(s)
         sleep(100)
-        http_client_pool_clear_raw()
+        http.client_pool_clear()
         got = status_of(port)
         sleep(100)
-        idle = http_client_pool_idle_count_raw()
+        idle = http.client_pool_idle_count()
         if got != "200" || idle != 0 {
             println("  FAIL a Connection: close answer (${names[g]}): got ${got} with ${idle} pooled, expected 200 with 0")
             bad = bad + 1

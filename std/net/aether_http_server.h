@@ -1125,7 +1125,7 @@ int http_server_evloop_connections(HttpServer* server);
 // How many times the loop's drivers came back from their pollers with work
 // since the server started, 0 without a loop. For tests and diagnostics: a
 // driver spinning on an interest nothing waits on shows here (#3258).
-long http_server_evloop_wakeups(HttpServer* server);
+int64_t http_server_evloop_wakeups(HttpServer* server);
 // The connections the loop's drivers hold right now, 0 without a loop. For
 // tests and diagnostics: how many a gateway serves there at once (#3263).
 int http_server_evloop_active(HttpServer* server);

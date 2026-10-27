@@ -151,7 +151,7 @@ void http_server_use_request_hook_loop_safe(HttpServer* s, HttpRequestHook h, vo
     (void)s; (void)h; (void)u;
 }
 int http_server_evloop_connections(HttpServer* s) { (void)s; return 0; }
-long http_server_evloop_wakeups(HttpServer* s) { (void)s; return 0; }
+int64_t http_server_evloop_wakeups(HttpServer* s) { (void)s; return 0; }
 int http_server_evloop_active(HttpServer* s) { (void)s; return 0; }
 const char* http_server_set_access_log_raw(HttpServer* s, const char* f, const char* p) {
     (void)s; (void)f; (void)p; return "";
@@ -3298,7 +3298,7 @@ int http_server_evloop_connections(HttpServer* server) {
     return server ? http_evloop_taken((HttpEvLoop*)server->evloop) : 0;
 }
 
-long http_server_evloop_wakeups(HttpServer* server) {
+int64_t http_server_evloop_wakeups(HttpServer* server) {
     return server ? http_evloop_wakeups((HttpEvLoop*)server->evloop) : 0;
 }
 
@@ -5183,8 +5183,10 @@ int http_request_head_check(const char* head, const char* hdr_end,
     size_t rl_len = rl_end ? (size_t)(rl_end - head) : (size_t)(hdr_end - head);
     if (rl_len >= HTTP_MAX_REQUEST_LINE) return HTTP_HEAD_URI_TOO_LONG;
 
-    char cl_value[64] = "";
-    char te_value[128] = "";
+    /* As large as a line's `value`: a copy cut short could read a longer
+     * duplicate Content-Length as the same one. */
+    char cl_value[256] = "";
+    char te_value[256] = "";
     int cl_count = 0, cl_differing = 0, te_count = 0, count = 0;
     for (const char* line = rl_end ? rl_end + 1 : hdr_end; line < hdr_end; ) {
         const char* eol = (const char*)memchr(line, '\n', (size_t)(hdr_end - line));

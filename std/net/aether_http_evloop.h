@@ -1,6 +1,8 @@
 #ifndef AETHER_HTTP_EVLOOP_H
 #define AETHER_HTTP_EVLOOP_H
 
+#include <stdint.h>
+
 /* A proxy driver that runs many connections on one thread (#1758).
  *
  * The server gives a connection its own worker for that connection's whole
@@ -45,7 +47,7 @@ int http_evloop_taken(HttpEvLoop* loop);
 /* How many times the drivers came back from their pollers with work since
  * the loop started, for tests and reporting: a driver that spins on an
  * interest nothing waits on shows here (#3258). */
-long http_evloop_wakeups(HttpEvLoop* loop);
+int64_t http_evloop_wakeups(HttpEvLoop* loop);
 
 void http_evloop_stop(HttpEvLoop* loop);
 

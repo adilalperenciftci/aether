@@ -22,7 +22,6 @@ import std.string
 import std.tcp
 
 extern exit(code: int)
-extern http_client_pool_clear_raw()
 
 handle_slow(req: ptr, res: ptr, ud: ptr) {
     sleep(300)
@@ -114,7 +113,7 @@ main() {
         s = gateway(up_url, g)
         port = start(s)
         sleep(100)
-        http_client_pool_clear_raw()
+        http.client_pool_clear()
 
         // Two at once, so the proxy holds two upstream connections.
         a, aerr = tcp.connect("127.0.0.1", port)
