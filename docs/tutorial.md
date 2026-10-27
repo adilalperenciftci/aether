@@ -435,6 +435,17 @@ main() {
 }
 ```
 
+To visit the elements of a slice or array rather than a count, loop over it directly:
+
+```aether
+main() {
+    for word in ["a", "b", "c"] {
+        print(word)
+    }
+    // prints: abc
+}
+```
+
 ### Multi-Statement Arrow Bodies
 
 Arrow functions can contain multiple statements. The last expression is the implicit return:
@@ -492,4 +503,5 @@ main() {
 | Hex/bin/oct | `0xFF`, `0b1010`, `0o755` |
 | If-expression | `if cond { a } else { b }` |
 | Range for | `for i in 0..10 { ... }` |
+| For-in (slice/array) | `for x in xs { ... }` |
 | Arrow block | `f(x) -> { stmts; expr }` |

@@ -1442,6 +1442,23 @@ for i in 1..n {
 
 The range `start..end` is exclusive of `end` (like Python's `range(start, end)`). It desugars to a C-style for loop internally. Its variable is the loop's own, a new one even where the name is bound outside the loop.
 
+### For-In Over Slices and Arrays
+
+`for VAR in XS` iterates the elements of a slice (`T[]`) or a fixed-size array (`T[N]`), in order:
+
+```aether,fragment
+total = 0
+for x in [3, 4, 5] {
+    total += x
+}
+
+for name in names {         // names: string[]
+    println(name)
+}
+```
+
+`VAR` is bound by value, a new variable of the element's type, for each pass. `XS` is any slice or array expression (a name, a field, a call, `a[1..3]`); a call or other expression is evaluated once, and the length is read once, before the first pass. `break` and `continue` work as in any loop. It lowers to the index loop `for i in 0..xs.len { x = xs[i] ... }`, so each element read is bounds-checked, and a write to `x` changes the copy, not the element: write `xs[i] = v` in an index loop for that.
+
 ### Loop Control
 
 ```aether,fragment
