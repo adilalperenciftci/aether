@@ -1,0 +1,127 @@
+// Unit tests for OS error details in std.fs and std.file write paths.
+
+import std.fs
+import std.file
+import std.string
+import std.os
+
+extern exit(code: int)
+
+fn assert_contains(str: string, substr: string, test_name: string) -> int {
+    if string.index_of(str, substr) >= 0 {
+        return 0
+    }
+    println("FAIL ${test_name}: expected '${str}' to contain '${substr}'")
+    return 1
+}
+
+fn assert_starts_with(str: string, prefix: string, test_name: string) -> int {
+    if _str_starts_with(str, prefix) == 1 {
+        return 0
+    }
+    println("FAIL ${test_name}: expected '${str}' to start with '${prefix}'")
+    return 1
+}
+
+fn _str_starts_with(s: string, prefix: string) -> int {
+    ls = string_length(s)
+    lp = string_length(prefix)
+    if lp > ls { return 0 }
+    if lp == 0 { return 1 }
+    i = 0
+    while i < lp {
+        if string_char_at(s, i) != string_char_at(prefix, i) { return 0 }
+        i = i + 1
+    }
+    return 1
+}
+
+fn _str_contains_icase(str: string, substr: string) -> int {
+    // Simple case-insensitive match for "directory"
+    ls = string_length(str)
+    sub = "directory"
+    lsub = string_length(sub)
+    if lsub > ls { return 0 }
+    i = 0
+    while i <= ls - lsub {
+        match_ok = 1
+        j = 0
+        while j < lsub {
+            c1 = string_char_at(str, i + j)
+            c2 = string_char_at(sub, j)
+            if c1 >= 65 {
+                if c1 <= 90 {
+                    c1 = c1 + 32
+                }
+            }
+            if c1 != c2 {
+                match_ok = 0
+                j = lsub
+            }
+            j = j + 1
+        }
+        if match_ok == 1 {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn assert_contains_dir_icase(str: string, test_name: string) -> int {
+    if _str_contains_icase(str, "directory") == 1 {
+        return 0
+    }
+    println("FAIL ${test_name}: expected '${str}' to contain 'directory' (case-insensitive)")
+    return 1
+}
+
+main() {
+    fails = 0
+
+    tmp_dir, terr = fs.make_temp_dir("", "test_fs_write_err")
+    if terr != "" {
+        println("FAIL: cannot create temp dir: ${terr}")
+        exit(1)
+    }
+
+    // 1. fs.write to a path inside a missing directory
+    missing_dir_path = fs.path_join(tmp_dir, "nonexistent_dir/file.txt")
+    err1 = fs.write(missing_dir_path, "hello")
+    fails = fails + assert_starts_with(err1, missing_dir_path, "fs.write missing directory prefix")
+    fails = fails + assert_contains(err1, "No such file", "fs.write missing directory OS reason")
+
+    // 2. fs.write to a directory path
+    err2 = fs.write(tmp_dir, "hello")
+    fails = fails + assert_starts_with(err2, tmp_dir, "fs.write directory path prefix")
+    fails = fails + assert_contains_dir_icase(err2, "fs.write directory path OS reason")
+
+    // 3. fs.rename from a missing source
+    missing_src = fs.path_join(tmp_dir, "missing_source.txt")
+    dst_path = fs.path_join(tmp_dir, "target.txt")
+    err3 = fs.rename(missing_src, dst_path)
+    fails = fails + assert_starts_with(err3, missing_src, "fs.rename missing source prefix")
+    fails = fails + assert_contains(err3, "No such file", "fs.rename missing source OS reason")
+
+    // 4. fs.write_atomic into a missing directory
+    missing_dir_atomic = fs.path_join(tmp_dir, "nonexistent_dir_atomic/file.txt")
+    data = string.bytes("hello")
+    err4 = fs.write_atomic(missing_dir_atomic, data)
+    fails = fails + assert_starts_with(err4, missing_dir_atomic, "fs.write_atomic missing directory prefix")
+    fails = fails + assert_contains(err4, "No such file", "fs.write_atomic missing directory OS reason")
+
+    // 5. file.write (std.file wrapper) to missing directory
+    err5 = file.write(missing_dir_path, "hello")
+    fails = fails + assert_starts_with(err5, missing_dir_path, "file.write missing directory prefix")
+    fails = fails + assert_contains(err5, "No such file", "file.write missing directory OS reason")
+
+    // Cleanup temp dir
+    fs.remove_tree(tmp_dir)
+
+    if fails == 0 {
+        println("PASS test_fs_write_errors")
+    } else {
+        println("FAIL test_fs_write_errors (${fails} failures)")
+        exit(1)
+    }
+}

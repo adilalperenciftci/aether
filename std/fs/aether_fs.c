@@ -1123,9 +1123,10 @@ int fs_unlink_raw(const char* path) {
 #include <time.h>
 
 int fs_write_binary_raw(const char* path, const char* data, int length) {
-    if (!path || length < 0) return 0;
-    if (length > 0 && !data) return 0;
-    if (!aether_sandbox_check("fs_write", path)) return 0;
+    if (!path || length < 0 || (length > 0 && !data) || !aether_sandbox_check("fs_write", path)) {
+        errno = 0;
+        return 0;
+    }
 
     size_t want;
     const char* bytes = fs_unwrap_bytes(data, length, &want);
@@ -1135,18 +1136,32 @@ int fs_write_binary_raw(const char* path, const char* data, int length) {
 
     size_t written = (want > 0) ? fwrite(bytes, 1, want, fp) : 0;
     int fwrite_ok = (written == want);
+    int err_save = 0;
+    if (!fwrite_ok) {
+        err_save = errno;
+    }
+
     int close_ok = (fclose(fp) == 0);
+    if (fwrite_ok && !close_ok) {
+        err_save = errno;
+    }
+
+    if (!fwrite_ok || !close_ok) {
+        errno = err_save;
+        return 0;
+    }
 
     // Non-atomic: on failure, the caller sees a partial file. This is
     // the explicit contract — use fs_write_atomic_raw when that's not
     // acceptable.
-    return (fwrite_ok && close_ok) ? 1 : 0;
+    return 1;
 }
 
 int fs_write_atomic_raw(const char* path, const char* data, int length) {
-    if (!path || length < 0) return 0;
-    if (length > 0 && !data) return 0;
-    if (!aether_sandbox_check("fs_write", path)) return 0;
+    if (!path || length < 0 || (length > 0 && !data) || !aether_sandbox_check("fs_write", path)) {
+        errno = 0;
+        return 0;
+    }
 
     size_t want;
     const char* bytes = fs_unwrap_bytes(data, length, &want);
@@ -1157,7 +1172,10 @@ int fs_write_atomic_raw(const char* path, const char* data, int length) {
     static unsigned long s_counter = 0;
     char tmp[4096];
     int plen = (int)strlen(path);
-    if (plen <= 0 || plen >= (int)sizeof(tmp) - 32) return 0;
+    if (plen <= 0 || plen >= (int)sizeof(tmp) - 32) {
+        errno = 0;
+        return 0;
+    }
     long pid =
 #ifdef _WIN32
         (long)_getpid();
@@ -1206,6 +1224,7 @@ int fs_write_atomic_raw(const char* path, const char* data, int length) {
     FILE* fp = fdopen(fd, "wb");
 #endif
     if (!fp) {
+        int err_save = errno;
 #ifdef _WIN32
         _close(fd);
         _unlink(tmp);
@@ -1213,11 +1232,16 @@ int fs_write_atomic_raw(const char* path, const char* data, int length) {
         close(fd);
         unlink(tmp);
 #endif
+        errno = err_save;
         return 0;
     }
 
     size_t written = (want > 0) ? fwrite(bytes, 1, want, fp) : 0;
     int fwrite_ok = (written == want);
+    int err_save = 0;
+    if (!fwrite_ok) {
+        err_save = errno;
+    }
 
 #ifndef _WIN32
     // Flush + fsync before rename. Without fsync a power loss between
@@ -1225,17 +1249,34 @@ int fs_write_atomic_raw(const char* path, const char* data, int length) {
     // the destination pointing at zero-length or garbage contents.
     int fsync_ok = 1;
     if (fwrite_ok) {
-        if (fflush(fp) != 0) fsync_ok = 0;
-        else if (fsync(fileno(fp)) != 0) fsync_ok = 0;
+        if (fflush(fp) != 0) {
+            fsync_ok = 0;
+            err_save = errno;
+        } else if (fsync(fileno(fp)) != 0) {
+            fsync_ok = 0;
+            err_save = errno;
+        }
     }
 #else
-    int fsync_ok = fwrite_ok ? (fflush(fp) == 0) : 0;
+    int fsync_ok = 1;
+    if (fwrite_ok) {
+        if (fflush(fp) != 0) {
+            fsync_ok = 0;
+            err_save = errno;
+        }
+    }
 #endif
 
-    if (fclose(fp) != 0) fsync_ok = 0;
+    if (fclose(fp) != 0) {
+        if (fwrite_ok && fsync_ok) {
+            fsync_ok = 0;
+            err_save = errno;
+        }
+    }
 
     if (!fwrite_ok || !fsync_ok) {
         remove(tmp);  // don't leak a half-written tmp file
+        errno = err_save;
         return 0;
     }
 
@@ -1248,16 +1289,19 @@ int fs_write_atomic_raw(const char* path, const char* data, int length) {
     remove(path);
 #endif
     if (rename(tmp, path) != 0) {
+        int err_rename = errno;
         remove(tmp);
+        errno = err_rename;
         return 0;
     }
     return 1;
 }
 
 int fs_rename_raw(const char* from, const char* to) {
-    if (!from || !to) return 0;
-    if (!aether_sandbox_check("fs_write", from)) return 0;
-    if (!aether_sandbox_check("fs_write", to)) return 0;
+    if (!from || !to || !aether_sandbox_check("fs_write", from) || !aether_sandbox_check("fs_write", to)) {
+        errno = 0;
+        return 0;
+    }
     return rename(from, to) == 0 ? 1 : 0;
 }
 

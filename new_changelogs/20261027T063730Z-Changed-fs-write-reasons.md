@@ -1,0 +1,1 @@
+- **`std.fs` and `std.file` write errors carry OS reasons.** `fs.write`, `fs.write_binary`, `fs.write_atomic`, `fs.rename`, and `file.write` now return formatted error messages containing the path and the OS error reason (`fs_error_message`) instead of fixed error strings like `"write failed"`.
