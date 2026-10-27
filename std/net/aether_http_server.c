@@ -483,6 +483,9 @@ typedef struct HttpConn {
      * was "only re-applied when it changes"; this is the guard that makes that
      * true. -1 rather than 0 because 0 is a valid "block indefinitely". */
     int   applied_recv_timeout_ms;
+    /* The SO_SNDTIMEO value on this socket, 0 when none has been applied
+     * (conn_apply_send_timeout, #3257). */
+    int   applied_send_timeout_ms;
     /* Set when the server refused a request it had not finished reading, so
      * the client may still be sending: conn_close then closes in stages
      * (conn_linger) rather than resetting the refusal away. */
@@ -810,8 +813,11 @@ static int send_response_with_optional_sendfile(HttpConn* conn,
     if (!sent_via_sendfile) {
         char*  buf = NULL;
         size_t cap = 0, resp_len = 0;
-        if (response_serialize_wire(req, res, &buf, &cap, &resp_len))
-            conn_send(conn, buf, (int)resp_len);
+        /* A send that failed, the send timeout among the ways (#3257), left
+         * the response cut short: the connection cannot carry another. */
+        if (!response_serialize_wire(req, res, &buf, &cap, &resp_len) ||
+            conn_send(conn, buf, (int)resp_len) < 0)
+            force_close = 1;
         free(buf);
     }
 
@@ -6006,6 +6012,27 @@ static void conn_apply_recv_timeout(HttpServer* server, HttpConn* c) {
                              ? server->keep_alive_idle_ms : 30000);
 }
 
+/* Per-send socket timeout, the same idle timeout: a send that makes no
+ * progress for that long fails and the connection closes. Without one a
+ * client that stopped reading blocked its worker in send() for as long as it
+ * kept the connection open, one worker per such client (#3257). */
+static void conn_apply_send_timeout(HttpServer* server, HttpConn* c) {
+    int ms = server->keep_alive_idle_ms > 0 ? server->keep_alive_idle_ms : 30000;
+    if (c->applied_send_timeout_ms == ms) return;
+    c->applied_send_timeout_ms = ms;
+#ifdef _WIN32
+    DWORD snd_timeout = (DWORD)ms;
+    setsockopt(c->fd, SOL_SOCKET, SO_SNDTIMEO,
+               (const char*)&snd_timeout, sizeof(snd_timeout));
+#else
+    struct timeval snd_tv = {
+        .tv_sec  = ms / 1000,
+        .tv_usec = (ms % 1000) * 1000
+    };
+    setsockopt(c->fd, SOL_SOCKET, SO_SNDTIMEO, &snd_tv, sizeof(snd_tv));
+#endif
+}
+
 /* Is the next request already here, or about to be?
  *
  * Bytes in the connection's own buffer (a pipelined request, or an over-read
@@ -6082,6 +6109,7 @@ static void conn_serve(HttpServer* server, HttpConn* conn) {
      * a syscall per request, and measured at 8 concurrent clients that cost
      * 9% against simply blocking. */
     conn_apply_recv_timeout(server, conn);
+    conn_apply_send_timeout(server, conn);
 
 #ifdef AETHER_HAS_NGHTTP2
     if (conn->is_h2) {

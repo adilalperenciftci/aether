@@ -354,7 +354,9 @@ client's `Connection` header, HTTP/1.0), and says so in its `Connection`
 header, as on the per-connection path (#3229). A client that sends nothing
 for the keep-alive idle timeout (30 seconds unless set), before its first
 request, between requests or partway through one, has its connection closed,
-as the per-connection path's receive timeout closes it (#3243).
+as the per-connection path's receive timeout closes it (#3243). So does one that
+takes no bytes of its response for as long, as the per-connection path's send
+timeout does (#3257).
 
 The driver serves HTTP/1.1 proxying, on a TLS-terminating server too: it
 carries the client's TLS handshake without waiting and reads and writes

@@ -1,0 +1,139 @@
+// A client that stops reading its response is cut off after the idle
+// timeout, on the proxy event loop and on the worker path alike (#3257).
+//
+// Neither path bounded a send. The worker path wrote a response with a
+// blocking send and no send timeout, so a client that never read held the
+// worker for good; the proxy event loop on Linux and macOS waited for the
+// client's socket to drain with no deadline, so the connection and its
+// response were held for good. Both now give up after the server's
+// keep-alive idle timeout without progress, as a receive does.
+//
+// Three pipelined GETs for 32 MB each, more than loopback buffers hold, through
+// a bare proxy (the event loop on Linux and macOS) and through one behind a
+// program's middleware (the worker path), each with a one second idle
+// timeout. The client reads nothing for three seconds, then reads to the
+// end: the responses must have been cut short. Three, because Windows takes
+// a whole send into the kernel when the socket has nothing queued, so the
+// first response never blocks there; the next one does. Every server
+// listens on 127.0.0.1 and a port the kernel picks.
+
+import std.http
+import std.http.proxy
+import std.string
+import std.tcp
+
+extern exit(code: int)
+
+const BIG = 33554432
+
+handle_big(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "application/octet-stream")
+    http.response_set_body(res, string.pad_end("", BIG, 120))
+}
+
+@c_callback mw_pass(req: ptr, res: ptr, ud: ptr) -> int {
+    return 1
+}
+
+start(server: ptr) -> int {
+    if http.server_bind(server, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    err = http.server_start_background(server)
+    if err != "" {
+        println("FAIL: ${err}")
+        exit(1)
+    }
+    return http.server_port(server)
+}
+
+need(label: string, err: string) {
+    if err != "" {
+        println("FAIL: ${label}: ${err}")
+        exit(1)
+    }
+}
+
+gateway(up_url: string, worker: int) -> ptr {
+    s = http.server_create(0)
+    http.server_set_host(s, "127.0.0.1")
+    if worker == 1 {
+        http.server_use_middleware(s, mw_pass, 0)
+    }
+    need("keepalive", http.server_set_keepalive(s, 1, 0, 1s))
+    pool = proxy.upstream_pool_new("round_robin", 10, 0, 0)
+    need("upstream_add", proxy.upstream_add(pool, up_url, 1))
+    opts = proxy.opts_new()
+    // Room for the response: the proxy refuses one over its cap with 502.
+    need("opts_set_body_cap", proxy.opts_set_body_cap(opts, 67108864))
+    need("mount", proxy.mount(s, "/", pool, opts))
+    return s
+}
+
+// The responses to three GETs whose reading starts three seconds late:
+// "whole" when every byte of all three arrived, else "cut short".
+late_reader(port: int) -> string {
+    sock, cerr = tcp.connect("127.0.0.1", port)
+    if cerr != "" {
+        return "connect failed"
+    }
+    get = "GET /big HTTP/1.1\r\nHost: x\r\n\r\n"
+    tcp.write(sock, "${get}${get}${get}")
+    sleep(3000)
+    total = 0
+    quiet = 0
+    while quiet < 20 {
+        ready, _perr = tcp.poll(sock, 100)
+        if ready {
+            chunk, rerr = tcp.read(sock, 65536)
+            if rerr != "" || string.length(chunk) == 0 {
+                quiet = 20
+            } else {
+                total = total + string.length(chunk)
+                quiet = 0
+            }
+        } else {
+            quiet = quiet + 1
+        }
+    }
+    tcp.close(sock)
+    if total > 3 * BIG {
+        return "whole"
+    }
+    return "cut short"
+}
+
+main() {
+    println("=== a client that stops reading is cut off after the idle timeout (#3257) ===")
+    upstream = http.server_create(0)
+    http.server_set_host(upstream, "127.0.0.1")
+    http.server_get(upstream, "/big", handle_big, 0)
+    up_url = "http://127.0.0.1:${start(upstream)}"
+
+    names = ["event loop", "worker path"]
+    bad = 0
+    g = 0
+    while g < 2 {
+        s = gateway(up_url, g)
+        port = start(s)
+        sleep(100)
+        got = late_reader(port)
+        if got != "cut short" {
+            println("  FAIL a response nobody reads (${names[g]}): got '${got}', expected 'cut short'")
+            bad = bad + 1
+        } else {
+            println("  PASS a response nobody reads (${names[g]})")
+        }
+        http.server_stop(s)
+        g = g + 1
+    }
+
+    http.server_stop(upstream)
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

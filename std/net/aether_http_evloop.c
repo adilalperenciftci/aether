@@ -1096,7 +1096,9 @@ static void ev_arm_deadline(EvDriver* d, EvConn* c) {
  * restarts with each receive; a TLS handshake has it once, start to finish,
  * and the request after it starts afresh. With no timeout at all, a client held
  * a connection for as long as it kept it open, idle or halfway through a
- * request (#3243). */
+ * request (#3243). The same bound covers writing a response to a client that
+ * stopped reading, moved each time it takes bytes, as the worker path's send
+ * timeout (conn_apply_send_timeout) restarts with each send (#3257). */
 static void ev_arm_idle(EvDriver* d, EvConn* c) {
     int ms = d->loop->server->keep_alive_idle_ms > 0
            ? d->loop->server->keep_alive_idle_ms : 30000;
@@ -1113,6 +1115,9 @@ static int ev_expire(EvDriver* d, EvConn* c) {
      * it (ev_arm_idle): closed, as the worker path closes on its receive
      * timeout (#3243). */
     if (c->state == EV_READ_REQUEST || c->state == EV_TLS_HANDSHAKE) return -1;
+    /* Or stopped reading the response for as long: closed, as the worker
+     * path's send fails on its send timeout (#3257). */
+    if (c->state == EV_CLIENT_SEND) return -1;
     /* The upstream did not answer in time: a failed call, which goes back to
      * the proxy exchange as the worker path's driver sends its own (#3250).
      * The exchange decrements the upstream's in-flight count, tells its
@@ -1568,8 +1573,14 @@ static int ev_advance(EvDriver* d, EvConn* c) {
         case EV_BACKOFF:
             return 0;    /* the timer moves it on (ev_expire) */
         case EV_CLIENT_SEND: {
+            size_t had = c->out_sent + c->out_body_sent;
             int r = ev_step_client_send(d, c);
+            /* Waiting on a client that is not reading: no longer than the
+             * idle timeout since the last byte it took (#3257). */
+            if (r == 0 && (c->out_sent + c->out_body_sent != had || c->deadline_ms == 0))
+                ev_arm_idle(d, c);
             if (r <= 0) return r;
+            ev_timer_set(d, c, 0);   /* written */
             c->requests_served++;
             /* A middleware's answer settled as closing the connection
              * (ev_answer) closes it now that it is written, as the worker
