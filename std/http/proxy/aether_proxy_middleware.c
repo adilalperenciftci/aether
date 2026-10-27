@@ -471,6 +471,24 @@ int aether_proxy_exchange_begin(AetherProxyExchange* px,
         return 0;
     }
 
+    /* A body larger than the connection buffer reaches a middleware streamed
+     * (#626): `body` is NULL and the rest is still on the socket. The
+     * upstream is owed the whole of it, so it is read now, bounded by the cap
+     * just checked; forwarding `body` alone sent the client's Content-Length
+     * with no bytes after it, and the upstream waited until the proxy gave up
+     * with 504 (#3238). A client that stops short is refused rather than
+     * having part of its body forwarded as if it were all of it. */
+    if (req->stream_conn && !req->body) {
+        http_request_body(req);
+        if (!http_request_body_complete(req)) {
+            http_response_set_status(res, 400);
+            http_response_set_header(res, "X-Aether-Proxy-Error", "request_body_incomplete");
+            http_response_set_header(res, "Content-Type", "text/plain");
+            http_response_set_body(res, "request body ended before its Content-Length\n");
+            return 0;
+        }
+    }
+
     /* Strip the configured prefix from the path before forwarding.
      * "/api/users" with strip "/api" becomes "/users". When
      * path_prefix matches but strip is unset, the full path is
@@ -552,10 +570,12 @@ static int px_build(AetherProxyExchange* px) {
     AetherProxyOpts* opts = px->opts;
     HttpRequest* req = px->req;
     HttpServerResponse* res = px->res;
+    /* Backoff between attempts, for the caller to wait out before it sends
+     * (#3232): sleeping here put the proxy event loop's driver to sleep, and
+     * every connection it held with it. */
+    px->backoff_ms = 0;
     if (px->attempt > 0) {
-        /* Backoff between attempts. */
-        int sleep_ms = retry_backoff_ms(opts->retry_backoff_base_ms, px->attempt);
-        retry_sleep_ms(sleep_ms);
+        px->backoff_ms = retry_backoff_ms(opts->retry_backoff_base_ms, px->attempt);
         atomic_fetch_add(&px->u->metric_retries, 1);
     }
 
@@ -672,6 +692,12 @@ static int px_build(AetherProxyExchange* px) {
 
 int aether_proxy_exchange_resume(AetherProxyExchange* px, int64_t elapsed_ms) {
     return px_classify(px, elapsed_ms);
+}
+
+void aether_proxy_exchange_abandon(AetherProxyExchange* px) {
+    if (!px || !px->u) return;
+    aether_proxy_inflight_dec(px->u);
+    px->u = NULL;
 }
 
 static int px_classify(AetherProxyExchange* px, int64_t elapsed_ms) {
@@ -1103,13 +1129,15 @@ int aether_proxy_direct_head(const AetherProxyDirect* d,
 }
 
 /* The blocking driver: the server's worker owns the thread for the whole
- * request, so it simply performs the send itself. */
+ * request, so it simply performs the send itself, and sleeps out a retry's
+ * backoff before it. */
 int aether_middleware_reverse_proxy(HttpRequest* req,
                                     HttpServerResponse* res,
                                     void* user_data) {
     AetherProxyExchange px;
     int r = aether_proxy_exchange_begin(&px, req, res, user_data, NULL);
     while (r == PX_NEED_SEND) {
+        retry_sleep_ms(px.backoff_ms);
         int64_t t0 = aether_proxy_now_ms();
         px.resp = http_send_raw(px.outbound);
         int64_t elapsed = aether_proxy_now_ms() - t0;

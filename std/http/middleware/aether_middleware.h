@@ -9,6 +9,14 @@
 // http_server_use_middleware chain. No new dispatch path; the hot
 // loop stays a function-pointer chain.
 //
+// CORS, the rate limiter, the virtual-host gate, rewrite and real-IP
+// never block (CPU work, at most a short mutex) and are registered
+// with http_server_use_middleware_loop_safe, so the proxy event loop
+// runs them in front of a proxy mount (#3214). The auth middleware call
+// a program's verifier and static files reads files: those are not
+// loop-safe. A middleware added here has to keep to that when its
+// factory registers it as loop-safe.
+//
 // This file ships the C primitives + factories. The Aether-side
 // surface lives in std/http/middleware/module.ae.
 //

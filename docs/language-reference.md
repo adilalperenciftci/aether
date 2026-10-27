@@ -3338,7 +3338,7 @@ actor Poller {
 }
 ```
 
-and a handler that sends nothing leaves the actor idle, so `wait_for_idle()` returns. `wait_for_idle()` waits for every countdown that is running, so a poller that never stops keeps it waiting (#3162), and so does the end of `main`: a countdown of a minute that started just before `main` returned holds the exit for that minute. There is no way yet to let `main` end without it (#3219).
+and a handler that sends nothing leaves the actor idle, so `wait_for_idle()` returns. `wait_for_idle()` waits for every countdown that is running, so a poller that never stops keeps it waiting (#3162). The end of `main` waits for the messages sent to be handled, but not for countdowns: a countdown still running then does not hold the exit, and its timeout does not run (#3219). A program that wants a countdown to fire before it ends calls `wait_for_idle()` first.
 
 ### State Variables
 
@@ -3498,9 +3498,15 @@ core's own (an actor the handler spawned starts there) is stepped by the
 waiting thread itself, as a send steps an idle actor of the core, so it
 answers, and one that asks another of the core's actors in turn has it
 stepped the same way: a chain of asks among one core's actors answers
-(#3196, #3220). The core's other actors wait for the reply, so an asked
-actor on another core that asks one of them in turn waits with it, to the
-timeout (#3197).
+(#3196, #3220). The core's other actors keep running (#3197): a millisecond
+into the wait, and every millisecond after, the waiting thread delivers what
+is queued for them and moves each one with work to a core that runs it, the
+core waiting on that very actor when there is one, else an idle one. So an
+asked actor on another core that asks one of them in turn gets its answer.
+Nothing else is run inside the waiting handler: an actor of the core that
+asks the waiting actor waits until its handler is done, as it would have. An
+actor with more messages queued than its mailbox holds stays until the ask
+ends, since moved, its later messages could overtake them (#3241).
 
 ### Reply Statement
 

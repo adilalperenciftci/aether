@@ -80,7 +80,7 @@ typedef struct {
 } CounterActor;
 ```
 
-The fields, in order: `active`, `id`, `mailbox`, `step`, `thread`, `auto_process`, `assigned_core`, `migrate_to`, `spsc_queue`, `reply_slot`, `step_lock`, `timeout_ns`, `last_activity_ns`, `dead`, `alloc_size`, `destroy_state`, `scheduler_owned`, `inbox`, `thread_parked`, `inflight`. The header comments each one.
+The fields, in order: `active`, `id`, `mailbox`, `step`, `thread`, `auto_process`, `assigned_core`, `migrate_to`, `spsc_queue`, `reply_slot`, `step_lock`, `timeout_ns`, `last_activity_ns`, `step_payload`, `step_type`, `dead`, `alloc_size`, `destroy_state`, `release_message`, `scheduler_owned`, `inbox`, `thread_parked`, `inflight`. The header comments each one.
 
 An actor the compiler generates holds the base as its first member instead, `ActorBase _aether_base;`, followed by its states. So a state can be named like any of these fields (`state id`, `state active`); only a state named `_aether_base` is refused (#3094).
 
@@ -160,13 +160,30 @@ void _aether_step_ActorName(ActorName* self) {
     if (_msg_id >= 0 && _msg_id < 256 && dispatch_table[_msg_id]) {
         goto *dispatch_table[_msg_id];
     }
+    aether_message_drop(&self->_aether_base, &msg);   // no handler for it
     return;
 
     handle_MessageA:
-        // process message
+        self->_aether_base.step_payload = _msg_data;
+        self->_aether_base.step_type = _msg_id;
+        ActorName_handle_MessageA(self, _msg_data);
+        self->_aether_base.step_payload = NULL;
+        _aether_msg_release_MessageA(_msg_data);   // what its fields own
+        aether_free_message(_msg_data);
         return;
 }
 ```
+
+### A message that is not handled
+
+A handled message's fields are released by the step after its handler: `_aether_msg_release_<Msg>` drops what they own (a string the send copied, a closure, a struct that owns), then the payload is freed. A message that is dropped instead is released the same way (#3142). Each program emits one `_aether_release_message(type, payload)`, a switch over its messages that own something, and every spawn stores it in the actor's `release_message`; `aether_message_drop()` calls it and frees the payload. Every drop goes through that function:
+
+- the messages queued to an actor that panicked, or that was released, and the ones sent to it after;
+- a message of a type its receiver has no handler for (its payload was not even freed before);
+- the message a handler panicked on: the step records it in `step_payload` while the handler runs, and the step's panic barrier drops it, since the release after the handler never ran;
+- a message refused because the scheduler is not running, or that could not be queued for lack of memory.
+
+The receiver's own definitions interpret the payload, as its dispatch does, so a message is released as the program that defined it lays it out. A `ptr` field owns nothing (R4), so a buffer sent with `move` and dropped undelivered is not freed: that needs a type that owns a `ptr`, which #3142 tracks. A message sent through a C `AetherActorRef` whose actor was released has only its payload freed, since the block may hold another actor by then, whose definitions need not be the sender's.
 
 ### Asking
 
@@ -180,6 +197,21 @@ An ask (`actor ? Msg {}`) sends its message with a reply slot (`Message._reply_s
 The ask a handler holds is part of its thread's step context, with the actor stepping. A step can run inside another (a send steps an idle actor of the same core inline, and a cooperative ask polls until its reply), so each step starts with no ask of its own and gives the enclosing step its context back when it ends: a handler that sends, or asks, before it replies still answers its own asker.
 
 `v, err = actor ? Msg {}` reads the reason (the language reference's Ask Pattern lists them); `v = actor ? Msg {}` gives the reply type's zero value for any of them, as it does at a timeout.
+
+An ask made in a handler blocks its core's scheduler thread. Only a core's own scheduler thread does what follows; an actor with a thread of its own sends as a foreign thread and waits without stepping anything for the core (#3246). The core is marked as asking, with the actor it waits on (`Scheduler.ask_target`) and the reply slot (`ask_slot`), and no actor is moved onto it but that one. The waiting thread steps its target itself when the target is the core's (#3220), and relieves the core (#3197): once the wait has lasted `ASK_RELIEF_NS` (1 ms), it does the part of its loop that steps nothing.
+
+- Its deferred sends go out, its own core's through its own queue. A flush already under way on the thread is left to finish (#3247).
+- The messages the loop's current batch still holds (`coalesce_buffer.next` marks how far the batch got) go into their actors' mailboxes, for every actor that is not stepping. They are the oldest each has, and the loop skips the entries taken. An actor keeps its entries from the first one that cannot go, so none of its messages passes another. The wait does this at once when its own target is held there.
+- Its queued messages go where the loop would put them: into its actors' mailboxes, to an actor's own thread, or on to the core an actor has moved to. A sender's queue is taken in order up to the first message that cannot go now, which the loop delivers once it runs again. That message cannot go when its actor's mailbox is full, or when the batch still holds a message for it.
+- Its actors with work (a message, or a receive timeout that is due) and nothing in flight are moved by `move_actor`, the one move path, to a core that runs them. That is the core waiting on that very actor, whose waiting thread is woken through its slot and steps it. When no core waits on it, it goes to a parked core, or else to the core with the fewest messages queued for it that is not asking.
+
+A relief that did something is followed by the next 50 µs later (`ASK_RELIEF_BUSY_NS`). One that found nothing is followed by the next after twice the last gap, up to 8 ms (`ASK_RELIEF_IDLE_MAX_NS`). An actor stepping on this thread (the asker, and any actor below it on the stack) holds its step lock and stays. Nothing is stepped inside the waiting handler: an actor run there that asked the asker could never be answered. Moved to another core, it runs on that core's thread, and an ask of the asker waits there until the asker's handler is done.
+
+An actor with more messages queued than its mailbox holds (32) keeps a message in flight, and moved, its senders' next messages could overtake it, so it waits for the ask, as every actor of the core did before. #3241 tracks handing it over with an overflow of its own.
+
+`tests/runtime/test_ask_relief.c` places the actors on chosen cores. It covers a chain of asks back to the waiting core, the waiting core's other actors, and a same-core target whose message the batch still held.
+
+An ask that was answered or failed returns only once its reply slot is freed. The replier lets go of the slot a few instructions after it wakes the asker, so the asker waits for that and frees the slot itself (#3245). What an ask allocated is gone when it returns, which a program that counts its heap around asks relies on. A timed-out ask does not wait; its replier frees the slot when it comes.
 
 ## Actor Timeouts
 
@@ -197,7 +229,7 @@ actor Monitor {
 
 The countdown starts when the actor waits on an empty mailbox: at spawn, and again each time it has handled a message. A message that arrives within the interval stops it, and the next wait starts it from the beginning, as Erlang's `receive ... after` does: the Monitor warns every time 5 seconds pass without a heartbeat. The timeout fires once per countdown. When its handler has run, only a message starts the next one, so a handler that sends the actor a message (`self ! Tick {}` below) keeps a cycle going, and one that sends nothing leaves the actor idle (#3162).
 
-Internally, `timeout_ns` in the actor's base holds the interval, set at spawn and kept, and `last_activity_ns` when the countdown was armed (0 while it is not). The generated `spawn_<Actor>` arms it. The generated step function arms it again at the end of each message's handling, disarms it when it takes a message, and before each `mailbox_receive()` fires the `after` arm (disarming it first) when it is armed, the interval has passed by `_aether_clock_ns()`, and no message is waiting. With no message to step it for, the actor's core (or its own thread) steps it once the deadline passes, so the timeout fires within a park's timed wait of it (32 ms at most). `wait_for_idle()` waits for every armed countdown of a live actor to end (#3102), so a poller that never stops keeps it waiting. So does the end of `main`, which waits for the actors as `wait_for_idle()` does: an actor with `after 60000` that handled a message moments before `main` returned holds the exit for that minute, and then runs its timeout. There is no way yet to let `main` end without it (#3219).
+Internally, `timeout_ns` in the actor's base holds the interval, set at spawn and kept, and `last_activity_ns` when the countdown was armed (0 while it is not). The generated `spawn_<Actor>` arms it. The generated step function arms it again at the end of each message's handling, disarms it when it takes a message, and before each `mailbox_receive()` fires the `after` arm (disarming it first) when it is armed, the interval has passed by `_aether_clock_ns()`, and no message is waiting. With no message to step it for, the actor's core (or its own thread) steps it once the deadline passes, so the timeout fires within a park's timed wait of it (32 ms at most). `wait_for_idle()` waits for every armed countdown of a live actor to end (#3102), so a poller that never stops keeps it waiting. The end of `main` waits for the messages sent to be handled, but not for countdowns (#3219): an actor with `after 60000` that handled a message moments before `main` returned does not hold the exit, and its timeout does not run, on either scheduler. `scheduler_shutdown()` calls the wait with countdowns left out, where `wait_for_idle()` keeps them. A program that wants a countdown to fire before it ends calls `wait_for_idle()` first.
 
 The timeout expression can reference actor state fields, not just integer literals, useful when the interval is configurable per-actor or computed:
 
@@ -343,7 +375,7 @@ Actors are placed on the caller's core at spawn time. Actors spawned from the ma
 
 During operation, a sender on another core sets a `migrate_to` hint on the target actor, asking for it on the sender's core. The actor's own core moves it, before it runs the message that brought the request, so a chain of sends (a thread ring, a pipeline) gathers on one core in its first round and its sends turn local. A busy actor whose messages run first is asked again after that batch. A move is non-blocking: if a lock cannot be taken, it waits for the next iteration.
 
-An actor moves only while no message for it is on its way through a core's queues. A sender counts its message in the actor's `inflight` before it reads the actor's core, and the core that delivers the message to the mailbox uncounts it, a whole run of one actor's messages at once. The move turns `inflight` from 0 to a moving mark, so a message cannot be left behind on the core the actor leaves and then overtaken by the sender's next one (#3093). A message that finds the mailbox full keeps its place: the actor's core steps it to make room, instead of putting the message at the back of a queue. Work stealing goes through the same path: the idle core asks for an actor, and the busy core moves it.
+An actor moves only while no message for it is on its way through a core's queues. A sender counts its message in the actor's `inflight` before it reads the actor's core, and the core that delivers the message to the mailbox uncounts it, a whole run of one actor's messages at once. The move turns `inflight` from 0 to a moving mark, so a message cannot be left behind on the core the actor leaves and then overtaken by the sender's next one (#3093). The same holds for what the moving actor sent itself. A core takes in its messages through one queue per sending core and drains them in index order, so a sender that moved with a message still in a receiver's queue from its old core could have its next one, sent from the new core, delivered first. So a core moves an actor only while nothing sent from that core is still on its way: no core's queue from it holds a message and its overflow is empty (#3240). A message that finds the mailbox full keeps its place: the actor's core steps it to make room, instead of putting the message at the back of a queue. Work stealing goes through the same path: the idle core asks for an actor, and the busy core moves it.
 
 Measured on Windows (i7-13700K, 1,000,000 messages, 10 runs, M msg/s, medians) against the runtime before (#3090): thread ring 24.91 from 3.03, on 0.078 s of CPU from 5.56 s, its 100 actors on one core; fork-join 39.69 from 30.23, each worker's batch delivered as one run; ping-pong (12.56 and 12.36) and counting (42.90 and 42.84) unchanged; skynet 1.69 from 1.31, with a narrower spread.
 

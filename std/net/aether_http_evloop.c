@@ -66,6 +66,7 @@ typedef enum {
     EV_UPSTREAM_DIAL,    /* a connect this driver started is still in flight */
     EV_UPSTREAM_SEND,    /* writing the request to the upstream */
     EV_UPSTREAM_RECV,    /* reading the response from the upstream */
+    EV_BACKOFF,          /* waiting out a retry's backoff, on a timer (#3232) */
     EV_CLIENT_SEND,      /* writing the response to the client */
     EV_CLOSING
 } EvState;
@@ -146,6 +147,27 @@ typedef struct EvConn {
     HttpServerResponse* res;     /* what the proxy fills in for the client */
     AetherProxyExchange px;      /* the proxy's own resumable state */
 
+    /* The connection's addresses and TLS state, resolved once, for each
+     * request built on it (#3169, #3214). */
+    HttpConnMeta meta;
+    int          meta_ready;
+
+    /* What runs around the proxy on the current request (#3214).
+     * `before_proxy`: the server's middleware ahead of the proxy runs on it,
+     * so the request object is this request's own (ev_begin_upstream).
+     * `hooked`: the server's request hooks observe its response, from the
+     * clock reading taken when its first byte was seen. */
+    int      before_proxy;
+    int      hooked;
+    int64_t  t_start_us;
+    /* Responses written on this connection, the worker path's
+     * requests_served, which its keep-alive policy counts. */
+    int      requests_served;
+    /* The response being written said Connection: close (a middleware's
+     * answer, settled as the worker path settles it): the connection ends
+     * once it is out. */
+    int      close_after;
+
     struct EvConn* next;         /* free list / owner list */
 } EvConn;
 
@@ -179,6 +201,7 @@ struct HttpEvLoop {
     EvDriver*   drivers;
     int         driver_count;
     atomic_int  active;
+    atomic_int  taken;           /* connections taken since the start (#3214) */
     atomic_int  stopping;
     atomic_int  next_driver;     /* round-robin placement of new connections */
 };
@@ -216,6 +239,10 @@ int http_evloop_active(HttpEvLoop* loop) {
     return loop ? atomic_load(&loop->active) : 0;
 }
 
+int http_evloop_taken(HttpEvLoop* loop) {
+    return loop ? atomic_load(&loop->taken) : 0;
+}
+
 /* ---- buffers ---- */
 
 static int ev_in_reserve(EvConn* c, size_t extra) {
@@ -227,6 +254,20 @@ static int ev_in_reserve(EvConn* c, size_t extra) {
     c->in = grown;
     c->in_cap = want;
     return 0;
+}
+
+/* What the proxy exchange built for an attempt, released once the attempt is
+ * over, as the blocking driver releases it after its send: the outbound
+ * request (its copy of the body, its content type, any header past the
+ * arena) and its URL. The exchange's body pointer points into the outbound
+ * request, so not before the upstream answered or failed. Clearing the
+ * exchange used to drop both, every proxied request leaking its URL and one
+ * with a body the copy of it too (#3242). */
+static void ev_release_attempt(EvConn* c) {
+    if (c->px.outbound) http_request_free_raw(c->px.outbound);
+    free(c->px.upstream_url);
+    c->px.outbound = NULL;
+    c->px.upstream_url = NULL;
 }
 
 /* Everything one request owned, released before the next one starts.
@@ -268,8 +309,19 @@ static void ev_conn_reset_request(EvConn* c) {
      * one costs a handful of allocations to build, including two fixed-size
      * arrays of header slots that are identical every time, and a connection
      * serves many requests. They are reset in place when the next request
-     * arrives rather than freed and built again. */
+     * arrives rather than freed and built again. Except a request the
+     * middleware ahead of the proxy ran on, which is that request's own and
+     * goes with it (ev_begin_upstream, #3214). */
+    ev_release_attempt(c);
     memset(&c->px, 0, sizeof(c->px));
+    if (c->before_proxy && c->req) {
+        http_request_free(c->req);
+        c->req = NULL;
+    }
+    c->before_proxy = 0;
+    c->hooked = 0;
+    c->t_start_us = 0;
+    c->close_after = 0;
 }
 
 /* Remember which connection a descriptor belongs to. The poller reports a
@@ -335,9 +387,12 @@ static void ev_conn_close(EvDriver* d, EvConn* c) {
  * Deliberately the same question the worker path asks, and the answer has to
  * match it: a driver that decided differently would accept a request the
  * other rejects. Headers end at a blank line, then exactly the body the
- * framing declares.
+ * framing declares. 1: a whole request is here; 0: more is needed; -1: its
+ * framing is the worker path's to answer or decode (#3228, #3233), or it is
+ * larger than this driver buffers (#3237). `body_limit` is the largest body
+ * the proxy forwards.
  */
-static int ev_request_complete(EvConn* c, size_t* out_total) {
+static int ev_request_complete(EvConn* c, size_t body_limit, size_t* out_total) {
     if (c->in_len == 0) return 0;
     c->in[c->in_len] = '\0';
 
@@ -355,25 +410,45 @@ static int ev_request_complete(EvConn* c, size_t* out_total) {
          * client sends. Length-bounded rather than trusting the NUL. */
         const char* found = http_find_header_end(c->in + from, c->in_len - from);
         c->in_scanned = c->in_len;
-        if (!found) return 0;
+        if (!found) {
+            /* A head that has not ended within the worker path's connection
+             * buffer is one that path closes the connection on. This driver
+             * grew its buffer for as long as the client kept sending, which a
+             * client could do without end (#3237); the worker path takes the
+             * connection, with what was read, and does what it does. */
+            if (c->in_len + 1 >= HTTP_CONN_BUF_CAP) return -1;
+            return 0;
+        }
         c->in_hdr_end = (size_t)((found + 4) - c->in);
     }
+    /* The same bound on a head found whole: one read can bring in more than
+     * 16 KiB once the buffer has grown for an earlier body, and a head that
+     * ended past the bound was taken here, though the worker path refuses
+     * it on a fresh connection (#3253). It goes there, which answers 431. */
+    if (c->in_hdr_end >= HTTP_CONN_BUF_CAP) return -1;
 
     size_t header_bytes = c->in_hdr_end;
     char* hdr_end = c->in + header_bytes - 4;
-    char cl[64];
-    int differing = 0;
-    int count = http_find_header_in_block(c->in, hdr_end, "Content-Length",
-                                          cl, sizeof(cl), &differing);
-    if (count == 0) { *out_total = header_bytes; return 1; }
-    if (differing) return -1;
-    char* endp = NULL;
-    /* strtoll, as the client side's parse: strtol into a `long`, 32 bits on
-     * Windows, turned a length past 2 GiB into 2147483647 and read the body
-     * short of what the client declared (#3096). */
-    errno = 0;
-    long long declared = strtoll(cl, &endp, 10);
-    if (!endp || *endp != '\0' || endp == cl || declared < 0 || errno == ERANGE) return -1;
+    /* The worker path's own checks on the head (#3236): the request line's
+     * length, each header line's shape, Content-Length and
+     * Transfer-Encoding. This driver read Content-Length alone, so it
+     * forwarded heads the worker refuses ("Content-Length : 5", an obs-fold
+     * line, more headers than the parser holds), and a refusal is the
+     * worker path's to answer. So is a chunked body: Transfer-Encoding
+     * decides where a body ends, and this driver dropped a chunked one and
+     * took Content-Length bytes as the body of a request with both (#3228);
+     * the worker path decodes it and bounds it, which keeps one decoder
+     * rather than two for a framing proxied clients rarely use. */
+    long declared = 0;
+    int chunked = 0;
+    if (http_request_head_check(c->in, hdr_end, &declared, &chunked) != HTTP_HEAD_OK || chunked)
+        return -1;
+    /* The body is read whole before anything looks at the request, so a
+     * declared length is what this driver will hold: 2 GiB declared, and it
+     * set out to buffer 2 GiB (#3237). One longer than the proxy forwards
+     * goes to the worker path, which streams a body that size and where the
+     * proxy refuses it, 502, without reading it. */
+    if ((size_t)declared > body_limit) return -1;
     if (c->in_len < header_bytes + (size_t)declared) return 0;
     *out_total = header_bytes + (size_t)declared;
     return 1;
@@ -456,6 +531,7 @@ static int ev_next_timeout_ms(EvDriver* d, int cap_ms) {
 static void ev_arm_deadline(EvDriver* d, EvConn* c);
 static int  ev_expire(EvDriver* d, EvConn* c);
 static int  ev_hand_back(EvDriver* d, EvConn* c);
+static int  ev_hand_to_tls(EvDriver* d, EvConn* c);
 static int  ev_watch_upstream(EvDriver* d, EvConn* c);
 static void ev_lend_rxbuf(EvConn* c);
 static int  ev_respond_from(EvDriver* d, EvConn* c);
@@ -662,9 +738,20 @@ static int ev_step_read_request(EvDriver* d, EvConn* c) {
          * after a pipelined request the next one is here already, and reading
          * first would block it behind bytes that never come. */
         if (c->in_len > 0) {
+            /* The request began with its first byte: the request hooks'
+             * duration runs from here, as the worker path's runs from
+             * before its read (#3214). Not read when no hook will ask. */
+            if (!c->t_start_us && d->loop->server->request_hook_chain)
+                c->t_start_us = http_server_clock_us();
             size_t total = 0;
-            int complete = ev_request_complete(c, &total);
-            if (complete < 0) return -1;         /* framing it cannot resolve */
+            AetherProxyOpts* opts = (AetherProxyOpts*)http_server_proxy_opts(d->loop->server);
+            size_t body_limit = opts ? (size_t)opts->max_body_bytes : 0;
+            int complete = ev_request_complete(c, body_limit, &total);
+            /* Framing this driver cannot resolve: the worker path has the
+             * answer for it (a 400 for a length that is no length), so the
+             * connection goes there with the bytes read, rather than being
+             * closed with nothing written (#3233). */
+            if (complete < 0) return ev_hand_back(d, c);
             if (complete) {                      /* a whole request is here */
                 c->in_total = total;
                 return 1;
@@ -789,15 +876,30 @@ static int ev_step_upstream_recv(EvDriver* d, EvConn* c) {
 
 
 
-/* The proxy has produced a response. Turn it into bytes and hand it to the
- * client-writing state, which is the only thing left to wait for. */
+/* A response object to send: the proxy's (an upstream's answer it copied, a
+ * cache hit, a refusal, a 502 or 504 of its own) or a middleware's ahead of
+ * it, a 429 from the rate limiter, a CORS preflight, an unknown host
+ * (#3214). It goes out as the worker path sends one
+ * (http_server_answer_bytes): the request hooks observe it first, as they
+ * observe every response the server sends (#3213); the keep-alive decision
+ * and the headers stating it are the ones finish_response makes (#3229); a
+ * HEAD carries no body, which the proxy's own answers did, so a client read
+ * the body as the next response (#3251). When the decision is to close (the
+ * client said so, HTTP/1.0, the server's keep-alive policy), the connection
+ * ends once the response is written, as it does there. */
+static int ev_answer(EvDriver* d, EvConn* c);
 static int ev_respond_from(EvDriver* d, EvConn* c) {
-    (void)d;
+    return ev_answer(d, c);
+}
+
+static int ev_answer(EvDriver* d, EvConn* c) {
     size_t len = 0;
-    if (!http_response_serialize_into(c->res, &c->out, &c->out_cap, &len))
-        return -1;
+    int keep = http_server_answer_bytes(d->loop->server, c->req, c->res, c->t_start_us,
+                                        c->requests_served, &c->out, &c->out_cap, &len);
+    if (keep < 0) return -1;
     c->out_len = len;
     c->out_sent = 0;
+    c->close_after = !keep;
     c->state = EV_CLIENT_SEND;
     return 1;
 }
@@ -807,6 +909,16 @@ static int ev_respond_from(EvDriver* d, EvConn* c) {
  * exchange. */
 static int ev_begin_retry_ex(EvDriver* d, EvConn* c, int next_addr);
 static int ev_begin_retry(EvDriver* d, EvConn* c) {
+    /* A retry's backoff is waited out on a timer (#3232). The exchange used
+     * to sleep it, on this thread, and every connection the driver held
+     * waited with it; now the connection parks and ev_expire dials when it
+     * is due. */
+    if (c->px.backoff_ms > 0) {
+        int64_t due = aether_proxy_now_ms() + c->px.backoff_ms;
+        c->px.backoff_ms = 0;
+        c->state = EV_BACKOFF;
+        return ev_timer_set(d, c, due) == 0 ? 0 : -1;
+    }
     return ev_begin_retry_ex(d, c, 0);
 }
 
@@ -821,7 +933,7 @@ static int ev_begin_retry_ex(EvDriver* d, EvConn* c, int next_addr) {
     int port = 0, use_tls = 0;
     if (!url || !parse_url_alloc(url, host, sizeof(host), &port, &path, &use_tls))
         return -1;
-    if (use_tls) { free(path); return -1; }
+    if (use_tls) { free(path); return ev_hand_to_tls(d, c); }   /* #3231 */
 
     int fd = next_addr ? http_upstream_redial(host, port, &c->up)
                        : http_upstream_acquire(host, port, &c->up);
@@ -847,6 +959,11 @@ static int ev_begin_retry_ex(EvDriver* d, EvConn* c, int next_addr) {
     free(path);   /* the head holds the request line now */
     if (!c->head) return -1;
 
+    /* The receive buffer may still be lent to the attempt this one replaces:
+     * a 5xx with retries left comes here from ev_finish_upstream with it in
+     * the exchange. Clearing the exchange dropped the only pointer to it,
+     * 16 KiB or more per retry (#3249). */
+    ev_reclaim_rxbuf(c);
     memset(&c->x, 0, sizeof(c->x));
     http_exchange_init(&c->x, &c->up.t, c->head, c->head_len, body, body_len,
                        http_request_method_of(c->px.outbound));
@@ -866,13 +983,14 @@ static int ev_begin_retry_ex(EvDriver* d, EvConn* c, int next_addr) {
 
 
 
-/* Give the connection to the general server path and stop tracking it here.
+/* Stop tracking the client here, for the general server path to take it.
  *
  * Ownership moves whole: the descriptor leaves this driver's poller and its
  * table before the other path sees it, so no event can arrive for a
- * connection this driver no longer owns.
+ * connection this driver no longer owns. Returns the descriptor; the TLS
+ * session, if any, goes to *ssl.
  */
-static int ev_hand_back(EvDriver* d, EvConn* c) {
+static int ev_release_client(EvDriver* d, EvConn* c, void** ssl) {
     int fd = c->client_fd;
     aether_io_poller_remove(&d->poller, fd);
     ev_untrack(d, fd);
@@ -883,23 +1001,81 @@ static int ev_hand_back(EvDriver* d, EvConn* c) {
     /* The session goes with it, and this connection stops owning it: the
      * handshake is done and the socket carries ciphertext, so a worker handed
      * only the descriptor would read bytes it cannot decode. */
-    void* ssl = NULL;
+    *ssl = NULL;
 #ifdef AETHER_HAS_OPENSSL
-    ssl = c->ssl;
+    *ssl = c->ssl;
     c->ssl = NULL;
 #endif
+    return fd;
+}
+
+/* The other path could not take it: nobody owns it now, so it closes. */
+static void ev_release_failed(int fd, void* ssl) {
+#ifdef AETHER_HAS_OPENSSL
+    if (ssl) SSL_free((SSL*)ssl);
+#else
+    (void)ssl;
+#endif
+    close(fd);
+}
+
+/* Give the connection to the general server path, with nothing of the
+ * current request run here. A pool worker serves it from then on, as it does
+ * an accepted connection: nothing of the worker path runs on this thread
+ * (#3230). */
+static int ev_hand_back(EvDriver* d, EvConn* c) {
+    void* ssl = NULL;
+    int fd = ev_release_client(d, c, &ssl);
     /* Every buffered byte goes with it, not just this request's: a client
      * may have pipelined the next one into the same segment, and the worker
-     * taking over is the only thing that will ever read it. */
-    int adopted = http_server_adopt_tls_connection(d->loop->server, fd, ssl,
-                                                   c->in, (int)c->in_len);
-    if (adopted != 0) {
-#ifdef AETHER_HAS_OPENSSL
-        if (ssl) SSL_free(ssl);
-#endif
-        close(fd);
-    }
+     * taking over is the only thing that will ever read it. So does the
+     * count of responses this driver sent on it, which the server's
+     * keep_alive_max goes on counting from (#3229). */
+    if (http_server_adopt_request(d->loop->server, fd, ssl, NULL, NULL, 0,
+                                  c->requests_served, 0, c->in, (int)c->in_len) != 0)
+        ev_release_failed(fd, ssl);
     return -1;                   /* finished with, as far as this driver goes */
+}
+
+/* Give the connection to the general server path after the middleware
+ * ahead of the proxy ran on its request and the proxy did not take it
+ * (#3214): the worker path goes on from the middleware after the mount, with
+ * the request as the chain left it (http_server_adopt_request). Handing back
+ * the bytes instead would run the chain on it twice: a rate limiter would
+ * count it twice. What was read past this request goes with it. With
+ * `at_proxy` 1 the worker path goes on from the mount itself (#3231). */
+static int ev_hand_over_from(EvDriver* d, EvConn* c, int at_proxy) {
+    void* ssl = NULL;
+    int fd = ev_release_client(d, c, &ssl);
+    if (http_server_adopt_request(d->loop->server, fd, ssl, c->req, c->res,
+                                  c->t_start_us, c->requests_served, at_proxy,
+                                  c->in + c->in_total,
+                                  (int)(c->in_len - c->in_total)) == 0) {
+        c->req = NULL;           /* the worker path's now, and done with */
+        c->res = NULL;
+    } else {
+        ev_release_failed(fd, ssl);
+    }
+    return -1;
+}
+
+static int ev_hand_over(EvDriver* d, EvConn* c) {
+    return ev_hand_over_from(d, c, 0);
+}
+
+/* The proxy picked an https upstream, which this driver cannot dial: it has
+ * no TLS client, and it used to close the client's connection with nothing
+ * written (#3231). A server with one is not served here at all
+ * (http_server_evloop_serves); one added while this request was on its way,
+ * or picked by a retry, lands here. The pick goes back, and the request goes
+ * to the worker path, whose client speaks TLS: from the mount itself when
+ * the middleware ahead of it already ran here, else with its bytes, as if
+ * this driver had never read it. */
+static int ev_hand_to_tls(EvDriver* d, EvConn* c) {
+    aether_proxy_exchange_abandon(&c->px);
+    ev_release_attempt(c);
+    if (!c->before_proxy) return ev_hand_back(d, c);
+    return ev_hand_over_from(d, c, 1);
 }
 
 /* The proxy's configured upstream timeout, as a moment to give up. A proxy
@@ -913,22 +1089,41 @@ static void ev_arm_deadline(EvDriver* d, EvConn* c) {
     ev_timer_set(d, c, aether_proxy_now_ms() + (int64_t)secs * 1000);
 }
 
+/* How long this driver waits on a quiet client: the worker path's receive
+ * timeout (conn_apply_recv_timeout), the server's keep-alive idle timeout,
+ * 30 seconds unless set. Armed while the driver waits on the client for a
+ * request, and moved each time bytes of it arrive, as a receive timeout
+ * restarts with each receive; a TLS handshake has it once, start to finish,
+ * and the request after it starts afresh. With no timeout at all, a client held
+ * a connection for as long as it kept it open, idle or halfway through a
+ * request (#3243). */
+static void ev_arm_idle(EvDriver* d, EvConn* c) {
+    int ms = d->loop->server->keep_alive_idle_ms > 0
+           ? d->loop->server->keep_alive_idle_ms : 30000;
+    ev_timer_set(d, c, aether_proxy_now_ms() + ms);
+}
+
 /* The upstream did not answer in time. The client is owed an answer anyway,
  * and it is the same one the blocking path gives. */
 static int ev_expire(EvDriver* d, EvConn* c) {
     ev_timer_set(d, c, 0);
-    if (c->up.t.sockfd >= 0) {
-        aether_io_poller_remove(&d->poller, c->up.t.sockfd);
-        ev_untrack(d, c->up.t.sockfd);
-        c->up_in_poller = 0;
-        http_upstream_release(&c->up, 0);   /* never pool a connection mid-answer */
-    }
-    if (!c->res) return -1;
-    http_response_set_status(c->res, 504);
-    http_response_set_header(c->res, "X-Aether-Proxy-Error", "upstream_timeout");
-    http_response_set_header(c->res, "Content-Type", "text/plain");
-    http_response_set_body(c->res, "upstream timed out\n");
-    return ev_respond_from(d, c);
+    /* Not a timeout: the backoff before a retry is over (#3232). */
+    if (c->state == EV_BACKOFF) return ev_begin_retry_ex(d, c, 0);
+    /* The client went quiet for the idle timeout while this driver waited on
+     * it (ev_arm_idle): closed, as the worker path closes on its receive
+     * timeout (#3243). */
+    if (c->state == EV_READ_REQUEST || c->state == EV_TLS_HANDSHAKE) return -1;
+    /* The upstream did not answer in time: a failed call, which goes back to
+     * the proxy exchange as the worker path's driver sends its own (#3250).
+     * The exchange decrements the upstream's in-flight count, tells its
+     * breaker, counts the timeout and retries where it may, else answers
+     * 504. Answered here instead, an upstream with an in-flight cap stayed
+     * full after its first timeout and a breaker never opened on timeouts.
+     * The words are the blocking client's for a deadline, which the exchange
+     * reads as a timeout. The connection is dropped, never pooled mid-answer. */
+    return ev_upstream_failed(d, c, c->x.framing.header_bytes
+                                    ? "request timed out before the response ended"
+                                    : "request timed out before the response arrived", 1);
 }
 
 /* ---- the bridge to the proxy ----
@@ -954,23 +1149,54 @@ static int ev_upstream_failed(EvDriver* d, EvConn* c, const char* why, int relea
     HttpResponse* resp = http_response_alloc_failed(why);
     if (!resp) return -1;
     c->px.resp = resp;
+    ev_release_attempt(c);   /* over; resume may build the next (#3242) */
     if (aether_proxy_exchange_resume(&c->px, 0) == PX_NEED_SEND) {
         return ev_begin_retry(d, c);
     }
     return ev_respond_from(d, c);
 }
 
-/* The request is complete: run the proxy up to the point where it needs the
- * upstream, then get a connection and a serialised head ready to go. */
+/* Parse the request at the front of `in`, `arena` NULL for the ordinary
+ * allocator. The bytes after it are the next request's, so the parse is
+ * bounded the way the worker path bounds it, by a NUL at the request's end:
+ * a request with no Content-Length had everything buffered after it, the
+ * next pipelined request included, parsed as its body, and the proxy
+ * forwarded that body upstream. */
+static int ev_parse_request(EvConn* c, HttpArena* arena) {
+    char saved = c->in[c->in_total];     /* in_total < in_cap (ev_in_reserve) */
+    c->in[c->in_total] = '\0';
+    HttpRequest* parsed = arena
+        ? http_parse_request_arena(c->req, c->in, c->in_total, arena)
+        : http_parse_request_into(c->req, c->in, c->in_total);
+    c->in[c->in_total] = saved;
+    return parsed != NULL;
+}
+
+/* The request is complete: run what precedes the proxy, and the proxy up to
+ * the point where it needs the upstream, then get a connection and a
+ * serialised head ready to go. */
 static int ev_begin_upstream(EvDriver* d, EvConn* c) {
-    if (!c->req) {
-        c->req = (HttpRequest*)calloc(1, sizeof(HttpRequest));
-        if (!c->req) return -1;
+    HttpServer* server = d->loop->server;
+    /* A server changed after this connection was taken may have gained a
+     * middleware ahead of the proxy, or a request hook, that is not
+     * loop-safe (#3214): from this request on the worker path serves the
+     * connection, and nothing of the request has run here yet. */
+    if (!http_server_evloop_serves(server)) return ev_hand_back(d, c);
+
+    if (!c->meta_ready) {
         /* The connection's peer, which the proxy names in X-Forwarded-For
-         * (#3169). One request per connection, reset by each parse, which
-         * keeps it. */
-        http_request_copy_fd_meta(c->req, c->client_fd);
+         * (#3169), and its TLS state, which a middleware may ask (#3214). */
+        int is_tls = 0;
+#ifdef AETHER_HAS_OPENSSL
+        is_tls = c->ssl != NULL;
+#endif
+        http_conn_meta_from_fd(&c->meta, c->client_fd, is_tls);
+        c->meta_ready = 1;
     }
+    c->before_proxy = http_server_has_before_proxy(server);
+    c->hooked = server->request_hook_chain != NULL;
+    if (c->hooked && !c->t_start_us) c->t_start_us = http_server_clock_us();
+
     /* The arena is emptied before the parse, not after it: the parse takes
      * this request's strings from it, and resetting afterwards would hand the
      * proxy pointers into a block that had just been handed back. It holds
@@ -982,8 +1208,35 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
         http_arena_reset(&c->arena);
     }
 
-    if (!http_parse_request_arena(c->req, c->in, c->in_total,
-                                  c->arena_ready ? &c->arena : NULL)) return -1;
+    /* A request that does not parse goes to the worker path with the bytes
+     * read, which answers it 400 (or 414 for a request line too long to
+     * hold), as it answers every request it cannot parse; closing the
+     * connection here left the client with no status at all (#3233). */
+    if (c->before_proxy) {
+        /* A middleware may change the request it is given, by the contract
+         * the worker path gives it: a request of its own, whose strings are
+         * each a malloc. use_real_ip replaces its peer; a program's middleware
+         * may set any field. A peer replaced on one request and reported by
+         * the connection's next, or a program's edit of an arena string,
+         * would break that, so this request is parsed outside the arena into
+         * an object of its own, which goes with it (ev_conn_reset_request).
+         * std's own edits go through the server's request edits, which keep
+         * an arena-backed or reused request whole (#3234). */
+        if (c->req) http_request_free(c->req);
+        c->req = (HttpRequest*)calloc(1, sizeof(HttpRequest));
+        if (!c->req) return -1;
+        if (!ev_parse_request(c, NULL)) return ev_hand_back(d, c);
+        http_request_set_conn_meta(c->req, &c->meta);
+    } else {
+        if (!c->req) {
+            c->req = (HttpRequest*)calloc(1, sizeof(HttpRequest));
+            if (!c->req) return -1;
+            /* One request object per connection, which a parse resets
+             * without touching these. */
+            http_request_set_conn_meta(c->req, &c->meta);
+        }
+        if (!ev_parse_request(c, c->arena_ready ? &c->arena : NULL)) return ev_hand_back(d, c);
+    }
 
     if (!c->res) {
         c->res = http_response_create();
@@ -992,15 +1245,22 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
         http_response_reset(c->res);
     }
 
-    void* opts = http_server_proxy_opts(d->loop->server);
+    /* The middleware ahead of the proxy, as the worker path's chain runs it
+     * (#3214): each loop-safe, or this server would not be served here. */
+    if (c->before_proxy && !http_server_run_before_proxy(server, c->req, c->res))
+        return ev_answer(d, c);   /* 1: the client write is next */
+
+    void* opts = http_server_proxy_opts(server);
     int r = aether_proxy_exchange_begin(&c->px, c->req, c->res, opts,
                                         c->arena_ready ? &c->arena : NULL);
     if (r == 1) {
         /* Not the proxy's request: a health endpoint, an admin route, or
          * anything another middleware answers. This driver knows one kind of
          * work, so the rest goes back to the path that knows the others,
-         * carrying the bytes already read off the socket. */
-        return ev_hand_back(d, c);
+         * carrying the bytes already read off the socket; or, when the
+         * middleware ahead of the proxy ran on it, the request as it left
+         * them. */
+        return c->before_proxy ? ev_hand_over(d, c) : ev_hand_back(d, c);
     }
     if (r != PX_NEED_SEND) {
         /* Served without an upstream: a cache hit or a refusal. The response
@@ -1016,8 +1276,9 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
     int port = 0, use_tls = 0;
     if (!url || !parse_url_alloc(url, host, sizeof(host), &port, &path, &use_tls))
         return -1;
-    /* this driver is only mounted on plain HTTP */
-    if (use_tls) { free(path); return -1; }
+    /* this driver dials plain HTTP only: an https upstream is the worker
+     * path's (#3231) */
+    if (use_tls) { free(path); return ev_hand_to_tls(d, c); }   /* #3231 */
 
     int fd = http_upstream_acquire(host, port, &c->up);
     if (fd < 0) {
@@ -1053,6 +1314,23 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
     return ev_track(d, fd, c) == 0 ? 1 : -1;
 }
 
+/* Append to the response head being built in `out`, growing it as the
+ * proxy's direct head does. */
+static int ev_out_put(EvConn* c, size_t* len, const char* s, size_t n) {
+    if (*len + n + 1 > c->out_cap) {
+        size_t want = c->out_cap ? c->out_cap : 1024;
+        while (want < *len + n + 1) want *= 2;
+        char* grown = (char*)realloc(c->out, want);
+        if (!grown) return -1;
+        c->out = grown;
+        c->out_cap = want;
+    }
+    memcpy(c->out + *len, s, n);
+    *len += n;
+    c->out[*len] = '\0';
+    return 0;
+}
+
 /* The upstream has answered. Hand the reply back to the proxy exchange, which
  * decides whether it is the one to keep, and turn what it produced into bytes
  * for the client. */
@@ -1069,25 +1347,44 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
  * a copy again. Everything else falls back, so this narrows what it handles
  * rather than changing what the proxy means.
  *
- * Returns 1 when it answered, 0 when the caller should take the copying path.
+ * Returns 1 when it answered, 0 when the caller should take the copying path,
+ * -1 when the head could not be finished and the connection has to close.
  */
 static int ev_try_direct(EvDriver* d, EvConn* c) {
-    (void)d;
     if (!aether_proxy_direct_ok(&c->px))                     return 0;
     if (!c->x.complete || c->x.framing.invalid)              return 0;
     if (c->x.framing.chunked || !c->x.framing.definite)      return 0;
     if (!c->x.buf || c->x.framing.header_bytes == 0)         return 0;
     /* Response transformers are the route handler's: a proxied response is
      * not one of theirs on the worker path either (#3213), so the upstream's
-     * own bytes are the answer whether one is registered or not. */
+     * own bytes are the answer whether one is registered or not. The request
+     * hooks are another matter (#3214): they observe the response object,
+     * which this path never builds, and a middleware ahead of the proxy may
+     * have put headers on that object (CORS does) that the upstream's bytes
+     * do not carry. Either takes the copying path, the worker path's. */
+    if (c->hooked || c->before_proxy)                        return 0;
 
     AetherProxyDirect direct;
     if (aether_proxy_direct_take(&c->px, 0, c->x.buf, c->x.len,
                                  c->x.framing.header_bytes, &direct) != 0) return 0;
 
+    /* The response is recorded from here on (metrics, breaker, in-flight), so
+     * a head that cannot be written closes rather than falling back to the
+     * copying path, which would record it a second time (#3244). */
     size_t head_len = 0;
     if (aether_proxy_direct_head(&direct, c->x.buf, c->x.framing.header_bytes,
-                                 &c->out, &c->out_cap, &head_len) != 0) return 0;
+                                 &c->out, &c->out_cap, &head_len) != 0) return -1;
+
+    /* The keep-alive decision and the lines stating it, which the copying
+     * path's response carries after every other header (#3229): they go
+     * before the blank line that ends the head, and fail the same way. */
+    char lines[160];
+    int keep = http_server_keep_alive_lines(d->loop->server, c->req, direct.status,
+                                            c->requests_served, lines, sizeof(lines));
+    head_len -= 2;
+    if (ev_out_put(c, &head_len, lines, strlen(lines)) != 0 ||
+        ev_out_put(c, &head_len, "\r\n", 2) != 0) return -1;
+    c->close_after = !keep;
 
     c->out_len       = head_len;
     c->out_sent      = 0;
@@ -1145,12 +1442,19 @@ static int ev_finish_upstream(EvDriver* d, EvConn* c) {
      * object. Tried before it is built, because building it is the copy this
      * avoids. The receive buffer stays with the connection until the response
      * has been written, so the body can be sent from where it landed. */
-    if (ev_try_direct(d, c)) return 1;
+    /* The attempt is over either way below: its outbound request and URL go
+     * (#3242). A retry builds its own. */
+    int answered = ev_try_direct(d, c);
+    if (answered) {
+        ev_release_attempt(c);
+        return answered;                /* 1 to write it, -1 to close */
+    }
 
     HttpResponse* resp = http_response_alloc_empty();
     if (!resp) return -1;
     if (c->x.buf) http_response_fill_from_bytes(resp, c->x.buf, c->x.len);
     c->px.resp = resp;
+    ev_release_attempt(c);
 
     int r = aether_proxy_exchange_resume(&c->px, 0);
     if (r == PX_NEED_SEND) {
@@ -1172,8 +1476,13 @@ static int ev_advance(EvDriver* d, EvConn* c) {
     for (;;) {
         switch (c->state) {
         case EV_READ_REQUEST: {
+            size_t had = c->in_len;
             int r = ev_step_read_request(d, c);
+            /* Waiting on the client: no longer than the idle timeout since
+             * its last byte (#3243). */
+            if (r == 0 && (c->in_len != had || c->deadline_ms == 0)) ev_arm_idle(d, c);
             if (r <= 0) return r;
+            ev_timer_set(d, c, 0);   /* the request is here */
             r = ev_begin_upstream(d, c);
             if (r <= 0) return r;
             continue;
@@ -1181,7 +1490,9 @@ static int ev_advance(EvDriver* d, EvConn* c) {
 #ifdef AETHER_HAS_OPENSSL
         case EV_TLS_HANDSHAKE: {
             int r = ev_step_tls_handshake(d, c);
+            if (r == 0 && c->deadline_ms == 0) ev_arm_idle(d, c);   /* #3243 */
             if (r <= 0) return r;
+            ev_timer_set(d, c, 0);
             continue;
         }
 #endif
@@ -1254,9 +1565,16 @@ static int ev_advance(EvDriver* d, EvConn* c) {
             if (r <= 0) return r;
             continue;
         }
+        case EV_BACKOFF:
+            return 0;    /* the timer moves it on (ev_expire) */
         case EV_CLIENT_SEND: {
             int r = ev_step_client_send(d, c);
             if (r <= 0) return r;
+            c->requests_served++;
+            /* A middleware's answer settled as closing the connection
+             * (ev_answer) closes it now that it is written, as the worker
+             * path does (#3214). */
+            if (c->close_after) return -1;
             /* Done with this request. The connection stays, and the next one
              * is read the same way the first was, so a client that keeps
              * talking never costs another accept. */
@@ -1317,6 +1635,7 @@ static void ev_take_submissions(EvDriver* d) {
         }
 #endif
         atomic_fetch_add(&d->loop->active, 1);
+        atomic_fetch_add(&d->loop->taken, 1);
 
         /* Watched once, for as long as this driver owns it. Every later wait
          * on this descriptor is then free. */
@@ -1427,9 +1746,9 @@ HttpEvLoop* http_evloop_start(HttpServer* server, int threads) {
     if (!server || threads <= 0) return NULL;
     /* No proxy mounted means nothing for this driver to do, and it says so by
      * not existing rather than by running empty. Nor does a server whose
-     * proxied requests get more than the proxy exchange: middleware before
-     * it, or a request hook, which the driver would skip
-     * (http_server_evloop_serves). */
+     * proxied requests get something that may block: a middleware ahead of
+     * the proxy, or a request hook, not registered as loop-safe
+     * (http_server_evloop_serves, #3214). */
     if (!http_server_proxy_opts(server) || !http_server_evloop_serves(server)) return NULL;
 
     HttpEvLoop* loop = (HttpEvLoop*)calloc(1, sizeof(HttpEvLoop));
@@ -1439,6 +1758,7 @@ HttpEvLoop* http_evloop_start(HttpServer* server, int threads) {
     if (!loop->drivers) { free(loop); return NULL; }
     loop->driver_count = threads;
     atomic_init(&loop->active, 0);
+    atomic_init(&loop->taken, 0);
     atomic_init(&loop->stopping, 0);
     atomic_init(&loop->next_driver, 0);
 
@@ -1493,6 +1813,7 @@ int  http_evloop_submit(HttpEvLoop* loop, int client_fd) {
     (void)loop; (void)client_fd; return -1;
 }
 int  http_evloop_active(HttpEvLoop* loop) { (void)loop; return 0; }
+int  http_evloop_taken(HttpEvLoop* loop)  { (void)loop; return 0; }
 void http_evloop_stop(HttpEvLoop* loop)   { (void)loop; }
 
 #endif /* AETHER_EVLOOP_SUPPORTED && AETHER_HAS_THREADS */

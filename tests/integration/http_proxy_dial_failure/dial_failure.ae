@@ -1,0 +1,133 @@
+// An upstream whose name does not resolve costs the proxy nothing it does not
+// own (#3248).
+//
+// A dial that failed before it made a socket left the upstream connection
+// holding descriptor 0, the value a fresh transport started from, and the
+// proxy event loop on Linux and macOS closed that descriptor when the client
+// connection ended: the program's stdin, or whichever connection held 0 by
+// then. Here a bare proxy (the event loop on Linux and macOS) and one behind
+// a program's middleware (the worker path) proxy to a name in the .invalid
+// domain, which never resolves (RFC 6761). Each must answer 502, and
+// descriptor 0 must still be open afterwards. Every server listens on
+// 127.0.0.1 and a port the kernel picks.
+
+import std.http
+import std.http.proxy
+import std.string
+import std.tcp
+
+extern exit(code: int)
+extern dup(fd: int) -> int
+extern close(fd: int) -> int
+
+@c_callback mw_pass(req: ptr, res: ptr, ud: ptr) -> int {
+    return 1
+}
+
+start(server: ptr) -> int {
+    if http.server_bind(server, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    err = http.server_start_background(server)
+    if err != "" {
+        println("FAIL: ${err}")
+        exit(1)
+    }
+    return http.server_port(server)
+}
+
+gateway(worker: int) -> ptr {
+    s = http.server_create(0)
+    http.server_set_host(s, "127.0.0.1")
+    if worker == 1 {
+        http.server_use_middleware(s, mw_pass, 0)
+    }
+    merr = proxy.mount_simple(s, "/", "http://nohost.invalid:9", 5)
+    if merr != "" {
+        println("FAIL: mount: ${merr}")
+        exit(1)
+    }
+    return s
+}
+
+// Whether descriptor 0 is open: dup fails on a closed one.
+fd0_open() -> int {
+    copy = dup(0)
+    if copy < 0 {
+        return 0
+    }
+    close(copy)
+    return 1
+}
+
+// One request on a connection of its own; the status line's code, "none"
+// when nothing came back.
+status_of(port: int) -> string {
+    sock, cerr = tcp.connect("127.0.0.1", port)
+    if cerr != "" {
+        return "connect failed"
+    }
+    tcp.write(sock, "GET /p HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    wire = ""
+    tries = 0
+    while tries < 100 {
+        ready, _perr = tcp.poll(sock, 100)
+        if ready {
+            chunk, rerr = tcp.read(sock, 4096)
+            if rerr != "" || string.length(chunk) == 0 {
+                tries = 100
+            } else {
+                wire = string.concat(wire, chunk)
+            }
+        }
+        tries = tries + 1
+    }
+    tcp.close(sock)
+    if string.length(wire) < 12 {
+        return "none"
+    }
+    return string.substring(wire, 9, 12)
+}
+
+main() {
+    println("=== an upstream name that does not resolve closes nothing it does not own (#3248) ===")
+    // Descriptor 0 is the program's stdin; a runner that closed it leaves 0
+    // free, and a copy of stdout then takes it, so there is one to watch.
+    if fd0_open() == 0 {
+        dup(1)
+    }
+    servers = [gateway(0), gateway(1)]
+    ports = [start(servers[0]), start(servers[1])]
+    names = ["event loop", "worker path"]
+    sleep(200)
+
+    bad = 0
+    g = 0
+    while g < 2 {
+        got = status_of(ports[g])
+        if got != "502" {
+            println("  FAIL the answer (${names[g]}): got '${got}', expected '502'")
+            bad = bad + 1
+        } else {
+            println("  PASS the answer (${names[g]})")
+        }
+        if fd0_open() == 0 {
+            println("  FAIL descriptor 0 is still open (${names[g]})")
+            bad = bad + 1
+            // Taken again, so the next case is checked on its own.
+            dup(1)
+        } else {
+            println("  PASS descriptor 0 is still open (${names[g]})")
+        }
+        g = g + 1
+    }
+
+    http.server_stop(servers[1])
+    http.server_stop(servers[0])
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

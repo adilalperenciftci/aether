@@ -889,8 +889,9 @@ int aether_rewrite_add_rule(AetherRewriteOpts* o,
     return 0;
 }
 
-/* Mutate req->path in place via free + strdup. The HttpRequest
- * struct owns its path via http_request_free's free(req->path). */
+/* Replace req->path through http_request_set_path, which knows how the
+ * request holds it (#3234): a free() of the old path handed an arena-backed
+ * request's path to the allocator that never issued it. */
 int aether_middleware_rewrite(HttpRequest* req, HttpServerResponse* res, void* user_data) {
     (void)res;
     AetherRewriteOpts* o = (AetherRewriteOpts*)user_data;
@@ -904,8 +905,8 @@ int aether_middleware_rewrite(HttpRequest* req, HttpServerResponse* res, void* u
             char* np = (char*)malloc(need);
             if (!np) return 1;  /* fail open on OOM */
             snprintf(np, need, "%s%s", r->to_prefix, tail);
-            free(req->path);
-            req->path = np;
+            http_request_set_path(req, np);   /* unchanged on OOM: fail open */
+            free(np);
             return 1;  /* first match wins; continue chain */
         }
     }
@@ -1182,32 +1183,6 @@ void aether_real_ip_opts_free(AetherRealIpOpts* o) {
     free(o);
 }
 
-/* Append a single header to req->header_keys/values. Mirrors the
- * memory ownership the HTTP/1.1 parser uses (each entry is a
- * malloc'd string freed by http_request_free). Returns 0 on
- * success, -1 on OOM. */
-static int request_append_header(HttpRequest* req,
-                                 const char* name,
-                                 const char* value) {
-    if (!req || !name || !value) return -1;
-    int n = req->header_count;
-    char** nk = (char**)realloc(req->header_keys,   (size_t)(n + 1) * sizeof(char*));
-    if (!nk) return -1;
-    req->header_keys = nk;
-    char** nv = (char**)realloc(req->header_values, (size_t)(n + 1) * sizeof(char*));
-    if (!nv) return -1;
-    req->header_values = nv;
-    char* kd = strdup(name);
-    char* vd = strdup(value);
-    // Store only if both copies succeed; returning with just one stored (the
-    // old code) leaked it, since header_count wasn't advanced to cover index n.
-    if (!kd || !vd) { free(kd); free(vd); return -1; }
-    req->header_keys[n]   = kd;
-    req->header_values[n] = vd;
-    req->header_count = n + 1;
-    return 0;
-}
-
 /* One entry of the forwarding header as an address: trimmed, unquoted, the
  * for= parameter of a `Forwarded` element, a [v6]:port or a v4:port
  * reduced to its address. 0 when it is none ("unknown", an obfuscated
@@ -1280,26 +1255,14 @@ static void real_ip_text(const unsigned char a[16], char* buf, size_t cap) {
 
 /* X-Real-IP is `ip`, the client resolved here, or gone when there is none:
  * a client can send that header itself, so one on the request is never
- * kept (#3169). */
+ * kept (#3169): none of them, a second one included, which used to stay and
+ * reach an upstream that reads the last X-Real-IP (#3239). Through the
+ * server's request edits (#3234): this replaced strings with free() and grew
+ * the header arrays to one past what they held, which an arena-backed request
+ * and a reused one cannot take. */
 static void real_ip_set_header(HttpRequest* req, const char* ip) {
-    for (int i = 0; i < req->header_count; i++) {
-        if (!req->header_keys[i] || strcasecmp(req->header_keys[i], "X-Real-IP") != 0) continue;
-        if (ip) {
-            char* v = strdup(ip);
-            if (v) {
-                free(req->header_values[i]);
-                req->header_values[i] = v;
-            }
-            return;
-        }
-        free(req->header_keys[i]);
-        free(req->header_values[i]);
-        req->header_count--;
-        req->header_keys[i] = req->header_keys[req->header_count];
-        req->header_values[i] = req->header_values[req->header_count];
-        return;
-    }
-    if (ip) request_append_header(req, "X-Real-IP", ip);
+    http_request_remove_header(req, "X-Real-IP");
+    if (ip) http_request_set_header(req, "X-Real-IP", ip);
 }
 
 /* The client a request came from, through the proxies `trusted` names

@@ -2162,6 +2162,54 @@ int message_owns_fields(CodeGenerator* gen, const char* name) {
     return 0;
 }
 
+/* #3142: does the program emit _aether_release_message, which its actors'
+ * spawns store as release_message? Only with an actor to store it and a
+ * message whose fields own something. */
+int program_releases_messages(CodeGenerator* gen) {
+    if (!gen->program) return 0;
+    if (gen->releases_messages && gen->releases_messages_of == gen->program)
+        return gen->releases_messages == 2;
+    int actors = 0, owning = 0;
+    for (int i = 0; i < gen->program->child_count && !(actors && owning); i++) {
+        ASTNode* def = gen->program->children[i];
+        if (def && def->type == AST_EXPORT_STATEMENT && def->child_count > 0) def = def->children[0];
+        if (!def) continue;
+        if (def->type == AST_ACTOR_DEFINITION) actors = 1;
+        else if (def->type == AST_MESSAGE_DEFINITION && def->value &&
+                 message_owns_fields(gen, def->value)) owning = 1;
+    }
+    gen->releases_messages = actors && owning ? 2 : 1;
+    gen->releases_messages_of = gen->program;
+    return actors && owning;
+}
+
+/* #3142: what a message's fields own, released when the message is dropped
+ * instead of handled (its receiver dead, released, or without a handler for
+ * it). One per program, switching on the ids its actors' dispatch reads, so
+ * a receiver's own definitions always interpret the payload. */
+static void emit_release_message_function(CodeGenerator* gen, ASTNode* program) {
+    if (!program_releases_messages(gen)) return;
+    print_line(gen, "/* A dropped message's owned fields, by type (#3142). */");
+    print_line(gen, "static void _aether_release_message(int type, void* payload) {");
+    indent(gen);
+    print_line(gen, "switch (type) {");
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* def = program->children[i];
+        if (def && def->type == AST_EXPORT_STATEMENT && def->child_count > 0) def = def->children[0];
+        if (!def || def->type != AST_MESSAGE_DEFINITION || !def->value ||
+            !message_owns_fields(gen, def->value)) continue;
+        MessageDef* md = lookup_message(gen->message_registry, def->value);
+        if (!md) continue;
+        print_line(gen, "case %d: _aether_msg_release_%s((%s*)payload); break;",
+                   md->message_id, def->value, def->value);
+    }
+    print_line(gen, "default: break;");
+    print_line(gen, "}");
+    unindent(gen);
+    print_line(gen, "}");
+    print_line(gen, "");
+}
+
 void emit_actor_to_header(CodeGenerator* gen, ASTNode* actor) {
     if (!gen->header_file || !actor || !actor->value) return;
 
@@ -10293,6 +10341,11 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
 
     // (reachable_funcs computed earlier, before the forward-decl loop.)
 
+    /* Defined after the loop, once every message is (#3142); the spawns in
+     * it store it. */
+    if (program_releases_messages(gen))
+        print_line(gen, "static void _aether_release_message(int type, void* payload);");
+
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* child = program->children[i];
         if (!child) continue;
@@ -10549,6 +10602,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         print_line(gen, "// Closure definitions");
         emit_closure_definitions(gen);
     }
+    emit_release_message_function(gen, program);
 
     /* #2297: register this image's @c_callback functions by name at load,
      * so a runtime linked as a shared library (which binds its own calls to

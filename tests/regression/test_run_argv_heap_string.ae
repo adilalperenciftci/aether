@@ -57,6 +57,7 @@ main() {
     out_lit, _, _ = os.run_capture(me, argv_lit, null)
     out_lit_t = string.trim(out_lit)
     _check("literal argv", out_lit_t, "hello")
+    list.free(argv_lit)
 
     // Heap argv — the failing case from the bug report.
     argv_heap = list.new()
@@ -65,6 +66,7 @@ main() {
     out_heap, _, _ = os.run_capture(me, argv_heap, null)
     out_heap_t = string.trim(out_heap)
     _check("heap argv (concat)", out_heap_t, "hello")
+    list.free(argv_heap)
 
     // Mixed literal + heap in one argv.
     argv_mixed = list.new()
@@ -75,6 +77,7 @@ main() {
     out_mixed, _, _ = os.run_capture(me, argv_mixed, null)
     out_mixed_t = string.trim(out_mixed)
     _check("mixed argv", out_mixed_t, "foo bar baz")
+    list.free(argv_mixed)
 
     // Substring-derived heap string.
     argv_sub = list.new()
@@ -83,6 +86,7 @@ main() {
     out_sub, _, _ = os.run_capture(me, argv_sub, null)
     out_sub_t = string.trim(out_sub)
     _check("substring argv", out_sub_t, "world")
+    list.free(argv_sub)
 
     println("=== all cases passed ===")
 }

@@ -170,6 +170,7 @@ tests/integration/http_server_tls/
 tests/integration/http_server_websocket/
 tests/integration/http_ipv6/
 tests/integration/sched_foreign_send_lifecycle/
+tests/integration/exit_armed_timeout/
 tests/integration/tinyweb_tls/
 tests/integration/http_stream_upload/
 tests/integration/import_error_attribution/

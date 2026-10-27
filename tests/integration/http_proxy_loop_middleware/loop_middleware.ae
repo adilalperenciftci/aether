@@ -1,0 +1,445 @@
+// What precedes a std.http.proxy mount runs on the proxy event loop, with the
+// worker path's semantics (#3214).
+//
+// On Linux and macOS a server whose first middleware is a proxy mount serves
+// its plain-HTTP connections from the proxy event loop. It used to run the
+// proxy exchange alone, so a server with any middleware ahead of the mount or
+// any request hook went to a worker thread per connection (#3203, #3213):
+// the common gateway (use_real_ip, a rate limiter, CORS, an access log,
+// metrics in front of a proxy) never had the loop. The loop now runs the
+// middleware ahead of the mount and the request hooks itself when every one
+// is registered loop-safe, as std's are, and a program's middleware is not
+// unless it says so.
+//
+// Two gateways with the same chain, one loop-safe throughout and one with a
+// program's middleware ahead of the mount, which keeps it on the worker
+// path, are given the same requests and must answer them alike: a proxied
+// request, one a middleware answers, a route that is not the proxy's (which
+// the loop hands to the worker path after its middleware ran), several on
+// one connection in one write mixing answered and proxied ones. The access
+// log and the metrics must count each response once. A pair with a rate
+// limit of two shows the handed-over request is counted once. A bare proxy
+// takes two requests in one write, the first without a body. On Linux and
+// macOS the event loop must serve the loop-safe gateways and not the others.
+//
+// Every server listens on 127.0.0.1 and a port the kernel picks.
+
+import std.fs
+import std.http
+import std.http.client
+import std.http.middleware
+import std.http.proxy
+import std.os
+import std.string
+import std.tcp
+
+extern exit(code: int)
+// The connections the proxy event loop has taken for `server`: 0 where it
+// runs none (Windows).
+extern http_server_evloop_connections(server: ptr) -> int
+
+// The upstream says what reached it: the method, the path, the length of
+// the body and the client use_real_ip resolved.
+handle_echo(req: ptr, res: ptr, ud: ptr) {
+    real = http.get_header(req, "X-Real-IP")
+    if real == null {
+        real = "-"
+    }
+    method = http.request_method(req)
+    path = http.request_path(req)
+    n = http.request_body_length(req)
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "up ${method} ${path} body=${n} real=${real}")
+}
+
+// A program's middleware: it lets everything through, and is registered the
+// ordinary way, so nothing says it never blocks.
+@c_callback mw_pass(req: ptr, res: ptr, ud: ptr) -> int {
+    return 1
+}
+
+// A server, set to 127.0.0.1, bound to a free port and started in the
+// background; its port.
+start(server: ptr) -> int {
+    if http.server_bind(server, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    err = http.server_start_background(server)
+    if err != "" {
+        println("FAIL: ${err}")
+        exit(1)
+    }
+    return http.server_port(server)
+}
+
+need(label: string, err: string) {
+    if err != "" {
+        println("FAIL: ${label}: ${err}")
+        exit(1)
+    }
+}
+
+// The gateway every case runs against: the client behind 127.0.0.1, a rate
+// limit no case reaches, CORS, one virtual host, a JSON access log at
+// `log_path`, metrics, and the upstream mounted at /api. `worker` 1 adds a
+// program's middleware ahead of the mount.
+gateway(up_url: string, log_path: string, worker: int) -> ptr {
+    s = http.server_create(0)
+    http.server_set_host(s, "127.0.0.1")
+    need("use_real_ip", middleware.use_real_ip(s, "", "127.0.0.1"))
+    need("use_rate_limit", middleware.use_rate_limit(s, 1000000, 60000))
+    need("use_cors", middleware.use_cors(s, "https://app.example", "GET, POST", "Content-Type", 0, 600))
+    need("use_vhost", middleware.use_vhost(s, "127.0.0.1"))
+    if worker == 1 {
+        http.server_use_middleware(s, mw_pass, 0)
+    }
+    need("access log", http.server_set_access_log(s, "json", log_path))
+    need("metrics", http.server_set_metrics(s, "/metrics"))
+    need("mount", proxy.mount_simple(s, "/api", up_url, 5))
+    return s
+}
+
+// A rate limit of two requests a minute, metrics, and the upstream at /api.
+tight(up_url: string, worker: int) -> ptr {
+    s = http.server_create(0)
+    http.server_set_host(s, "127.0.0.1")
+    need("use_rate_limit", middleware.use_rate_limit(s, 2, 60000))
+    if worker == 1 {
+        http.server_use_middleware(s, mw_pass, 0)
+    }
+    need("metrics", http.server_set_metrics(s, "/metrics"))
+    need("mount", proxy.mount_simple(s, "/api", up_url, 5))
+    return s
+}
+
+// One request through the std client; "<status> <body>" and, when asked,
+// the value of one response header.
+fetch(method: string, url: string, xff: string, body: string, header: string) -> string {
+    req = client.request(method, url)
+    client.set_timeout(req, 10s)
+    if xff != "" {
+        client.set_header(req, "X-Forwarded-For", xff)
+    }
+    if body != "" {
+        client.set_body(req, string.bytes(body), "text/plain")
+    }
+    resp, err = client.send_request(req)
+    client.request_free(req)
+    if err != "" {
+        return "error ${err}"
+    }
+    out = "${client.response_status(resp)} ${client.response_body(resp)}"
+    if header != "" {
+        out = "${out} [${header}: ${client.response_header(resp, header)}]"
+    }
+    client.response_free(resp)
+    return out
+}
+
+// The value of `name` in a response head, "" when it has none.
+head_value(head: string, name: string) -> string {
+    at = string.index_of(head, "\r\n${name}: ")
+    if at < 0 {
+        return ""
+    }
+    from = at + string.length(name) + 4
+    end = string.index_of_from(head, "\r\n", from)
+    if end < 0 {
+        return ""
+    }
+    return string.substring(head, from, end)
+}
+
+// The responses at the front of `wire`, each as "<status> <body>", and for a
+// middleware's answer (no body from the upstream) its Connection header,
+// joined with " | "; then "+" when `want` were complete. Proxied responses
+// are compared by status and body: the worker path states its keep-alive
+// decision on them and the loop does not (as before #3214). The response
+// numbered `head_at` (from 0; -1 for none) answers a HEAD: it states the
+// length a GET's body would have, shown as [n], and carries no body, which
+// the response after it shows (a body sent anyway would be read as its
+// start).
+summarize(wire: string, want: int, head_at: int) -> string {
+    out = ""
+    pos = 0
+    got = 0
+    while got < want {
+        hdr_end = string.index_of_from(wire, "\r\n\r\n", pos)
+        if hdr_end < 0 {
+            return out
+        }
+        // Through the last header's line ending, which head_value reads to.
+        head = string.substring(wire, pos, hdr_end + 2)
+        status = string.substring(head, 9, 12)
+        len_text = head_value(head, "Content-Length")
+        n = 0
+        if len_text != "" && got != head_at {
+            n = string.get_int(len_text)
+        }
+        body_at = hdr_end + 4
+        if body_at + n > string.length(wire) {
+            return out
+        }
+        body = string.substring(wire, body_at, body_at + n)
+        item = "${status} ${body}"
+        if got == head_at {
+            item = "${status} [${len_text}]"
+        }
+        if string.starts_with(body, "up ") != 1 {
+            conn = head_value(head, "Connection")
+            item = "${item} (${conn})"
+        }
+        if got > 0 {
+            out = "${out} | "
+        }
+        out = "${out}${item}"
+        pos = body_at + n
+        got = got + 1
+    }
+    return "${out} +"
+}
+
+// `requests`, written to the gateway on `port` in one write on one
+// connection; the first `want` responses summarized. With `closes` 1, then
+// "closed" when the server closed the connection after them, "open" when it
+// had not within five seconds. Bounded throughout: a server that never
+// answers fails the case rather than hanging the test.
+exchange(port: int, requests: string, want: int, head_at: int, closes: int) -> string {
+    sock, cerr = tcp.connect("127.0.0.1", port)
+    if cerr != "" {
+        return "connect failed"
+    }
+    tcp.write(sock, requests)
+    wire = ""
+    tries = 0
+    summary = summarize(wire, want, head_at)
+    while string.ends_with(summary, "+") != 1 && tries < 100 {
+        ready, _perr = tcp.poll(sock, 100)
+        if ready {
+            chunk, rerr = tcp.read(sock, 65536)
+            if rerr != "" || string.length(chunk) == 0 {
+                tries = 100
+            } else {
+                wire = string.concat(wire, chunk)
+            }
+        }
+        tries = tries + 1
+        summary = summarize(wire, want, head_at)
+    }
+    if closes == 0 {
+        tcp.close(sock)
+        return summary
+    }
+    state = "open"
+    waited = 0
+    while state == "open" && waited < 50 {
+        ready, _perr = tcp.poll(sock, 100)
+        if ready {
+            chunk, rerr = tcp.read(sock, 65536)
+            if rerr != "" || string.length(chunk) == 0 {
+                state = "closed"
+            }
+        }
+        waited = waited + 1
+    }
+    tcp.close(sock)
+    return "${summary} ${state}"
+}
+
+count_lines(text: string) -> int {
+    n = 0
+    at = string.index_of_from(text, "\n", 0)
+    while at >= 0 {
+        n = n + 1
+        at = string.index_of_from(text, "\n", at + 1)
+    }
+    return n
+}
+
+// 1 when each line of a JSON access log carries a duration from 0 to 10
+// seconds.
+durations_sane(text: string) -> int {
+    at = string.index_of_from(text, "\"dur_us\":", 0)
+    if at < 0 {
+        return 0
+    }
+    while at >= 0 {
+        from = at + 9
+        end = string.index_of_from(text, ",", from)
+        if end < 0 {
+            return 0
+        }
+        us = string.get_int(string.substring(text, from, end))
+        if us < 0 || us > 10000000 {
+            return 0
+        }
+        at = string.index_of_from(text, "\"dur_us\":", end)
+    }
+    return 1
+}
+
+// The value of a Prometheus counter line in `text`, -1 when it is absent.
+counter(text: string, series: string) -> int {
+    at = string.index_of(text, "${series} ")
+    if at < 0 {
+        return -1
+    }
+    from = at + string.length(series) + 1
+    end = string.index_of_from(text, "\n", from)
+    if end < 0 {
+        return -1
+    }
+    return string.get_int(string.substring(text, from, end))
+}
+
+expect(label: string, got: string, want: string) -> int {
+    if got != want {
+        println("  FAIL ${label}: got '${got}', expected '${want}'")
+        return 1
+    }
+    println("  PASS ${label}")
+    return 0
+}
+
+// The same `got` on both gateways, and the one expected.
+both(label: string, loop_got: string, worker_got: string, want: string) -> int {
+    bad = expect("${label} (loop-safe gateway)", loop_got, want)
+    return bad + expect("${label} (worker gateway)", worker_got, want)
+}
+
+main() {
+    println("=== the proxy event loop runs the middleware and hooks around the proxy (#3214) ===")
+    upstream = http.server_create(0)
+    http.server_set_host(upstream, "127.0.0.1")
+    http.server_get(upstream, "/api/:name", handle_echo, 0)
+    http.server_post(upstream, "/api/:name", handle_echo, 0)
+    up_url = "http://127.0.0.1:${start(upstream)}"
+
+    dir, derr = fs.make_temp_dir("", "aether-loopmw-")
+    need("temp dir", derr)
+    defer fs.remove_tree(dir)
+    loop_log = fs.join_clean(dir, "loop.log")
+    worker_log = fs.join_clean(dir, "worker.log")
+    gl = gateway(up_url, loop_log, 0)
+    gw = gateway(up_url, worker_log, 1)
+    tl = tight(up_url, 0)
+    tw = tight(up_url, 1)
+    bare = http.server_create(0)
+    http.server_set_host(bare, "127.0.0.1")
+    need("mount", proxy.mount_simple(bare, "/api", up_url, 5))
+    pl = start(gl)
+    pw = start(gw)
+    ptl = start(tl)
+    ptw = start(tw)
+    pb = start(bare)
+    sleep(200)
+
+    bad = 0
+    l = "http://127.0.0.1:${pl}"
+    w = "http://127.0.0.1:${pw}"
+
+    // Proxied, with the client use_real_ip resolved from a trusted peer and
+    // the CORS header the middleware put on the response.
+    want = "200 up GET /api/one body=0 real=203.0.113.7 [Access-Control-Allow-Origin: https://app.example]"
+    bad = bad + both("a proxied GET", fetch("GET", "${l}/api/one", "203.0.113.7", "", "Access-Control-Allow-Origin"),
+        fetch("GET", "${w}/api/one", "203.0.113.7", "", "Access-Control-Allow-Origin"), want)
+    want = "200 up POST /api/two body=5 real=127.0.0.1"
+    bad = bad + both("a proxied POST with a body", fetch("POST", "${l}/api/two", "", "hello", ""),
+        fetch("POST", "${w}/api/two", "", "hello", ""), want)
+    // Answered by CORS ahead of the proxy.
+    want = "204  [Access-Control-Max-Age: 600]"
+    bad = bad + both("a preflight CORS answers", fetch("OPTIONS", "${l}/api/three", "", "", "Access-Control-Max-Age"),
+        fetch("OPTIONS", "${w}/api/three", "", "", "Access-Control-Max-Age"), want)
+
+    // Six requests in one write on one connection: proxied for a client
+    // behind the trusted peer, answered and kept alive, answered by the
+    // virtual host check (a GET, then a HEAD, whose answer carries no body),
+    // proxied for the peer itself, answered and closed because the client
+    // asked. The first has no body: what follows it in the buffer is the
+    // next request, not its body. Nothing use_real_ip did to the first
+    // carries over to the fifth, which sends an X-Real-IP of its own that
+    // use_real_ip replaces.
+    burst = "GET /api/four HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Forwarded-For: 203.0.113.7\r\n\r\nOPTIONS /api/five HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\nGET /api/six HTTP/1.1\r\nHost: elsewhere.example\r\n\r\nHEAD /api/six HTTP/1.1\r\nHost: elsewhere.example\r\n\r\nGET /api/ten HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Real-IP: 198.51.100.1\r\n\r\nOPTIONS /api/seven HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+    want = "200 up GET /api/four body=0 real=203.0.113.7 | 204  (keep-alive) | 404 Unknown host (keep-alive) | 404 [12] (keep-alive) | 200 up GET /api/ten body=0 real=127.0.0.1 | 204  (close) + closed"
+    bad = bad + both("six requests on one connection", exchange(pl, burst, 6, 3, 1),
+        exchange(pw, burst, 6, 3, 1), want)
+
+    // The same for a proxy with nothing ahead of it, which the loop served
+    // before #3214 too: it sent the first request upstream with everything
+    // after it in the buffer as its body.
+    pair = "GET /api/eight HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\nGET /api/nine HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+    want = "200 up GET /api/eight body=0 real=- | 200 up GET /api/nine body=0 real=- +"
+    bad = bad + expect("two requests in one write through a bare proxy", exchange(pb, pair, 2, -1, 0), want)
+
+    // Not the proxy's: the loop hands it to the worker path after the
+    // middleware ran, and the metrics count every response before it.
+    lm = fetch("GET", "${l}/metrics", "", "", "")
+    wm = fetch("GET", "${w}/metrics", "", "", "")
+    series = [
+        "aether_http_requests_total{method=\"GET\",path=\"/api/one\"}",
+        "aether_http_requests_total{method=\"POST\",path=\"/api/two\"}",
+        "aether_http_requests_total{method=\"OPTIONS\",path=\"/api/three\"}",
+        "aether_http_requests_total{method=\"GET\",path=\"/api/four\"}",
+        "aether_http_requests_total{method=\"OPTIONS\",path=\"/api/five\"}",
+        "aether_http_4xx_total{method=\"GET\",path=\"/api/six\"}",
+        "aether_http_4xx_total{method=\"HEAD\",path=\"/api/six\"}",
+        "aether_http_requests_total{method=\"GET\",path=\"/api/ten\"}",
+        "aether_http_requests_total{method=\"OPTIONS\",path=\"/api/seven\"}"
+    ]
+    i = 0
+    while i < 9 {
+        bad = bad + both("metrics count ${series[i]} once", "${counter(lm, series[i])}",
+            "${counter(wm, series[i])}", "1")
+        i = i + 1
+    }
+
+    // The access log: one line per response, the scrape's included, each
+    // with a duration that makes sense.
+    ltext, lerr = fs.read(loop_log)
+    wtext, werr = fs.read(worker_log)
+    need("read loop log", lerr)
+    need("read worker log", werr)
+    bad = bad + both("the access log has a line for each of 10 responses", "${count_lines(ltext)}",
+        "${count_lines(wtext)}", "10")
+    bad = bad + both("each with a duration from 0 to 10 s", "${durations_sane(ltext)}",
+        "${durations_sane(wtext)}", "1")
+
+    // A rate limit of two: the request the proxy does not take counts once,
+    // so one proxied request still fits after it, and the next does not.
+    tlu = "http://127.0.0.1:${ptl}"
+    twu = "http://127.0.0.1:${ptw}"
+    bad = bad + both("the limiter lets the scrape through", string.substring(fetch("GET", "${tlu}/metrics", "", "", ""), 0, 3),
+        string.substring(fetch("GET", "${twu}/metrics", "", "", ""), 0, 3), "200")
+    bad = bad + both("and counts it once: the second request fits", fetch("GET", "${tlu}/api/x", "", "", ""),
+        fetch("GET", "${twu}/api/x", "", "", ""), "200 up GET /api/x body=0 real=-")
+    bad = bad + both("the third does not", string.substring(fetch("GET", "${tlu}/api/x", "", "", ""), 0, 3),
+        string.substring(fetch("GET", "${twu}/api/x", "", "", ""), 0, 3), "429")
+
+    // Where the loop runs, it served the loop-safe gateways, and a program's
+    // middleware ahead of the mount kept the others off it.
+    if os.platform() == "windows" {
+        println("  PASS the loop serves only the loop-safe gateways (no event loop on Windows)")
+    } else {
+        on_loop = 0
+        if http_server_evloop_connections(gl) > 0 && http_server_evloop_connections(tl) > 0 {
+            on_loop = 1
+        }
+        bad = bad + expect("the loop serves the loop-safe gateways", "${on_loop}", "1")
+        bad = bad + expect("and not the ones with a program's middleware",
+            "${http_server_evloop_connections(gw) + http_server_evloop_connections(tw)}", "0")
+    }
+
+    http.server_stop(bare)
+    http.server_stop(tw)
+    http.server_stop(tl)
+    http.server_stop(gw)
+    http.server_stop(gl)
+    http.server_stop(upstream)
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

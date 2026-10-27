@@ -1,16 +1,18 @@
 # tests/leaks_exclude.txt — regression programs the macOS leaks(1) gate
-# cannot run, listed one per line ('#' and blank lines ignored).
+# cannot run, listed one per line ('#' and blank lines ignored). They are
+# leak-checked on Linux CI under Valgrind and ASan-LSan instead.
 #
-# leaks(1) --atExit forks the target into its own process group and waits
-# for it to exit. A target that itself fork/exec's a child (os.run_capture
-# et al.) leaves leaks(1) waiting on the child group, so the run hangs
-# until the gate's per-test timeout fires. These programs are leak-checked
-# on Linux CI under Valgrind / ASan-LSan instead, which handle subprocess
-# spawns correctly.
+# What stops leaks(1) (#3202, seen with the gate's sample(1) of the stuck
+# run): leaks --atExit interposes _exit in the target's image
+# (libLeaksAtExit's my__exit), and the hook stops the exiting process for
+# an inspection. A child the target forks has the same image. One that
+# execs a program is fine, but one whose exec fails leaves by _exit before
+# any exec, so the hook stops it too. leaks(1) inspects only its target, so
+# that child stays stopped, and its parent's wait for it never returns. So a
+# program that starts a missing program on POSIX cannot run under the gate.
+# Keep such a case in a test of its own, as test_os_run_supervised_cannot_start
+# does, and the rest of the program stays checked here.
+test_os_run_supervised_cannot_start
+# Each also starts a missing program, among other cases.
 test_run_capture_status
 test_os_run_full
-test_run_argv_heap_string
-# Spawns copies of itself under os.run_supervised; ran in 6 s here until
-# std.os's spawns began waiting for the child's exec (#3170), and now
-# outlasts the 120 s bound while it passes on the macOS legs (#3202).
-test_os_run_supervised

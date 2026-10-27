@@ -1,0 +1,160 @@
+// A request the proxy event loop hands back is served by a pool worker, not
+// on the loop's own thread (#3230).
+//
+// On Linux and macOS a request the proxy mount does not take (a route such
+// as /metrics, a health check) goes to the worker path with its connection.
+// The hand-back ran the worker path right there, on the driver thread, so a
+// route handler that took its time held up every connection on that driver.
+//
+// A gateway proxies /api to an upstream that counts the requests it gets,
+// and has a route, /wait, whose handler waits until the upstream has counted
+// eight. /wait goes out first and the handler says it is waiting; then eight
+// requests for /api, each on a connection of its own, which the loop places
+// on its drivers in turn, so one shares /wait's driver. The handler sees all
+// eight only if none of them waits behind it. Every server listens on
+// 127.0.0.1 and a port the kernel picks.
+
+import std.http
+import std.http.proxy
+import std.string
+import std.sync
+import std.tcp
+
+extern exit(code: int)
+
+// One request counted: `cell` is the shared count.
+handle_up(req: ptr, res: ptr, cell: ptr) {
+    sync.atomic_add(cell, 1)
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "up")
+}
+
+// Says it is waiting (1000 on the count), then waits for eight upstream
+// requests, five seconds at most, and answers how many it saw.
+handle_wait(req: ptr, res: ptr, cell: ptr) {
+    sync.atomic_add(cell, 1000)
+    waited = 0
+    while sync.atomic_load(cell) < 1008 && waited < 500 {
+        sleep(10)
+        waited = waited + 1
+    }
+    seen = sync.atomic_load(cell) - 1000
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "saw ${seen}")
+}
+
+start(server: ptr) -> int {
+    if http.server_bind(server, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    err = http.server_start_background(server)
+    if err != "" {
+        println("FAIL: ${err}")
+        exit(1)
+    }
+    return http.server_port(server)
+}
+
+// A request on a connection of its own, written and left unread.
+open_request(port: int, path: string) -> ptr {
+    sock, err = tcp.connect("127.0.0.1", port)
+    if err != "" {
+        println("FAIL: connect: ${err}")
+        exit(1)
+    }
+    tcp.write(sock, "GET ${path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+    return sock
+}
+
+// The body of the response on `sock`, read until the server closes it,
+// ten seconds at most; "(no answer)" when nothing complete came.
+answer(sock: ptr) -> string {
+    wire = ""
+    tries = 0
+    done = 0
+    while done == 0 && tries < 100 {
+        ready, _perr = tcp.poll(sock, 100)
+        if ready {
+            chunk, rerr = tcp.read(sock, 4096)
+            if rerr != "" || string.length(chunk) == 0 {
+                done = 1
+            } else {
+                wire = string.concat(wire, chunk)
+            }
+        }
+        tries = tries + 1
+    }
+    tcp.close(sock)
+    at = string.index_of(wire, "\r\n\r\n")
+    if at < 0 {
+        return "(no answer)"
+    }
+    return string.substring(wire, at + 4, string.length(wire))
+}
+
+main() {
+    println("=== a request the event loop hands back runs on a pool worker (#3230) ===")
+    count = sync.atomic_new(0)
+    upstream = http.server_create(0)
+    http.server_set_host(upstream, "127.0.0.1")
+    http.server_get(upstream, "/api/:n", handle_up, count)
+    up_url = "http://127.0.0.1:${start(upstream)}"
+
+    gateway = http.server_create(0)
+    http.server_set_host(gateway, "127.0.0.1")
+    merr = proxy.mount_simple(gateway, "/api", up_url, 5)
+    if merr != "" {
+        println("FAIL: mount: ${merr}")
+        exit(1)
+    }
+    http.server_get(gateway, "/wait", handle_wait, count)
+    port = start(gateway)
+    sleep(200)
+
+    waiting = open_request(port, "/wait")
+    tries = 0
+    while sync.atomic_load(count) < 1000 && tries < 500 {
+        sleep(10)
+        tries = tries + 1
+    }
+    if sync.atomic_load(count) < 1000 {
+        println("FAIL: the /wait handler never ran")
+        exit(1)
+    }
+
+    socks = [open_request(port, "/api/1"), open_request(port, "/api/2"), open_request(port, "/api/3"), open_request(port, "/api/4"),
+        open_request(port, "/api/5"), open_request(port, "/api/6"), open_request(port, "/api/7"), open_request(port, "/api/8")]
+    waited = answer(waiting)
+    proxied = 0
+    i = 0
+    while i < 8 {
+        if answer(socks[i]) == "up" {
+            proxied = proxied + 1
+        }
+        i = i + 1
+    }
+
+    http.server_stop(gateway)
+    http.server_stop(upstream)
+    bad = 0
+    if waited != "saw 8" {
+        println("  FAIL the handler saw the eight proxied requests while it waited: '${waited}'")
+        bad = bad + 1
+    } else {
+        println("  PASS the handler saw the eight proxied requests while it waited")
+    }
+    if proxied != 8 {
+        println("  FAIL every proxied request was answered: ${proxied} of 8")
+        bad = bad + 1
+    } else {
+        println("  PASS every proxied request was answered")
+    }
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

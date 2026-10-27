@@ -1,0 +1,124 @@
+// The proxy event loop frees each proxied request's outbound copy (#3242).
+//
+// The proxy exchange builds the request it sends upstream, with a copy of
+// the body, and its URL. The worker path frees both after the send; the
+// event loop on Linux and macOS never did, so every proxied request left
+// its URL behind and every one with a body left the body's copy too.
+//
+// Fifty POSTs with a 2000 byte body go through a bare proxy on one kept
+// connection, after a few to settle the connection's buffers; the bytes the
+// runtime's accounted allocators hold must not have grown by anything like
+// the bodies' 100 KB. Every server listens on 127.0.0.1 and a port the
+// kernel picks.
+
+import std.http
+import std.http.proxy
+import std.string
+import std.tcp
+
+extern exit(code: int)
+// The bytes the runtime's cap-aware allocators hold, which the outbound
+// body's copy is one of.
+extern aether_caps_used_bytes() -> long
+
+handle_up(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "ok")
+}
+
+start(server: ptr) -> int {
+    if http.server_bind(server, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    err = http.server_start_background(server)
+    if err != "" {
+        println("FAIL: ${err}")
+        exit(1)
+    }
+    return http.server_port(server)
+}
+
+// `count` POSTs on `sock`, each read back before the next is sent; how many
+// came back 200.
+post_many(sock: ptr, count: int, body: string) -> int {
+    request = "POST /p HTTP/1.1\r\nHost: x\r\nContent-Type: text/plain\r\nContent-Length: ${string.length(body)}\r\n\r\n${body}"
+    ok = 0
+    i = 0
+    while i < count {
+        tcp.write(sock, request)
+        wire = ""
+        tries = 0
+        while string.index_of(wire, "\r\n\r\nok") < 0 && tries < 100 {
+            ready, _perr = tcp.poll(sock, 100)
+            if ready {
+                chunk, rerr = tcp.read(sock, 4096)
+                if rerr != "" || string.length(chunk) == 0 {
+                    tries = 100
+                } else {
+                    wire = string.concat(wire, chunk)
+                }
+            }
+            tries = tries + 1
+        }
+        if string.starts_with(wire, "HTTP/1.1 200") == 1 && string.index_of(wire, "\r\n\r\nok") >= 0 {
+            ok = ok + 1
+        }
+        i = i + 1
+    }
+    return ok
+}
+
+main() {
+    println("=== the event loop frees each proxied request's outbound copy (#3242) ===")
+    upstream = http.server_create(0)
+    http.server_set_host(upstream, "127.0.0.1")
+    http.server_post(upstream, "/p", handle_up, 0)
+    up_url = "http://127.0.0.1:${start(upstream)}"
+    gateway = http.server_create(0)
+    http.server_set_host(gateway, "127.0.0.1")
+    merr = proxy.mount_simple(gateway, "/", up_url, 5)
+    if merr != "" {
+        println("FAIL: mount: ${merr}")
+        exit(1)
+    }
+    port = start(gateway)
+    sleep(200)
+
+    sock, cerr = tcp.connect("127.0.0.1", port)
+    if cerr != "" {
+        println("FAIL: connect: ${cerr}")
+        exit(1)
+    }
+    body = string.pad_end("", 2000, 120)
+    bad = 0
+    if post_many(sock, 5, body) != 5 {
+        println("  FAIL the first requests were answered")
+        bad = bad + 1
+    }
+    before = aether_caps_used_bytes()
+    answered = post_many(sock, 50, body)
+    grown = aether_caps_used_bytes() - before
+    tcp.close(sock)
+    if answered != 50 {
+        println("  FAIL fifty proxied POSTs were answered: ${answered}")
+        bad = bad + 1
+    } else {
+        println("  PASS fifty proxied POSTs were answered")
+    }
+    if grown >= 25000 {
+        println("  FAIL the accounted heap grew by ${grown} bytes over fifty 2000 byte bodies")
+        bad = bad + 1
+    } else {
+        println("  PASS the accounted heap did not grow with the bodies")
+    }
+
+    http.server_stop(gateway)
+    http.server_stop(upstream)
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

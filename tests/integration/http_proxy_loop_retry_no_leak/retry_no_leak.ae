@@ -1,0 +1,135 @@
+// A retry on the proxy event loop keeps its receive buffer (#3249).
+//
+// The loop lends a connection's receive buffer to each upstream exchange and
+// takes it back when the request ends. A 5xx answer with retries left goes
+// round again, and the retry cleared the exchange with the lent buffer still
+// in it, so every retried attempt dropped 16 KiB that the runtime's
+// accounted allocator kept charging.
+//
+// An upstream answers 503 to every GET, behind a proxy that retries twice.
+// Twenty GETs on one kept connection, after a few to settle its buffers, must
+// each come back 503 without the accounted heap growing by anything like the
+// forty buffers the retries would drop. Every server listens on 127.0.0.1 and
+// a port the kernel picks.
+
+import std.http
+import std.http.proxy
+import std.string
+import std.tcp
+
+extern exit(code: int)
+// The bytes the runtime's cap-aware allocators hold, which the receive
+// buffer is one of.
+extern aether_caps_used_bytes() -> long
+
+handle_busy(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 503)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "busy")
+}
+
+start(server: ptr) -> int {
+    if http.server_bind(server, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    err = http.server_start_background(server)
+    if err != "" {
+        println("FAIL: ${err}")
+        exit(1)
+    }
+    return http.server_port(server)
+}
+
+need(label: string, err: string) {
+    if err != "" {
+        println("FAIL: ${label}: ${err}")
+        exit(1)
+    }
+}
+
+// `count` GETs on `sock`, each read back before the next is sent; how many
+// came back 503 from the upstream.
+get_many(sock: ptr, count: int) -> int {
+    busy = 0
+    i = 0
+    while i < count {
+        tcp.write(sock, "GET /r HTTP/1.1\r\nHost: x\r\n\r\n")
+        wire = ""
+        tries = 0
+        while string.index_of(wire, "\r\n\r\nbusy") < 0 && tries < 100 {
+            ready, _perr = tcp.poll(sock, 100)
+            if ready {
+                chunk, rerr = tcp.read(sock, 4096)
+                if rerr != "" || string.length(chunk) == 0 {
+                    tries = 100
+                } else {
+                    wire = string.concat(wire, chunk)
+                }
+            }
+            tries = tries + 1
+        }
+        if string.starts_with(wire, "HTTP/1.1 503") == 1 && string.index_of(wire, "\r\n\r\nbusy") >= 0 {
+            busy = busy + 1
+        }
+        i = i + 1
+    }
+    return busy
+}
+
+main() {
+    println("=== a retry on the event loop keeps its receive buffer (#3249) ===")
+    upstream = http.server_create(0)
+    http.server_set_host(upstream, "127.0.0.1")
+    http.server_get(upstream, "/r", handle_busy, 0)
+    up_url = "http://127.0.0.1:${start(upstream)}"
+
+    gateway = http.server_create(0)
+    http.server_set_host(gateway, "127.0.0.1")
+    pool = proxy.upstream_pool_new("round_robin", 5, 0, 0)
+    if pool == 0 {
+        println("FAIL: upstream_pool_new")
+        exit(1)
+    }
+    need("upstream_add", proxy.upstream_add(pool, up_url, 1))
+    opts = proxy.opts_new()
+    need("opts_set_retry_policy", proxy.opts_set_retry_policy(opts, 2, 1))
+    need("mount", proxy.mount(gateway, "/", pool, opts))
+    port = start(gateway)
+    sleep(200)
+
+    sock, cerr = tcp.connect("127.0.0.1", port)
+    if cerr != "" {
+        println("FAIL: connect: ${cerr}")
+        exit(1)
+    }
+    bad = 0
+    if get_many(sock, 5) != 5 {
+        println("  FAIL the first requests were answered")
+        bad = bad + 1
+    }
+    before = aether_caps_used_bytes()
+    answered = get_many(sock, 20)
+    grown = aether_caps_used_bytes() - before
+    tcp.close(sock)
+    if answered != 20 {
+        println("  FAIL twenty retried GETs were answered 503: ${answered}")
+        bad = bad + 1
+    } else {
+        println("  PASS twenty retried GETs were answered 503")
+    }
+    if grown >= 100000 {
+        println("  FAIL the accounted heap grew by ${grown} bytes over forty retries")
+        bad = bad + 1
+    } else {
+        println("  PASS the accounted heap did not grow with the retries")
+    }
+
+    http.server_stop(gateway)
+    http.server_stop(upstream)
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

@@ -2703,9 +2703,14 @@ int http_upstream_acquire(const char* host, int port, HttpUpstreamConn* out) {
     return http_upstream_acquire_ex(host, port, 1, out);
 }
 
-/* A fresh transport on `out`, the pool key kept. */
+/* A fresh transport on `out`, the pool key kept. No descriptor until one is
+ * dialled or taken from the pool: -1, which is what every caller tests
+ * (sockfd >= 0). It was 0, so a dial that failed before it made a socket (a
+ * name that does not resolve) left descriptor 0 behind as this connection's,
+ * and the proxy event loop closed it when the connection ended: the
+ * program's stdin, or whatever connection held 0 by then (#3248). */
 static void upstream_reset(HttpUpstreamConn* out) {
-    out->t.sockfd = 0;
+    out->t.sockfd = -1;
     out->t.nonblocking = 0;
     out->t.applied_timeout_ns = -1;
     /* Set by hand like its neighbours: transport_close frees whatever is

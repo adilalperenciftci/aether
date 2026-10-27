@@ -679,6 +679,10 @@ typedef struct {
     /* Was a `goto main_exit;` written (a `return` in main)? Its label is
      * written only then. */
     int main_exit_targeted;
+    /* program_releases_messages, once per program: 0 not known yet, 1 no,
+     * 2 yes, for the program it was worked out for (#3142). */
+    int releases_messages;
+    const void* releases_messages_of;
 } CodeGenerator;
 
 // Code generation functions

@@ -144,6 +144,13 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
      * end of each message's handling arm it, a message and the firing \
      * disarm it (the generated step function does all three). */ \
     uint64_t last_activity_ns; \
+    /* The heap payload of the message a handler is running on, and its \
+     * type: the generated step sets them around the handler call and \
+     * clears the payload after it. A panic out of the handler skips the \
+     * release that follows, so the step barrier drops the message (#3142). \
+     * NULL between handlers. */ \
+    void* step_payload; \
+    int step_type; \
     /* Bits (#2517): AETHER_ACTOR_PANICKED once the actor's step() unwound \
      * via aether_panic() or a caught signal, AETHER_ACTOR_RELEASED once it \
      * was released, AETHER_ACTOR_THREAD_GONE once its own thread (an \
@@ -161,6 +168,13 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
      * path a release or the scheduler's teardown ends the actor through, \
      * after the actor can no longer be stepped (#2528). */ \
     void (*destroy_state)(void*); \
+    /* Releases what a message's fields own (strings, closures, structs) \
+     * when it is dropped instead of handled, by the program's message \
+     * definitions: the receiver's, which read its type as its dispatch \
+     * does. Set by the generated spawn; NULL for an actor registered by a \
+     * caller, or in a program whose messages own nothing. Called through \
+     * aether_message_drop() only (#3142). */ \
+    void (*release_message)(int type, void* payload); \
     /* 1 when scheduler_spawn_actor allocated the actor, which the scheduler \
      * then frees; 0 for one a caller passed to scheduler_register_actor, \
      * whose memory stays the caller's. Written before the actor is \
@@ -265,6 +279,11 @@ typedef struct {
         void* actors[SCHEDULER_DRAIN_BATCH];
         Message messages[SCHEDULER_DRAIN_BATCH];
         int count;
+        /* While a step runs from the batch, the first message not yet in a
+         * mailbox: [next, count) is older than anything still queued, and a
+         * relief delivers nothing for an actor with a message there
+         * (#3197). `count` once the batch is through. */
+        int next;
     } coalesce_buffer;
 
     AdaptiveBatchState batch_state;   // Adaptive batching (small, embedded)
@@ -279,8 +298,17 @@ typedef struct {
     atomic_int      parked;
 
     // How many asks this core's thread is blocked in (#3220): while one is,
-    // the core runs nothing, so no actor is moved onto it (move_actor).
+    // the core's loop does not run, so no actor is moved onto it
+    // (move_actor), but the one it waits on, by a relief (#3197).
     atomic_int      asking;
+    // The innermost of those asks: the actor it waits on and its reply
+    // slot, set and put back under actor_lock with `asking`. Another core's
+    // relief moves that actor here, where the waiting thread steps it, and
+    // wakes the wait through the slot (#3197).
+    _Atomic(ActorBase*)      ask_target;
+    _Atomic(ActorReplySlot*) ask_slot;
+    // Where this core's next relief scan of its table starts (#3197).
+    int             relief_cursor;
 
     // Per-core I/O event loop (platform-agnostic: epoll/kqueue/poll)
     AetherIoPoller io_poller;         // Platform I/O poller instance
@@ -371,6 +399,15 @@ typedef struct {
 
 AetherActorRef scheduler_actor_ref(ActorBase* actor);
 void scheduler_send_ref(AetherActorRef ref, Message msg);
+
+// A message dropped instead of handled (#3142): what its fields own goes
+// through `target`'s release_message, then its payload and an owned zero-copy
+// buffer are freed. Every drop goes through here: a dead or released target's
+// mailbox and queues, a send refused, a type the receiver has no handler for.
+// The reply slot and the processed count are the caller's. `target` may be
+// NULL (a reference whose block is another actor's now): the payload alone
+// is freed.
+void aether_message_drop(ActorBase* target, Message* msg);
 /* A thread that steps actors without being a core's scheduler thread
  * (aether_actor_thread, which inlines sends to actors of its core) takes
  * part in reclamation like a core (#2517): it registers before its first

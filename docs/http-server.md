@@ -569,6 +569,25 @@ leaves its user data to the program; `http_server_use_middleware_owned`
 and `http_server_use_response_transformer_owned` take a release the
 server runs on it.
 
+**Loop-safe middleware and hooks.** On Linux and macOS a server with a
+`std.http.proxy` mount serves its plain-HTTP connections from the proxy's
+event loop, a few threads that each hold many connections, and the loop
+runs the middleware registered before the first mount and the request
+hooks itself (#3214). Anything it runs holds up every connection on its
+thread, so it runs only what is registered as never blocking. `use_real_ip`,
+`use_rate_limit`, `use_cors`, `use_vhost`, `use_rewrite`, the access log and
+the metrics are loop-safe; the auth middleware (which call your verifier)
+and `use_static_files` (which reads files) are not, and neither is a
+middleware registered with `http.server_use_middleware`, which may block.
+Register one that never blocks with
+`http.server_use_middleware_loop_safe(server, fn, user_data, release)`
+(`release` frees `user_data` with the server, or `null`); from C,
+`http_server_use_request_hook_loop_safe` does the same for a hook. A server
+with one that is not loop-safe before its first mount, or among its hooks,
+serves each connection from a worker thread instead, where everything runs
+as it always has. Either way the responses are the same. See
+[the reverse proxy guide](http-reverse-proxy.md#middleware-and-hooks-on-the-driver).
+
 **Real-IP trust model.** A forwarding header is a list any client can
 start: `curl -H 'X-Forwarded-For: 1.2.3.4'` writes one. `use_real_ip`
 therefore believes it only from a peer among the proxies it is given,
@@ -764,7 +783,8 @@ NCSA Combined Log Format is the Apache default. File is opened
 `"ab"` so process restarts append rather than truncate. Every response
 the server sends is logged, one a middleware answered included: a
 proxied request, a 401 from basic auth, a 429 from the rate limiter
-(#3213).
+(#3213). The logger is loop-safe (#3214): a gateway that logs keeps the
+proxy's event loop, which writes the line itself.
 
 ---
 
@@ -792,15 +812,19 @@ aether_http_request_duration_seconds_count{method="GET",path="/api/users"} 4239
 ```
 
 Histogram buckets: 5ms / 25ms / 100ms / 500ms / 2s / 10s / +Inf.
-Counters are atomic; insertion-time mutex only.
+Counters are atomic; insertion-time mutex only. The collector is
+loop-safe (#3214), like the access log.
 
 Custom hooks: `http_server_use_request_hook(server, hook, ud)` is a
-C-level extension point (declared in `std/net/aether_http_server.c`,
+C-level extension point (declared in `std/net/aether_http_server.h`,
 not exported from `std.http`) used internally by the access-log and
 metrics hooks. Multiple hooks may register; they fire in registration
 order after the response transformer chain. A hook is
 `void hook(HttpRequest* req, HttpServerResponse* res, int64_t duration_us, void* user_data)`;
-the duration was a `long` before, 32 bits on Windows. It is not
+the duration was a `long` before, 32 bits on Windows. A hook registered
+this way may block, so a gateway with one leaves the proxy's event loop
+for a thread per connection; `http_server_use_request_hook_loop_safe`
+registers one that never blocks, which the loop runs. It is not
 currently callable from Aether code.
 
 ---

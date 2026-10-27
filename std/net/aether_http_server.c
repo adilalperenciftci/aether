@@ -147,6 +147,10 @@ const char* http_server_set_health_probes_raw(HttpServer* s, const char* lp, con
 void http_server_use_request_hook(HttpServer* s, HttpRequestHook h, void* u) {
     (void)s; (void)h; (void)u;
 }
+void http_server_use_request_hook_loop_safe(HttpServer* s, HttpRequestHook h, void* u) {
+    (void)s; (void)h; (void)u;
+}
+int http_server_evloop_connections(HttpServer* s) { (void)s; return 0; }
 const char* http_server_set_access_log_raw(HttpServer* s, const char* f, const char* p) {
     (void)s; (void)f; (void)p; return "";
 }
@@ -191,6 +195,10 @@ void http_server_use_middleware(HttpServer* s, HttpMiddleware m, void* u) { (voi
 void http_server_use_middleware_owned(HttpServer* s, HttpMiddleware m, void* u, void (*r)(void*)) {
     (void)s; (void)m; (void)u; (void)r;
 }
+void http_server_use_middleware_loop_safe(HttpServer* s, HttpMiddleware m, void* u,
+                                          void (*r)(void*)) {
+    (void)s; (void)m; (void)u; (void)r;
+}
 void http_server_use_response_transformer(HttpServer* s, HttpResponseTransformer x, void* u) {
     (void)s; (void)x; (void)u;
 }
@@ -200,6 +208,9 @@ void http_server_use_response_transformer_owned(HttpServer* s, HttpResponseTrans
 }
 HttpRequest* http_parse_request(const char* r) { (void)r; return NULL; }
 const char* http_get_header(HttpRequest* r, const char* k) { (void)r; (void)k; return NULL; }
+int http_request_set_header(HttpRequest* r, const char* n, const char* v) { (void)r; (void)n; (void)v; return -1; }
+void http_request_remove_header(HttpRequest* r, const char* n) { (void)r; (void)n; }
+int http_request_set_path(HttpRequest* r, const char* p) { (void)r; (void)p; return -1; }
 const char* http_get_query_param(HttpRequest* r, const char* k) { (void)r; (void)k; return NULL; }
 const char* http_get_path_param(HttpRequest* r, const char* k) { (void)r; (void)k; return NULL; }
 void http_request_free(HttpRequest* r) { (void)r; }
@@ -391,8 +402,8 @@ static void pt_server_close(void* c) {
  * lost between handle_one_request calls. Without this, the
  * single-request implementation's "read up to \r\n\r\n then free"
  * pattern silently drops anything past the first request's body
- * boundary in the same recv. */
-#define HTTP_CONN_BUF_CAP (16 * 1024)
+ * boundary in the same recv. Its size, HTTP_CONN_BUF_CAP, is in the
+ * header, where the proxy event loop reads it too (#3237). */
 
 /* The parser copies the request line into a fixed buffer; this is that size,
  * kept here so the check that answers 414 and the buffer that must hold the
@@ -476,6 +487,14 @@ typedef struct HttpConn {
      * the client may still be sending: conn_close then closes in stages
      * (conn_linger) rather than resetting the refusal away. */
     int   linger_on_close;
+    /* A request the proxy event loop took through the middleware ahead of
+     * its proxy mount, handed over with its connection when the mount did
+     * not take it (http_server_adopt_request, #3214): handle_one_request
+     * dispatches it from `pending_from` before reading anything. */
+    HttpRequest*        pending_req;
+    HttpServerResponse* pending_res;
+    HttpMiddlewareNode* pending_from;
+    int64_t             pending_t_start;
 } HttpConn;
 
 /* The parking lot holds HttpConn by pointer and needs exactly two things from
@@ -666,6 +685,66 @@ static int sendfile_eligible(HttpConn* c, HttpRequest* req) {
     return 1;
 }
 
+/* A file http_serve_file staged on `res` (sendfile_fd), read into its body
+ * and closed: what a connection that cannot take sendfile gets, and what
+ * the proxy event loop always does with one, since it sends from memory
+ * (#3214). The 2 GiB cap is conservative: buffered bodies above that are
+ * unusual for static serves and would memory-press a runtime that doesn't
+ * intend the cost. The fast path (sendfile) has no such limit. */
+static void response_load_staged_file(HttpServerResponse* res) {
+    if (res->sendfile_fd < 0) return;
+    long long size = res->sendfile_size;
+    if (size >= 0 && size <= (long long)0x7FFFFFFF) {
+        /* Cap-aware (#343): file size is OS-supplied and
+         * unbounded from the plugin host's perspective; gate via
+         * the caps allocator. The matching free in
+         * http_server_response_free passes res->body_cap. */
+        size_t buf_cap = (size_t)size + 1;
+        char* buf = (char*)aether_caps_malloc(buf_cap);
+        if (buf) {
+            size_t total = 0;
+#ifndef _WIN32
+            lseek(res->sendfile_fd, 0, SEEK_SET);
+            while (total < (size_t)size) {
+                ssize_t n = read(res->sendfile_fd, buf + total,
+                                 (size_t)size - total);
+                if (n <= 0) break;
+                total += (size_t)n;
+            }
+#endif
+            if (total == (size_t)size) {
+                buf[size] = '\0';
+                aether_caps_free(res->body, res->body_cap);
+                res->body = buf;
+                res->body_length = (size_t)size;
+                res->body_cap = buf_cap;
+            } else {
+                aether_caps_free(buf, buf_cap);
+            }
+        }
+    }
+#ifndef _WIN32
+    close(res->sendfile_fd);
+#endif
+    res->sendfile_fd = -1;
+}
+
+/* `res` as the bytes that go on the wire, into *buf (grown as needed).
+ * RFC 9110 section 9.3.2: a HEAD response carries the headers the GET would
+ * have carried and no body. Sending one desynchronises a persistent
+ * connection, the client reads those bytes as the start of the next
+ * response. Shared by the worker path and the proxy event loop (#3214). */
+static char* response_serialize_wire(HttpRequest* req, HttpServerResponse* res,
+                                     char** buf, size_t* cap, size_t* out_len) {
+    int head_only = req && req->method && strcmp(req->method, "HEAD") == 0;
+    char*  body     = res->body;
+    size_t body_len = res->body_length;
+    if (head_only) { res->body = NULL; res->body_length = 0; }
+    char* out = http_response_serialize_into(res, buf, cap, out_len);
+    if (head_only) { res->body = body; res->body_length = body_len; }
+    return out;
+}
+
 /* Send `res` to `conn`. When res->sendfile_fd is set AND the
  * request/connection is sendfile-eligible, takes the zero-copy
  * path: serialize headers only (body is NULL on this path), cork
@@ -724,58 +803,16 @@ static int send_response_with_optional_sendfile(HttpConn* conn,
             }
         }
     } else if (res->sendfile_fd >= 0) {
-        /* Ineligible: read the fd into res->body before serializing.
-         * The 2 GiB cap is conservative — buffered bodies above that
-         * are unusual for static serves and would memory-press a
-         * runtime that doesn't intend the cost. The fast path
-         * (sendfile) has no such limit. */
-        long long size = res->sendfile_size;
-        if (size >= 0 && size <= (long long)0x7FFFFFFF) {
-            /* Cap-aware (#343): file size is OS-supplied and
-             * unbounded from the plugin host's perspective; gate via
-             * the caps allocator. The matching free in
-             * http_server_response_free passes res->body_cap. */
-            size_t buf_cap = (size_t)size + 1;
-            char* buf = (char*)aether_caps_malloc(buf_cap);
-            if (buf) {
-                size_t total = 0;
-#ifndef _WIN32
-                lseek(res->sendfile_fd, 0, SEEK_SET);
-                while (total < (size_t)size) {
-                    ssize_t n = read(res->sendfile_fd, buf + total,
-                                     (size_t)size - total);
-                    if (n <= 0) break;
-                    total += (size_t)n;
-                }
-#endif
-                if (total == (size_t)size) {
-                    buf[size] = '\0';
-                    aether_caps_free(res->body, res->body_cap);
-                    res->body = buf;
-                    res->body_length = (size_t)size;
-                    res->body_cap = buf_cap;
-                } else {
-                    aether_caps_free(buf, buf_cap);
-                }
-            }
-        }
-#ifndef _WIN32
-        close(res->sendfile_fd);
-#endif
-        res->sendfile_fd = -1;
+        /* Ineligible: read the fd into res->body before serializing. */
+        response_load_staged_file(res);
     }
 
     if (!sent_via_sendfile) {
-        size_t resp_len = 0;
-        char*  body      = res->body;
-        size_t body_len  = res->body_length;
-        if (head_only) { res->body = NULL; res->body_length = 0; }
-        char* response_str = http_response_serialize_len(res, &resp_len);
-        if (head_only) { res->body = body; res->body_length = body_len; }
-        if (response_str) {
-            conn_send(conn, response_str, (int)resp_len);
-            free(response_str);
-        }
+        char*  buf = NULL;
+        size_t cap = 0, resp_len = 0;
+        if (response_serialize_wire(req, res, &buf, &cap, &resp_len))
+            conn_send(conn, buf, (int)resp_len);
+        free(buf);
     }
 
     return force_close;
@@ -862,6 +899,14 @@ static void conn_close(HttpConn* c) {
         c->buf_cap = 0;
         c->read_pos = 0;
         c->write_pos = 0;
+    }
+    /* A request the proxy event loop handed over that no worker reached:
+     * the pool closes what it queued when it shuts down (#3230). */
+    if (c->pending_req) {
+        http_request_free(c->pending_req);
+        http_server_response_free(c->pending_res);
+        c->pending_req = NULL;
+        c->pending_res = NULL;
     }
 }
 
@@ -1287,7 +1332,8 @@ const char* http_server_set_health_probes_raw(HttpServer* server,
 // =================================================================
 
 static void server_add_request_hook(HttpServer* server, HttpRequestHook hook,
-                                    void* user_data, void (*release)(void*));
+                                    void* user_data, void (*release)(void*),
+                                    int loop_safe);
 
 typedef struct {
     char* format;       /* "combined" or "json" */
@@ -1411,7 +1457,10 @@ const char* http_server_set_access_log_raw(HttpServer* server,
         st->own_fp = 1;
     }
 
-    server_add_request_hook(server, access_log_hook, st, access_log_release);
+    /* Loop-safe (#3214): a line formatted and appended to a file, which is
+     * how nginx writes its access log from its event loop. Logging to "-"
+     * writes stderr, which stalls only while whatever reads it does. */
+    server_add_request_hook(server, access_log_hook, st, access_log_release, 1);
     return "";
 }
 
@@ -1634,7 +1683,8 @@ const char* http_server_set_metrics_raw(HttpServer* server,
     if (!st) return "out of memory";
     pthread_mutex_init(&st->lock, NULL);
     st->server = server;
-    server_add_request_hook(server, metrics_hook, st, metrics_release);
+    /* Loop-safe (#3214): counters, and a mutex held for one list lookup. */
+    server_add_request_hook(server, metrics_hook, st, metrics_release, 1);
     const char* endpoint = (metrics_endpoint && *metrics_endpoint)
         ? metrics_endpoint : "/metrics";
     http_server_get(server, endpoint, metrics_handler, st);
@@ -1902,6 +1952,122 @@ static void req_release(HttpRequest* req, void* p) {
     if (!req->arena_backed) free(p);
 }
 
+/* Header arrays holding at least `want` slots, keeping what they hold: 1, or
+ * 0 when the allocator refused. They grow and never shrink (#3234). A
+ * capacity nobody recorded (header_cap 0) is read as the headers held, and
+ * grown to no less than HTTP_MAX_HEADERS, so arrays sized by someone else
+ * are not cut below what a parse puts in them. */
+static int req_header_room(HttpRequest* req, int want) {
+    int have = req->header_cap > req->header_count ? req->header_cap : req->header_count;
+    if (req->header_keys && req->header_values && have >= want) return 1;
+    int grown = want > have ? want : have;
+    if (req->header_cap == 0 && grown < HTTP_MAX_HEADERS) grown = HTTP_MAX_HEADERS;
+    char** keys = (char**)realloc(req->header_keys, sizeof(char*) * (size_t)grown);
+    if (!keys) return 0;
+    req->header_keys = keys;
+    char** values = (char**)realloc(req->header_values, sizeof(char*) * (size_t)grown);
+    if (!values) return 0;    /* the keys grew, which costs nothing but space */
+    req->header_values = values;
+    req->header_cap = grown;
+    return 1;
+}
+
+/* An arena-backed request's strings, copied out of the arena, so that one can
+ * be replaced and freed like any other (#3234): a parse takes them all from
+ * the arena or none (arena_backed), and an edit keeps it that way by moving
+ * them all. 0, or -1 when the allocator refused, the request unchanged. The
+ * arena keeps its copies until its owner resets it. */
+static int req_own_strings(HttpRequest* req) {
+    if (!req->arena_backed) return 0;
+    int n = req->header_count;
+    char* fixed[4] = { req->method, req->path, req->query_string, req->http_version };
+    char* copy[4] = { NULL, NULL, NULL, NULL };
+    char** keys = n ? (char**)calloc((size_t)n, sizeof(char*)) : NULL;
+    char** values = n ? (char**)calloc((size_t)n, sizeof(char*)) : NULL;
+    int ok = n == 0 || (keys && values);
+    for (int i = 0; ok && i < 4; i++)
+        if (fixed[i] && !(copy[i] = strdup(fixed[i]))) ok = 0;
+    for (int i = 0; ok && i < n; i++) {
+        if (req->header_keys[i] && !(keys[i] = strdup(req->header_keys[i]))) ok = 0;
+        if (ok && req->header_values[i] && !(values[i] = strdup(req->header_values[i]))) ok = 0;
+    }
+    if (!ok) {
+        for (int i = 0; i < 4; i++) free(copy[i]);
+        for (int i = 0; i < n && keys && values; i++) { free(keys[i]); free(values[i]); }
+        free(keys);
+        free(values);
+        return -1;
+    }
+    req->method = copy[0];
+    req->path = copy[1];
+    req->query_string = copy[2];
+    req->http_version = copy[3];
+    for (int i = 0; i < n; i++) {
+        req->header_keys[i] = keys[i];
+        req->header_values[i] = values[i];
+    }
+    free(keys);
+    free(values);
+    req->arena_backed = 0;
+    return 0;
+}
+
+int http_request_set_header(HttpRequest* req, const char* name, const char* value) {
+    if (!req || !name || !value) return -1;
+    if (req_own_strings(req) != 0) return -1;
+    for (int i = 0; i < req->header_count; i++) {
+        if (!req->header_keys[i] || strcasecmp(req->header_keys[i], name) != 0) continue;
+        char* v = strdup(value);
+        if (!v) return -1;
+        free(req->header_values[i]);
+        req->header_values[i] = v;
+        return 0;
+    }
+    if (!req_header_room(req, req->header_count + 1)) return -1;
+    char* k = strdup(name);
+    char* v = strdup(value);
+    if (!k || !v) { free(k); free(v); return -1; }
+    req->header_keys[req->header_count] = k;
+    req->header_values[req->header_count] = v;
+    req->header_count++;
+    return 0;
+}
+
+/* The headers after a removed one move down, so the rest keep their order,
+ * which is the order they are forwarded in. An arena-backed request's strings
+ * are the arena's, so they are dropped, not freed. */
+void http_request_remove_header(HttpRequest* req, const char* name) {
+    if (!req || !name || !req->header_keys || !req->header_values) return;
+    int kept = 0;
+    for (int i = 0; i < req->header_count; i++) {
+        if (req->header_keys[i] && strcasecmp(req->header_keys[i], name) == 0) {
+            if (!req->arena_backed) {
+                free(req->header_keys[i]);
+                free(req->header_values[i]);
+            }
+            continue;
+        }
+        req->header_keys[kept] = req->header_keys[i];
+        req->header_values[kept] = req->header_values[i];
+        kept++;
+    }
+    for (int i = kept; i < req->header_count; i++) {
+        req->header_keys[i] = NULL;
+        req->header_values[i] = NULL;
+    }
+    req->header_count = kept;
+}
+
+int http_request_set_path(HttpRequest* req, const char* path) {
+    if (!req || !path) return -1;
+    if (req_own_strings(req) != 0) return -1;
+    char* p = strdup(path);
+    if (!p) return -1;
+    free(req->path);
+    req->path = p;
+    return 0;
+}
+
 /* Every string this parse produces is a copy of part of the request, so the
  * request's own length bounds the bytes they hold. Each also carries a
  * terminator and is rounded up to the arena's alignment, and there are at
@@ -2010,13 +2176,17 @@ static HttpRequest* http_parse_request_n_impl(HttpRequest* req,
     
     // Parse headers
     /* A reused request arrives with these already allocated, which is the
-     * point of reusing it: the arrays are fixed-size and outlive a request
-     * perfectly well. */
-    if (!req->header_keys)
-        req->header_keys = (char**)malloc(sizeof(char*) * HTTP_MAX_HEADERS);
-    if (!req->header_values)
-        req->header_values = (char**)malloc(sizeof(char*) * HTTP_MAX_HEADERS);
+     * point of reusing it: the arrays outlive a request perfectly well. They
+     * have to hold HTTP_MAX_HEADERS, and arrays someone else sized may not:
+     * use_real_ip's append used to realloc them to one past the headers they
+     * held, and the next parse into the request wrote past the end (#3234).
+     * req_header_room grows them; it never shrinks them. */
     req->header_count = 0;
+    if (!req_header_room(req, HTTP_MAX_HEADERS)) {
+        free(req->header_keys);   req->header_keys = NULL;
+        free(req->header_values); req->header_values = NULL;
+        req->header_cap = 0;
+    }
     // If either array failed to allocate, drop both and skip storing headers
     // (the loop below still runs to advance past them to the body) rather than
     // writing strdup results through a NULL array pointer.
@@ -2506,23 +2676,6 @@ void* http_server_proxy_opts(HttpServer* server) {
     return NULL;
 }
 
-/* May the proxy event loop serve this server's connections? It runs the
- * proxy exchange alone, so only where that is all a proxied request gets
- * on the worker path: the proxy is the chain's first middleware, and no
- * request hook is registered. For a chain with use_real_ip, a rate limiter
- * or basic auth ahead of the proxy the loop skipped them, and a proxied
- * request went past the auth on Linux (#3203); the access log and metrics,
- * which observe every response (run_request_hooks), were skipped the same
- * way (#3213). Response transformers are the route handler's and do not
- * touch a proxied response on either path. Middleware after the proxy sees
- * only what the proxy passes on, which the loop hands back to the worker
- * path. */
-int http_server_evloop_serves(HttpServer* server) {
-    return server && server->middleware_chain &&
-           server->middleware_chain->middleware == aether_middleware_reverse_proxy &&
-           !server->request_hook_chain;
-}
-
 void http_response_set_header(HttpServerResponse* res, const char* key, const char* value) {
     if (!res) return;
     /* A header carrying a line ending would be written into the response head
@@ -2867,12 +3020,30 @@ void http_server_delete(HttpServer* server, const char* path, HttpHandler handle
     http_server_add_route(server, "DELETE", path, handler, user_data);
 }
 
+static void server_add_middleware(HttpServer* server, HttpMiddleware middleware,
+                                  void* user_data, void (*release)(void*),
+                                  int loop_safe);
+
 void http_server_use_middleware(HttpServer* server, HttpMiddleware middleware, void* user_data) {
-    http_server_use_middleware_owned(server, middleware, user_data, NULL);
+    server_add_middleware(server, middleware, user_data, NULL, 0);
 }
 
 void http_server_use_middleware_owned(HttpServer* server, HttpMiddleware middleware,
                                       void* user_data, void (*release)(void*)) {
+    server_add_middleware(server, middleware, user_data, release, 0);
+}
+
+/* A middleware that says it never blocks (#3214): the proxy event loop runs
+ * it when it sits ahead of the proxy. The two registrations above stay not
+ * loop-safe, because a program's middleware may block. */
+void http_server_use_middleware_loop_safe(HttpServer* server, HttpMiddleware middleware,
+                                          void* user_data, void (*release)(void*)) {
+    server_add_middleware(server, middleware, user_data, release, 1);
+}
+
+static void server_add_middleware(HttpServer* server, HttpMiddleware middleware,
+                                  void* user_data, void (*release)(void*),
+                                  int loop_safe) {
     HttpMiddlewareNode* node = (HttpMiddlewareNode*)malloc(sizeof(HttpMiddlewareNode));
     if (!node) {
         /* Not installed: what it would have owned goes now. */
@@ -2883,6 +3054,7 @@ void http_server_use_middleware_owned(HttpServer* server, HttpMiddleware middlew
     node->user_data = user_data;
     node->next = NULL;
     node->release = release;
+    node->loop_safe = loop_safe;
     /* Append to the end of the chain so registration order matches
      * execution order — what every HTTP framework does, what the
      * std.http.middleware factories assume, and what the
@@ -2918,8 +3090,81 @@ struct HttpRequestHookNode {
      * server owns (the access logger, the metrics collector); NULL for a
      * hook the caller registered, whose state stays the caller's. */
     void (*release)(void*);
+    /* 1 when the registration said the hook never blocks, so the proxy
+     * event loop may run it (#3214). */
+    int loop_safe;
     struct HttpRequestHookNode* next;
 };
+
+/* The first proxy mount in the chain, or NULL. */
+static HttpMiddlewareNode* server_proxy_node(HttpServer* server) {
+    for (HttpMiddlewareNode* n = server ? server->middleware_chain : NULL; n; n = n->next)
+        if (n->middleware == aether_middleware_reverse_proxy) return n;
+    return NULL;
+}
+
+/* May the proxy event loop serve this server's connections? A proxied
+ * request gets on the loop exactly what it gets on the worker path: the
+ * middleware ahead of the proxy, the proxy exchange, the request hooks on
+ * the response. The loop runs all of them itself (#3214), so each has to be
+ * safe to run there, which its registration says: a loop thread holds
+ * hundreds of connections, and a middleware that waits on a database stalls
+ * every one of them. One that is not loop-safe, ahead of the proxy or among
+ * the hooks, sends the server's connections to the worker path, where it
+ * runs as it always did. Before #3214 the loop ran the proxy exchange alone,
+ * so it served only a server with the proxy first and no hook: it had
+ * skipped use_real_ip, the rate limiter and basic auth ahead of the proxy
+ * (#3203), and the access log and metrics (#3213). Response transformers
+ * are the route handler's and do not touch a proxied response on either
+ * path. Middleware after the proxy sees only what the proxy passes on,
+ * which the loop gives the worker path (http_server_adopt_request). */
+int http_server_evloop_serves(HttpServer* server) {
+    if (!server) return 0;
+    HttpMiddlewareNode* proxy = server_proxy_node(server);
+    if (!proxy) return 0;
+    /* The loop carries a client's TLS through OpenSSL only. A server on the
+     * pure-Aether stack (AETHER_PURE_TLS=1, or a build without OpenSSL) has
+     * no OpenSSL context: the loop closed every connection it took for one,
+     * and a build without OpenSSL read the TLS bytes as HTTP (#3256). */
+    if (server->tls_enabled) {
+#ifdef AETHER_HAS_OPENSSL
+        if (server->is_pure_tls || !server->tls_ctx) return 0;
+#else
+        return 0;
+#endif
+    }
+    /* The loop dials plain HTTP only; a mount with an https upstream is the
+     * worker path's, whose client speaks TLS (#3231). */
+    if (!aether_proxy_upstreams_all_plain((const AetherProxyOpts*)proxy->user_data)) return 0;
+    for (HttpMiddlewareNode* n = server->middleware_chain; n != proxy; n = n->next)
+        if (!n->loop_safe) return 0;
+    for (struct HttpRequestHookNode* h = server->request_hook_chain; h; h = h->next)
+        if (!h->loop_safe) return 0;
+    return 1;
+}
+
+int http_server_has_before_proxy(HttpServer* server) {
+    HttpMiddlewareNode* proxy = server_proxy_node(server);
+    return proxy && proxy != server->middleware_chain;
+}
+
+/* The chain up to the first proxy mount, as handle_one_request runs it (the
+ * same loop, stopped short of the mount, whose exchange the caller drives
+ * itself). */
+int http_server_run_before_proxy(HttpServer* server, HttpRequest* req,
+                                 HttpServerResponse* res) {
+    HttpMiddlewareNode* proxy = server_proxy_node(server);
+    for (HttpMiddlewareNode* n = server->middleware_chain; n && n != proxy; n = n->next) {
+        if (!n->middleware(req, res, n->user_data)) return 0;
+    }
+    return 1;
+}
+
+/* Whether a gateway runs on the loop at all is otherwise invisible: the
+ * responses are the same either way, by design (#3214). */
+int http_server_evloop_connections(HttpServer* server) {
+    return server ? http_evloop_taken((HttpEvLoop*)server->evloop) : 0;
+}
 
 /* SSE route node (#260 Tier 2). */
 struct HttpSseRoute {
@@ -4105,12 +4350,20 @@ static int ws_send_handshake(HttpConn* conn, const char* client_key) {
 }
 
 static void server_add_request_hook(HttpServer* server, HttpRequestHook hook,
-                                    void* user_data, void (*release)(void*)) {
+                                    void* user_data, void (*release)(void*),
+                                    int loop_safe) {
     struct HttpRequestHookNode* node =
         (struct HttpRequestHookNode*)malloc(sizeof(*node));
+    if (!node) {
+        /* Not installed: what it would have owned goes now, as a middleware's
+         * does. The node used to be written through unchecked. */
+        if (release && user_data) release(user_data);
+        return;
+    }
     node->hook = hook;
     node->user_data = user_data;
     node->release = release;
+    node->loop_safe = loop_safe;
     node->next = NULL;
     if (!server->request_hook_chain) {
         server->request_hook_chain = node;
@@ -4125,7 +4378,15 @@ void http_server_use_request_hook(HttpServer* server,
                                   HttpRequestHook hook,
                                   void* user_data) {
     if (!server || !hook) return;
-    server_add_request_hook(server, hook, user_data, NULL);
+    server_add_request_hook(server, hook, user_data, NULL, 0);
+}
+
+/* A hook that says it never blocks (#3214): the proxy event loop runs it. */
+void http_server_use_request_hook_loop_safe(HttpServer* server,
+                                            HttpRequestHook hook,
+                                            void* user_data) {
+    if (!server || !hook) return;
+    server_add_request_hook(server, hook, user_data, NULL, 1);
 }
 
 void http_server_use_response_transformer(HttpServer* server,
@@ -4297,6 +4558,10 @@ static HttpRoute* http_resolve_route(HttpServer* server, HttpRequest* req) {
     return head_to_get;
 }
 
+static int response_settle_keep_alive(HttpServer* server, HttpRequest* req,
+                                      HttpServerResponse* res, int requests_served,
+                                      int max_requests, int holds_worker);
+
 /* Per-request slice of the connection lifecycle. Returns:
  *    1 — request was processed; caller may loop for another request
  *        on the same connection (subject to keep-alive policy).
@@ -4312,9 +4577,91 @@ static HttpRoute* http_resolve_route(HttpServer* server, HttpRequest* req) {
  * send the response itself and close, so every reverse-proxied response
  * (the proxy middleware answers by short-circuiting) closed its inbound
  * connection, whatever the server keep-alive setting said (#1653). */
+/* The most of a streamed request body (#626) left unread when its response is
+ * ready that is read and dropped to keep the connection. Past it the
+ * connection closes instead: reading a declared 2 GiB to keep a connection
+ * costs more than the connection is worth, and a refusal (the proxy's body
+ * cap) is a refusal to read it. The pool path keeps a receive buffer of the
+ * same size (HTTP_RX_KEEP_MAX). */
+#define HTTP_BODY_DRAIN_MAX (64 * 1024)
+
+/* Whether some of `req`'s streamed body is still on its connection, which
+ * then cannot carry another request: the next one would be read from the
+ * middle of this one's body. */
+static int request_body_unread(const HttpRequest* req) {
+    return req->stream_conn && req->stream_consumed < req->stream_total;
+}
+
+/* Settle what is left of `req`'s streamed body before its response goes out
+ * (#3255): a remainder within HTTP_BODY_DRAIN_MAX is read and dropped, so the
+ * connection's next request starts where the client put it. A larger one, or
+ * one the client stops sending, is left, request_body_unread says so, and
+ * keep_alive_decision closes the connection, in stages: the client may still
+ * be sending, and the reset that closing over unread bytes sends can destroy
+ * the response.
+ *
+ * Only the route handler's path drained before, without a bound. A
+ * middleware's answer (the proxy refusing a body over its cap before reading
+ * it, a 429 from the rate limiter, the proxy's 400 for a body that stopped
+ * short) kept the connection with the body still on it, and the body was
+ * parsed as the next request: a body carrying a request of its own had that
+ * request served, behind whatever the middleware had refused. */
+static void request_body_settle(HttpConn* conn, HttpRequest* req) {
+    if (!req->stream_conn) return;
+    HttpConn* sconn = (HttpConn*)req->stream_conn;
+    long left = req->stream_total - req->stream_consumed;
+    if (left > 0 && left <= HTTP_BODY_DRAIN_MAX) {
+        /* What is already buffered first, then off the socket in small reads
+         * (no buffer the body's size); a client that stops sending ends it at
+         * the receive timeout, leaving the rest unread. */
+        int buffered = sconn->write_pos - sconn->read_pos;
+        if (buffered > 0) {
+            int drop = buffered < (int)left ? buffered : (int)left;
+            sconn->read_pos += drop;
+            req->stream_consumed += drop;
+            left -= drop;
+        }
+        while (left > 0) {
+            char scratch[4096];
+            int chunk = left < (long)sizeof(scratch) ? (int)left : (int)sizeof(scratch);
+            int n = conn_recv(sconn, scratch, chunk);
+            if (n <= 0) break;
+            req->stream_consumed += n;
+            left -= n;
+        }
+    }
+    if (left > 0) conn->linger_on_close = 1;
+}
+
 static int finish_response(HttpServer* server, HttpConn* conn,
                            HttpRequest* req, HttpServerResponse* res,
                            int requests_served, int max_requests) {
+    /* The body's rest first: whether the connection can carry another
+     * request depends on it, and the response says which (#3255). */
+    request_body_settle(conn, req);
+    int will_keep_alive = response_settle_keep_alive(server, req, res, requests_served,
+                                                     max_requests, 1);
+
+    /* Issue #383 zero-copy: dispatched via the helper so the same
+     * behaviour applies whether we got here from the route handler
+     * or from a middleware short-circuit (the chain at line ~2270
+     * also calls this helper). */
+    int force_close = send_response_with_optional_sendfile(conn, res, req);
+    if (force_close) will_keep_alive = 0;
+
+    // Cleanup
+    http_request_free(req);
+    http_server_response_free(res);
+    return will_keep_alive;
+}
+
+/* Whether the connection carries another request after `res`, stated in
+ * its headers: a definite length and the Connection header, and Keep-Alive
+ * when the server caps requests per connection. finish_response's decision,
+ * and the proxy event loop's for a response a middleware answered (#3214),
+ * where `holds_worker` is 0: a connection on the loop costs no worker. */
+static int keep_alive_decision(HttpServer* server, HttpRequest* req, int status,
+                               int requests_served, int max_requests, int holds_worker) {
     /* Decide whether this response keeps the connection open.
      * Three things can force close:
      *   - keep-alive disabled on the server,
@@ -4326,8 +4673,10 @@ static int finish_response(HttpServer* server, HttpConn* conn,
                        && http_request_wants_keepalive(req)
                        && (max_requests == 0 ||
                            requests_served + 1 < max_requests)
-                       && res->status_code != 408
-                       && res->status_code != 426;
+                       && status != 408
+                       && status != 426
+                       /* the next request would start mid-body (#3255) */
+                       && !request_body_unread(req);
 
     /* Without somewhere to park it, a kept connection holds its worker for
      * its whole life, so keeping one while others wait in the accept queue
@@ -4341,9 +4690,28 @@ static int finish_response(HttpServer* server, HttpConn* conn,
      * for no one's benefit (#1663). Keeping this rule on made the server
      * close 284 of 300 idle keep-alive connections, which is the behaviour
      * parking exists to remove. */
-    if (will_keep_alive && !server->park_lot && http_pool_pending() > 0) {
+    if (will_keep_alive && holds_worker && !server->park_lot && http_pool_pending() > 0) {
         will_keep_alive = 0;
     }
+    return will_keep_alive;
+}
+
+/* The Keep-Alive header's value when the server caps requests per
+ * connection: how long an idle connection is kept and how many requests it
+ * has left. */
+static void keep_alive_value(HttpServer* server, int requests_served, int max_requests,
+                             char* out, size_t cap) {
+    int remaining = max_requests - requests_served - 1;
+    int idle_sec = server->keep_alive_idle_ms > 0
+        ? server->keep_alive_idle_ms / 1000 : 30;
+    snprintf(out, cap, "timeout=%d, max=%d", idle_sec, remaining);
+}
+
+static int response_settle_keep_alive(HttpServer* server, HttpRequest* req,
+                                      HttpServerResponse* res, int requests_served,
+                                      int max_requests, int holds_worker) {
+    int will_keep_alive = keep_alive_decision(server, req, res->status_code, requests_served,
+                                              max_requests, holds_worker);
 
     /* A persistent connection needs a definite body length, or the client
      * cannot tell where this response ends and the next begins. Responses
@@ -4373,27 +4741,34 @@ static int finish_response(HttpServer* server, HttpConn* conn,
         http_response_set_header(res, "Connection", "keep-alive");
         if (max_requests > 0) {
             char ka[64];
-            int remaining = max_requests - requests_served - 1;
-            int idle_sec = server->keep_alive_idle_ms > 0
-                ? server->keep_alive_idle_ms / 1000 : 30;
-            snprintf(ka, sizeof(ka), "timeout=%d, max=%d", idle_sec, remaining);
+            keep_alive_value(server, requests_served, max_requests, ka, sizeof(ka));
             http_response_set_header(res, "Keep-Alive", ka);
         }
     } else {
         http_response_set_header(res, "Connection", "close");
     }
-
-    /* Issue #383 zero-copy: dispatched via the helper so the same
-     * behaviour applies whether we got here from the route handler
-     * or from a middleware short-circuit (the chain at line ~2270
-     * also calls this helper). */
-    int force_close = send_response_with_optional_sendfile(conn, res, req);
-    if (force_close) will_keep_alive = 0;
-
-    // Cleanup
-    http_request_free(req);
-    http_server_response_free(res);
     return will_keep_alive;
+}
+
+/* For a response head the loop writes from the upstream's own bytes (its
+ * direct path), the decision and the header lines that state it, which the
+ * copying path's response gets in the same place: last, after every other
+ * header. */
+int http_server_keep_alive_lines(HttpServer* server, HttpRequest* req, int status,
+                                 int requests_served, char* out, size_t cap) {
+    if (!server || !req || !out || cap == 0) return 0;
+    int max_requests = server->keep_alive_max;
+    int keep = keep_alive_decision(server, req, status, requests_served, max_requests, 0);
+    if (!keep) {
+        snprintf(out, cap, "Connection: close\r\n");
+    } else if (max_requests > 0) {
+        char ka[64];
+        keep_alive_value(server, requests_served, max_requests, ka, sizeof(ka));
+        snprintf(out, cap, "Connection: keep-alive\r\nKeep-Alive: %s\r\n", ka);
+    } else {
+        snprintf(out, cap, "Connection: keep-alive\r\n");
+    }
+    return keep;
 }
 
 /* handle_one_request's third answer, alongside 1 (keep going) and 0 (close):
@@ -4504,26 +4879,32 @@ static void conn_resolve_addrs(HttpConn* c) {
     fd_end_text(c->fd, 0, c->local_addr, sizeof(c->local_addr), &c->local_port);
 }
 
-/* The peer and the local address of the plain-HTTP connection on `fd`,
- * copied into `req` as http_request_copy_conn_meta does for an HttpConn.
+/* The peer and the local address of the connection on `fd`, resolved once
+ * for the connection as conn_resolve_addrs does for an HttpConn (#1719).
  * The proxy event loop (aether_http_evloop.c) serves its connections
  * without an HttpConn, and its requests read "" for both: the proxy's
- * X-Forwarded-For named the hop "unknown" on Linux (#3169). The strings are
- * the request's, freed by http_request_free; a parse does not reset them,
- * so a connection's request takes them once. */
-void http_request_copy_fd_meta(HttpRequest* req, int fd) {
-    if (!req) return;
-    char text[INET6_ADDRSTRLEN];
-    int port = 0;
-    fd_end_text(fd, 1, text, sizeof(text), &port);
+ * X-Forwarded-For named the hop "unknown" on Linux (#3169). `is_tls` is the
+ * connection's: the loop terminates TLS too, and its requests said plain
+ * HTTP to every middleware that asked (#3214). */
+void http_conn_meta_from_fd(HttpConnMeta* meta, int fd, int is_tls) {
+    if (!meta) return;
+    fd_end_text(fd, 1, meta->remote_addr, sizeof(meta->remote_addr), &meta->remote_port);
+    fd_end_text(fd, 0, meta->local_addr, sizeof(meta->local_addr), &meta->local_port);
+    meta->is_tls = is_tls ? 1 : 0;
+}
+
+/* `meta` copied into `req`, replacing what it held, as
+ * http_request_copy_conn_meta does for an HttpConn. The strings are the
+ * request's, freed by http_request_free; a parse does not reset them. */
+void http_request_set_conn_meta(HttpRequest* req, const HttpConnMeta* meta) {
+    if (!req || !meta) return;
     free(req->remote_addr);
-    req->remote_addr = text[0] ? strdup(text) : NULL;
-    req->remote_port = text[0] ? port : 0;
-    fd_end_text(fd, 0, text, sizeof(text), &port);
+    req->remote_addr = meta->remote_addr[0] ? strdup(meta->remote_addr) : NULL;
+    req->remote_port = meta->remote_addr[0] ? meta->remote_port : 0;
     free(req->local_addr);
-    req->local_addr = text[0] ? strdup(text) : NULL;
-    req->local_port = text[0] ? port : 0;
-    req->is_tls = 0;
+    req->local_addr = meta->local_addr[0] ? strdup(meta->local_addr) : NULL;
+    req->local_port = meta->local_addr[0] ? meta->local_port : 0;
+    req->is_tls = meta->is_tls;
 }
 
 /* Connection-level metadata that handlers learn from the kernel rather
@@ -4628,6 +5009,71 @@ static int conn_parse_content_length(const char* text, long* out) {
     return 0;
 }
 
+/* What the worker path checks in a request head before it trusts the head's
+ * framing, in one place, which the proxy event loop asks too (#3236): the
+ * loop read Content-Length alone and forwarded heads this path refuses, a
+ * "Content-Length : 5" among them, which a front end may read as a length
+ * where this server sees none. `head` is the request line's first byte and
+ * `hdr_end` the blank line's "\r\n\r\n". HTTP_HEAD_OK fills *content_length
+ * (0 when there is none) and *chunked; anything else is the status the
+ * request is refused with. */
+int http_request_head_check(const char* head, const char* hdr_end,
+                            long* content_length, int* chunked) {
+    *content_length = 0;
+    *chunked = 0;
+    /* A NUL makes the head something other than a request (RFC 9110 5.5),
+     * and the parser, which scans it as a C string, would stop there and
+     * take the rest of the head for the body (#3254). */
+    if (memchr(head, '\0', (size_t)(hdr_end - head))) return HTTP_HEAD_MALFORMED;
+    /* A request line longer than the parser's line buffer is answered rather
+     * than dropped, and it is checked here so the parser's own bound is never
+     * the thing a client reaches. */
+    const char* rl_end = (const char*)memchr(head, '\n', (size_t)(hdr_end - head));
+    size_t rl_len = rl_end ? (size_t)(rl_end - head) : (size_t)(hdr_end - head);
+    if (rl_len >= HTTP_MAX_REQUEST_LINE) return HTTP_HEAD_URI_TOO_LONG;
+    /* Headers first: a line this server would read differently from the peer
+     * that sent it is refused before its framing is trusted. */
+    if (rl_end) {
+        int hdr_ok = conn_headers_well_formed(rl_end + 1, hdr_end);
+        if (hdr_ok < 0) return HTTP_HEAD_TOO_LARGE;
+        if (!hdr_ok)    return HTTP_HEAD_BAD_FRAMING;
+    }
+    char cl_value[64];
+    int cl_differing = 0;
+    int cl_count = http_find_header_in_block(head, hdr_end, "Content-Length",
+                                             cl_value, sizeof(cl_value), &cl_differing);
+    if (cl_count > 0) {
+        /* Two lengths that disagree leave no single answer about where this
+         * message ends, and a value that is not a count of bytes leaves none
+         * either. Both are unrecoverable rather than something to pick from
+         * (RFC 9112 6.3): guessing is what lets a front end and this server
+         * disagree about where one request stops and the next begins. */
+        if (cl_differing || conn_parse_content_length(cl_value, content_length) != 0)
+            return HTTP_HEAD_BAD_FRAMING;
+    }
+
+    /* Transfer-Encoding decides where the body ends, and when it is present
+     * Content-Length does not (RFC 9112 6.3). Ignoring it read a chunked
+     * upload as having no body at all: the payload was dropped, and the chunk
+     * bytes stayed in the stream to be parsed as the beginning of the next
+     * request. Against a front end that does honour the header, that
+     * disagreement about where one request ends is request smuggling.
+     *
+     * A message carrying both is refused rather than resolved, because the
+     * two lengths are exactly what a smuggling pair is built from and no
+     * legitimate sender emits both. */
+    char te_value[128];
+    int te_count = http_find_header_in_block(head, hdr_end, "Transfer-Encoding",
+                                             te_value, sizeof(te_value), NULL);
+    if (te_count > 0) {
+        *chunked = http_strcasestr(te_value, "chunked") != NULL;
+        /* Both lengths present, or a coding this server cannot decode: refuse
+         * the message rather than pick one of the two answers. */
+        if (cl_count > 0 || !*chunked) return HTTP_HEAD_BAD_FRAMING;
+    }
+    return HTTP_HEAD_OK;
+}
+
 /* The largest chunked request body this server will buffer. A chunked body
  * declares no length in advance, so nothing else bounds it. */
 #define HTTP_MAX_CHUNKED_BODY (8 * 1024 * 1024)
@@ -4640,6 +5086,23 @@ static void conn_send_headers_too_large(HttpConn* conn) {
         "Connection: close\r\n"
         "\r\n"
         "header line is too long\n";
+    conn_send(conn, msg, (int)(sizeof(msg) - 1));
+    conn->linger_on_close = 1;
+}
+
+/* A head that does not fit the connection buffer: answered 431 and closed in
+ * stages like every refusal of a request not read to its end (#3252). It was
+ * closed with nothing written and the rest of the head unread, and the reset
+ * that sends could destroy the response to the request before it, which the
+ * client had received but not yet read. */
+static void conn_send_head_too_large(HttpConn* conn) {
+    static const char msg[] =
+        "HTTP/1.1 431 Request Header Fields Too Large\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: 26\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "request head is too large\n";
     conn_send(conn, msg, (int)(sizeof(msg) - 1));
     conn->linger_on_close = 1;
 }
@@ -4713,6 +5176,41 @@ static void run_request_hooks(HttpServer* server, HttpRequest* req,
         h->hook(req, res, duration_us, h->user_data);
 }
 
+/* The clock the hooks measure with, for the proxy event loop, which runs them
+ * on the responses it sends (#3214, http_server_answer_bytes). */
+int64_t http_server_clock_us(void) {
+    return http_now_us();
+}
+
+/* A middleware's answer on the proxy event loop (#3214), made into the bytes
+ * the worker path would send for it, by the same steps in the same order:
+ * the hooks (dispatch_request's short-circuit), then finish_response's
+ * keep-alive decision and headers, then the send short of sendfile, which
+ * the loop never waits on: a staged file is dropped for HEAD and otherwise
+ * read into the body, as send_response_with_optional_sendfile does for a
+ * connection that cannot take it. */
+int http_server_answer_bytes(HttpServer* server, HttpRequest* req,
+                             HttpServerResponse* res, int64_t t_start_us,
+                             int requests_served, char** buf, size_t* cap,
+                             size_t* out_len) {
+    if (!server || !req || !res || !buf || !cap || !out_len) return -1;
+    run_request_hooks(server, req, res, t_start_us);
+    int keep = response_settle_keep_alive(server, req, res, requests_served,
+                                          server->keep_alive_max, 0);
+    if (res->sendfile_fd >= 0 && req->method && strcmp(req->method, "HEAD") == 0) {
+        close(res->sendfile_fd);
+        res->sendfile_fd = -1;
+    }
+    response_load_staged_file(res);
+    if (!response_serialize_wire(req, res, buf, cap, out_len)) return -1;
+    return keep;
+}
+
+static int dispatch_request(HttpServer* server, HttpConn* conn,
+                            HttpRequest* req, HttpServerResponse* res,
+                            HttpMiddlewareNode* from, int64_t t_start,
+                            int requests_served, int max_requests);
+
 static int handle_one_request(HttpServer* server, HttpConn* conn,
                               int requests_served, int max_requests) {
     int64_t t_start = http_now_us();
@@ -4724,6 +5222,19 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
     }
     /* Reclaim space at the head if the previous request consumed it. */
     conn_buf_compact(conn);
+
+    /* A request the proxy event loop already took through the middleware
+     * ahead of its proxy mount (http_server_adopt_request, #3214): it goes
+     * on from the mount, read and parsed as it is. */
+    if (conn->pending_req) {
+        HttpRequest* req = conn->pending_req;
+        HttpServerResponse* res = conn->pending_res;
+        conn->pending_req = NULL;
+        conn->pending_res = NULL;
+        res->takeover_conn = conn;
+        return dispatch_request(server, conn, req, res, conn->pending_from,
+                                conn->pending_t_start, requests_served, max_requests);
+    }
 
 #ifdef AETHER_HAS_NGHTTP2
     /* Prior-knowledge h2 detection (RFC 7540 §3.5). When the server
@@ -4771,11 +5282,22 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
             /* NUL-terminate the unconsumed slice in place — we have
              * one byte of slack reserved at the end of the buffer. */
             conn->buf[conn->write_pos] = '\0';
-            hdr_end = strstr(conn->buf + conn->read_pos, "\r\n\r\n");
+            /* By length, not strstr: a NUL in the head stopped the search
+             * there, and the worker waited out the idle timeout for an end
+             * that had already arrived (#3254). The head check refuses it. */
+            hdr_end = (char*)http_find_header_end(conn->buf + conn->read_pos,
+                                                  (size_t)(conn->write_pos - conn->read_pos));
             if (hdr_end) break;
         }
-        if (conn->write_pos + 1 >= conn->buf_cap) {
-            /* Header section exceeded buffer capacity; bail. */
+        /* A head holds no more than the connection buffer's first size,
+         * HTTP_CONN_BUF_CAP, less the NUL, answered 431 past it (#3252).
+         * The bound was the buffer itself, which grows for a body of up to
+         * that size and for bytes the proxy event loop hands over, so a head
+         * refused on a fresh connection was accepted after one such body
+         * (#3253). */
+        if (conn->write_pos - conn->read_pos + 1 >= HTTP_CONN_BUF_CAP ||
+            conn->write_pos + 1 >= conn->buf_cap) {
+            conn_send_head_too_large(conn);
             return 0;
         }
         int n = conn->write_pos == conn->read_pos
@@ -4798,72 +5320,24 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
 
     int header_size = (int)(hdr_end - conn->buf) + 4 - conn->read_pos;
     int request_total = header_size;
+    /* The same bound on a head found whole in a buffer larger than that,
+     * which a read can fill in one go (#3253). */
+    if (header_size >= HTTP_CONN_BUF_CAP) {
+        conn_send_head_too_large(conn);
+        return 0;
+    }
 
-    /* Resolve Content-Length and ensure the full body is buffered. */
+    /* Resolve Content-Length and ensure the full body is buffered, once the
+     * head has passed the checks the proxy event loop makes too (#3236). */
     const char* head_start = conn->buf + conn->read_pos;
-    /* A request line longer than the parser's line buffer is answered rather
-     * than dropped, and it is checked here so the parser's own bound is never
-     * the thing a client reaches. */
-    {
-        const char* rl_end = (const char*)memchr(head_start, '\n',
-                                                 (size_t)(hdr_end - head_start));
-        size_t rl_len = rl_end ? (size_t)(rl_end - head_start)
-                               : (size_t)(hdr_end - head_start);
-        if (rl_len >= HTTP_MAX_REQUEST_LINE) {
-            conn_send_uri_too_long(conn);
-            return 0;
-        }
-    }
-    /* Headers first: a line this server would read differently from the peer
-     * that sent it is refused before its framing is trusted. */
-    {
-        const char* first_header = (const char*)memchr(head_start, '\n',
-                                                       (size_t)(hdr_end - head_start));
-        if (first_header) {
-            int hdr_ok = conn_headers_well_formed(first_header + 1, hdr_end);
-            if (hdr_ok < 0) { conn_send_headers_too_large(conn); return 0; }
-            if (!hdr_ok)    { conn_send_bad_framing(conn);       return 0; }
-        }
-    }
-    char cl_value[64];
-    int cl_differing = 0;
-    int cl_count = http_find_header_in_block(head_start, hdr_end, "Content-Length",
-                                    cl_value, sizeof(cl_value), &cl_differing);
     long content_length = 0;
-    if (cl_count > 0) {
-        /* Two lengths that disagree leave no single answer about where this
-         * message ends, and a value that is not a count of bytes leaves none
-         * either. Both are unrecoverable rather than something to pick from
-         * (RFC 9112 6.3): guessing is what lets a front end and this server
-         * disagree about where one request stops and the next begins. */
-        if (cl_differing || conn_parse_content_length(cl_value, &content_length) != 0) {
-            conn_send_bad_framing(conn);
-            return 0;
-        }
-    }
-
-    /* Transfer-Encoding decides where the body ends, and when it is present
-     * Content-Length does not (RFC 9112 6.3). Ignoring it read a chunked
-     * upload as having no body at all: the payload was dropped, and the chunk
-     * bytes stayed in the stream to be parsed as the beginning of the next
-     * request. Against a front end that does honour the header, that
-     * disagreement about where one request ends is request smuggling.
-     *
-     * A message carrying both is refused rather than resolved, because the
-     * two lengths are exactly what a smuggling pair is built from and no
-     * legitimate sender emits both. */
-    char te_value[128];
-    int te_count = http_find_header_in_block(head_start, hdr_end, "Transfer-Encoding",
-                                    te_value, sizeof(te_value), NULL);
     int te_chunked = 0;
-    if (te_count > 0) {
-        te_chunked = http_strcasestr(te_value, "chunked") != NULL;
-        /* Both lengths present, or a coding this server cannot decode: refuse
-         * the message rather than pick one of the two answers. */
-        if (cl_count > 0 || !te_chunked) {
-            conn_send_bad_framing(conn);
-            return 0;
-        }
+    switch (http_request_head_check(head_start, hdr_end, &content_length, &te_chunked)) {
+    case HTTP_HEAD_MALFORMED:    conn_send_bad_request_line(conn);  return 0;
+    case HTTP_HEAD_URI_TOO_LONG: conn_send_uri_too_long(conn);      return 0;
+    case HTTP_HEAD_TOO_LARGE:    conn_send_headers_too_large(conn); return 0;
+    case HTTP_HEAD_BAD_FRAMING:  conn_send_bad_framing(conn);       return 0;
+    default: break;
     }
     /* #626 (upload half) — streaming-body decision. A body whose
      * declared Content-Length exceeds one connection buffer (16 KiB)
@@ -5017,8 +5491,24 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
     HttpServerResponse* res = http_response_create();
     res->takeover_conn = conn;
 
+    return dispatch_request(server, conn, req, res, server->middleware_chain,
+                            t_start, requests_served, max_requests);
+}
+
+/* `req` through the server from middleware `from` on: the rest of the
+ * chain, the upgrades, the route handler, the transformers and the hooks,
+ * and the response sent. Owns `req` and `res`; returns as
+ * handle_one_request does. handle_one_request starts at the chain's head. A
+ * request the proxy event loop took through the middleware ahead of its
+ * proxy mount, which the mount then passed on, starts after the mount
+ * (http_server_adopt_request, #3214): what ran on the loop is not run
+ * again, so a rate limiter does not count it twice. */
+static int dispatch_request(HttpServer* server, HttpConn* conn,
+                            HttpRequest* req, HttpServerResponse* res,
+                            HttpMiddlewareNode* from, int64_t t_start,
+                            int requests_served, int max_requests) {
     // Execute middleware chain
-    HttpMiddlewareNode* middleware = server->middleware_chain;
+    HttpMiddlewareNode* middleware = from;
     int should_continue = 1;
 
     while (middleware && should_continue) {
@@ -5254,43 +5744,9 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
      * perceived round trip. Hooks may not mutate; they observe. */
     run_request_hooks(server, req, res, t_start);
 
-    /* #626 — drain any unread streaming-body bytes. A handler that
-     * streamed only part of the body (or ignored it entirely — e.g. a
-     * 413/401 rejection before reading) leaves the rest sitting on the
-     * socket. On a keep-alive connection the next request parse would
-     * then start mid-body and desync the wire. Consume whatever's left
-     * of `stream_total` so `read_pos`/the socket sit exactly at the
-     * next request boundary. Bounded scratch (no full-body buffer);
-     * we read and discard. If the peer closed mid-body the drain just
-     * stops — the keep-alive check below will see the broken stream on
-     * the next recv and close. */
-    if (req->stream_conn) {
-        HttpConn* sconn = (HttpConn*)req->stream_conn;
-        long left = req->stream_total - req->stream_consumed;
-        /* First, discard any already-buffered body bytes. */
-        if (left > 0) {
-            int buffered = sconn->write_pos - sconn->read_pos;
-            if (buffered > 0) {
-                int drop = (buffered < (int)left) ? buffered : (int)left;
-                sconn->read_pos += drop;
-                req->stream_consumed += drop;
-                left -= drop;
-            }
-        }
-        /* Then read-and-discard the rest off the socket in buffer-sized
-         * gulps (reusing the connection buffer's tail as scratch). */
-        while (left > 0) {
-            char scratch[4096];
-            int chunk = (left < (long)sizeof(scratch)) ? (int)left : (int)sizeof(scratch);
-            int n = conn_recv(sconn, scratch, chunk);
-            if (n <= 0) break;
-            req->stream_consumed += n;
-            left -= n;
-        }
-        /* The streaming body is fully consumed (or the stream broke);
-         * clear the backref so nothing touches it post-free. */
-        req->stream_conn = NULL;
-    }
+    /* #626: a handler that read part of a streamed body, or none of it,
+     * leaves the rest on the socket; finish_response settles it for this
+     * path and a middleware's answer alike (request_body_settle, #3255). */
 
     return finish_response(server, conn, req, res, requests_served, max_requests);
 }
@@ -5728,19 +6184,78 @@ int http_server_adopt_connection(HttpServer* server, int client_fd,
                                             prebuffered, prebuffered_len);
 }
 
+static HttpConn* adopt_conn_new(int client_fd, void* ssl,
+                                const char* prebuffered, int prebuffered_len);
+
+/* A connection the proxy event loop gives up goes to a pool worker, as an
+ * accepted one does (#3230). conn_serve runs the route handler, every
+ * middleware after the proxy mount and the wait for the next request; on the
+ * loop's driver thread, where the hand-back used to call it, all of that held
+ * up every other connection the driver had until it returned. The pool is
+ * sized for this (http_pool_worker_count keeps two workers when the loop
+ * runs). Like the accept path, the submit waits while the pool's queue is
+ * full, which is the backpressure that bounds it; without a pool (none could
+ * be started) the connection is served here, as the accept path would. */
+static void adopt_conn_serve(HttpServer* server, HttpConn* conn) {
+#if AETHER_HAS_THREADS
+    if (server->conn_pool) {
+        http_pool_submit_conn((HttpConnectionPool*)server->conn_pool, conn);
+        return;
+    }
+#endif
+    conn_serve(server, conn);
+}
+
 int http_server_adopt_tls_connection(HttpServer* server, int client_fd, void* ssl,
                                      const char* prebuffered, int prebuffered_len) {
     if (!server || client_fd < 0) return -1;
-
-    HttpConn* conn = (HttpConn*)calloc(1, sizeof(HttpConn));
+    HttpConn* conn = adopt_conn_new(client_fd, ssl, prebuffered, prebuffered_len);
     if (!conn) return -1;
+    adopt_conn_serve(server, conn);
+    return 0;
+}
+
+/* The proxy event loop ran the middleware ahead of the first proxy mount on
+ * this request, and the mount did not take it (#3214). Running the chain
+ * again from the bytes would count the request twice in a rate limiter and
+ * undo nothing a middleware did to it; the worker path goes on from the
+ * middleware after the mount instead, with the request as it stands. */
+int http_server_adopt_request(HttpServer* server, int client_fd, void* ssl,
+                              HttpRequest* req, HttpServerResponse* res,
+                              int64_t t_start_us, int requests_served, int at_proxy,
+                              const char* prebuffered, int prebuffered_len) {
+    if (!server || client_fd < 0 || (!req) != (!res)) return -1;
+    HttpMiddlewareNode* proxy = server_proxy_node(server);
+    HttpConn* conn = adopt_conn_new(client_fd, ssl, prebuffered, prebuffered_len);
+    if (!conn) return -1;
+    /* The responses already sent on the connection count against the
+     * server's keep_alive_max wherever the next one is served (#3229). */
+    conn->requests_served = requests_served;
+    if (req) {
+        conn->pending_req = req;
+        conn->pending_res = res;
+        /* From the mount itself when the loop could not send the request
+         * (an https upstream, #3231), else after it. */
+        conn->pending_from = proxy ? (at_proxy ? proxy : proxy->next) : NULL;
+        conn->pending_t_start = t_start_us;
+    }
+    adopt_conn_serve(server, conn);
+    return 0;
+}
+
+/* A connection given to the worker path by the proxy event loop, with the
+ * bytes the loop read past what it served. */
+static HttpConn* adopt_conn_new(int client_fd, void* ssl,
+                                const char* prebuffered, int prebuffered_len) {
+    HttpConn* conn = (HttpConn*)calloc(1, sizeof(HttpConn));
+    if (!conn) return NULL;
     conn->fd = client_fd;
     conn->applied_recv_timeout_ms = -1;
 
     if (prebuffered && prebuffered_len > 0) {
         if (conn_buf_ensure(conn, prebuffered_len + 1) != 0) {
             free(conn);
-            return -1;
+            return NULL;
         }
         memcpy(conn->buf, prebuffered, (size_t)prebuffered_len);
         conn->write_pos = prebuffered_len;
@@ -5762,9 +6277,7 @@ int http_server_adopt_tls_connection(HttpServer* server, int client_fd, void* ss
 #else
     (void)ssl;
 #endif
-
-    conn_serve(server, conn);
-    return 0;
+    return conn;
 }
 
 void http_server_drain_connection(HttpServer* server, int client_fd) {
@@ -5778,8 +6291,8 @@ void http_server_drain_connection(HttpServer* server, int client_fd) {
      *
      * A refusal costs nothing, because the connection has not been touched
      * yet and the worker path is still right below. */
-    /* A server changed since the loop started may have middleware ahead of
-     * the proxy now, or a hook, which the loop would skip. */
+    /* A server changed since the loop started may have a middleware ahead
+     * of the proxy now, or a hook, that is not loop-safe (#3214). */
     if (server->evloop && !server->h2_enabled && http_server_evloop_serves(server)) {
         if (http_evloop_submit((HttpEvLoop*)server->evloop, client_fd) == 0) return;
     }

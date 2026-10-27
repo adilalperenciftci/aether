@@ -139,6 +139,10 @@ struct AetherProxyPool {
     int    upstream_count;
     int    upstream_cap;
     _Atomic int rr_cursor;            /* RR doesn't need the lock */
+    /* How many upstreams are https. The proxy event loop dials plain HTTP
+     * only, so it reads this, without the lock, for every request it takes
+     * (aether_proxy_upstreams_all_plain, #3231). */
+    _Atomic int tls_upstreams;
 
     /* Health-check thread (one per pool — see aether_proxy_health.c). */
     int             hc_started;
@@ -314,6 +318,12 @@ typedef struct {
     int                 status;
     int                 attempt;
     int                 max_attempts;
+    /* How long to wait before sending `outbound`, in milliseconds: a retry's
+     * backoff, 0 for a first attempt. The caller waits it out its own way
+     * (#3232): the blocking driver sleeps, the event loop sets a timer and
+     * serves its other connections meanwhile. The exchange slept it itself,
+     * which put the loop's whole driver to sleep. */
+    int                 backoff_ms;
     /* Optional. A driver serving many requests on one connection points this
      * at an arena it owns, and the outbound request's headers are built there
      * instead of one malloc each. NULL means the ordinary allocator, which is
@@ -323,14 +333,21 @@ typedef struct {
 
 /* Returns 0 or 1, the middleware's own result, when the exchange is finished,
  * or PX_NEED_SEND when `outbound` is built and waiting. On PX_NEED_SEND the
- * caller sends it, frees it and `upstream_url`, stores the reply in `resp`,
- * and calls resume with how long the send took in milliseconds. */
+ * caller waits `backoff_ms`, sends it, frees it and `upstream_url`, stores
+ * the reply in `resp`, and calls resume with how long the send took in
+ * milliseconds. */
 int aether_proxy_exchange_begin(AetherProxyExchange* px,
                                 HttpRequest* req,
                                 HttpServerResponse* res,
                                 void* user_data,
                                 struct HttpArena* arena);
 int aether_proxy_exchange_resume(AetherProxyExchange* px, int64_t elapsed_ms);
+
+/* An exchange given up before its attempt was sent, by a driver that cannot
+ * send it (the proxy event loop and an https upstream, #3231): the pick's
+ * in-flight count goes back and nothing is charged to the upstream. The
+ * caller frees `outbound` and `upstream_url`, as after a send. */
+void aether_proxy_exchange_abandon(AetherProxyExchange* px);
 
 /* ---- answering without copying the response (#1758) ---------------------
  *
@@ -359,7 +376,9 @@ int aether_proxy_direct_ok(const AetherProxyExchange* px);
 /* The success half of resume for a response the caller still holds as raw
  * bytes. Returns 0 when `out` is filled and the head should be written,
  * or -1 when this response is not one to pass through and the caller should
- * take the copying path instead. */
+ * take the copying path instead. After 0 the response is recorded: the caller
+ * must not take the copying path for it, which records it again, and closes
+ * the connection if it cannot write the head (#3244). */
 int aether_proxy_direct_take(AetherProxyExchange* px, int64_t elapsed_ms,
                              const char* raw, size_t raw_len,
                              size_t header_bytes, AetherProxyDirect* out);

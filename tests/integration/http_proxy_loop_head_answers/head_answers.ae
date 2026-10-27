@@ -1,0 +1,160 @@
+// A HEAD the proxy answers itself carries no body on the event loop either
+// (#3251).
+//
+// RFC 9110 9.3.2: a response to HEAD carries the head the GET would have and
+// no body. The worker path writes every response that way. The proxy event
+// loop on Linux and macOS wrote the ones the proxy made itself (a 502 for an
+// upstream that cannot be reached or an upgrade it will not forward, the 504
+// for one that does not answer in time) with their bodies, which a client
+// reads as the start of the next response.
+//
+// Each such HEAD goes, on a connection of its own that asks to close, to a
+// bare proxy (the event loop on Linux and macOS) and to one behind a
+// program's middleware (the worker path): the status must be the one
+// expected and nothing may follow the head. Every server listens on
+// 127.0.0.1 and a port the kernel picks.
+
+import std.http
+import std.http.proxy
+import std.string
+import std.tcp
+
+extern exit(code: int)
+
+handle_slow(req: ptr, res: ptr, ud: ptr) {
+    sleep(3000)
+    http.response_set_status(res, 200)
+    http.response_set_body(res, "slow")
+}
+
+handle_up(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_body(res, "up")
+}
+
+@c_callback mw_pass(req: ptr, res: ptr, ud: ptr) -> int {
+    return 1
+}
+
+start(server: ptr) -> int {
+    if http.server_bind(server, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    err = http.server_start_background(server)
+    if err != "" {
+        println("FAIL: ${err}")
+        exit(1)
+    }
+    return http.server_port(server)
+}
+
+gateway(up_url: string, timeout: int, worker: int) -> ptr {
+    s = http.server_create(0)
+    http.server_set_host(s, "127.0.0.1")
+    if worker == 1 {
+        http.server_use_middleware(s, mw_pass, 0)
+    }
+    merr = proxy.mount_simple(s, "/", up_url, timeout)
+    if merr != "" {
+        println("FAIL: mount: ${merr}")
+        exit(1)
+    }
+    return s
+}
+
+// `raw` on a connection of its own, read until the server closes it: the
+// status, then "head only" when nothing followed the blank line that ends
+// the head, else how many bytes did.
+probe(port: int, raw: string) -> string {
+    sock, cerr = tcp.connect("127.0.0.1", port)
+    if cerr != "" {
+        return "connect failed"
+    }
+    tcp.write(sock, raw)
+    wire = ""
+    tries = 0
+    while tries < 80 {
+        ready, _perr = tcp.poll(sock, 100)
+        if ready {
+            chunk, rerr = tcp.read(sock, 4096)
+            if rerr != "" || string.length(chunk) == 0 {
+                tries = 80
+            } else {
+                wire = string.concat(wire, chunk)
+            }
+        }
+        tries = tries + 1
+    }
+    tcp.close(sock)
+    end = string.index_of(wire, "\r\n\r\n")
+    if string.length(wire) < 12 || end < 0 {
+        return "no answer"
+    }
+    status = string.substring(wire, 9, 12)
+    after = string.length(wire) - (end + 4)
+    if after == 0 {
+        return "${status} head only"
+    }
+    return "${status} and ${after} bytes after the head"
+}
+
+main() {
+    println("=== a HEAD the proxy answers itself carries no body on the event loop (#3251) ===")
+    slow = http.server_create(0)
+    http.server_set_host(slow, "127.0.0.1")
+    http.server_get(slow, "/p", handle_slow, 0)
+    slow_url = "http://127.0.0.1:${start(slow)}"
+
+    up = http.server_create(0)
+    http.server_set_host(up, "127.0.0.1")
+    http.server_get(up, "/p", handle_up, 0)
+    up_url = "http://127.0.0.1:${start(up)}"
+
+    // A port nothing listens on: a server's, once it has stopped.
+    gone = http.server_create(0)
+    http.server_set_host(gone, "127.0.0.1")
+    gone_url = "http://127.0.0.1:${start(gone)}"
+    http.server_stop(gone)
+
+    labels = ["an upstream that cannot be reached", "an upgrade the proxy does not forward",
+        "an upstream that does not answer in time"]
+    urls = [gone_url, up_url, slow_url]
+    raws = ["HEAD /p HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        "HEAD /p HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: close\r\n\r\n",
+        "HEAD /p HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"]
+    wants = ["502 head only", "502 head only", "504 head only"]
+    // Long enough for a refused connect, which Windows retries for two
+    // seconds, and short enough for the slow upstream to outlast.
+    timeouts = [5, 5, 1]
+    names = ["event loop", "worker path"]
+
+    bad = 0
+    i = 0
+    while i < 3 {
+        g = 0
+        while g < 2 {
+            s = gateway(urls[i], timeouts[i], g)
+            port = start(s)
+            sleep(100)
+            got = probe(port, raws[i])
+            if got != wants[i] {
+                println("  FAIL ${labels[i]} (${names[g]}): got '${got}', expected '${wants[i]}'")
+                bad = bad + 1
+            } else {
+                println("  PASS ${labels[i]} (${names[g]})")
+            }
+            http.server_stop(s)
+            g = g + 1
+        }
+        i = i + 1
+    }
+
+    http.server_stop(up)
+    http.server_stop(slow)
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

@@ -5,6 +5,13 @@
 // wrappers below allocate the per-middleware config struct and do
 // the registration in one call.
 //
+// In front of a std.http.proxy mount: use_real_ip, use_rate_limit,
+// use_cors, use_vhost and use_rewrite are loop-safe, so a gateway
+// built from them keeps the proxy event loop on Linux and macOS
+// (#3214); an auth middleware or use_static_files ahead of the mount
+// puts the gateway's connections on worker threads (see the note at
+// the externs below, and docs/http-reverse-proxy.md).
+//
 // Usage (issue #260 Tier 1):
 //
 //     import std.http
@@ -86,7 +93,18 @@ extern aether_middleware_vhost(req: ptr, res: ptr, user_data: ptr) -> int
 // Every factory below hands its options block to the server with the
 // block's own free, which http_server_free runs (#3191): the server owns
 // what a factory registers, rewrite's and error pages' opts included.
+//
+// The middleware that never block register as loop-safe (#3214):
+// use_real_ip, use_rate_limit, use_cors, use_vhost and use_rewrite do CPU
+// work and take at most a short mutex. On Linux and macOS a server whose
+// middleware ahead of a std.http.proxy mount are all loop-safe keeps its
+// plain-HTTP connections on the proxy event loop, which runs them itself.
+// The auth middleware call the program's verifier, which may wait on a
+// database, and use_static_files reads files: those stay not loop-safe, and
+// one of them ahead of a proxy mount puts the server's connections on
+// worker threads.
 extern http_server_use_middleware_owned(server: ptr, middleware: ptr, user_data: ptr, release: ptr)
+extern http_server_use_middleware_loop_safe(server: ptr, middleware: ptr, user_data: ptr, release: ptr)
 extern http_server_use_response_transformer_owned(server: ptr, xform: ptr, user_data: ptr, release: ptr)
 extern aether_cors_opts_free(opts: ptr)
 extern aether_basic_auth_opts_free(opts: ptr)
@@ -138,7 +156,7 @@ use_cors(server: ptr,
     if opts == null {
         return "cors: allocation failed"
     }
-    http_server_use_middleware_owned(server, aether_middleware_cors, opts, aether_cors_opts_free)
+    http_server_use_middleware_loop_safe(server, aether_middleware_cors, opts, aether_cors_opts_free)
     return ""
 }
 
@@ -234,7 +252,7 @@ use_rate_limit(server: ptr, max_requests: int, window_ms: int) -> {
     if opts == null {
         return "rate_limit: allocation failed"
     }
-    http_server_use_middleware_owned(server, aether_middleware_rate_limit, opts,
+    http_server_use_middleware_loop_safe(server, aether_middleware_rate_limit, opts,
         aether_rate_limit_opts_free)
     return ""
 }
@@ -268,7 +286,7 @@ use_vhost(server: ptr, hosts_csv: string) -> {
         i = i + 1
     }
 
-    http_server_use_middleware_owned(server, aether_middleware_vhost, map, aether_vhost_map_free)
+    http_server_use_middleware_loop_safe(server, aether_middleware_vhost, map, aether_vhost_map_free)
     return ""
 }
 
@@ -364,7 +382,7 @@ use_rewrite(server: ptr, opts: ptr) -> {
     if opts == null {
         return "rewrite: opts is null (make them with rewrite_new)"
     }
-    http_server_use_middleware_owned(server, aether_middleware_rewrite, opts,
+    http_server_use_middleware_loop_safe(server, aether_middleware_rewrite, opts,
         aether_rewrite_opts_free)
     return ""
 }
@@ -435,7 +453,7 @@ use_real_ip(server: ptr, header_name: string, trusted: string) -> {
     if opts == null {
         return "real_ip: '${trusted}' is not a comma-separated list of IP addresses and networks such as 10.0.0.0/8 or fd00::/8"
     }
-    http_server_use_middleware_owned(server, aether_middleware_real_ip, opts,
+    http_server_use_middleware_loop_safe(server, aether_middleware_real_ip, opts,
         aether_real_ip_opts_free)
     return ""
 }

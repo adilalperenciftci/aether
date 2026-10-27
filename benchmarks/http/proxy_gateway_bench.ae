@@ -1,0 +1,207 @@
+// A gateway's usual middleware in front of std.http.proxy, on the proxy
+// event loop and on the worker path (#3214).
+//
+//     ae run benchmarks/http/proxy_gateway_bench.ae
+//
+// Three servers proxy to one upstream that answers "ok":
+//
+//   bare     the proxy alone, which the event loop served before #3214;
+//   loop     use_real_ip, use_rate_limit (a limit no run reaches), a JSON
+//            access log and metrics ahead of the proxy, all loop-safe, so
+//            the event loop serves it on Linux and macOS;
+//   worker   the same plus a program's middleware that passes everything,
+//            registered the ordinary way, which keeps it on the worker path
+//            (a thread per connection).
+//
+// CLIENTS keep-alive clients (default 16) each send REQUESTS requests
+// (default 2000) to one server at a time, on worker threads; the servers take
+// turns, ROUNDS times (default 3), so drift on the box is shared out. Each
+// row is requests a second over the whole run and the mean latency a client
+// saw. Compare rows from one run on one machine: the absolute numbers say
+// more about the load generator and the box than about the server. Windows
+// has no event loop, so there the loop and worker rows measure the same path.
+// Every server listens on 127.0.0.1 and a port the kernel picks.
+
+import std.fs
+import std.http
+import std.http.client
+import std.http.middleware
+import std.http.proxy
+import std.io
+import std.os
+import std.string
+import std.sync
+import std.worker
+
+extern exit(code: int)
+extern http_server_evloop_connections(server: ptr) -> int
+
+handle_ok(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "ok")
+}
+
+// A middleware that passes everything, registered the ordinary way: nothing
+// says it never blocks.
+@c_callback mw_pass(req: ptr, res: ptr, ud: ptr) -> int {
+    return 1
+}
+
+need(label: string, err: string) {
+    if err != "" {
+        println("${label}: ${err}")
+        exit(1)
+    }
+}
+
+start(server: ptr) -> int {
+    need("bind", http.server_bind(server, "127.0.0.1", 0))
+    need("start", http.server_start_background(server))
+    return http.server_port(server)
+}
+
+// `kind` 0 bare, 1 loop, 2 worker.
+gateway(up_url: string, log_path: string, kind: int) -> ptr {
+    s = http.server_create(0)
+    http.server_set_host(s, "127.0.0.1")
+    if kind > 0 {
+        need("use_real_ip", middleware.use_real_ip(s, "", "127.0.0.1"))
+        need("use_rate_limit", middleware.use_rate_limit(s, 1000000000, 1000))
+        if kind == 2 {
+            http.server_use_middleware(s, mw_pass, 0)
+        }
+        need("access log", http.server_set_access_log(s, "json", log_path))
+        need("metrics", http.server_set_metrics(s, "/metrics"))
+    }
+    need("mount", proxy.mount_simple(s, "/", up_url, 5))
+    return s
+}
+
+env_int(name: string, fallback: int) -> int {
+    v = io.getenv(name)
+    if v == 0 {
+        return fallback
+    }
+    n = string.get_int(v)
+    if n <= 0 {
+        return fallback
+    }
+    return n
+}
+
+// One run against `port`: requests a second, the mean latency in
+// microseconds, and the requests that failed, added into the three cells.
+run_load(port: int, clients: int, requests: int, rps_sum: ptr, lat_sum: ptr, fails: ptr) {
+    done_us = sync.atomic_new(0)
+    errors = sync.atomic_new(0)
+    url = "http://127.0.0.1:${port}/ok"
+    t0 = os.now_monotonic_ns()
+    i = 0
+    while i < clients {
+        ok = worker.run(| _ctx: ptr | {
+                j = 0
+                while j < requests {
+                    s = os.now_monotonic_ns()
+                    req = client.request("GET", url)
+                    resp, err = client.send_request(req)
+                    client.request_free(req)
+                    if err != "" {
+                        sync.atomic_add(errors, 1)
+                    } else {
+                        if client.response_status(resp) != 200 {
+                            sync.atomic_add(errors, 1)
+                        }
+                        client.response_free(resp)
+                    }
+                    sync.atomic_add(done_us, (os.now_monotonic_ns() - s) / 1000)
+                    j = j + 1
+                }
+            }, | _ctx: ptr | {})
+        if !ok {
+            println("could not queue a client")
+            exit(1)
+        }
+        i = i + 1
+    }
+    worker.wait()
+    _ = worker.drain(clients)
+    elapsed_ns = os.now_monotonic_ns() - t0
+    total = clients * requests
+    sync.atomic_add(rps_sum, total * 1000000000 / elapsed_ns)
+    sync.atomic_add(lat_sum, sync.atomic_load(done_us) / total)
+    sync.atomic_add(fails, sync.atomic_load(errors))
+    sync.atomic_free(done_us)
+    sync.atomic_free(errors)
+}
+
+main() {
+    clients = env_int("CLIENTS", 16)
+    requests = env_int("REQUESTS", 2000)
+    rounds = env_int("ROUNDS", 3)
+    worker.pool_size(clients)
+
+    upstream = http.server_create(0)
+    http.server_set_host(upstream, "127.0.0.1")
+    http.server_get(upstream, "/ok", handle_ok, 0)
+    up_url = "http://127.0.0.1:${start(upstream)}"
+
+    dir, derr = fs.make_temp_dir("", "aether-gwbench-")
+    need("temp dir", derr)
+    defer fs.remove_tree(dir)
+    names = ["bare", "loop", "worker"]
+    servers = [gateway(up_url, "", 0), gateway(up_url, fs.join_clean(dir, "loop.log"), 1),
+        gateway(up_url, fs.join_clean(dir, "worker.log"), 2)]
+    ports = [start(servers[0]), start(servers[1]), start(servers[2])]
+    sleep(200)
+
+    rps = [sync.atomic_new(0), sync.atomic_new(0), sync.atomic_new(0)]
+    lat = [sync.atomic_new(0), sync.atomic_new(0), sync.atomic_new(0)]
+    fails = [sync.atomic_new(0), sync.atomic_new(0), sync.atomic_new(0)]
+
+    // A short warm-up against each, so the first round does not pay for
+    // the connections and the pools.
+    k = 0
+    while k < 3 {
+        warm_r = sync.atomic_new(0)
+        warm_l = sync.atomic_new(0)
+        warm_f = sync.atomic_new(0)
+        run_load(ports[k], clients, 50, warm_r, warm_l, warm_f)
+        sync.atomic_free(warm_r)
+        sync.atomic_free(warm_l)
+        sync.atomic_free(warm_f)
+        k = k + 1
+    }
+
+    r = 0
+    while r < rounds {
+        k = 0
+        while k < 3 {
+            run_load(ports[k], clients, requests, rps[k], lat[k], fails[k])
+            k = k + 1
+        }
+        r = r + 1
+    }
+
+    println("=== std.http.proxy gateway, ${clients} keep-alive clients x ${requests} requests, ${rounds} rounds ===")
+    println("server   on loop   requests/s   mean latency (us)   failed")
+    k = 0
+    while k < 3 {
+        on_loop = "no"
+        if http_server_evloop_connections(servers[k]) > 0 {
+            on_loop = "yes"
+        }
+        mean_rps = sync.atomic_load(rps[k]) / rounds
+        mean_lat = sync.atomic_load(lat[k]) / rounds
+        println("${string.pad_end(names[k], 8, 32)} ${string.pad_end(on_loop, 9, 32)} ${string.pad_start("${mean_rps}", 10, 32)}   ${string.pad_start("${mean_lat}", 17, 32)}   ${sync.atomic_load(fails[k])}")
+        k = k + 1
+    }
+
+    k = 0
+    while k < 3 {
+        http.server_stop(servers[k])
+        k = k + 1
+    }
+    http.server_stop(upstream)
+    worker.pool_shutdown()
+}

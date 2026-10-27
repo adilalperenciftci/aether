@@ -631,6 +631,7 @@ void push_own_drop_carrier(CodeGenerator* gen, const char* name, Type* t, int li
 void emit_value_take(CodeGenerator* gen, ASTNode* e, Type* t);
 ASTNode* find_message_definition(ASTNode* program, const char* name);
 int message_owns_fields(CodeGenerator* gen, const char* name);
+int program_releases_messages(CodeGenerator* gen);
 int expr_is_c_view_of_slice(CodeGenerator* gen, const ASTNode* expr);
 void emit_array_fill(CodeGenerator* gen, const char* dst, ASTNode* e, Type* at);
 void emit_array_fill_c(CodeGenerator* gen, const char* dst, const char* src, Type* at, int retain);

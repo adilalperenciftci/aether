@@ -541,6 +541,8 @@ static HttpRequest* request_from_stream(AetherH2Stream* str) {
             free(req);
             return NULL;
         }
+        /* Recorded, so an edit grows the arrays from here (#3234). */
+        req->header_cap = n;
         const char* p = str->header_block;
         int i = 0;
         while (*p && i < n) {

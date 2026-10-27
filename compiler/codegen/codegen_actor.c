@@ -411,6 +411,16 @@ static void emit_timeout_rearm(CodeGenerator* gen, ASTNode* timeout_arm) {
                     "self->_aether_base.last_activity_ns = (uint64_t)_aether_clock_ns();");
 }
 
+/* The handler's call on a heap payload, recorded in the actor's base while
+ * it runs: a panic out of it skips the release after it, and the step
+ * barrier drops the message from there instead (#3142). */
+static void emit_handler_on_payload(CodeGenerator* gen, const char* actor, const char* msg) {
+    print_line(gen, "self->_aether_base.step_payload = _msg_data;");
+    print_line(gen, "self->_aether_base.step_type = _msg_id;");
+    print_line(gen, "%s_handle_%s(self, _msg_data);", actor, msg);
+    print_line(gen, "self->_aether_base.step_payload = NULL;");
+}
+
 void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     if (!actor || actor->type != AST_ACTOR_DEFINITION) return;
     
@@ -994,6 +1004,9 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
         print_line(gen, "default: break;");
         print_line(gen, "}");
         print_line(gen, "#endif");
+        /* A type it has no handler for is dropped, its payload with what
+         * its fields own (#3142). */
+        print_line(gen, "aether_message_drop(&self->_aether_base, &msg);");
         emit_timeout_rearm(gen, timeout_arm);
         print_line(gen, "return;  // Unknown message type");
         print_line(gen, "");
@@ -1036,7 +1049,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                             }
                             print_line(gen, "if (_msg_data) {");
                             indent(gen);
-                            print_line(gen, "%s_handle_%s(self, _msg_data);", actor->value, pattern->value);
+                            emit_handler_on_payload(gen, actor->value, pattern->value);
                             /* Release heap-string fields the sender
                              * deep-copied at send time (#466). The
                              * _aether_msg_release_<Msg> function is
@@ -1072,8 +1085,23 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                             unindent(gen);
                             print_line(gen, "}");
                         } else {
-                            // Two-field inline: reconstruct from payload_int + payload_ptr
-                            print_line(gen, "%s_handle_%s(self, _msg_data);", actor->value, pattern->value);
+                            // Two-field inline: reconstruct from payload_int + payload_ptr.
+                            // A message with no fields travels with no payload
+                            // unless an ask sent it: only then is there one to
+                            // record for a panic.
+                            if (msg_def && msg_def->fields) {
+                                emit_handler_on_payload(gen, actor->value, pattern->value);
+                            } else {
+                                print_line(gen, "if (unlikely(_msg_data != NULL)) {");
+                                indent(gen);
+                                emit_handler_on_payload(gen, actor->value, pattern->value);
+                                unindent(gen);
+                                print_line(gen, "} else {");
+                                indent(gen);
+                                print_line(gen, "%s_handle_%s(self, _msg_data);", actor->value, pattern->value);
+                                unindent(gen);
+                                print_line(gen, "}");
+                            }
                             /* Same release-fields call as the single-
                              * int branch above (#466). */
                             if (msg_def) {
@@ -1093,7 +1121,9 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
             }
         }
     } else {
-        /* No arm to run: the message is handled by being taken. */
+        /* No arm to run: the message is handled by being taken, and
+         * dropped (#3142). */
+        print_line(gen, "aether_message_drop(&self->_aether_base, &msg);");
         emit_timeout_rearm(gen, timeout_arm);
     }
 
@@ -1159,6 +1189,8 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
         }
     }
     print_line(gen, "actor->_aether_base.destroy_state = _aether_state_drop_%s;   /* #2528 */", actor->value);
+    if (program_releases_messages(gen))
+        print_line(gen, "actor->_aether_base.release_message = _aether_release_message;   /* #3142 */");
 
     // Auto-initialize "my_ref" to the actor's own pointer so it is valid
     // immediately after spawn — no Setup message needed.  This eliminates
