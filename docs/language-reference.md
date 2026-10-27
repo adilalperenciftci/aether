@@ -1300,11 +1300,14 @@ max = if a > b { a } else { b }
 // Use inline in function calls
 println(if x > 0 { x } else { 0 - x })
 
+// Chained with `else if`
+grade = if score >= 90 { 4 } else if score >= 80 { 3 } else { 2 }
+
 // Nested if-expressions
 grade = if score >= 90 { 4 } else { if score >= 80 { 3 } else { 2 } }
 ```
 
-The `else` branch is required, and the expression has the type its branches have in common. A value `match` types its arms the same way, one rule for every kind of value:
+`else if` chains to any length and is shorthand for the nested form: `else if c { b } else { d }` is `else { if c { b } else { d } }`, so a chain types as the nested if-expressions it stands for. The final `else` branch is required, and the expression has the type its branches have in common. A value `match` types its arms the same way, one rule for every kind of value:
 
 - Two numeric branches have their common type: `if c { 1 } else { big }` with a `long big` is a `long`, and an `int` beside a `float` is a `float`, so neither branch is narrowed into the other's type. A float literal beside an `f32` branch takes the `f32`, as it does beside an `f32` operand. Two integers take the smallest type that holds both, where C's `?:` would take the unsigned one: a signed one beside an unsigned one is an `int` beside a `byte`, a `uint8` or a `uint16`, and a `long` beside a `uint32` (`if c { -1 } else { u }` with a `uint32 u` gives -1, not 4294967295). A literal that fits a `uint32` or `uint64` branch beside it takes that type (`if c { 0 } else { u }` is a `uint32`); of several literal arms or clauses beside one, every one must fit (`0`, `-1` and a `uint32` are a `long`). A signed value beside a `uint64` is a compile error naming both, since no integer type holds both.
 - A `T` beside a `T?`, or beside `none`, is a `T?`.

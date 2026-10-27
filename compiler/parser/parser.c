@@ -1820,7 +1820,11 @@ static ASTNode* parse_primary_expression_inner(Parser* parser) {
         }
 
         case TOKEN_IF: {
-            // If-expression: if COND { EXPR } else { EXPR }
+            // If-expression: if COND { EXPR } else { EXPR }, or
+            // `else if COND { EXPR } ... else { EXPR }`: an `else if` is
+            // sugar for an else arm that is itself an if-expression, so a
+            // chain of any length is nested two-armed if-expressions and
+            // types as they do, the last `else` still required.
             Token* t = advance_token(parser); // consume 'if'
             ASTNode* cond = parse_expression(parser);
             if (!cond) return NULL;
@@ -1829,10 +1833,17 @@ static ASTNode* parse_primary_expression_inner(Parser* parser) {
             if (!then_expr) return NULL;
             if (!expect_token(parser, TOKEN_RIGHT_BRACE)) return NULL;
             if (!expect_token(parser, TOKEN_ELSE)) return NULL;
-            if (!expect_token(parser, TOKEN_LEFT_BRACE)) return NULL;
-            ASTNode* else_expr = parse_expression(parser);
-            if (!else_expr) return NULL;
-            if (!expect_token(parser, TOKEN_RIGHT_BRACE)) return NULL;
+            ASTNode* else_expr = NULL;
+            Token* after_else = peek_token(parser);
+            if (after_else && after_else->type == TOKEN_IF) {
+                else_expr = parse_primary_expression(parser);
+                if (!else_expr) return NULL;
+            } else {
+                if (!expect_token(parser, TOKEN_LEFT_BRACE)) return NULL;
+                else_expr = parse_expression(parser);
+                if (!else_expr) return NULL;
+                if (!expect_token(parser, TOKEN_RIGHT_BRACE)) return NULL;
+            }
 
             ASTNode* if_expr = create_ast_node(AST_IF_EXPRESSION, NULL, t->line, t->column);
             if_expr->node_type = create_type(TYPE_UNKNOWN);
