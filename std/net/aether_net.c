@@ -483,28 +483,52 @@ int tcp_send_bytes_raw(TcpSocket* sock, const void* data, int length) {
 }
 
 #ifndef _WIN32
-/* Wait for `fd` to take more bytes, for no longer than its send timeout
- * (SO_SNDTIMEO; none set, no bound): 1 when it can, else 0. For a blocking
- * socket only: one its owner made non-blocking asked not to be waited on. */
-static int net_wait_writable(int fd) {
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0 || (flags & O_NONBLOCK)) return 0;
-    struct timeval tv = { 0, 0 };
-    socklen_t tl = sizeof tv;
-    long long ms = getsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, &tl) == 0
-                 ? (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000 : 0;
-    long long due = ms > 0 ? (long long)(aether_now_ns() / 1000000) + ms : 0;
+/* Where tcp_send_all_raw is in its send timeout: the socket's SO_SNDTIMEO
+ * (-1 until read, 0 for none), when the current period of it ends (0 before
+ * the first wait), and whether any byte went in that period. */
+typedef struct {
+    long long timeout_ms;
+    long long due_ms;
+    int       sent;
+} NetSendWait;
+
+static long long net_now_ms(void) {
+    return (long long)(aether_now_ns() / 1000000);
+}
+
+/* Wait for `fd` to take more bytes: 1 when it can, else 0. The send timeout
+ * keeps the meaning a blocking send gives it (#3108): a period of it in
+ * which some bytes went is followed by another, and one in which none went
+ * ends the send. What changes is the wake: poll(2) reports the socket
+ * writable once a good part of its buffer is free, not for every byte that
+ * frees (#3257). For a blocking socket only: one its owner made non-blocking
+ * asked not to be waited on. */
+static int net_wait_writable(int fd, NetSendWait* w) {
+    if (w->timeout_ms < 0) {
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags < 0 || (flags & O_NONBLOCK)) return 0;
+        struct timeval tv = { 0, 0 };
+        socklen_t tl = sizeof tv;
+        w->timeout_ms = getsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, &tl) == 0
+                      ? (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000 : 0;
+    }
+    if (w->timeout_ms > 0 && !w->due_ms) w->due_ms = net_now_ms() + w->timeout_ms;
     for (;;) {
         int wait = -1;
-        if (due) {
-            long long left = due - (long long)(aether_now_ns() / 1000000);
-            if (left <= 0) return 0;
+        if (w->timeout_ms > 0) {
+            long long left = w->due_ms - net_now_ms();
+            if (left <= 0) {
+                if (!w->sent) return 0;            /* a whole period, nothing went */
+                w->sent = 0;
+                w->due_ms = net_now_ms() + w->timeout_ms;
+                left = w->timeout_ms;
+            }
             wait = left > INT_MAX ? INT_MAX : (int)left;
         }
         struct pollfd pfd = { fd, POLLOUT, 0 };
         int r = poll(&pfd, 1, wait);
         if (r > 0) return 1;      /* an error or a hangup: the send reports it */
-        if (r == 0 || errno != EINTR) return 0;
+        if (r < 0 && errno != EINTR) return 0;
     }
 }
 #endif
@@ -515,16 +539,18 @@ static int net_wait_writable(int fd) {
  * fails, or times out having sent nothing, ends it. Returns the bytes sent:
  * `length` once every one is out, fewer when a send failed.
  *
- * The send timeout is the time the peer may take nothing (#3257). On POSIX
- * each send goes without blocking and a full socket is waited on in
- * net_wait_writable. A blocking send wakes for any room that frees and the
- * option times each send(2) afresh: on Linux a peer that read nothing for
- * three seconds kept a send under a one second timeout going all that time.
- * The pure-Aether TLS server writes through here. */
+ * On POSIX each send goes without blocking and a full socket is waited on in
+ * net_wait_writable, which keeps that meaning of the send timeout (#3257). A
+ * blocking send wakes for any room that frees: on Linux a peer that read
+ * nothing for three seconds kept a send under a one second timeout going all
+ * that time. The pure-Aether TLS server writes through here. */
 int tcp_send_all_raw(TcpSocket* sock, const void* data, int length) {
     if (!sock || !sock->connected || length <= 0 || !data) return 0;
     const char* p = (const char*)data;
     int sent = 0;
+#ifndef _WIN32
+    NetSendWait wait = { -1, 0, 0 };
+#endif
     while (sent < length) {
 #ifdef _WIN32
         int n = send(sock->fd, p + sent, (size_t)(length - sent), 0);
@@ -537,11 +563,12 @@ int tcp_send_all_raw(TcpSocket* sock, const void* data, int length) {
         int n = (int)send(sock->fd, p + sent, (size_t)(length - sent), MSG_DONTWAIT);
         if (n > 0) {
             sent += n;
+            wait.sent = 1;
             continue;
         }
         if (n < 0 && errno == EINTR) continue;
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) &&
-            net_wait_writable(sock->fd))
+            net_wait_writable(sock->fd, &wait))
             continue;
 #endif
         break;
