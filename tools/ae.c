@@ -2412,6 +2412,45 @@ static void dep_packages_root(char* out, size_t osz) {
     snprintf(out, osz, "%s/.aether/packages", get_home_dir());
 }
 
+/* A field of the record `ae add` keeps beside a package it fetched,
+ * `<package dir>.fetched` (#1362): `url`, `hash` and `version` lines that
+ * ae-fetch and `ae add` wrote, or `error` in a failed fetch's. 1 with the
+ * value in `out`, 0 when there is no record or no such field. A package
+ * installed from a release artifact, or by git before #1362, has none. */
+static int ae_fetch_record_get(const char* record, const char* field,
+                               char* out, size_t osz) {
+    out[0] = '\0';
+    FILE* f = fopen(record, "r");
+    if (!f) return 0;
+    char line[2048];
+    size_t fl = strlen(field);
+    int found = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, field, fl) == 0 && line[fl] == ' ') {
+            line[strcspn(line, "\r\n")] = '\0';
+            snprintf(out, osz, "%s", line + fl + 1);
+            found = 1;
+            break;
+        }
+    }
+    fclose(f);
+    return found;
+}
+
+/* `name`'s value in `[section]` of `doc`, its key spelled bare or quoted (the
+ * parser keeps a key's quotes), or NULL. */
+static const char* ae_manifest_value(TomlDocument* doc, const char* section,
+                                     const char* name) {
+    if (!doc) return NULL;
+    const char* v = toml_get_value(doc, section, name);
+    if (!v || !*v) {
+        char quoted[520];
+        snprintf(quoted, sizeof(quoted), "\"%s\"", name);
+        v = toml_get_value(doc, section, quoted);
+    }
+    return (v && *v) ? v : NULL;
+}
+
 /* Per-invocation overrides from --override name=path (#1901 part 2).
  * Bazel's --override_repository shape: leaves no trace in the manifest, which
  * is what "just this once" and "CI proving an unpublished branch" want. */
@@ -2844,6 +2883,26 @@ static int dep_graph_enqueue(DepNode* nodes, int* count, TomlDocument* root_doc,
                     "    ae add %s\n", name, name);
             }
             continue;
+        } else {
+            /* #1362: the installed tree must be the one the declaring
+             * manifest pins in [dependency-hashes]. The record `ae add` kept
+             * names the hash it fetched; a package with no record (a release
+             * artifact, a git clone from before #1362) is not checked.
+             * Building against another tree would be a silent wrong build. */
+            const char* pin = ae_manifest_value(doc, "dependency-hashes", name);
+            char record[2112], installed[160];
+            snprintf(record, sizeof(record), "%s.fetched", root);
+            if (pin && ae_fetch_record_get(record, "hash", installed, sizeof(installed)) &&
+                strcmp(pin, installed) != 0) {
+                fprintf(stderr,
+                    "Error: dependency '%s' is installed as another tree than %s pins:\n"
+                    "         pinned     %s\n"
+                    "         installed  %s\n"
+                    "       Remove %s and run `ae add %s` to fetch the pinned tree.\n",
+                    name, via[0] ? via : "aether.toml", pin, installed, root, name);
+                status = -1;
+                continue;
+            }
         }
 
         if (*count >= DEP_GRAPH_MAX) {
@@ -6934,20 +6993,28 @@ static void build_usage(FILE* out) {
 }
 
 static void add_usage(FILE* out) {
-    fprintf(out, "Usage: ae add <host>/<user>/<repo>[@version] [--source] [--target <triple>]\n");
+    fprintf(out, "Usage: ae add <host>/<user>/<repo>[@version] [--update] [--source] [--target <triple>]\n");
     fprintf(out, "Examples:\n");
     fprintf(out, "  ae add github.com/user/repo\n");
     fprintf(out, "  ae add github.com/user/repo@v1.2.0\n");
     fprintf(out, "  ae add gitlab.com/user/repo\n");
+    fprintf(out, "  ae add github.com/user/repo@v1.3.0 --update\n");
     fprintf(out, "  ae add github.com/user/repo@v1.2.0 --target macos-arm64\n");
+    fprintf(out, "\nThe package's source is the archive its forge serves for the tag (or\n");
+    fprintf(out, "for its default branch, without @version); no git is needed. The hash\n");
+    fprintf(out, "of the tree is pinned in aether.toml's [dependency-hashes]: a later\n");
+    fprintf(out, "add must get the same tree, and a build refuses an installed package\n");
+    fprintf(out, "that is not it. Without @version, the version aether.toml names is\n");
+    fprintf(out, "installed. --update moves a pinned dependency to a new version or tree.\n");
     fprintf(out, "\nWith @version, a matching release artifact is preferred when the\n");
     fprintf(out, "package publishes one: a binary package (a released aether.toml with\n");
-    fprintf(out, "a `binary` key naming a bare per-triple shared lib), else a source\n");
-    fprintf(out, "archive. A binary package REQUIRES a published .sha256 (an\n");
-    fprintf(out, "unverifiable shared library is refused). --source forces the git\n");
-    fprintf(out, "clone. --target <triple> fetches a FOREIGN platform's binary package\n");
-    fprintf(out, "(e.g. linux-x86_64, macos-arm64, freebsd-x86_64) instead of the\n");
-    fprintf(out, "host's, for cross-platform bundling.\n");
+    fprintf(out, "a `binary` key naming a bare per-triple shared lib), else an archive\n");
+    fprintf(out, "for this platform. A binary package REQUIRES a published .sha256 (an\n");
+    fprintf(out, "unverifiable shared library is refused). --source takes the source\n");
+    fprintf(out, "archive instead. --target <triple> fetches a FOREIGN platform's binary\n");
+    fprintf(out, "package (e.g. linux-x86_64, macos-arm64, freebsd-x86_64) instead of the\n");
+    fprintf(out, "host's, for cross-platform bundling. AE_RELEASE_BASE_URL names a mirror\n");
+    fprintf(out, "(docs/package-fetching.md).\n");
 }
 
 static void lib_info_usage(FILE* out) {
@@ -11183,8 +11250,8 @@ static int cmd_test(int argc, char** argv) {
  * Asset naming follows the convention Aether's own releases use:
  *   <repo>-<version>-<os>-<arch>.tar.gz
  * e.g. mylib-v1.2.0-linux-x86_64.tar.gz. We try the tarball, then the
- * zip, and fall back to the git clone when neither is present — so a
- * package that publishes no artifacts behaves exactly as before.
+ * zip, and fall back to the source archive when neither is present, so a
+ * package that publishes no artifacts installs from its source (#1362).
  */
 
 /* The host's shared-library file extension, for the bare-lib binary-package
@@ -11222,8 +11289,9 @@ static const char* ae_pkg_basename(const char* package) {
  * git tag does not need (#1360).
  *
  * Returns  1  verified,
- *          0  no checksum published (caller decides — we warn, matching
- *             the git path's own trust level rather than refusing),
+ *          0  no checksum published (caller decides: the archive path
+ *             warns and installs, as a first `ae add` of a source archive
+ *             trusts what it fetched and pins it),
  *         -1  checksum published but MISMATCHED — always fatal.
  */
 static int ae_verify_sha256(const char* archive, const char* url_base,
@@ -11406,15 +11474,18 @@ static int ae_try_binary_package(const char* package, const char* tag,
  * bytes on an incompatible request instead of silently reusing or replacing
  * them. Pre-#3073 binary caches have no target record and must be refetched. */
 static int ae_check_cached_binary_target(const char* pkg_dir, const char* target) {
-    char manifest[2048], marker[2048], git_dir[2048];
+    char manifest[2048], marker[2048], git_dir[2048], record[2112];
     snprintf(git_dir, sizeof(git_dir), "%s/.git", pkg_dir);
+    snprintf(record, sizeof(record), "%s.fetched", pkg_dir);
     snprintf(manifest, sizeof(manifest), "%s/aether.toml", pkg_dir);
     snprintf(marker, sizeof(marker), "%s/.aether-binary-target", pkg_dir);
     TomlDocument* doc = toml_parse_file(manifest);
     const char* binary = doc ? toml_get_value(doc, "package", "binary") : NULL;
-    /* --source clones may themselves declare a release binary in their
-     * manifest. Their .git identifies them as source caches. */
-    int is_binary = binary && *binary && !dir_exists(git_dir) && !path_exists(git_dir);
+    /* A source package may itself declare a release binary in its manifest.
+     * The record a source fetch keeps beside it (#1362), or the .git of a
+     * clone from before, identifies it as a source cache. */
+    int is_binary = binary && *binary && !path_exists(record) &&
+                    !dir_exists(git_dir) && !path_exists(git_dir);
     if (doc) toml_free_document(doc);
     if (!is_binary && !target) return 0;  /* ordinary source cache */
 
@@ -11438,7 +11509,7 @@ static int ae_check_cached_binary_target(const char* pkg_dir, const char* target
 
 /* Try to install <package>@<version> from a published release asset.
  * Returns 1 when the package was installed from an artifact, 0 when no
- * matching artifact exists (caller falls back to git). */
+ * matching artifact exists (caller fetches the source archive). */
 static int ae_try_release_asset(const char* package, const char* version,
                                 const char* pkg_dir, const char* target) {
     /* `target` (from --target <triple>) fetches a FOREIGN platform's binary
@@ -11479,8 +11550,8 @@ static int ae_try_release_asset(const char* package, const char* version,
     int bp = ae_try_binary_package(package, tag, triple, url_base, tmp_dir, pkg_dir, foreign);
     if (bp != 0) return bp;             /* 1 installed, -1 fatal */
 
-    /* --target names a FOREIGN platform's binary. A host source archive or a
-     * git clone would build the WRONG platform, so with an explicit target the
+    /* --target names a FOREIGN platform's binary. A host source archive
+     * would build the WRONG platform, so with an explicit target the
      * binary package is the only correct path: fail rather than fall through. */
     if (foreign) {
         fprintf(stderr,
@@ -11531,11 +11602,12 @@ static int ae_try_release_asset(const char* package, const char* version,
     return 0;                            /* nothing published for us */
 }
 
-/* Remove a half-installed package clone. A failed `ae add` must leave nothing
+/* Remove a half-installed package. A failed `ae add` must leave nothing
  * resolvable at the final cache path (report: ae-add-tag-pin-fails). Mirrors
  * the rm -rf idiom used in ae_cache.c / ae_version.c, with the Windows arm. */
 static void ae_add_rmrf(const char* dir) {
-    if (!dir || !*dir) return;
+    /* cmd's rmdir reports a missing directory; nothing to remove is fine. */
+    if (!dir || !*dir || !dir_exists(dir)) return;
     char cmd[1200];
 #ifdef _WIN32
     snprintf(cmd, sizeof(cmd), "rmdir /s /q \"%s\"", dir);
@@ -11545,20 +11617,465 @@ static void ae_add_rmrf(const char* dir) {
     if (system(cmd) != 0) { /* best-effort */ }
 }
 
+/* ---- Fetching a package's source (#1362) ---------------------------------
+ *
+ * `ae add` takes a package's source as the archive every forge serves for a
+ * tag or for its default branch, and needs no git. ae-fetch (tools/ae-fetch,
+ * an Aether program) fetches it with std.http, unpacks it with std.tar and
+ * hashes the tree. The hash is the package's identity, Zig's model: the URL
+ * is one place to get bytes that match it. aether.toml's [dependency-hashes]
+ * records it, a later `ae add` (another machine, an emptied cache) must get
+ * the same tree, and a build refuses an installed package that is not the
+ * tree the manifest pins (dep_graph_enqueue). docs/package-fetching.md has
+ * the design. */
+
+/* A package name is <host>/<owner>/.../<repo>: shell-safe characters, a
+ * host with a dot in it, every component non-empty and neither `.` nor `..`
+ * (#3304). It names a directory under ~/.aether/packages that `ae add
+ * --update` replaces, so it must never reach outside. */
+static int ae_package_name_ok(const char* package) {
+    if (!is_safe_shell_arg(package) || strchr(package, '@')) return 0;
+    const char* slash = strchr(package, '/');
+    if (!slash || !memchr(package, '.', (size_t)(slash - package))) return 0;
+    const char* p = package;
+    for (;;) {
+        const char* end = strchr(p, '/');
+        size_t len = end ? (size_t)(end - p) : strlen(p);
+        if (len == 0) return 0;
+        if ((len == 1 && p[0] == '.') || (len == 2 && p[0] == '.' && p[1] == '.')) return 0;
+        if (!end) return 1;
+        p = end + 1;
+    }
+}
+
+/* A version is a tag name: letters, digits, `.`, `-`, `_` and `+`, and not
+ * `.` or `..`. It goes into a URL and into aether.toml. */
+static int ae_version_ok(const char* v) {
+    if (!v || !*v || strlen(v) > 100) return 0;
+    for (const char* p = v; *p; p++) {
+        if (isalnum((unsigned char)*p) || *p == '.' || *p == '-' || *p == '_' || *p == '+') continue;
+        return 0;
+    }
+    return strcmp(v, ".") != 0 && strcmp(v, "..") != 0;
+}
+
+/* `v1.2.0` and `1.2.0` are one version: `ae add` has always taken both. */
+static int ae_same_version(const char* a, const char* b) {
+    if (a[0] == 'v' && isdigit((unsigned char)a[1])) a++;
+    if (b[0] == 'v' && isdigit((unsigned char)b[1])) b++;
+    return strcmp(a, b) == 0;
+}
+
+/* The package fetcher: AE_FETCH when set, else the one this toolchain built
+ * from the fetcher's source, built now when it has not been. Every install
+ * ships the source (share/aether/tools/ae-fetch/main.ae), not a binary per
+ * platform, and the build is keyed as `ae run`'s cache is (the source, what
+ * it imports, the compiler, the runtime), so the fetcher is never older
+ * than the std it is built from. 0 with the program's path in `out`, else -1
+ * with the reason printed. */
+static int ae_fetch_tool(char* out, size_t osz) {
+    const char* env = getenv("AE_FETCH");
+    if (env && *env) {
+        snprintf(out, osz, "%s", env);
+        return 0;
+    }
+    char cwd[1024];
+    if (!getcwd(cwd, sizeof(cwd))) {
+        fprintf(stderr, "Error: cannot read the working directory\n");
+        return -1;
+    }
+    char src[2200];
+    const char* sub = tc.dev_mode ? "tools/ae-fetch/main.ae" : "share/aether/tools/ae-fetch/main.ae";
+    if (path_is_absolute_any(tc.root)) snprintf(src, sizeof(src), "%s/%s", tc.root, sub);
+    else snprintf(src, sizeof(src), "%s/%s/%s", cwd, tc.root, sub);
+    if (!path_exists(src)) {
+        fprintf(stderr,
+            "Error: the package fetcher's source is missing: %s\n"
+            "       This install is incomplete; reinstall Aether.\n", src);
+        return -1;
+    }
+    char dir[1100];
+    snprintf(dir, sizeof(dir), "%s/.aether/tools", get_home_dir());
+    mkdirs(dir);
+    unsigned long long key = compute_cache_key(src, NULL, "O2", "ae-fetch");
+    snprintf(out, osz, "%s/ae-fetch-%016llx" EXE_EXT, dir, key);
+    if (key && path_exists(out)) return 0;
+
+    /* Built in a directory with a manifest of its own: `ae build` reads the
+     * manifest it finds walking up from the working directory, and the
+     * project's (its [dependencies], its [build] defines) is not the
+     * fetcher's. */
+    char work[1200], manifest[1300];
+    snprintf(work, sizeof(work), "%s/build", dir);
+    mkdirs(work);
+    snprintf(manifest, sizeof(manifest), "%s/aether.toml", work);
+    if (!path_exists(manifest)) {
+        FILE* m = fopen(manifest, "w");
+        if (m) {
+            fputs("[package]\nname = \"ae-fetch\"\n", m);
+            fclose(m);
+        }
+    }
+    char self[1200];
+    if (!get_exe_path(self, sizeof(self))) {
+        fprintf(stderr, "Error: cannot locate this ae to build the package fetcher\n");
+        return -1;
+    }
+    char tmp_base[1300], tmp_path[1320];
+    snprintf(tmp_base, sizeof(tmp_base), "%s/ae-fetch-%016llx.%d", dir, key, (int)getpid());
+    snprintf(tmp_path, sizeof(tmp_path), "%s" EXE_EXT, tmp_base);
+    if (chdir(work) != 0) {
+        fprintf(stderr, "Error: cannot enter %s to build the package fetcher\n", work);
+        return -1;
+    }
+    printf("Building the package fetcher (once per toolchain)...\n");
+    fflush(stdout);
+    char* argv[] = { self, (char*)"build", src, (char*)"-o", tmp_base, NULL };
+    int rc = ae_spawn(argv, 2, NULL, 0);
+    if (chdir(cwd) != 0) {
+        fprintf(stderr, "Error: cannot return to %s\n", cwd);
+        remove(tmp_path);
+        return -1;
+    }
+    if (rc != 0 || !path_exists(tmp_path)) {
+        fprintf(stderr, "Error: the package fetcher did not build from %s\n", src);
+        remove(tmp_path);
+        return -1;
+    }
+    /* The build wrote the source's dependency manifest, so the key is now
+     * the one the next lookup computes (as `ae run` publishes, #1882). No
+     * key (a source the key walk could not read whole): this build is used
+     * once, under its own name, rather than published as current. */
+    key = compute_cache_key(src, NULL, "O2", "ae-fetch");
+    if (!key) {
+        snprintf(out, osz, "%s", tmp_path);
+        return 0;
+    }
+    snprintf(out, osz, "%s/ae-fetch-%016llx" EXE_EXT, dir, key);
+    if (cache_publish(tmp_path, out) != 0) {
+        fprintf(stderr, "Error: cannot install the package fetcher at %s\n", out);
+        remove(tmp_path);
+        return -1;
+    }
+    return 0;
+}
+
+/* Appends one formatted URL to `urls`, when there is room. */
+static void ae_url_push(char urls[][1600], int* n, int max, const char* fmt, ...) {
+    if (*n >= max) return;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(urls[*n], 1600, fmt, ap);
+    va_end(ap);
+    (*n)++;
+}
+
+static int ae_host_is_gitlab(const char* host) {
+    return strcmp(host, "gitlab.com") == 0 || strncmp(host, "gitlab.", 7) == 0;
+}
+
+static int ae_host_is_gitea(const char* host) {
+    return strcmp(host, "codeberg.org") == 0 || strcmp(host, "gitea.com") == 0 ||
+           strncmp(host, "gitea.", 6) == 0 || strncmp(host, "forgejo.", 8) == 0;
+}
+
+/* The URLs that serve `package`'s source archive for `ref`, a tag or "HEAD"
+ * (the default branch), in each forge's own layout. AE_RELEASE_BASE_URL
+ * names a mirror instead, laid out as <mirror>/<package>/archive/<ref>.tar.gz
+ * (Gitea's layout): an internal mirror, an air-gapped file:// tree, a test's
+ * fixture. A host the table does not know gets Gitea's layout, then
+ * GitLab's. */
+static void ae_archive_urls(const char* package, const char* ref,
+                            char urls[][1600], int* n, int max) {
+    const char* mirror = getenv("AE_RELEASE_BASE_URL");
+    if (mirror && *mirror) {
+        ae_url_push(urls, n, max, "%s/%s/archive/%s.tar.gz", mirror, package, ref);
+        return;
+    }
+    const char* slash = strchr(package, '/');
+    char host[256];
+    snprintf(host, sizeof(host), "%.*s", (int)(slash - package), package);
+    const char* path = slash + 1;
+    const char* repo = ae_pkg_basename(package);
+    if (strcmp(host, "github.com") == 0) {
+        if (strcmp(ref, "HEAD") == 0)
+            ae_url_push(urls, n, max, "https://codeload.github.com/%s/tar.gz/HEAD", path);
+        else
+            ae_url_push(urls, n, max, "https://codeload.github.com/%s/tar.gz/refs/tags/%s", path, ref);
+    } else if (strcmp(host, "bitbucket.org") == 0) {
+        ae_url_push(urls, n, max, "https://bitbucket.org/%s/get/%s.tar.gz", path, ref);
+    } else if (ae_host_is_gitlab(host)) {
+        ae_url_push(urls, n, max, "https://%s/%s/-/archive/%s/%s-%s.tar.gz", host, path, ref, repo, ref);
+    } else {
+        ae_url_push(urls, n, max, "https://%s/%s/archive/%s.tar.gz", host, path, ref);
+        if (!ae_host_is_gitea(host))
+            ae_url_push(urls, n, max, "https://%s/%s/-/archive/%s/%s-%s.tar.gz", host, path, ref, repo, ref);
+    }
+}
+
+/* Where `package`'s forge lists its tags, newest first where the forge
+ * sorts them: <mirror>/<package>/tags.json under AE_RELEASE_BASE_URL. */
+static void ae_tags_url(const char* package, char* out, size_t osz) {
+    const char* mirror = getenv("AE_RELEASE_BASE_URL");
+    if (mirror && *mirror) {
+        snprintf(out, osz, "%s/%s/tags.json", mirror, package);
+        return;
+    }
+    const char* slash = strchr(package, '/');
+    char host[256];
+    snprintf(host, sizeof(host), "%.*s", (int)(slash - package), package);
+    const char* path = slash + 1;
+    if (strcmp(host, "github.com") == 0) {
+        snprintf(out, osz, "https://api.github.com/repos/%s/tags?per_page=100", path);
+    } else if (strcmp(host, "bitbucket.org") == 0) {
+        snprintf(out, osz, "https://api.bitbucket.org/2.0/repositories/%s/refs/tags?pagelen=100&sort=-name", path);
+    } else if (ae_host_is_gitlab(host)) {
+        /* GitLab names a project by its URL-encoded path. */
+        char enc[1024];
+        size_t w = 0;
+        for (const char* p = path; *p && w + 4 < sizeof(enc); p++) {
+            if (*p == '/') { memcpy(enc + w, "%2F", 3); w += 3; }
+            else enc[w++] = *p;
+        }
+        enc[w] = '\0';
+        snprintf(out, osz, "https://%s/api/v4/projects/%s/repository/tags?per_page=100", host, enc);
+    } else {
+        snprintf(out, osz, "https://%s/api/v1/repos/%s/tags?limit=50", host, path);
+    }
+}
+
+/* Prints the `error` of a failed fetch's record, every line of it. */
+static void ae_fetch_print_error(const char* record) {
+    FILE* f = fopen(record, "r");
+    if (!f) {
+        fprintf(stderr, "       (the fetcher left no reason)\n");
+        return;
+    }
+    char line[2048];
+    int on = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (!on && strncmp(line, "error ", 6) == 0) {
+            on = 1;
+            fprintf(stderr, "       %s", line + 6);
+        } else if (on) {
+            fprintf(stderr, "       %s", line);
+        }
+    }
+    fclose(f);
+}
+
+/* Prints the tags `package`'s forge lists, for a version that was not
+ * found. */
+static void ae_fetch_print_tags(const char* tool, const char* package, const char* record) {
+    char url[1600];
+    ae_tags_url(package, url, sizeof(url));
+    char* argv[] = { (char*)tool, (char*)"tags", (char*)record, url, NULL };
+    remove(record);
+    fprintf(stderr, "Available versions:\n");
+    if (ae_spawn(argv, 1, NULL, 0) != 0) {
+        fprintf(stderr, "  (the tag list at %s could not be read)\n", url);
+        ae_fetch_print_error(record);
+        remove(record);
+        return;
+    }
+    FILE* f = fopen(record, "r");
+    int shown = 0;
+    if (f) {
+        char line[512];
+        while (fgets(line, sizeof(line), f) && shown < 20) {
+            if (strncmp(line, "tag ", 4) != 0) continue;
+            fprintf(stderr, "  %s", line + 4);
+            shown++;
+        }
+        fclose(f);
+    }
+    if (shown == 0) fprintf(stderr, "  (none)\n");
+    remove(record);
+}
+
+/* Fetches `package` at `version` (NULL: its default branch) into `dest`,
+ * which must not exist, trying the v-prefixed tag and then the bare one, as
+ * `ae add` always has. 0 with ae-fetch's record (url, hash) at `record`;
+ * else -1, the record holding the reason and nothing at `dest`. */
+static int ae_fetch_source(const char* tool, const char* package, const char* version,
+                           const char* dest, const char* record) {
+    char urls[8][1600];
+    int n = 0;
+    if (version) {
+        const char* bare = (version[0] == 'v') ? version + 1 : version;
+        char vtag[128];
+        snprintf(vtag, sizeof(vtag), "v%s", bare);
+        ae_archive_urls(package, vtag, urls, &n, 8);
+        ae_archive_urls(package, bare, urls, &n, 8);
+    } else {
+        ae_archive_urls(package, "HEAD", urls, &n, 8);
+    }
+    char* argv[16];
+    int a = 0;
+    argv[a++] = (char*)tool;
+    argv[a++] = (char*)"get";
+    argv[a++] = (char*)dest;
+    argv[a++] = (char*)record;
+    for (int i = 0; i < n; i++) argv[a++] = urls[i];
+    argv[a] = NULL;
+    remove(record);
+    return ae_spawn(argv, 0, NULL, 0) == 0 ? 0 : -1;
+}
+
+/* Replaces `path` with `tmp`, also where the platform's rename will not
+ * replace a file that exists. */
+static int ae_replace_file(const char* tmp, const char* path) {
+#ifdef _WIN32
+    return MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING) ? 0 : -1;
+#else
+    return rename(tmp, path);
+#endif
+}
+
+/* Sets `"key" = "value"` in `[section]` of the manifest at `path`, keeping
+ * every other byte: the key's line is replaced when the section has it (the
+ * key bare or quoted), else a line is added after the section's last entry,
+ * and the section is appended when the manifest has none. Written beside the
+ * manifest and moved over it. 0, or -1 with the reason printed. */
+static int ae_manifest_set(const char* path, const char* section,
+                           const char* key, const char* value) {
+    FILE* f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "Error: Could not read %s\n", path);
+        return -1;
+    }
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz < 0) {
+        fclose(f);
+        fprintf(stderr, "Error: Could not read %s\n", path);
+        return -1;
+    }
+    char* buf = malloc((size_t)sz + 1);
+    if (!buf) {
+        fclose(f);
+        fprintf(stderr, "Error: Out of memory\n");
+        return -1;
+    }
+    size_t len = fread(buf, 1, (size_t)sz, f);
+    buf[len] = '\0';
+    fclose(f);
+
+    size_t klen = strlen(key);
+    long key_start = -1, key_end = -1;  /* the key's line, newline included */
+    long insert_at = -1;                /* after the section's last entry */
+    int in_section = 0;
+    size_t pos = 0;
+    while (pos < len) {
+        size_t eol = pos;
+        while (eol < len && buf[eol] != '\n') eol++;
+        size_t next = (eol < len) ? eol + 1 : eol;
+        const char* p = buf + pos;
+        while (p < buf + eol && (*p == ' ' || *p == '\t')) p++;
+        if (p < buf + eol && *p == '[') {
+            if (in_section) break;          /* the next section begins */
+            const char* name = p + 1;
+            const char* close = memchr(name, ']', (size_t)(buf + eol - name));
+            in_section = name[0] != '[' && close &&
+                         (size_t)(close - name) == strlen(section) &&
+                         strncmp(name, section, strlen(section)) == 0;
+            if (in_section) insert_at = (long)next;
+        } else if (in_section && p < buf + eol && *p != '#' && *p != '\r') {
+            const char* k = p;
+            size_t kl;
+            if (*k == '"') {
+                k++;
+                const char* q = memchr(k, '"', (size_t)(buf + eol - k));
+                kl = q ? (size_t)(q - k) : 0;
+            } else {
+                kl = 0;
+                while (k + kl < buf + eol && k[kl] != '=' && k[kl] != ' ' && k[kl] != '\t') kl++;
+            }
+            if (kl == klen && strncmp(k, key, klen) == 0) {
+                key_start = (long)pos;
+                key_end = (long)next;
+            }
+            insert_at = (long)next;
+        }
+        pos = next;
+    }
+
+    char line[1200];
+    snprintf(line, sizeof(line), "\"%s\" = \"%s\"\n", key, value);
+    char tmp[1200];
+    snprintf(tmp, sizeof(tmp), "%s.tmp.%d", path, (int)getpid());
+    FILE* o = fopen(tmp, "wb");
+    if (!o) {
+        free(buf);
+        fprintf(stderr, "Error: Could not write %s\n", tmp);
+        return -1;
+    }
+    if (key_start >= 0) {
+        fwrite(buf, 1, (size_t)key_start, o);
+        fputs(line, o);
+        fwrite(buf + key_end, 1, len - (size_t)key_end, o);
+    } else if (insert_at >= 0) {
+        fwrite(buf, 1, (size_t)insert_at, o);
+        if (insert_at > 0 && buf[insert_at - 1] != '\n') fputc('\n', o);
+        fputs(line, o);
+        fwrite(buf + insert_at, 1, len - (size_t)insert_at, o);
+    } else {
+        fwrite(buf, 1, len, o);
+        if (len > 0 && buf[len - 1] != '\n') fputc('\n', o);
+        fprintf(o, "\n[%s]\n", section);
+        fputs(line, o);
+    }
+    free(buf);
+    if (fclose(o) != 0 || ae_replace_file(tmp, path) != 0) {
+        remove(tmp);
+        fprintf(stderr, "Error: Could not write %s\n", path);
+        return -1;
+    }
+    return 0;
+}
+
+/* Records `package` in aether.toml: its version under [dependencies] and,
+ * for a source package, its tree's hash under [dependency-hashes]. `listed`
+ * and `pinned` are what the manifest said before ("" for nothing). */
+static int ae_add_record(const char* package, const char* version, const char* listed,
+                         const char* pinned, const char* hash) {
+    const char* value = version ? version : "latest";
+    int updated = 0;
+    if (!listed[0] || !ae_same_version(listed, value)) {
+        if (ae_manifest_set("aether.toml", "dependencies", package, value) != 0) return 1;
+        updated = listed[0] != '\0';
+    }
+    if (hash && hash[0] && strcmp(hash, pinned) != 0) {
+        if (ae_manifest_set("aether.toml", "dependency-hashes", package, hash) != 0) return 1;
+        printf("Pinned %s %s\n", package, hash);
+    }
+    if (!listed[0]) printf("Added %s to dependencies.\n", package);
+    else if (updated) printf("Updated %s to %s.\n", package, value);
+    else printf("Already in dependencies.\n");
+    return 0;
+}
+
 static int cmd_add(int argc, char** argv) {
     if (argc < 1 || argv[0][0] == '-') {
         add_usage(stderr);
         return 1;
     }
 
-    /* --source forces the historical git-clone path (#1360).
-     * --target <triple> fetches a FOREIGN platform's binary package instead of
-     * the host's (for cross-platform bundling / release CI). */
+    /* --source takes the source archive even when a release artifact is
+     * published (#1360). --target <triple> fetches a FOREIGN platform's
+     * binary package instead of the host's (for cross-platform bundling /
+     * release CI). --update moves a dependency aether.toml already pins: to
+     * the version given, else to what its version (or its default branch)
+     * holds now (#1362). */
     bool force_source = false;
+    bool update = false;
     const char* target = NULL;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--source") == 0) {
             force_source = true;
+        } else if (strcmp(argv[i], "--update") == 0) {
+            update = true;
         } else if (strcmp(argv[i], "--target") == 0 && i + 1 < argc) {
             target = argv[++i];
         } else if (strncmp(argv[i], "--target=", 9) == 0) {
@@ -11567,7 +12084,7 @@ static int cmd_add(int argc, char** argv) {
     }
     if (force_source && target) {
         fprintf(stderr, "Error: --source and --target are mutually exclusive "
-                        "(--source forces the git clone; --target fetches a binary).\n");
+                        "(--source fetches the source; --target fetches a binary).\n");
         return 1;
     }
     if (target && !*target) {
@@ -11580,11 +12097,11 @@ static int cmd_add(int argc, char** argv) {
     strncpy(pkg_buf, argv[0], sizeof(pkg_buf) - 1);
     pkg_buf[sizeof(pkg_buf) - 1] = '\0';
 
-    const char* version = NULL;
+    const char* req_version = NULL;
     char* at = strchr(pkg_buf, '@');
     if (at) {
         *at = '\0';
-        version = at + 1;
+        req_version = at + 1;
     }
     const char* package = pkg_buf;
 
@@ -11593,10 +12110,10 @@ static int cmd_add(int argc, char** argv) {
         return 1;
     }
 
-    // Validate: must look like a git-hostable URL (host.tld/user/repo)
-    // Supports GitHub, GitLab, Bitbucket, Codeberg, self-hosted, etc.
-    if (!strchr(package, '/') || !strchr(package, '.')) {
-        fprintf(stderr, "Error: Package must be a git-hostable path.\n");
+    // A forge path (host.tld/user/repo): GitHub, GitLab, Bitbucket,
+    // Codeberg, self-hosted Gitea, Forgejo or GitLab.
+    if (!ae_package_name_ok(package)) {
+        fprintf(stderr, "Error: '%s' is not a package path.\n", package);
         fprintf(stderr, "Format: ae add <host>/<user>/<repo>[@version]\n");
         fprintf(stderr, "Examples:\n");
         fprintf(stderr, "  ae add github.com/user/repo\n");
@@ -11604,187 +12121,171 @@ static int cmd_add(int argc, char** argv) {
         fprintf(stderr, "  ae add codeberg.org/user/repo\n");
         return 1;
     }
-
-    // Validate package name to prevent command injection
-    if (!is_safe_shell_arg(package)) {
-        fprintf(stderr, "Error: Package name contains invalid characters.\n");
+    if (req_version && !ae_version_ok(req_version)) {
+        fprintf(stderr, "Error: '%s' is not a version: a tag name, of letters, digits, '.', '-', '_' and '+'.\n",
+                req_version);
         return 1;
     }
 
-    printf("Adding %s%s%s...\n", package, version ? "@" : "", version ? version : "");
+    /* What the manifest already says about the package. */
+    char listed[128] = "", pinned[160] = "";
+    TomlDocument* mdoc = toml_parse_file("aether.toml");
+    const char* lv = ae_manifest_value(mdoc, "dependencies", package);
+    const char* pv = ae_manifest_value(mdoc, "dependency-hashes", package);
+    if (lv) snprintf(listed, sizeof(listed), "%s", lv);
+    if (pv) snprintf(pinned, sizeof(pinned), "%s", pv);
+    if (mdoc) toml_free_document(mdoc);
 
-    // Cache directory — sized generously so GCC's -Wformat-truncation
-    // doesn't complain (real paths are ~60 bytes, never close to limits)
+    /* The version to install: the one asked for, else the one aether.toml
+     * names, so a fresh machine installing a project's dependencies gets the
+     * versions the project pins rather than each default branch. "latest"
+     * is the default branch. */
+    const char* version = req_version;
+    if (!version && listed[0] && strcmp(listed, "latest") != 0) version = listed;
+    if (req_version && listed[0] && !ae_same_version(req_version, listed) && !update) {
+        fprintf(stderr,
+            "Error: aether.toml pins %s at %s.\n"
+            "       To move it to %s: ae add %s@%s --update\n",
+            package, listed, req_version, package, req_version);
+        return 1;
+    }
+    if (target && !version) {
+        fprintf(stderr, "Error: --target fetches a release's binary package; name the release: %s@<version>\n",
+                package);
+        return 1;
+    }
+    const char* want = version ? version : "latest";
+
+    printf("Adding %s%s%s...\n", package, version ? "@" : "", version ? version : "");
+    fflush(stdout);
+
     char cache_dir[512];
     snprintf(cache_dir, sizeof(cache_dir), "%s/.aether/packages", get_home_dir());
-
-    char pkg_dir[1024];
+    char pkg_dir[1024], record[1100];
     snprintf(pkg_dir, sizeof(pkg_dir), "%.511s/%.511s", cache_dir, package);
+    snprintf(record, sizeof(record), "%s.fetched", pkg_dir);
 
     if (dir_exists(pkg_dir) && ae_check_cached_binary_target(pkg_dir, target) != 0) return 1;
 
-    if (!dir_exists(pkg_dir)) {
-        /* Prefer a published release artifact when one matches this host
-         * (#1360): faster than a clone, needs no toolchain to consume,
-         * and pins against an immutable asset rather than a movable tag.
-         * Falls back to the clone when nothing is published. */
-        if (!force_source) {
-            int r = ae_try_release_asset(package, version, pkg_dir, target);
-            if (r < 0) return 1;        /* checksum mismatch / target error — reported */
-            if (r > 0) goto write_toml; /* installed from artifact */
+    if (dir_exists(pkg_dir) && !update) {
+        /* Installed already, by this project or another: the cache holds one
+         * tree of a package. One this project cannot use is an error, not a
+         * silent build against it. */
+        char inst_hash[160], inst_ver[128];
+        if (!ae_fetch_record_get(record, "hash", inst_hash, sizeof(inst_hash))) {
+            /* A release artifact, or a git clone from before #1362: no hash
+             * to check or to pin. */
+            return ae_add_record(package, version, listed, pinned, NULL);
         }
-        printf("Downloading...\n");
+        if (ae_fetch_record_get(record, "version", inst_ver, sizeof(inst_ver)) &&
+            !ae_same_version(inst_ver, want)) {
+            fprintf(stderr,
+                "Error: %s is installed at %s, not %s; the package cache holds one\n"
+                "       version of a package. To replace it: ae add %s%s%s --update\n",
+                package, inst_ver, want, package, version ? "@" : "", version ? version : "");
+            return 1;
+        }
+        if (pinned[0] && strcmp(pinned, inst_hash) != 0) {
+            fprintf(stderr,
+                "Error: the installed %s is another tree than aether.toml pins:\n"
+                "         pinned     %s\n"
+                "         installed  %s\n"
+                "       Remove %s and run `ae add %s` to fetch the pinned tree,\n"
+                "       or take a new tree with `ae add %s --update`.\n",
+                package, pinned, inst_hash, pkg_dir, package, package);
+            return 1;
+        }
+        return ae_add_record(package, version, listed, pinned, inst_hash);
+    }
+
+    /* A fresh install goes straight to the cache path; an update goes beside
+     * the installed tree and replaces it only once it is complete. */
+    int replacing = dir_exists(pkg_dir);
+    char dest[1100], dest_record[1120];
+    snprintf(dest, sizeof(dest), replacing ? "%s.new" : "%s", pkg_dir);
+    snprintf(dest_record, sizeof(dest_record), "%s.fetched", dest);
+    if (replacing) ae_add_rmrf(dest);       /* an interrupted update's */
+    remove(dest_record);
+    {
         char parent[1024];
-        strncpy(parent, pkg_dir, sizeof(parent) - 1);
-        parent[sizeof(parent) - 1] = '\0';
+        snprintf(parent, sizeof(parent), "%s", pkg_dir);
         char* slash = strrchr(parent, '/');
         if (slash) { *slash = '\0'; mkdirs(parent); }
+    }
 
-        char cmd[4096];
-        /* AE_RELEASE_BASE_URL also redirects the git origin, mirroring the
-         * release-artifact path above: an internal mirror or a file:// tree
-         * can serve the clone, and it is what makes this path testable
-         * without the public internet. `<origin>/<package>` so a bare git repo
-         * at that layout is reachable. */
-        const char* git_origin = getenv("AE_RELEASE_BASE_URL");
-        char clone_url[1600];
-        if (git_origin && *git_origin) {
-            snprintf(clone_url, sizeof(clone_url), "%s/%s", git_origin, package);
-        } else {
-            snprintf(clone_url, sizeof(clone_url), "https://%s", package);
-        }
-        if (version) {
-            snprintf(cmd, sizeof(cmd), "git clone %s %s", clone_url, pkg_dir);
-        } else {
-            snprintf(cmd, sizeof(cmd), "git clone --depth 1 %s %s", clone_url, pkg_dir);
-        }
-        if (run_cmd(cmd) != 0) {
-            fprintf(stderr, "Failed to download package.\n");
-            fprintf(stderr, "Check that the repository exists: https://%s\n", package);
-            /* git clone may have created a partial directory before failing;
-             * do not leave it resolvable. */
-            ae_add_rmrf(pkg_dir);
+    char hash[160] = "";
+    int installed = 0;
+    /* Prefer a published release artifact when one matches this host
+     * (#1360): faster than building the source, needs no toolchain to
+     * consume, and pinned against an immutable asset rather than a movable
+     * tag (its .sha256 verifies it). */
+    if (version && !force_source) {
+        int r = ae_try_release_asset(package, version, dest, target);
+        if (r < 0) {                        /* checksum mismatch / target error, reported */
+            ae_add_rmrf(dest);
             return 1;
         }
-
-        // Checkout specific version tag if requested
-        if (version) {
-            /* #1879-adjacent (ae-add-tag-pin report): the checkout ran through
-             * run_cmd, whose tokenizer posix_spawns argv directly with NO
-             * shell -- so `cd "dir" && git checkout ... 2>/dev/null || ...`
-             * was handed to a program literally named `cd`, and `&&`, `||`,
-             * `2>/dev/null` were argv words. The whole line failed every time;
-             * the tag pin has never actually worked. The clone succeeded only
-             * because a lone `git clone` has no shell metacharacters.
-             *
-             * Use `git -C <dir>` (a real git flag, no shell needed) so the
-             * checkout runs, and normalise the tag so both `@v0.2.1` and
-             * `@0.2.1` resolve. */
-            const char* bare = (version[0] == 'v') ? version + 1 : version;
-            char vtag[128];
-            snprintf(vtag, sizeof(vtag), "v%s", bare);
-
-            /* Try the v-prefixed tag, then the bare form for repos that tag
-             * without the `v`. run_cmd_quiet only to avoid the noise of the
-             * first miss; the real error is surfaced below if both fail. */
-            snprintf(cmd, sizeof(cmd), "git -C \"%s\" checkout %s", pkg_dir, vtag);
-            int co = run_cmd_quiet(cmd);
-            if (co != 0) {
-                snprintf(cmd, sizeof(cmd), "git -C \"%s\" checkout %s", pkg_dir, bare);
-                co = run_cmd_quiet(cmd);
+        installed = r > 0;
+    }
+    if (!installed) {
+        char tool[1400];
+        if (ae_fetch_tool(tool, sizeof(tool)) != 0) return 1;
+        printf("Downloading...\n");
+        fflush(stdout);
+        if (ae_fetch_source(tool, package, version, dest, dest_record) != 0) {
+            if (version) {
+                fprintf(stderr, "Error: Version '%s' of %s could not be fetched:\n", version, package);
+                ae_fetch_print_error(dest_record);
+                ae_fetch_print_tags(tool, package, dest_record);
+            } else {
+                fprintf(stderr, "Failed to download package:\n");
+                ae_fetch_print_error(dest_record);
+                fprintf(stderr, "Check that the repository exists: https://%s\n", package);
             }
-            if (co != 0) {
-                fprintf(stderr, "Error: Version '%s' not found.\n", version);
-                /* A failed pin MUST NOT leave an unpinned clone behind: a
-                 * later `ae run` / `ae lib-path` would resolve the dependency
-                 * to this main checkout and go green against the wrong tree --
-                 * the exact reproducibility hole this feature set closes. So
-                 * list the tags first (with -C, against the clone that has
-                 * them -- the old `cd` form left this empty too), THEN remove
-                 * the partial clone. */
-                /* No pipe: run_cmd has no shell, so `| sort | tail` would
-                 * be argv to `git tag`. git sorts natively; the newest tags
-                 * sort first, so the first handful is the useful part. */
-                snprintf(cmd, sizeof(cmd),
-                         "git -C \"%s\" tag -l --sort=-v:refname v*", pkg_dir);
-                fprintf(stderr, "Available versions:\n");
-                (void)run_cmd(cmd);
-                ae_add_rmrf(pkg_dir);
-                return 1;
-            }
-            printf("Checked out %s\n", vtag);
-        }
-    }
-
-    /* Declared before the label: a declaration may not directly follow one in
-     * C11 (it is a C23 relaxation that gcc takes as an extension), so
-     * `write_toml: FILE* f = ...` failed to compile on clang. */
-    FILE* f = NULL;
-write_toml:
-    // Add to aether.toml
-    f = fopen("aether.toml", "r");
-    if (!f) {
-        fprintf(stderr, "Error: Could not read aether.toml\n");
-        return 1;
-    }
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    if (sz < 0) {
-        fclose(f);
-        fprintf(stderr, "Error: Could not determine file size\n");
-        return 1;
-    }
-    fseek(f, 0, SEEK_SET);
-    char* content = malloc((size_t)sz + 1);
-    if (!content) {
-        fclose(f);
-        fprintf(stderr, "Error: Out of memory\n");
-        return 1;
-    }
-    size_t nread = fread(content, 1, (size_t)sz, f);
-    content[nread] = '\0';
-    fclose(f);
-
-    if (strstr(content, package)) {
-        printf("Already in dependencies.\n");
-        free(content);
-        return 0;
-    }
-
-    char* deps = strstr(content, "[dependencies]");
-    if (deps) {
-        char* next_sect = strchr(deps + 14, '[');
-        f = fopen("aether.toml", "w");
-        if (!f) {
-            fprintf(stderr, "Error: Could not write aether.toml\n");
-            free(content);
+            remove(dest_record);
+            ae_add_rmrf(dest);
             return 1;
         }
-        if (next_sect) {
-            fwrite(content, 1, next_sect - content, f);
-            fprintf(f, "%s = \"%s\"\n", package, version ? version : "latest");
-            fputs(next_sect, f);
-        } else {
-            fputs(content, f);
-            fprintf(f, "%s = \"%s\"\n", package, version ? version : "latest");
-        }
-        fclose(f);
-    } else {
-        // No [dependencies] section — append one
-        f = fopen("aether.toml", "a");
-        if (!f) {
-            fprintf(stderr, "Error: Could not write aether.toml\n");
-            free(content);
+        char url[1600];
+        ae_fetch_record_get(dest_record, "hash", hash, sizeof(hash));
+        ae_fetch_record_get(dest_record, "url", url, sizeof(url));
+        if (pinned[0] && !update && strcmp(pinned, hash) != 0) {
+            fprintf(stderr,
+                "Error: %s%s%s is not the tree aether.toml pins:\n"
+                "         pinned   %s\n"
+                "         fetched  %s\n"
+                "       The archive changed since it was pinned (a moved tag, a new\n"
+                "       default-branch commit). To take the new tree: ae add %s --update\n",
+                package, version ? "@" : "", version ? version : "", pinned, hash, package);
+            remove(dest_record);
+            ae_add_rmrf(dest);
             return 1;
         }
-        fprintf(f, "\n[dependencies]\n");
-        fprintf(f, "%s = \"%s\"\n", package, version ? version : "latest");
-        fclose(f);
+        FILE* rf = fopen(dest_record, "a");
+        if (!rf || fprintf(rf, "version %s\n", want) < 0 || fclose(rf) != 0) {
+            fprintf(stderr, "Error: could not write %s\n", dest_record);
+            remove(dest_record);
+            ae_add_rmrf(dest);
+            return 1;
+        }
+        printf("Fetched %s\n", url);
     }
 
-    free(content);
-    printf("Added %s to dependencies.\n", package);
-    return 0;
+    if (replacing) {
+        ae_add_rmrf(pkg_dir);
+        remove(record);
+        if (rename(dest, pkg_dir) != 0) {
+            fprintf(stderr, "Error: could not move %s to %s\n", dest, pkg_dir);
+            return 1;
+        }
+        if (!installed && rename(dest_record, record) != 0) {
+            fprintf(stderr, "Error: could not move %s to %s\n", dest_record, record);
+            return 1;
+        }
+    } else if (installed) {
+        remove(record);                     /* a removed source install's */
+    }
+    return ae_add_record(package, version, listed, pinned, installed ? NULL : hash);
 }
 
 /* What an example's header says about building it (#3105). The examples

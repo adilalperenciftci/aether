@@ -456,6 +456,10 @@ if [ "$EDITOR_ONLY" -eq 0 ]; then
     mkdir -p "$SRC_DIR"
     cp -r runtime "$SRC_DIR/" 2>/dev/null || true
     cp -r std     "$SRC_DIR/" 2>/dev/null || true
+    # The package fetcher's source: `ae add` builds it with this toolchain
+    # the first time it fetches a package (#1362).
+    mkdir -p "$SRC_DIR/tools/ae-fetch"
+    cp tools/ae-fetch/main.ae "$SRC_DIR/tools/ae-fetch/"
     # std module specs are co-located beside the modules they cover
     # (std/<mod>/test_*.ae, #1584): tests, not payload. Strip them the
     # way `make install` and release.yml do, or every source install

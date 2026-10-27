@@ -84,6 +84,10 @@ cp -r runtime std "$out/share/aether/"
 rm -rf "$out/share/aether/runtime/examples"
 find "$out/share/aether/std" -type f -name 'test_*.ae' -delete
 cp "$bin/MANIFEST" "$out/share/aether/"
+# The package fetcher's source: `ae add` builds it with this toolchain the
+# first time it fetches a package (#1362).
+mkdir -p "$out/share/aether/tools/ae-fetch"
+cp tools/ae-fetch/main.ae "$out/share/aether/tools/ae-fetch/"
 
 # contrib sources, so `import contrib.X` resolves on a binary release as on a
 # source install (#2208), trimmed as install.sh trims them: no tests,

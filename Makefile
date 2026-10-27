@@ -1618,6 +1618,7 @@ test-release-archive: compiler ae stdlib check-archive-exports
 	done && \
 	test -d "$$verdir/share/aether/runtime"  || (echo "  FAIL: share/aether/runtime missing"; exit 1) && \
 	test -d "$$verdir/share/aether/std"      || (echo "  FAIL: share/aether/std missing"; exit 1) && \
+	test -f "$$verdir/share/aether/tools/ae-fetch/main.ae" || (echo "  FAIL: the package fetcher's source is missing (#1362)"; exit 1) && \
 	test -f "$$verdir/share/aether/contrib/sqlite/amalgamation/sqlite3.c" || (echo "  FAIL: the SQLite amalgamation is missing (#1372)"; exit 1) && \
 	test -f "$$verdir/share/aether/contrib/quickjs/amalgamation/quickjs-amalgam.c" || (echo "  FAIL: the QuickJS amalgamation is missing"; exit 1) && \
 	test -s "$$verdir/share/aether/MANIFEST" || (echo "  FAIL: share/aether/MANIFEST missing; ae cannot build from source without it"; exit 1) && \
@@ -1631,6 +1632,16 @@ test-release-archive: compiler ae stdlib check-archive-exports
 	output=$$(AETHER_HOME="$$verdir" "$$verdir/bin/ae$(EXE_EXT)" run 2>&1) && \
 	echo "  Output: $$output" && \
 	echo "$$output" | grep -q "Hello from archivetest" && \
+	echo "  Testing ae add from extracted archive (no git, #1362)..." && \
+	mkdir -p "$$projdir/mirror/example.com/acme/smoke/archive" "$$projdir/src/smoke-v1.0.0" "$$projdir/home" && \
+	echo 'smoke() -> int { return 1 }' > "$$projdir/src/smoke-v1.0.0/smoke.ae" && \
+	( cd "$$projdir/src" && tar -czf "$$projdir/mirror/example.com/acme/smoke/archive/v1.0.0.tar.gz" smoke-v1.0.0 ) && \
+	{ mirror="$$projdir/mirror"; home="$$projdir/home"; \
+	  if command -v cygpath >/dev/null 2>&1; then mirror=$$(cygpath -m "$$mirror"); home=$$(cygpath -m "$$home"); fi; \
+	  HOME="$$projdir/home" USERPROFILE="$$home" AE_RELEASE_BASE_URL="file://$$mirror" AETHER_HOME="$$verdir" \
+	    "$$verdir/bin/ae$(EXE_EXT)" add example.com/acme/smoke@v1.0.0 > "$$tmpdir/add.log" 2>&1 || true; } && \
+	{ test -f "$$projdir/home/.aether/packages/example.com/acme/smoke/smoke.ae" || \
+	  { echo "  FAIL: ae add from the extracted archive:"; sed 's/^/      /' "$$tmpdir/add.log"; exit 1; }; } && \
 	echo "  Cleaning up..." && \
 	rm -rf "$$tmpdir" "$$projdir" && \
 	echo "  [PASS] Release archive smoke test" || \
@@ -2432,6 +2443,10 @@ install: $(VERSION_HEADER) release-build ae stdlib
 	@# amalgamation itself, and the other C-backed modules @source theirs.
 	@-$(RM_DIR) $(PREFIX)/share/aether/contrib
 	@cp -R contrib $(PREFIX)/share/aether/
+	@# The package fetcher's source: `ae add` builds it with this toolchain
+	@# the first time it fetches a package (#1362).
+	@install -d $(PREFIX)/share/aether/tools/ae-fetch
+	@install -m 644 tools/ae-fetch/main.ae $(PREFIX)/share/aether/tools/ae-fetch/main.ae
 	@# Trim source-tree noise from the contrib install: tests, benchmarks,
 	@# example .ae, $(BUILD_DIR)/CI scripts, and the .c/.m files (those compile
 	@# into the libaether_<x>.a archives via `make contrib`; no value in

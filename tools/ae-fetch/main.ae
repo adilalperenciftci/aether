@@ -1,0 +1,280 @@
+// ae-fetch: how `ae add` gets a package's source (#1362).
+//
+// A package is a source archive over HTTPS (or from a file:// mirror),
+// identified by the hash of what is in it, not by where it came from: the
+// URL is one place to get bytes that match the hash (Zig's model,
+// docs/package-fetching.md). No git, no shell: std.http fetches (OpenSSL,
+// or the pure-Aether TLS where there is none), std.zlib inflates, std.tar
+// extracts (no symlinks, no path out of the destination), std.cryptography
+// hashes. `ae` builds this program the first time it needs it.
+//
+//   ae-fetch get <dest> <info> <url>...  the first URL that answers 200 is
+//                                         extracted into <dest> (the
+//                                         archive's single top directory
+//                                         stripped); <info> gets `url <u>`
+//                                         and `hash <h>`
+//   ae-fetch hash <dir> <info>           <info> gets `hash <h>` of <dir>
+//   ae-fetch tags <info> <api-url>       <info> gets one `tag <name>` per tag
+//                                         a host's API lists
+//
+// A failure writes `error <why>` to <info> and exits 1.
+//
+// The hash: "sha256-" and the hex SHA-256 of, for each regular file under
+// the package root in byte order of its path (relative, `/`-separated), the
+// path, a NUL, the hex SHA-256 of its bytes and a newline. Directories and
+// file modes are not part of it, so a package hashes the same on every OS.
+
+import std.bytes
+import std.cryptography
+import std.fs
+import std.http.client
+import std.json
+import std.os
+import std.sort
+import std.string
+import std.tar
+import std.zlib
+
+extern exit(code: int)
+
+fail(info: string, why: string) {
+    fs.write(info, "error ${why}\n")
+    exit(1)
+}
+
+// Every regular file under `root`, as paths relative to it, sorted.
+files_under(root: string) -> string[] {
+    count = 0
+    fs.walk(root, |path: string, kind: int, depth: int| {
+        if kind == fs.STAT_KIND_FILE {
+            count = count + 1
+        }
+        return fs.WALK_CONTINUE
+    })
+    names = make([]string, count)
+    i = 0
+    prefix = string.length(root) + 1
+    fs.walk(root, |path: string, kind: int, depth: int| {
+        if kind == fs.STAT_KIND_FILE && i < count {
+            rel = string.substring(path, prefix, string.length(path))
+            names[i] = string.replace(rel, "\\", "/")
+            i = i + 1
+        }
+        return fs.WALK_CONTINUE
+    })
+    sort.strings(names)
+    return names
+}
+
+tree_hash(root: string) -> (string, string) {
+    // fs.walk of a missing root walks nothing, which would hash as an
+    // empty package.
+    kind, _size, _mtime, serr = fs.file_stat(root)
+    if serr != "" || kind != fs.STAT_KIND_DIR {
+        return "", "${root} is not a directory"
+    }
+    names = files_under(root)
+    listing = ""
+    k = 0
+    while k < names.len {
+        data, n, err = fs.read_binary("${root}/${names[k]}")
+        if err != "" {
+            why = "cannot read ${names[k]}: ${err}"
+            free(names)
+            return "", why
+        }
+        h, herr = cryptography.sha256_hex(string.bytes(data)[0..n])
+        if herr != "" {
+            free(names)
+            return "", herr
+        }
+        listing = "${listing}${names[k]}\x00${h}\n"
+        k = k + 1
+    }
+    free(names)
+    total, terr = cryptography.sha256_hex(string.bytes(listing))
+    if terr != "" {
+        return "", terr
+    }
+    return "sha256-${total}", ""
+}
+
+// The one directory an archive's entries sit under (`repo-v1.2.0/`).
+single_top(stage: string) -> string {
+    names, err = fs.list_dir(stage)
+    if err != "" {
+        return ""
+    }
+    n = fs.dir_list_count(names)
+    top = ""
+    if n == 1 && fs.dir_list_kind(names, 0) == fs.STAT_KIND_DIR {
+        top = string.copy(fs.dir_list_get(names, 0))
+    }
+    fs.dir_list_free(names)
+    return top
+}
+
+// The local path a file:// URL names, or "" for any other URL. A mirror
+// can be a directory tree (AE_RELEASE_BASE_URL=file:///srv/mirror), for a
+// machine with no network.
+file_path_of(url: string) -> string {
+    if string.starts_with(url, "file://") == 0 {
+        return ""
+    }
+    path = string.substring(url, 7, string.length(url))
+    // file:///C:/mirror names C:/mirror.
+    if string.length(path) > 2 && string.char_at(path, 0) == 47 && string.char_at(path, 2) == 58 {
+        return string.substring(path, 1, string.length(path))
+    }
+    return path
+}
+
+// The body at `url`, binary-safe: (bytes, "") or ("", why not).
+get_body(url: string, seconds: int) -> (string, string) {
+    local = file_path_of(url)
+    if local != "" {
+        data, n, rerr = fs.read_binary(local)
+        if rerr != "" {
+            return "", "not found: ${rerr}"
+        }
+        return bytes.string_from_slice(string.bytes(data)[0..n]), ""
+    }
+    req = client.request("GET", url)
+    client.set_follow_redirects(req, 5)
+    client.set_timeout(req, seconds * 1s)
+    client.set_header(req, "User-Agent", "ae-fetch")
+    resp, err = client.send_request(req)
+    client.request_free(req)
+    if err != "" {
+        return "", err
+    }
+    status = client.response_status(resp)
+    if status != 200 {
+        client.response_free(resp)
+        return "", "HTTP ${status}"
+    }
+    body = bytes.string_from_slice(client.response_body_bytes(resp))
+    client.response_free(resp)
+    return body, ""
+}
+
+// The archive at `url` into `dest`, or the reason it could not be. It is
+// unpacked beside `dest` and moved there whole, so a failure leaves no
+// `dest` behind.
+fetch_into(url: string, dest: string) -> string {
+    body, err = get_body(url, 120)
+    if err != "" {
+        return err
+    }
+    tar_bytes, n, gerr = zlib.gzip_inflate(string.bytes(body))
+    if gerr != "" {
+        return "not a gzip archive: ${gerr}"
+    }
+    stage = "${dest}.stage"
+    archive = "${dest}.tar"
+    // What an interrupted run left.
+    fs.remove_tree(stage)
+    fs.delete(archive)
+    fs.mkdir_p(stage)
+    werr = fs.write_binary(archive, string.bytes(tar_bytes)[0..n])
+    if werr != "" {
+        fs.remove_tree(stage)
+        return werr
+    }
+    xerr = tar.extract(archive, stage, tar.default_extract_options())
+    fs.delete(archive)
+    if xerr != "" {
+        fs.remove_tree(stage)
+        return "cannot extract: ${xerr}"
+    }
+    top = single_top(stage)
+    if top == "" {
+        fs.remove_tree(stage)
+        return "the archive does not hold one top directory"
+    }
+    rerr = fs.rename("${stage}/${top}", dest)
+    fs.remove_tree(stage)
+    if rerr != "" {
+        return rerr
+    }
+    return ""
+}
+
+cmd_get(dest: string, info: string, first: int, argc: int) {
+    if fs.exists(dest) == 1 {
+        fail(info, "${dest} already exists")
+    }
+    tried = ""
+    i = first
+    while i < argc {
+        url = os.args_get(i)
+        err = fetch_into(url, dest)
+        if err == "" {
+            h, herr = tree_hash(dest)
+            if herr != "" {
+                fail(info, herr)
+            }
+            fs.write(info, "url ${url}\nhash ${h}\n")
+            return
+        }
+        tried = "${tried}\n  ${url}: ${err}"
+        i = i + 1
+    }
+    fail(info, "no archive could be fetched:${tried}")
+}
+
+// A host's tag list: a JSON array of objects with a "name" (GitHub,
+// GitLab, Gitea and Forgejo, a mirror's tags.json), or an object whose
+// "values" is one (Bitbucket).
+cmd_tags(info: string, url: string) {
+    body, err = get_body(url, 30)
+    if err != "" {
+        fail(info, err)
+    }
+    doc, jerr = json.parse(body)
+    if jerr != "" {
+        fail(info, "the tag list is not JSON: ${jerr}")
+    }
+    list = doc
+    values, verr = json.object_get(doc, "values")
+    if verr == "" && values != null {
+        list = values
+    }
+    out = ""
+    n = json.json_array_size(list)
+    k = 0
+    while k < n {
+        item, _ierr = json.array_get(list, k)
+        field, _ferr = json.object_get(item, "name")
+        name, nerr = json.get_string(field)
+        if nerr == "" && name != "" {
+            out = "${out}tag ${name}\n"
+        }
+        k = k + 1
+    }
+    json.free(doc)
+    fs.write(info, out)
+}
+
+main() {
+    argc = os.args_count()
+    if argc < 2 {
+        println("usage: ae-fetch get <dest> <info> <url>... | hash <dir> <info> | tags <info> <api-url>")
+        exit(2)
+    }
+    cmd = os.args_get(1)
+    if cmd == "get" && argc >= 5 {
+        cmd_get(os.args_get(2), os.args_get(3), 4, argc)
+    } else if cmd == "hash" && argc == 4 {
+        h, err = tree_hash(os.args_get(2))
+        if err != "" {
+            fail(os.args_get(3), err)
+        }
+        fs.write(os.args_get(3), "hash ${h}\n")
+    } else if cmd == "tags" && argc == 4 {
+        cmd_tags(os.args_get(2), os.args_get(3))
+    } else {
+        println("usage: ae-fetch get <dest> <info> <url>... | hash <dir> <info> | tags <info> <api-url>")
+        exit(2)
+    }
+}
