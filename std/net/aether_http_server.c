@@ -1615,6 +1615,31 @@ static void metrics_escape(char* dst, size_t cap, const char* src) {
     dst[n] = '\0';
 }
 
+/* printf onto the scrape, growing it as it goes. The scrape was a fixed 64 KB
+ * and the series that did not fit were dropped without a word, about fifty
+ * of them in (#3264). Cap-aware (#343): grown with the caps allocator, so a
+ * plugin host's memory budget bounds it, *cap tracking the exact size for
+ * the matching free. Returns 0, or -1 when the allocator refuses. */
+static int metrics_put(char** buf, size_t* cap, size_t* off, const char* fmt, ...) {
+    for (;;) {
+        va_list ap;
+        va_start(ap, fmt);
+        int wrote = vsnprintf(*buf + *off, *cap - *off, fmt, ap);
+        va_end(ap);
+        if (wrote < 0) return -1;
+        if ((size_t)wrote < *cap - *off) {
+            *off += (size_t)wrote;
+            return 0;
+        }
+        size_t want = *cap * 2;
+        while (want <= *off + (size_t)wrote) want *= 2;
+        char* grown = (char*)aether_caps_realloc(*buf, *cap, want);
+        if (!grown) return -1;
+        *buf = grown;
+        *cap = want;
+    }
+}
+
 /* Handler for the configured /metrics endpoint. Walks the
  * per-route counters and emits Prometheus text format. */
 static void metrics_handler(HttpRequest* req, HttpServerResponse* res, void* user_data) {
@@ -1626,12 +1651,9 @@ static void metrics_handler(HttpRequest* req, HttpServerResponse* res, void* use
         return;
     }
 
-    /* Build into a heap buffer; size grows with route count. 64KB
-     * suffices for hundreds of routes. Cap-aware (#343): the buffer
-     * is allocated and freed entirely within this handler, so the
-     * exact byte count (`cap`) is in scope at the matching free
-     * below — route it through the caps allocator so a plugin host's
-     * memory budget bounds the /metrics scrape allocation. */
+    /* Built into a heap buffer that grows with the series (metrics_put).
+     * Cap-aware (#343): allocated and freed entirely within this handler,
+     * so the exact byte count (`cap`) is in scope at the matching free. */
     size_t cap = 64 * 1024;
     char* buf = (char*)aether_caps_malloc(cap);
     if (!buf) {
@@ -1640,23 +1662,24 @@ static void metrics_handler(HttpRequest* req, HttpServerResponse* res, void* use
         return;
     }
     size_t off = 0;
-    off += snprintf(buf + off, cap - off,
+    buf[0] = '\0';
+    int ok = metrics_put(&buf, &cap, &off,
         "# TYPE aether_http_requests_total counter\n"
         "# TYPE aether_http_errors_total counter\n"
         "# TYPE aether_http_4xx_total counter\n"
         "# TYPE aether_http_request_duration_seconds histogram\n"
-        "# TYPE aether_http_parked_connections gauge\n");
+        "# TYPE aether_http_parked_connections gauge\n") == 0;
 
     /* Idle keep-alive connections held by the poller rather than by a worker
      * (#1663). Worth exporting because it is the number that used to be
      * capped at the worker count: a deployment can see how far past that line
      * it is running. */
-    off += snprintf(buf + off, cap - off,
+    ok = ok && metrics_put(&buf, &cap, &off,
         "aether_http_parked_connections %d\n",
-        st->server ? http_park_count((HttpParkLot*)st->server->park_lot) : 0);
+        st->server ? http_park_count((HttpParkLot*)st->server->park_lot) : 0) == 0;
 
     pthread_mutex_lock(&st->lock);
-    for (MetricsRoute* r = st->head; r; r = r->next) {
+    for (MetricsRoute* r = st->head; r && ok; r = r->next) {
         char m[64], p[256];
         metrics_escape(m, sizeof(m), r->method);
         metrics_escape(p, sizeof(p), r->path_pattern);
@@ -1670,7 +1693,7 @@ static void metrics_handler(HttpRequest* req, HttpServerResponse* res, void* use
         long long b500  = atomic_load(&r->bucket_le_500ms);
         long long b2    = atomic_load(&r->bucket_le_2s);
         long long b10   = atomic_load(&r->bucket_le_10s);
-        int wrote = snprintf(buf + off, cap - off,
+        ok = metrics_put(&buf, &cap, &off,
             "aether_http_requests_total{method=\"%s\",path=\"%s\"} %lld\n"
             "aether_http_errors_total{method=\"%s\",path=\"%s\"} %lld\n"
             "aether_http_4xx_total{method=\"%s\",path=\"%s\"} %lld\n"
@@ -1689,12 +1712,17 @@ static void metrics_handler(HttpRequest* req, HttpServerResponse* res, void* use
             m, p, b5, m, p, b25, m, p, b100, m, p, b500,
             m, p, b2, m, p, b10, m, p, total,
             m, p, (double)sum / 1e6,
-            m, p, total);
-        if (wrote < 0 || (size_t)wrote >= cap - off) break;
-        off += (size_t)wrote;
+            m, p, total) == 0;
     }
     pthread_mutex_unlock(&st->lock);
 
+    if (!ok) {
+        /* A partial scrape reads as counters that went backwards. */
+        http_response_set_status(res, 500);
+        http_response_set_body(res, "metrics: oom");
+        aether_caps_free(buf, cap);
+        return;
+    }
     http_response_set_status(res, 200);
     http_response_set_header(res, "Content-Type", "text/plain; version=0.0.4");
     http_response_set_body(res, buf);
