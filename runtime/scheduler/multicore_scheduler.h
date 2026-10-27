@@ -533,6 +533,12 @@ void scheduler_spawn_ready(ActorBase* actor);
 void aether_rebirth_abandon(void);
 /* The scheduler's part once a reborn actor is alive (wake its core). */
 void scheduler_actor_revived(ActorBase* actor);
+/* The child a supervisor's factory spawned (#2974): the first actor that
+ * comes alive on this thread between begin and end (a fresh spawn or a
+ * rebirth), or NULL. Brackets nest. */
+void  aether_actor_capture_begin(void);
+void* aether_actor_capture_end(void);
+void  aether_actor_capture_note(ActorBase* actor);
 
 // #2527: a reference that knows which actor it was taken from. The block a
 // released actor leaves goes to the next spawn of its size, which gets an id

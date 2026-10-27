@@ -3758,6 +3758,12 @@ ends too, with the same reason, unless the reason is `"normal"`. An actor
 that calls `actors.trap_exits(true)` gets a `Down` for a linked actor's death
 instead, and lives on. `actors.unlink(ref)` takes the tie away.
 
+An ended actor can be restarted under the same ref, so the refs its siblings
+and clients hold reach the new one: `std.supervise` does it, by strategy and
+within a restart budget, from factories such as `|| -> spawn(Worker())`
+(see its [guide](../std/supervise/README.md)). `actors.incarnation(ref)` says
+how many times an actor was restarted.
+
 On wasi a panic ends the whole program (the target has no way to unwind), so
 `actors.monitor`, `actors.link` and `actors.trap_exits` are refused when
 compiling for it.

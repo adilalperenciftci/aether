@@ -7,11 +7,11 @@ cannot leave the index behind. The sections after it cover the most-used
 modules in depth; for the others the index links to the module source, whose
 header comment is the authoritative description.
 
-## Module index (88 modules)
+## Module index (89 modules)
 
 | Module | Purpose | Exports | Detail |
 |---|---|---:|---|
-| `std.actors` | Process-global registry mapping names to actor references. | 6 | [guide](../std/actors/README.md) · [source](../std/actors/module.ae) |
+| `std.actors` | Name registry, death notices, links, and ending and restarting actors. | 17 | [guide](../std/actors/README.md) · [source](../std/actors/module.ae) |
 | `std.alloc` | Allocator handles the containers accept, so a structure can allocate from an arena instead of the system. | 6 | [guide](../std/alloc/README.md) · [source](../std/alloc/module.ae) |
 | `std.arena` | Bulk allocator: many allocations, released in one shot. | 7 | [guide](../std/arena/README.md) · [source](../std/arena/module.ae) |
 | `std.audio` | Audio playback: WAV and PCM loading, device control, volume; pan, pitch, looping, groups, a queue source and a headless engine for the game-engine mixer. | 46 | [guide](../std/audio/README.md) · [source](../std/audio/module.ae) |
@@ -81,6 +81,7 @@ header comment is the authoritative description.
 | `std.strarr` | Growable string array whose backing is a `string[]`, for sorting runtime-built lists. | 15 | [guide](../std/strarr/README.md) · [source](../std/strarr/module.ae) |
 | `std.strbuilder` | Amortised-O(1) string building. | 18 | [guide](../std/strbuilder/README.md) · [source](../std/strbuilder/module.ae) |
 | `std.string` | Managed strings: construction, search, slicing, case, split and join. | 100 | [full section](#strings-stdstring) |
+| `std.supervise` | Supervisors that restart dead actors in place, by strategy and within a restart budget. | 9 | [guide](../std/supervise/README.md) · [source](../std/supervise/module.ae) |
 | `std.sync` | Atomic 64-bit integer cell (load, store, add, sub, compare-and-swap) for refcounts and lock-free reclamation. | 7 | [guide](../std/sync/README.md) · [source](../std/sync/module.ae) |
 | `std.tar` | Streaming tar archives: a ustar writer, a ustar, pax and GNU reader. | 24 | [full section](#posix-ustar-archives-stdtar) |
 | `std.tcp` | TCP sockets, re-exported from `std.net`. | 38 | [guide](../std/tcp/README.md) · [source](../std/tcp/module.ae) |
@@ -4524,6 +4525,14 @@ handle_request(req: ptr, res: ptr, ud: ptr) {
 - `actors.registry_clear()` - Wipe all bindings.
 
 Models BEAM's `erlang:register` / `whereis`. The registry doesn't track actor liveness, if the actor exits, `whereis` keeps returning the stale ref until something explicitly calls `unregister`. Match BEAM's behaviour for non-link'd registrations.
+
+The rest of the module is about the end of an actor: `actors.monitor(ref)`
+asks for a `Down { ref, reason }` message when it ends, `actors.link(ref)`
+ties two actors' ends together, `actors.kill(ref)` and `actors.stop()` end
+one, and `actors.dead_sends()` counts the messages that reached a dead one.
+The [guide](../std/actors/README.md) has each, and
+[`std.supervise`](../std/supervise/README.md) builds supervisors that restart
+actors on them.
 
 **Why the module name is plural**: `actor` (singular) is a reserved keyword in Aether and can't appear as a namespace prefix. `actors.register(...)` parses; `actor.register(...)` does not. The plural also reads correctly, "the actors registry."
 

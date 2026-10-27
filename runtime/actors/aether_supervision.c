@@ -385,6 +385,7 @@ void aether_actor_trap_exits(int on) {
 // never named by generated code.
 // ---------------------------------------------------------------------------
 
+static AETHER_TLS int t_capture_depth = 0;   // the spawn capture, below
 static AETHER_TLS ActorBase* t_rebirth_target = NULL;
 static AETHER_TLS ActorBase* t_reborn = NULL;
 
@@ -440,6 +441,7 @@ ActorBase* aether_rebirth_take(void (*step)(void*), size_t size) {
 }
 
 void scheduler_spawn_ready(ActorBase* a) {
+    if (unlikely(t_capture_depth > 0) && a) aether_actor_capture_note(a);
     if (likely(t_reborn != a) || !a) return;   // a fresh spawn: alive already
     t_reborn = NULL;
     // Its state is written: the release makes it visible to whoever reads
@@ -489,4 +491,34 @@ void aether_rebirth_abandon(void) {
 
 int aether_actor_incarnation(void* ref) {
     return ref ? atomic_load_explicit(&((ActorBase*)ref)->incarnation, memory_order_acquire) : 0;
+}
+
+// ---------------------------------------------------------------------------
+// The child a factory spawned (#2974)
+//
+// A supervisor's child spec is a closure that spawns the child (and may
+// configure it, or spawn helpers first). The supervisor brackets the call:
+// the first actor that comes alive on this thread inside the bracket
+// (scheduler_spawn_ready, a fresh spawn or a rebirth) is the child.
+// Brackets nest, a factory that starts a supervisor of its own included.
+// ---------------------------------------------------------------------------
+
+#define AETHER_CAPTURE_DEPTH 16
+// t_capture_depth is defined with the rebirth claim, above.
+static AETHER_TLS ActorBase* t_captured[AETHER_CAPTURE_DEPTH];
+
+void aether_actor_capture_begin(void) {
+    if (t_capture_depth < AETHER_CAPTURE_DEPTH) t_captured[t_capture_depth] = NULL;
+    t_capture_depth++;
+}
+
+void* aether_actor_capture_end(void) {
+    if (t_capture_depth <= 0) return NULL;
+    t_capture_depth--;
+    return t_capture_depth < AETHER_CAPTURE_DEPTH ? t_captured[t_capture_depth] : NULL;
+}
+
+void aether_actor_capture_note(ActorBase* a) {
+    int top = t_capture_depth - 1;
+    if (top >= 0 && top < AETHER_CAPTURE_DEPTH && !t_captured[top]) t_captured[top] = a;
 }

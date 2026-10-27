@@ -85,6 +85,7 @@
     <li><a href="strarr.html">strarr</a></li>
     <li><a href="strbuilder.html">strbuilder</a></li>
     <li><a href="string.html">string</a></li>
+    <li><a href="supervise.html">supervise</a></li>
     <li><a href="sync.html">sync</a></li>
     <li><a href="tar.html">tar</a></li>
     <li><a href="tcp.html">tcp</a></li>
@@ -460,6 +461,11 @@
       <h3>string</h3>
       <p>std.string - String Module Import with: import std.string Building strings incrementally? Do NOT loop `d = &quot;${d}${piece}&quot;` / `string.concat(d, piece)` — each iteration re-copies the whole prefix, so the loop is O(n²) in total bytes (issue #1346).</p>
       <span class="count">100 exports</span>
+    </a>
+    <a href="supervise.html" class="module-card">
+      <h3>supervise</h3>
+      <p>std.supervise: supervisors that restart actors (#2974).</p>
+      <span class="count">9 exports</span>
     </a>
     <a href="sync.html" class="module-card">
       <h3>sync</h3>
@@ -2583,6 +2589,15 @@
       <li class="function-item" data-name="keep"><a href="string.html#keep"><span class="fn-name">keep</span><span class="fn-module">string</span></a></li>
       <li class="function-item" data-name="release_kept"><a href="string.html#release_kept"><span class="fn-name">release_kept</span><span class="fn-module">string</span></a></li>
       <li class="function-item" data-name="from_ptr"><a href="string.html#from_ptr"><span class="fn-name">from_ptr</span><span class="fn-module">string</span></a></li>
+      <li class="function-item" data-name="start"><a href="supervise.html#start"><span class="fn-name">start</span><span class="fn-module">supervise</span></a></li>
+      <li class="function-item" data-name="child"><a href="supervise.html#child"><span class="fn-name">child</span><span class="fn-module">supervise</span></a></li>
+      <li class="function-item" data-name="child_restart"><a href="supervise.html#child_restart"><span class="fn-name">child_restart</span><span class="fn-module">supervise</span></a></li>
+      <li class="function-item" data-name="which"><a href="supervise.html#which"><span class="fn-name">which</span><span class="fn-module">supervise</span></a></li>
+      <li class="function-item" data-name="restarts"><a href="supervise.html#restarts"><span class="fn-name">restarts</span><span class="fn-module">supervise</span></a></li>
+      <li class="function-item" data-name="stop"><a href="supervise.html#stop"><span class="fn-name">stop</span><span class="fn-module">supervise</span></a></li>
+      <li class="function-item" data-name="SuperviseChild"><a href="supervise.html#SuperviseChild"><span class="fn-name">SuperviseChild</span><span class="fn-module">supervise</span></a></li>
+      <li class="function-item" data-name="SuperviseSpec"><a href="supervise.html#SuperviseSpec"><span class="fn-name">SuperviseSpec</span><span class="fn-module">supervise</span></a></li>
+      <li class="function-item" data-name="MAX_CHILDREN"><a href="supervise.html#MAX_CHILDREN"><span class="fn-name">MAX_CHILDREN</span><span class="fn-module">supervise</span></a></li>
       <li class="function-item" data-name="atomic_new"><a href="sync.html#atomic_new"><span class="fn-name">atomic_new</span><span class="fn-module">sync</span></a></li>
       <li class="function-item" data-name="atomic_load"><a href="sync.html#atomic_load"><span class="fn-name">atomic_load</span><span class="fn-module">sync</span></a></li>
       <li class="function-item" data-name="atomic_store"><a href="sync.html#atomic_store"><span class="fn-name">atomic_store</span><span class="fn-module">sync</span></a></li>

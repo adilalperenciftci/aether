@@ -433,6 +433,10 @@ static Symbol* own_extern_symbol(Symbol* found, const char* merged_from, const c
 static int is_program_own_decl(const Symbol* s) {
     const ASTNode* n = s ? s->node : NULL;
     if (!n || n->origin_module || n->is_imported) return 0;
+    /* The compiler's own `message Down` (#2974) is every file's: a module's
+     * Down arm reads its field types too. */
+    if (n->type == AST_MESSAGE_DEFINITION && n->annotation && strcmp(n->annotation, "system") == 0)
+        return 0;
     switch (n->type) {
         case AST_FUNCTION_DEFINITION: case AST_BUILDER_FUNCTION:
         case AST_STRUCT_DEFINITION: case AST_SUM_TYPE_DEF: case AST_ENUM_DEFINITION:

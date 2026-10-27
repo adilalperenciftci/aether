@@ -260,6 +260,12 @@ No message sent before the restart reaches the new incarnation. A counted send r
 
 `tests/runtime/test_actor_rebirth.c` restarts an actor that panics every 150 messages while three sender actors and the main thread send to it: each message is handled at most once and in its sender's order, handled plus dropped is what was sent, nothing reaches a half-made incarnation, and nothing a sender had finished sending when the child was claimed reaches the new one.
 
+### Supervisors
+
+`std.supervise` is an ordinary actor on these pieces (`std/supervise/module.ae`). `supervise.start` runs each child's factory in order before it returns, inside a spawn capture (`aether_actor_capture_begin` and `aether_actor_capture_end`: the first actor that comes alive between the two, through `scheduler_spawn_ready`, is the child; captures nest), so every child's ref is known at once. The supervisor then traps exits and links each child, so a child's death reaches it as a `Down`, and its own death, by a panic or a kill, takes the children with it.
+
+At a child's `Down` it checks the child's restart kind (`"permanent"`, `"transient"`, `"temporary"`) and its budget (the restarts made within the window, kept in a ring of times), then takes the strategy's set: the child alone (`one_for_one`), every child (`one_for_all`) or the child and those started after it (`rest_for_one`). The others in the set are killed, newest first, and the set is queued in start order. The queue is restarted from a message to itself, one child at a time: a child it killed waits for its own `Down` (so its death is finalized before the claim), and a claim that says "not yet" is tried again from a later message, so the supervisor never blocks its core. Each restart runs the factory between `rebirth_begin` and `rebirth_end`, in the same capture, and links the child again. Past its budget, or at a restart that fails, it kills its children, newest first, and panics with the reason, so its own watchers get a `Down` saying why, and a supervisor it is linked to restarts it in turn.
+
 ## Actor Timeouts
 
 The `after` clause on a `receive` block fires a handler if no message arrives within a given number of milliseconds:

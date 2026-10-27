@@ -1,0 +1,173 @@
+// Supervisors restart actors in place (#2974).
+//
+// std.supervise starts children from factories, links them, and restarts a
+// child that dies under the ref its siblings and clients already hold, by its
+// strategy; past its restart budget it gives up, and its own watchers get a
+// Down saying so. Without it a dead actor stayed dead and every ref to it
+// went nowhere.
+
+import std.actors
+import std.supervise
+
+message Bump {}
+message Boom {}
+message Halt {}
+message Label { text: string }
+message Watch { who: actor_ref }
+message Count {}
+message GetLabel {}
+
+extern exit(code: int)
+
+actor Worker {
+    state n = 0
+    state label = ""
+    receive {
+        Bump() -> { n = n + 1 }
+        Boom() -> { panic("worker blew up") }
+        Halt() -> { actors.stop() }
+        Label(text) -> { label = text }
+        Count() -> { reply n }
+        GetLabel() -> { reply label }
+    }
+}
+
+actor Watcher {
+    state downs = 0
+    state reason = ""
+    receive {
+        Watch(who) -> { _id = actors.monitor(who) }
+        Down(ref, reason: why) -> {
+            downs = downs + 1
+            reason = why
+        }
+    }
+}
+
+check(label: string, ok: bool) -> int {
+    if !ok {
+        println("  FAIL ${label}")
+        return 1
+    }
+    println("  PASS ${label}")
+    return 0
+}
+
+main() {
+    println("=== supervisors restart actors in place (#2974) ===")
+    fails = 0
+
+    // one_for_one: the dead child alone, under its ref; the factory's
+    // configuration runs again.
+    sup = supervise.start(strategy: "one_for_one", max_restarts: 3, within_secs: 60) {
+        supervise.child("a", || {
+                w = spawn(Worker())
+                w ! Label { text: "configured" }
+            })
+        supervise.child("b", || -> spawn(Worker()))
+    }
+    wait_for_idle()
+    a = supervise.which(sup, "a")
+    b = supervise.which(sup, "b")
+    a ! Bump {}
+    b ! Bump {}
+    wait_for_idle()
+    dead0 = actors.dead_sends()
+    a ! Boom {}
+    a ! Bump {} // queued behind the panic: dropped, counted
+    wait_for_idle()
+    a ! Bump {} // after the restart: the new incarnation
+    a ! Bump {}
+    wait_for_idle()
+    wa = supervise.which(sup, "a")
+    int an = a ? Count {}
+    al = a ? GetLabel {}
+    int bn = b ? Count {}
+    fails = fails + check("the restart keeps the ref", wa == a)
+    fails = fails + check("one restart, got ${supervise.restarts(sup)}", supervise.restarts(sup) == 1)
+    fails = fails + check("a is incarnation 1, got ${actors.incarnation(a)}", actors.incarnation(a) == 1)
+    fails = fails + check("the client's sends reach it, count 2, got ${an}", an == 2)
+    fails = fails + check("its factory configured it again, got \"${al}\"", al == "configured")
+    fails = fails + check("what was queued at the death is counted, got ${actors.dead_sends() - dead0}",
+        actors.dead_sends() - dead0 == 1)
+    fails = fails + check("the sibling is untouched: incarnation 0, count 1, got ${actors.incarnation(b)}, ${bn}",
+        actors.incarnation(b) == 0 && bn == 1)
+    fails = fails + check("a name no child has: null", supervise.which(sup, "nobody") == null)
+
+    // one_for_all: every child restarts.
+    all = supervise.start(strategy: "one_for_all", max_restarts: 3, within_secs: 60) {
+        supervise.child("x", || -> spawn(Worker()))
+        supervise.child("y", || -> spawn(Worker()))
+        supervise.child("z", || -> spawn(Worker()))
+    }
+    wait_for_idle()
+    y = supervise.which(all, "y")
+    y ! Boom {}
+    wait_for_idle()
+    x = supervise.which(all, "x")
+    z = supervise.which(all, "z")
+    fails = fails + check("one_for_all: each child is incarnation 1, got ${actors.incarnation(x)} ${actors.incarnation(y)} ${actors.incarnation(z)}",
+        actors.incarnation(x) == 1 && actors.incarnation(y) == 1 && actors.incarnation(z) == 1)
+
+    // rest_for_one: the dead child and the ones started after it.
+    rest = supervise.start(strategy: "rest_for_one", max_restarts: 3, within_secs: 60) {
+        supervise.child("p", || -> spawn(Worker()))
+        supervise.child("q", || -> spawn(Worker()))
+        supervise.child("r", || -> spawn(Worker()))
+    }
+    wait_for_idle()
+    q = supervise.which(rest, "q")
+    q ! Boom {}
+    wait_for_idle()
+    p = supervise.which(rest, "p")
+    r = supervise.which(rest, "r")
+    fails = fails + check("rest_for_one: p 0, q 1, r 1, got ${actors.incarnation(p)} ${actors.incarnation(q)} ${actors.incarnation(r)}",
+        actors.incarnation(p) == 0 && actors.incarnation(q) == 1 && actors.incarnation(r) == 1)
+
+    // Restart kinds: a transient child that stops normally stays stopped,
+    // a temporary one is never restarted.
+    kinds = supervise.start(strategy: "one_for_one", max_restarts: 3, within_secs: 60) {
+        supervise.child_restart("t", || -> spawn(Worker()), "transient")
+        supervise.child_restart("u", || -> spawn(Worker()), "temporary")
+    }
+    wait_for_idle()
+    t = supervise.which(kinds, "t")
+    u = supervise.which(kinds, "u")
+    t ! Halt {}
+    u ! Boom {}
+    wait_for_idle()
+    fails = fails + check("transient and temporary: no restart, got ${supervise.restarts(kinds)}",
+        supervise.restarts(kinds) == 0)
+
+    // The budget: more than 2 restarts within the window and the supervisor
+    // gives up; its watcher gets a Down that says so.
+    fragile = supervise.start(strategy: "one_for_one", max_restarts: 2, within_secs: 60) {
+        supervise.child("f", || -> spawn(Worker()))
+    }
+    wait_for_idle()
+    watcher = spawn(Watcher())
+    watcher ! Watch { who: fragile }
+    wait_for_idle()
+    f = supervise.which(fragile, "f")
+    k = 0
+    while k < 3 {
+        f ! Boom {}
+        wait_for_idle()
+        k = k + 1
+    }
+    fails = fails + check("two restarts were made, got ${supervise.restarts(fragile)}", supervise.restarts(fragile) == 2)
+    fails = fails + check("the third death ends the supervisor: one Down, got ${watcher.downs}", watcher.downs == 1)
+    fails = fails + check("whose reason says it gave up, got \"${watcher.reason}\"",
+        watcher.reason == "supervisor gave up: more than 2 restarts within 60 s (f: worker blew up)")
+    deadf = actors.dead_sends()
+    f ! Bump {}
+    wait_for_idle()
+    fails = fails + check("and its child stays ended: a send to it is dropped, got ${actors.dead_sends() - deadf}",
+        actors.dead_sends() - deadf == 1)
+
+    if fails > 0 {
+        println("FAIL: ${fails} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}
