@@ -63,7 +63,7 @@ extern xml_event_attr_name(p: ptr, i: int) -> string
 extern xml_event_attr_value(p: ptr, i: int) -> string
 extern xml_event_attr_str(p: ptr, name: string) -> string
 extern xml_parser_error(p: ptr) -> string
-extern xml_parser_free(p: ptr)
+extern xml_parser_free(p: @frees ptr)
 
 extern xml_builder_new() -> ptr
 extern xml_builder_declaration(b: ptr)
@@ -73,7 +73,7 @@ extern xml_builder_text(b: ptr, text: string)
 extern xml_builder_end(b: ptr, name: string)
 extern xml_builder_element(b: ptr, name: string, text: string)
 extern xml_builder_finish(b: ptr) -> string @heap
-extern xml_builder_free(b: ptr)
+extern xml_builder_free(b: @frees ptr)
 
 extern xml_escape(s: string) -> string @heap
 
@@ -133,7 +133,7 @@ error(p: ptr) -> string {
 }
 
 // Release a reader.
-free(p: ptr) {
+free(p: @frees ptr) {
     xml_parser_free(p)
 }
 

@@ -682,7 +682,7 @@ writer_new() -> ptr {
 }
 
 // Release a writer and every entry it holds. Safe on a null pointer.
-writer_free(wp: ptr) {
+writer_free(wp: @frees ptr) {
     if wp == null { return }
     w = wp as *ZipWriter
     if w.entries != null {

@@ -8,7 +8,7 @@ extern aether_tracking_wrap(inner: ptr) -> ptr
 extern aether_tracking_count(t: ptr) -> int
 extern aether_tracking_bytes(t: ptr) -> long
 extern aether_tracking_report(t: ptr) -> int
-extern aether_tracking_destroy(t: ptr)
+extern aether_tracking_destroy(t: @frees ptr)
 
 wrap(inner: ptr) -> ptr {
     return aether_tracking_wrap(inner)
@@ -26,6 +26,6 @@ report(t: ptr) -> int {
     return aether_tracking_report(t)
 }
 
-destroy(t: ptr) {
+destroy(t: @frees ptr) {
     aether_tracking_destroy(t)
 }

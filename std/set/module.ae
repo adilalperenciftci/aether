@@ -38,9 +38,9 @@ extern aether_set_has(set: ptr, item: @aether string) -> int
 extern aether_set_remove(set: ptr, item: @aether string)
 extern aether_set_size(set: ptr) -> int
 extern aether_set_clear(set: ptr)
-extern aether_set_free(set: ptr)
+extern aether_set_free(set: @frees ptr)
 extern aether_set_items_raw(set: ptr) -> ptr
-extern aether_set_items_free(items: ptr)
+extern aether_set_items_free(items: @frees ptr)
 // aether_set_items_raw returns the same MapKeys snapshot map.keys does, so
 // the read side is literally the same two functions (#1724).
 extern map_keys_size_raw(items: ptr) -> int
@@ -104,7 +104,7 @@ clear(set: ptr) {
 }
 
 // Release the set. Items were copied in, so nothing else needs freeing.
-free(set: ptr) {
+free(set: @frees ptr) {
     aether_set_free(set)
 }
 
@@ -123,7 +123,7 @@ items(set: ptr) -> {
 }
 
 // Release a snapshot returned by `set.items`.
-items_free(items: ptr) {
+items_free(items: @frees ptr) {
     aether_set_items_free(items)
 }
 

@@ -12,6 +12,7 @@
 #include "missing_return.h"
 #include "slice_escape.h"
 #include "actor_protocol.h"
+#include "free_check.h"
 #include "quote.h"
 
 /* Defined with typecheck_program below; infer_type needs it far earlier. */
@@ -7725,6 +7726,9 @@ int typecheck_program(ASTNode* program) {
     /* #385: sends through references that follow a protocol, in the order
      * it allows, asked of the checked program. */
     if (error_count == 0) error_count += check_actor_protocols(program);
+    /* #1300: a value used or freed after it was freed, a view after its
+     * storage went, and the `@frees` and `@moves` declarations. */
+    if (error_count == 0) error_count += check_frees(program);
 
     // #481: validate effect tags over the whole-program call graph.
     check_effect_tags(program);
@@ -9687,6 +9691,33 @@ static int call_arg_mode(ASTNode* program, ASTNode* call, int i) {
     return is_into_param(p) ? FN_MODE_INTO : FN_MODE_BORROWED;
 }
 
+/* #1300: what the callee of `call` does to the memory its argument `i`
+ * points at: TC_ARG_FREES (C's `free`, `heap.free`, a `@frees` parameter),
+ * TC_ARG_MOVES (a `@moves` parameter: the storage may move) or 0; *into
+ * is set when the result points into it (an `@into` parameter). A call
+ * through a value says nothing of it. */
+int tc_call_arg_effect(ASTNode* program, ASTNode* call, int i, int* into) {
+    if (into) *into = 0;
+    if (!call || call->type != AST_FUNCTION_CALL || !call->value || call_value_type(call)) return 0;
+    ASTNode* decl = call_callee_decl(program, call);
+    if (!decl) {
+        /* The builtins: C's free, and heap.new's release. */
+        if (i == 0 && (!strcmp(call->value, "free") || !strcmp(call->value, "heap.free")))
+            return TC_ARG_FREES;
+        return 0;
+    }
+    ASTNode* p = call_decl_param(decl, call, i);
+    if (!p) return 0;
+    if (into) *into = is_into_param(p);
+    /* An extern that is C's free, under its name or another. */
+    if (decl->type == AST_EXTERN_FUNCTION && i == 0 && decl->value &&
+        (!strcmp(decl->value, "free") || binds_symbol(decl->annotation, "free")))
+        return TC_ARG_FREES;
+    if (param_has_mode(p, "frees_param")) return TC_ARG_FREES;
+    if (param_has_mode(p, "moves_param")) return TC_ARG_MOVES;
+    return 0;
+}
+
 /* The declared result of the callee of `call`, or NULL when not known. */
 static Type* call_result_decl_type(ASTNode* program, ASTNode* call) {
     Type* vt = call_value_type(call);
@@ -9710,6 +9741,10 @@ static Carried carries_borrowed_ptr(ASTNode* e, const KeepSet* s) {
             return keep_set_lookup(s, e->value);
         case AST_PTR_AS_STRUCT_CAST: case AST_PTR_AS_ARRAY_CAST: case AST_PTR_AS_FN_CAST:
         case AST_VALUE_CAST:
+        /* #3294: a slice of it (`(p as byte[])[0..n]`) views the memory it
+         * points at, as a cast does, and so do the coercions between a
+         * slice and a pointer. */
+        case AST_SLICE_EXPR: case AST_SLICE_TO_PTR: case AST_SLICE_FROM_ARRAY:
             return e->child_count > 0 ? carries_borrowed_ptr(e->children[0], s) : none;
         case AST_IF_EXPRESSION: {
             if (e->child_count < 3) return none;
@@ -11065,7 +11100,12 @@ static int type_can_hold_ptr_decl(ASTNode* program, Type* t, int depth) {
     switch (t->kind) {
         case TYPE_PTR: case TYPE_FUNCTION: case TYPE_UNKNOWN: case TYPE_WILDCARD:
             return 1;
-        case TYPE_OPTIONAL: case TYPE_ARRAY: case TYPE_ISOLATED:
+        case TYPE_ARRAY:
+            /* A slice is a pointer and a length (#3294); a fixed-size array
+             * holds its elements in place. */
+            if (!type_is_sized_array(t)) return 1;
+            return type_can_hold_ptr_decl(program, t->element_type, depth + 1);
+        case TYPE_OPTIONAL: case TYPE_ISOLATED:
             return type_can_hold_ptr_decl(program, t->element_type, depth + 1);
         case TYPE_TUPLE: case TYPE_SUM:
             for (int i = 0; i < t->tuple_count; i++)
@@ -11119,8 +11159,38 @@ static void check_param_modes(ASTNode* program, ASTNode* decl) {
             p->type != AST_CLOSURE_PARAM)
             continue;
         int keep = is_keep_param(p), into = is_into_param(p);
-        if (!keep && !into) continue;
         char msg[320];
+        /* #1300: `@frees` and `@moves` say what a call does to the memory
+         * a pointer, a `*T` or a slice parameter points at. */
+        int frees = param_has_mode(p, "frees_param"), moves = param_has_mode(p, "moves_param");
+        if (frees || moves) {
+            const char* mode2 = frees ? "frees" : "moves";
+            Type* pt = p->node_type;
+            int pointer = pt && (pt->kind == TYPE_PTR || pt->kind == TYPE_ARRAY);
+            const char* other = (frees && moves) ? "moves"
+                                : keep ? "keep" : into ? "into"
+                                : (is_extern && param_has_mode(p, "retain_param")) ? "retain"
+                                : (is_extern && param_has_mode(p, "holder_param")) ? "holds"
+                                : (frees && is_extern && param_has_mode(p, "noescape_param")) ? "noescape"
+                                                                                               : NULL;
+            if (!pointer) {
+                snprintf(msg, sizeof(msg),
+                         "`@%s` applies to a pointer or slice parameter; '%s' is %s", mode2,
+                         p->value, with_article(type_spelled(pt)));
+                type_error_code_hint(msg, "drop it: only memory a parameter points at is freed or moved",
+                                     p->line, p->column, AETHER_ERR_FREES_MODE);
+            } else if (other) {
+                snprintf(msg, sizeof(msg), "'%s' is declared both `@%s` and `@%s`", p->value, mode2,
+                         other);
+                type_error_code_hint(msg,
+                                     frees ? "a function that frees what it is given neither keeps "
+                                             "it nor hands it on: declare `@frees` alone"
+                                           : "declare one",
+                                     p->line, p->column, AETHER_ERR_FREES_MODE);
+            }
+            continue;
+        }
+        if (!keep && !into) continue;
         const char* mode = into ? "into" : "keep";
         const char* other = (into && keep) ? "keep"
                             : (is_extern && param_has_mode(p, "retain_param")) ? "retain"

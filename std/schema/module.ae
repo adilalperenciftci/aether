@@ -1279,7 +1279,7 @@ to_json_schema(schema_ptr: ptr) -> string {
 // Cleanup
 // ---------------------------------------------------------------------------
 
-schema_free(schema_ptr: ptr) {
+schema_free(schema_ptr: @frees ptr) {
     if schema_ptr == null {
         return
     }
@@ -1318,13 +1318,13 @@ fn field_free(f: *Field) {
 // The values map now OWNS each stored value (parse stores coerced/transformed/
 // defaulted strings via map_put_string_owned). map_free reclaims both the spine
 // and every owned value.
-values_free(values: ptr) {
+values_free(values: @frees ptr) {
     if values != null {
         map_free(values)
     }
 }
 
-errors_free(errors: ptr) {
+errors_free(errors: @frees ptr) {
     if errors == null {
         return
     }

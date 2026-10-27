@@ -27,7 +27,7 @@ exports(
 
 // ---- raw externs (std/intmap/aether_intmap.c) ----
 extern aether_intmap_new(capacity_hint: int) -> ptr
-extern aether_intmap_free(m: ptr)
+extern aether_intmap_free(m: @frees ptr)
 extern aether_intmap_put(m: ptr, key: long, value: long) -> int
 extern aether_intmap_get(m: ptr, key: long, missing: long) -> long
 extern aether_intmap_has(m: ptr, key: long) -> int
@@ -46,7 +46,7 @@ new(capacity_hint: int) -> ptr {
     return aether_intmap_new(capacity_hint)
 }
 
-free(m: ptr) {
+free(m: @frees ptr) {
     aether_intmap_free(m)
 }
 

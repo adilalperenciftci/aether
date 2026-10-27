@@ -1522,9 +1522,16 @@ static void parse_param_modes(Parser* parser, char** annotation) {
            peek_ahead(parser, 1) && peek_ahead(parser, 1)->type == TOKEN_IDENTIFIER &&
            peek_ahead(parser, 1)->value &&
            (strcmp(peek_ahead(parser, 1)->value, "keep") == 0 ||
-            strcmp(peek_ahead(parser, 1)->value, "into") == 0)) {
-        const char* marker = strcmp(peek_ahead(parser, 1)->value, "keep") == 0 ? "keep_param"
-                                                                               : "into_param";
+            strcmp(peek_ahead(parser, 1)->value, "into") == 0 ||
+            strcmp(peek_ahead(parser, 1)->value, "frees") == 0 ||
+            strcmp(peek_ahead(parser, 1)->value, "moves") == 0)) {
+        /* #1300: `@frees` (the function frees what it is given) and
+         * `@moves` (it may move the storage the argument holds). */
+        const char* word = peek_ahead(parser, 1)->value;
+        const char* marker = strcmp(word, "keep") == 0    ? "keep_param"
+                             : strcmp(word, "into") == 0  ? "into_param"
+                             : strcmp(word, "frees") == 0 ? "frees_param"
+                                                          : "moves_param";
         advance_token(parser);
         advance_token(parser);
         *annotation = annotation_add_marker(*annotation, marker);
@@ -6202,12 +6209,16 @@ static void parse_extern_param_attrs_and_type(Parser* parser, ASTNode* param) {
                 tag = "keep_param";
             } else if (strcmp(attr->value, "holds") == 0) {
                 tag = "holder_param";
+            } else if (strcmp(attr->value, "frees") == 0) {
+                tag = "frees_param";   /* #1300 */
+            } else if (strcmp(attr->value, "moves") == 0) {
+                tag = "moves_param";   /* #1300 */
             }
             if (tag) advance_token(parser);
         }
         if (!tag) {
             parser_error(parser, "unknown extern-param attribute (expected @aether, @retain, "
-                                 "@noescape, @into, @keep or @holds)");
+                                 "@noescape, @into, @keep, @holds, @frees or @moves)");
             break;
         }
         /* Append to the comma-separated set, deduping. */

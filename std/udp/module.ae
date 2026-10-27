@@ -42,7 +42,7 @@ extern udp_set_broadcast_raw(sock: ptr, on: int) -> int
 extern udp_resolve_raw(host: string, port: int) -> ptr
 extern udp_addr_new() -> ptr
 extern udp_addr_clone_raw(addr: ptr) -> ptr
-extern udp_addr_free(addr: ptr) -> int
+extern udp_addr_free(addr: @frees ptr) -> int
 extern udp_addr_host_raw(addr: ptr) -> string @heap
 extern udp_addr_port_raw(addr: ptr) -> int
 extern udp_addr_equal_raw(a: ptr, b: ptr) -> int
@@ -140,7 +140,7 @@ addr_clone(addr: ptr) -> ptr {
 }
 
 // Release an address. -1 for null.
-addr_free(addr: ptr) -> int {
+addr_free(addr: @frees ptr) -> int {
     return udp_addr_free(addr)
 }
 

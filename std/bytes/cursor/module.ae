@@ -74,7 +74,7 @@ extern bytes_cursor_seek(c: ptr, pos: int)
 
 // Free the cursor struct only — NOT the borrowed AetherBytes.
 // Idempotent on null.
-extern bytes_cursor_free(c: ptr)
+extern bytes_cursor_free(c: @frees ptr)
 // A cursor over `len` bytes of raw memory (a slice's backing). Borrows it.
 extern bytes_cursor_new_from_ptr(data: ptr, len: int) -> ptr
 // The address of the next `n` bytes, advancing past them, without copying.
@@ -198,6 +198,6 @@ seek(c: ptr, pos: int) {
 }
 
 // Free the cursor struct only (NOT the borrowed AetherBytes).
-free(c: ptr) {
+free(c: @frees ptr) {
     bytes_cursor_free(c)
 }

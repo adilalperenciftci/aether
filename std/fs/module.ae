@@ -353,7 +353,7 @@ extern dir_list_get(list: ptr, index: int) -> string
 // socket / device). 0 = unknown: the filesystem didn't report a type
 // (rare) — stat that entry to resolve it.
 extern dir_list_kind(list: ptr, index: int) -> int
-extern dir_list_free(list: ptr)
+extern dir_list_free(list: @frees ptr)
 
 // Path utilities - pure functions, never fail
 extern path_join(path1: string, path2: string) -> string @heap

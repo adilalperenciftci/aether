@@ -82,7 +82,7 @@ extern http_request_set_stream_raw(req: ptr, on: int) -> int
 extern http_request_use_env_proxy_raw(req: ptr, on: int) -> int
 extern http_request_use_http_proxy_raw(req: ptr, proxy_url: string) -> int
 extern http_request_ignore_http_proxy_raw(req: ptr) -> int
-extern http_request_free_raw(req: ptr)
+extern http_request_free_raw(req: @frees ptr)
 extern http_send_raw(req: ptr) -> ptr
 
 extern http_response_status(response: ptr) -> int
@@ -95,7 +95,7 @@ extern http_response_error(response: ptr) -> string
 extern http_response_redirect_error_raw(response: ptr) -> string
 extern http_response_header_raw(response: ptr, name: string) -> string
 extern http_response_effective_url_raw(response: ptr) -> string
-extern http_response_free(response: ptr)
+extern http_response_free(response: @frees ptr)
 
 // String helpers for the wrappers below.
 extern string_concat(a: string, b: string) -> string @heap
@@ -246,7 +246,7 @@ ignore_http_proxy(req: ptr) -> string {
 }
 
 // Free the request. No-op on null. Safe to call even after send().
-request_free(req: ptr) { http_request_free_raw(req) }
+request_free(req: @frees ptr) { http_request_free_raw(req) }
 
 // Send the configured request and wait for the response. Returns
 // (resp, "") on success — the caller MUST free the response with
@@ -367,7 +367,7 @@ response_headers(resp: ptr) -> string { return http_response_headers(resp) }
 response_url(resp: ptr) -> string { return http_response_effective_url_raw(resp) }
 
 // Free the response. No-op on null.
-response_free(resp: ptr) { http_response_free(resp) }
+response_free(resp: @frees ptr) { http_response_free(resp) }
 
 // =================================================================
 // v2.1 sugar wrappers — pure-Aether composition over the v2 builder.

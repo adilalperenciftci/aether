@@ -186,7 +186,10 @@ main() {
             gen = gen + 1
         }
         final = snapshot.load(cell)
-        if value_of(final) != 5 {
+        // Read before the drain frees it: the FAIL line below reported a
+        // freed snapshot (E0903, #1300).
+        final_value = value_of(final)
+        if final_value != 5 {
             ok_all = 0
         }
         // Drain: free the still-deferred snapshot, the live snapshot,
@@ -200,7 +203,7 @@ main() {
             println("  [5] PASS deferred-reclamation CAS loop (5 publishes)")
             passed = passed + 1
         } else {
-            println("  [5] FAIL: final snapshot = ${value_of(final)}, want 5")
+            println("  [5] FAIL: final snapshot = ${final_value}, want 5")
             failed = failed + 1
         }
     }

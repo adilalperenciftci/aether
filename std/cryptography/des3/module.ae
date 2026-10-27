@@ -453,7 +453,7 @@ new_encryptor(key: byte[]) -> ptr {
 new_decryptor(key: byte[]) -> ptr {
     return new_ctx(key, 0)
 }
-free(ctx: ptr) {
+free(ctx: @frees ptr) {
     if ctx == null { return }
     libc_free(ctx)
 }

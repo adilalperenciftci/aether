@@ -67,7 +67,7 @@ key_from_components(n: @keep ptr, e: @keep ptr, d: @keep ptr) -> ptr {
     return k
 }
 
-key_free(k: ptr) {
+key_free(k: @frees ptr) {
     if k == null { return }
     kk = k as *RsaKey
     if kk.n != null { bignum.free(kk.n) }

@@ -111,7 +111,7 @@ from_be32(b: ptr) -> ptr {
 // ---- Jacobian point (X:Y:Z) ----
 struct EcPt { x: ptr y: ptr z: ptr }
 pt_new(x: @keep ptr, y: @keep ptr, z: @keep ptr) -> *EcPt { q = malloc(sizeof(EcPt)) as *EcPt; q.x = x; q.y = y; q.z = z; return q }
-pt_free(q: *EcPt) { bignum.free(q.x); bignum.free(q.y); bignum.free(q.z); libc_free(q) }
+pt_free(q: @frees *EcPt) { bignum.free(q.x); bignum.free(q.y); bignum.free(q.z); libc_free(q) }
 
 // Point at infinity: Z = 0.
 pt_infinity() -> *EcPt { return pt_new(bignum.from_int(1), bignum.from_int(1), bignum.from_int(0)) }

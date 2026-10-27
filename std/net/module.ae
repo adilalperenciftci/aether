@@ -75,7 +75,7 @@ extern http_get_raw(url: string) -> ptr
 extern http_post_raw(url: string, body: string, content_type: string) -> ptr
 extern http_put_raw(url: string, body: string, content_type: string) -> ptr
 extern http_delete_raw(url: string) -> ptr
-extern http_response_free(response: ptr)
+extern http_response_free(response: @frees ptr)
 extern http_response_status_code(response: ptr) -> int
 extern http_response_body_str(response: ptr) -> string
 extern http_response_headers_str(response: ptr) -> string
@@ -96,7 +96,7 @@ extern http_server_bind_raw(server: ptr, host: string, port: int) -> int
 extern http_server_port(server: ptr) -> int
 extern http_server_start_raw(server: ptr) -> int
 extern http_server_stop(server: ptr)
-extern http_server_free(server: ptr)
+extern http_server_free(server: @frees ptr)
 
 // HTTP Server - routing
 extern http_server_add_route(server: ptr, method: string, path: string, handler: @retain ptr, user_data: ptr)
@@ -112,7 +112,7 @@ extern http_server_use_middleware(server: ptr, middleware: ptr, user_data: ptr)
 extern http_get_header(req: ptr, name: string) -> string
 extern http_get_query_param(req: ptr, name: string) -> string
 extern http_get_path_param(req: ptr, name: string) -> string
-extern http_request_free(req: ptr)
+extern http_request_free(req: @frees ptr)
 
 // HTTP Response - building
 extern http_response_create() -> ptr
@@ -128,7 +128,7 @@ extern http_response_set_body(res: ptr, body: string)
 // symbol with different parameter types are a C compile error in a program
 // importing both. Set a binary body with http.response_set_body_bytes.
 extern http_response_json(res: ptr, json: string)
-extern http_server_response_free(res: ptr)
+extern http_server_response_free(res: @frees ptr)
 
 // HTTP Server - actor dispatch mode
 extern http_server_set_actor_handler(server: ptr, step_fn: ptr, send_fn: ptr, spawn_fn: ptr, release_fn: ptr)

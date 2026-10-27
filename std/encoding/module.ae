@@ -322,6 +322,6 @@ csv_field(handle: ptr, i: int) -> string {
 }
 
 // Release a handle returned by csv_split.
-csv_free(handle: ptr) {
+csv_free(handle: @frees ptr) {
     string.array_free(handle)
 }
