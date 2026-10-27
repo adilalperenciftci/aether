@@ -673,29 +673,31 @@ static int user_explicit_namespace_count = 0;
 static int user_explicit_namespace_cap = 0;
 
 // Import alias table: maps short names to dotted qualified names
-// for selective imports (e.g. "release" -> "build.release")
-#define MAX_IMPORT_ALIASES 512
-static struct {
-    char short_name[128];
-    char qualified_name[256];
-} import_aliases[MAX_IMPORT_ALIASES];
-static int import_alias_count = 0;
+// for selective imports (e.g. "release" -> "build.release"). Keys and
+// values are owned copies; iteration is in insertion order, and the first
+// binding of a short name wins, as a linear scan of the table found it.
+//
+// It was a fixed 512-entry array that dropped entries past the last one
+// without a word. A glob import of a module wider than that (aether-ui's
+// `ui`, about 700 exports) left the dropped names bound in the symbol table
+// but not rewritten, so the program type-checked and its C called the bare
+// `window(...)` and `vstack(...)`, undeclared, while the same names imported
+// selectively, a handful of entries, built.
+static StrMap import_aliases;
 
 static void add_import_alias(const char* short_name, const char* qualified) {
-    if (import_alias_count < MAX_IMPORT_ALIASES) {
-        snprintf(import_aliases[import_alias_count].short_name, sizeof(import_aliases[0].short_name), "%s", short_name);
-        snprintf(import_aliases[import_alias_count].qualified_name, sizeof(import_aliases[0].qualified_name), "%s", qualified);
-        import_alias_count++;
-    }
+    if (strmap_has(&import_aliases, short_name)) return;
+    strmap_put(&import_aliases, short_name, strdup(qualified));
 }
 
 static const char* find_import_alias(const char* name) {
-    for (int i = 0; i < import_alias_count; i++) {
-        if (strcmp(import_aliases[i].short_name, name) == 0) {
-            return import_aliases[i].qualified_name;
-        }
-    }
-    return NULL;
+    return (const char*)strmap_get(&import_aliases, name);
+}
+
+static void reset_import_aliases(void) {
+    for (int i = 0; i < strmap_count(&import_aliases); i++)
+        free(strmap_value_at(&import_aliases, i));
+    strmap_free(&import_aliases);
 }
 
 void register_namespace(const char* ns) {
@@ -7396,7 +7398,7 @@ int typecheck_program(ASTNode* program) {
     // namespace prefix (`<ns>_`) and registering the trailing short name
     // as an alias. Names with a leading underscore in the short part are
     // treated as private and skipped. Issue #171 (P1).
-    import_alias_count = 0;  // Reset for fresh compilation
+    reset_import_aliases();  // Reset for fresh compilation
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* child = program->children[i];
         if (child->type != AST_IMPORT_STATEMENT || !child->value) continue;
@@ -7557,9 +7559,9 @@ int typecheck_program(ASTNode* program) {
     // full symbol, but the glob path did not; refreshing every alias from
     // the canonical full symbol makes both forms carry the wrappers' real
     // tuple return types. (fbs-core ask #1.)
-    for (int a = 0; a < import_alias_count; a++) {
-        const char* short_name = import_aliases[a].short_name;
-        const char* dotted = import_aliases[a].qualified_name;
+    for (int a = 0; a < strmap_count(&import_aliases); a++) {
+        const char* short_name = strmap_key_at(&import_aliases, a);
+        const char* dotted = (const char*)strmap_value_at(&import_aliases, a);
         // The full C name the dotted alias reaches ("fs.list_dir" ->
         // "fs_list_dir", #2978: as a qualified call reaches it).
         char full_name[256];
