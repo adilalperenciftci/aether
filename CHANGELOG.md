@@ -14,6 +14,150 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.854.0]
+
+### Added
+
+- **`tcp.set_read_buffer(sock, bytes)`** sets a connected socket's receive
+  buffer (SO_RCVBUF), which also stops the kernel growing it by itself while
+  data arrives. A client that must stop taking bytes when it stops reading,
+  such as a test of a server's send timeout, sets it small (#3257).
+
+### Fixed
+
+- **The proxy event loop does not pool an upstream connection that said it
+  closes.** On Linux and macOS the loop put an upstream connection back in
+  the client pool after a response with `Connection: close`, or an HTTP/1.0
+  one without keep-alive, so the next request to that upstream took a
+  connection the upstream had closed. It now decides as the worker path's
+  client does, by one shared rule, which reads the header where it lies
+  (#3259, #3281).
+
+- **A retry after a stale pooled upstream connection dials a fresh one on the
+  proxy event loop.** On Linux and macOS the loop sent the request again on
+  another connection from the same pool, so when the upstream had closed
+  that one too (as it does on an idle timeout) the client got 502. The retry
+  now dials a fresh connection, as the worker path's client does (#3260).
+
+- **Every request on the proxy event loop gets its stale-connection
+  retry.** On Linux and macOS the loop retried a dead pooled upstream
+  connection once per client connection: after the first such retry, later
+  requests on the same client connection that drew a dead pooled connection
+  were answered 502. The retry is now each request's, as on the worker path
+  (#3261).
+
+- **The proxy event loop no longer spins on the poll() backend.** On a POSIX
+  system without epoll or kqueue (Cygwin, for one) the loop left interests
+  registered that the connection no longer waited on: write interest on a
+  client after a send that had to wait, and read interest on a client while
+  its request waited on the upstream. Such a backend reports a ready
+  descriptor on every wait, so the driver ran flat out, about 20000 to 30000
+  wakeups a second for one idle connection. Each descriptor now holds only
+  what its connection's state waits on there, and a connection whose
+  interest the poller will not take (a full poll set) is closed rather than
+  left waiting on nothing; epoll and kqueue are unchanged (#3258, #3278).
+
+- **A kept-alive connection gives back a large buffer once its request is
+  done.** The proxy event loop kept a connection's receive, input and output
+  buffers at the largest size any request needed, and the worker path kept a
+  read buffer grown for a chunked request body (up to 8 MiB), each for as
+  long as the connection stayed open, idle or parked. Both now keep at most
+  64 KiB between requests, the bound the client pool keeps a pooled
+  connection's receive buffer at (#3262).
+
+- **The /metrics scrape lists every series.** It was written into a fixed
+  64 KB buffer and the series that did not fit, about fifty in, were left
+  out of every scrape without a word. The buffer now grows with the series,
+  and a scrape it cannot finish is answered 500 rather than cut short. It is
+  written without holding the lock every request's metrics take, so a scrape
+  does not stall the server's requests while it runs (#3264, #3280).
+
+- **The proxy event loop never waits on a name lookup.** On Linux and macOS
+  the loop resolved an upstream's name with a blocking getaddrinfo on its
+  driver thread for every fresh upstream connection, so a slow resolver
+  (seconds for a name that does not exist) stopped every connection the
+  driver held. The loop now has a resolver of its own that looks a name up on
+  up to four threads of its own while the connection waits and the driver
+  serves the rest; the connection stays on the loop, requests waiting on one
+  name share one lookup, the upstream timeout covers the wait, and the
+  answer is kept, looked up again behind the dials that use it once it is
+  ten seconds old, and kept in use while lookups fail, for up to a day,
+  unless the resolver says the name is gone. A name that does not resolve is
+  answered 502, as on the worker path. Adding an upstream looks nothing up,
+  and a program that does not proxy starts no resolver thread (#3267, #3275,
+  #3276, #3277, #3283, #3284, #3286).
+
+- **Less work per request on the proxy event loop.** On Linux and macOS a
+  kept connection's idle timeout no longer goes into the deadline heap and
+  out again on every request (a sweep a few times a second closes the quiet
+  ones), a request head is checked in one pass over its lines, once per
+  request rather than on every read of its body, the loop keeps what it
+  needs from the server's middleware chain and recomputes it only when the
+  chain changes, a proxy pool's round-robin cursor has a cache line of its
+  own, and the keep-alive line a passed-through response carries is copied
+  rather than formatted. The head check's single pass serves the worker
+  path too (#3269).
+
+- **The proxy event loop builds warning-free without OpenSSL.** Its TLS
+  client write was defined in every build and called only from the TLS
+  branch, so a build without OpenSSL, which every `--target=` cross build
+  is, failed under `-Werror` with an unused function. It is defined only
+  where TLS is (#3271).
+
+- **A trailing block on an assignment to a module-level `var` runs.** `g = vstack(0) { ... }`, with `g` a module `var`, stored the call's value and dropped the block without a word: the global-store path left the statement before the trailing-block handler that a local's binding goes through. It now pushes the stored value as the block's context and runs the block, as for a local. Found porting ChrysaLisp's Minefield to aether-ui, where the window's views are kept in globals and every one came up empty. `tests/regression/test_trailing_block_global_assign.ae`.
+
+- **Every /metrics series has labels of its own, in UTF-8.** A series was
+  keyed on the whole method and path a request carried, but written with
+  them cut at 63 and 255 bytes, so two paths that agreed that far were two
+  series with the same labels; and a path's bytes went into its label as
+  sent, ones that are not UTF-8 included. A Prometheus scrape rejects both.
+  A series is now keyed on its labels as written, and a byte that is not
+  part of a UTF-8 character is written `?` (#3282).
+
+### Security
+
+- **A client that stops reading its response is cut off.** Nothing bounded
+  a send: the worker path wrote with a blocking send and no send timeout, so
+  a client that never read held a worker for as long as it kept the
+  connection open, and on Linux and macOS the proxy event loop waited on such
+  a client with no deadline. Both now give up after the keep-alive idle
+  timeout without progress (30 seconds unless set), as a receive does, and a
+  response whose send failed closes the connection instead of keeping it.
+  On Linux and macOS a send that has to wait waits for the client's socket to
+  take more, as the event loop does, rather than on a socket send timeout,
+  which a client that read nothing for seconds never let expire; files sent
+  with sendfile and OpenSSL's writes are bounded the same way. std.tcp's
+  `write_all`, which the pure-Aether TLS server writes through, waits the
+  same way and keeps what its send timeout meant: a period of it in which
+  nothing went ends the write. A TLS response written in many pieces
+  changes the socket's mode once, not around each piece, and its
+  close_notify waits for room as a write does (#3257, #3285).
+
+- **The proxy event loop holds no more request bodies at once than the
+  worker path would.** On Linux and macOS the loop reads each request's body
+  whole before proxying it, up to the mount's cap per connection, and it
+  reads every connection a client opens, so many connections each declaring
+  a large body made it hold the cap times the number of connections. It now
+  holds bodies over 16 KiB against a total of one cap per worker the worker
+  path would run, and a request past that goes to the worker path, which
+  streams it (#3263).
+
+- **Request metrics are bounded and found by hash.** The per-route counters
+  were keyed by the method and path a client sent, one series per pair
+  without limit, in a list every request walked under one lock: a client
+  requesting fresh paths grew them, and slowed every request, for as long as
+  it liked. Past 1024 series a request now counts in one series labelled
+  `(other)`, the same series a request sending those labels itself counts
+  in, so no two series share labels, and a series is found by hash (#3265,
+  #3279).
+
+- **The rate limiter holds a bounded set of clients.** It kept a bucket for
+  every client address it had ever seen, in 256 chains every request walked
+  under one lock, so a client cycling addresses (one IPv6 client has more
+  than enough) grew it, and slowed every request through it, without end.
+  It now holds at most 16384 clients in 4096 chains, and at the bound the
+  client seen least recently gives up its bucket (#3266).
+
 ## [0.853.0]
 
 ### Changed
