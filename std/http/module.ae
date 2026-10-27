@@ -907,7 +907,7 @@ extern http_response_add_header(res: ptr, name: string, value: string)
 // recorded headers verbatim — record/replay must not have Aether's
 // defaults overlaid on the captured response.
 extern http_response_clear_headers(res: ptr)
-extern http_response_set_body(res: ptr, body: @aether string)
+extern http_response_set_body(res: ptr, body: string)
 // Length-aware sibling — binary-safe set_body. Wrapped by
 // response_set_body_bytes; `body` is `ptr` and this is not exported
 // (#2301): the wrapper passes a byte[] slice's raw data pointer, and a heap

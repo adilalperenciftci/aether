@@ -3109,10 +3109,12 @@ void http_response_set_body_n(HttpServerResponse* res, const char* body, int len
         res->body_length = 0;
         res->body_cap = 0;
     } else {
+        /* #3297: `body` is bytes, as the extern's plain `ptr` delivers a
+         * string argument (its characters) and as every C caller passes
+         * one. Asking them whether they are a string header misread an
+         * upstream body or a cached one that began like a header, and
+         * followed a pointer made of its bytes. */
         const char* src = body;
-        if (is_aether_string(body)) {
-            src = ((const AetherString*)body)->data;
-        }
         size_t alloc_cap = (size_t)length + 1;
         res->body = (char*)aether_caps_malloc(alloc_cap);
         if (!res->body) {

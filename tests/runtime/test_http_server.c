@@ -116,6 +116,27 @@ TEST(http_server_response_building) {
     http_server_response_free(resp);
 }
 
+/* #3297: set_body_n takes its body as bytes. A body that begins like a
+ * string header (magic DE C0 57 AE, refcount 0, length and capacity 1, a
+ * non-null "data pointer" made of payload bytes) was taken for one, and the
+ * copy read from that pointer: a crash, or a wild read of what an upstream
+ * or a cached body pointed it at. */
+TEST(http_server_response_set_body_n_takes_bytes) {
+    unsigned char body[40];
+    memset(body, 0x01, sizeof body);
+    body[0] = 0xDE; body[1] = 0xC0; body[2] = 0x57; body[3] = 0xAE;
+    memset(body + 4, 0, 4);                 /* ref_count 0 */
+    memset(body + 8, 0, 16);
+    body[8] = 1;                            /* length 1 */
+    body[16] = 1;                           /* capacity 1 */
+    HttpServerResponse* resp = http_response_create();
+    ASSERT_NOT_NULL(resp);
+    http_response_set_body_n(resp, (const char*)body, (int)sizeof body);
+    ASSERT_EQ((int)sizeof body, (int)resp->body_length);
+    ASSERT_TRUE(memcmp(resp->body, body, sizeof body) == 0);
+    http_server_response_free(resp);
+}
+
 /* #1739: a response reused across requests, and a header overwritten with a
  * value that fits, cost no allocation -- while every header string stays
  * its own allocation, because C outside the library frees them one by one
