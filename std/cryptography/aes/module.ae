@@ -10,13 +10,14 @@
 // OCB / AES-key-wrap / AES-CMAC / AES-CTR-DRBG all sit on exactly this
 // primitive and nothing else.
 //
-// Byte-oriented FIPS-197 reference form (one 256-byte S-box + inverse,
-// GF(2^8) xtime for MixColumns) rather than Bouncy Castle's T-box
-// `AesEngine.cs`. Smaller, obviously correct against the FIPS-197 / NIST KAT
-// vectors, and not cache-timing-leaky the way big T-tables are. A T-box /
-// AES-NI fast path is a later perf slice; the mode layers don't care which
-// sits underneath. Algorithm + S-box from FIPS-197; structure follows
-// Bouncy Castle's AesEngine.
+// The cipher is aether_aes.c: the 64-bit bitsliced AES of BearSSL's ct64
+// (Boyar-Peralta S-box circuit, four blocks per pass), constant time in the
+// key and the data. It replaced a byte-oriented form that indexed a 256-byte
+// S-box with secret bytes, which leaks the key through the cache (#2600).
+// GHASH (gf_mul) is a masked shift-and-add, constant time in H and the
+// state; every tag check compares all bytes and declassifies one verdict.
+// About 185 MB/s in CTR mode with the default build. Structure follows
+// Bouncy Castle's AesEngine; algorithm from FIPS-197.
 //
 // Block primitive (what modes call):
 //   ctx   = aes.new_encryptor(key_bytes, key_len)   // key_len = 16/24/32
@@ -38,6 +39,7 @@ import std.bytes
 import std.bits
 import std.intarr
 import std.string
+import std.cryptography.ct as ctime
 
 exports(
     new_encryptor, new_decryptor, process_block, free,
@@ -499,11 +501,11 @@ key_unwrap(key: byte[], data: byte[]) -> {
     ok = 1
     k = 0
     while k < 8 {
-        if (bytes.get(a, k) & 0xFF) != 0xA6 { ok = 0 }
+        ok = ok & ctime.eq(bytes.get(a, k) & 0xFF, 0xA6)
         k = k + 1
     }
     bytes.free(a)
-    if ok == 0 {
+    if ctime.declassify(ok) == 0 {
         bytes.free(r)
         return null, "integrity check failed"
     }
@@ -522,44 +524,64 @@ key_unwrap(key: byte[], data: byte[]) -> {
 
 // GF(2^128) multiply (x * y) in GCM's bit-reflected basis. x,y,out are
 // 16-byte buffers (big-endian block order, MSB-first bit numbering).
+//
+// Constant time (#2600): x is the running GHASH state and y the hash key H,
+// both secret. Every one of the 128 steps adds v to z under a mask built
+// from x's bit and folds R into v under a mask built from v's low bit, so
+// no branch and no memory index depends on either (the bit-by-bit loop it
+// replaces branched on both).
 gf_mul(x: ptr, y: ptr) -> ptr {
-    z = bytes.new(16)
-    v = bytes.new(16)
-    i = 0
-    while i < 16 { bytes.set(z, i, 0); bytes.set(v, i, bytes.get(y, i)); i = i + 1 }
+    uint64 xh = load_be64(x, 0)
+    uint64 xl = load_be64(x, 8)
+    uint64 vh = load_be64(y, 0)
+    uint64 vl = load_be64(y, 8)
+    uint64 zh = 0
+    uint64 zl = 0
+    uint64 r = 0xe100000000000000
     // For each bit of x from MSB (bit 0 of byte 0) to LSB:
-    bit = 0
+    int bit = 0
     while bit < 128 {
-        byte_i = bit / 8
-        bit_i = 7 - (bit % 8)
-        if ((bytes.get(x, byte_i) >> bit_i) & 1) == 1 {
-            k = 0
-            while k < 16 { bytes.set(z, k, (bytes.get(z, k) ^ bytes.get(v, k)) & 0xFF); k = k + 1 }
+        uint64 xb = 0
+        if bit < 64 {
+            xb = (xh >> (63 - bit)) & 1
+        } else {
+            xb = (xl >> (127 - bit)) & 1
         }
-        // v = (v >> 1); if LSB of v was set, v ^= R (R = 0xe1 || 0...0)
-        lsb = bytes.get(v, 15) & 1
-        gf_shr1(v)
-        if lsb == 1 {
-            bytes.set(v, 0, (bytes.get(v, 0) ^ 0xe1) & 0xFF)
-        }
+        uint64 m = 0 - xb
+        zh = zh ^ (vh & m)
+        zl = zl ^ (vl & m)
+        // v = (v >> 1) ^ (R if v's low bit was set), R = 0xe1 || 0...0
+        uint64 lsb = vl & 1
+        vl = (vl >> 1) | (vh << 63)
+        vh = (vh >> 1) ^ (r & (0 - lsb))
         bit = bit + 1
     }
-    bytes.free(v)
+    z = bytes.new(16)
+    store_be64(z, 0, zh)
+    store_be64(z, 8, zl)
     return z
 }
-// Right-shift a 16-byte big-endian value by 1 bit, in place.
-gf_shr1(v: ptr) {
-    i = 0
-    carry = 0
-    while i < 16 {
-        cur = bytes.get(v, i) & 0xFF
-        nv = ((cur >> 1) | (carry << 7)) & 0xFF
-        carry = cur & 1
-        bytes.set(v, i, nv)
+
+// Big-endian 64-bit load/store at byte offset off of a std.bytes buffer.
+fn load_be64(b: ptr, off: int) -> uint64 {
+    uint64 v = 0
+    int i = 0
+    while i < 8 {
+        v = (v << 8) | ((bytes.get(b, off + i) & 255) as uint64)
         i = i + 1
     }
+    return v
 }
 
+fn store_be64(b: ptr, off: int, val: uint64) {
+    uint64 v = val
+    int i = 7
+    while i >= 0 {
+        bytes.set(b, off + i, (v & 255) as int)
+        v = v >> 8
+        i = i - 1
+    }
+}
 // GHASH: fold `data` (len bytes, processed in 16-byte blocks, zero-padded)
 // into the running hash `acc` (16 bytes) under subkey H. Returns a fresh acc.
 ghash_update(acc: ptr, h: ptr, data: byte[]) -> ptr {
@@ -724,7 +746,7 @@ gcm_open(ctx: ptr, iv: ptr, aad: byte[], ct_with_tag: byte[]) -> {
         i = i + 1
     }
     bytes.free(want)
-    if diff != 0 {
+    if ctime.declassify(ctime.eq(diff, 0)) == 0 {
         bytes.free(h); bytes.free(j0)
         return null, "authentication failed"
     }
@@ -952,7 +974,7 @@ ccm_open(key: byte[], nonce: byte[], aad: byte[], ct: byte[], taglen: int) -> {
     }
     bytes.free(mac); bytes.free(s0)
     free(enc)
-    if diff != 0 {
+    if ctime.declassify(ctime.eq(diff, 0)) == 0 {
         bytes.free(pt)
         return null, -1
     }
@@ -1033,7 +1055,7 @@ eax_open(key: byte[], nonce: byte[], aad: byte[], ct: byte[], taglen: int) -> {
         i = i + 1
     }
     bytes.free(h_mac); bytes.free(c_mac)
-    if diff != 0 {
+    if ctime.declassify(ctime.eq(diff, 0)) == 0 {
         bytes.free(n_mac); bytes.free(body)
         return null, -1
     }
@@ -1386,7 +1408,7 @@ ocb_open(key: byte[], nonce: byte[], aad: byte[], ct: byte[], taglen: int) -> {
     bytes.free(tagfull); bytes.free(checksum); bytes.free(sum)
     bytes.free(offm); bytes.free(l_star); bytes.free(l_dollar); bytes.free(ltab)
     free(enc); free(dec)
-    if diff != 0 {
+    if ctime.declassify(ctime.eq(diff, 0)) == 0 {
         bytes.free(pt)
         return null, -1
     }

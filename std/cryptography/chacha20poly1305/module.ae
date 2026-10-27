@@ -32,6 +32,7 @@
 import std.bytes
 import std.bits
 import std.intarr
+import std.cryptography.ct as ctime
 
 exports(
     chacha20_xor, poly1305_mac, aead_seal, aead_open
@@ -395,7 +396,7 @@ aead_open(key: ptr, nonce: ptr, aad: byte[], ct_with_tag: byte[]) -> {
         i = i + 1
     }
     bytes.free(want)
-    if diff != 0 {
+    if ctime.declassify(ctime.eq(diff, 0)) == 0 {
         return null, "authentication failed"
     }
 

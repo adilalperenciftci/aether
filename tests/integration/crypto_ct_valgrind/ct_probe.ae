@@ -17,6 +17,10 @@ import std.cryptography.ed25519
 import std.cryptography.ed448
 import std.cryptography.x25519
 import std.cryptography.x448
+import std.cryptography.aes
+import std.cryptography.chacha20poly1305
+import std.cryptography.hmac
+import std.cryptography.hkdf
 import std.cryptography.sha2
 
 extern ct_shim_available() -> int
@@ -324,6 +328,97 @@ fn eddsa_xdh_cases() -> int {
     bytes.free(ak); bytes.free(apub); bytes.free(bpub); bytes.free(xk); bytes.free(xpub)
     return fails
 }
+
+// ---- record ciphers, MACs and the key schedule: the key secret ----
+
+fn symmetric_cases() -> int {
+    fails = 0
+    // FIPS-197 C.1 and C.3: AES-128 and AES-256, encrypt and decrypt.
+    k128 = hb("000102030405060708090a0b0c0d0e0f")
+    secret(k128)
+    pt = hb("00112233445566778899aabbccddeeff")
+    e128 = aes.new_encryptor(bytes.view(k128))
+    c128 = aes.process_block(e128, pt)
+    fails = fails + check("aes-128 encrypt", c128, "69c4e0d86a7b0430d8cdb78070b4c55a")
+    d128 = aes.new_decryptor(bytes.view(k128))
+    p128 = aes.process_block(d128, c128)
+    fails = fails + check("aes-128 decrypt", p128, "00112233445566778899aabbccddeeff")
+    k256 = hb("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+    secret(k256)
+    e256 = aes.new_encryptor(bytes.view(k256))
+    c256 = aes.process_block(e256, pt)
+    fails = fails + check("aes-256 encrypt", c256, "8ea2b7ca516745bfeafc49904b496089")
+    // AES-GCM, the GCM specification's test case 4: seal and open.
+    kg = hb("feffe9928665731c6d6a8f9467308308")
+    secret(kg)
+    iv = hb("cafebabefacedbaddecaf888")
+    aad = hb("feedfacedeadbeeffeedfacedeadbeefabaddad2")
+    pg = hb("d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39")
+    eg = aes.new_encryptor(bytes.view(kg))
+    sealed = aes.gcm_seal(eg, iv, bytes.view(aad), bytes.view(pg))
+    fails = fails + check("aes-gcm seal", sealed, "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e0915bc94fbc3221a5db94fae95ae7121a47")
+    opened, gerr = aes.gcm_open(eg, iv, bytes.view(aad), bytes.view(sealed))
+    if gerr != "" {
+        println("FAIL aes-gcm open: ${gerr}")
+        fails = fails + 1
+    } else {
+        fails = fails + check("aes-gcm open", opened, "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39")
+        bytes.free(opened)
+    }
+    // RFC 8439 2.8.2: ChaCha20-Poly1305 seal and open.
+    kc = hb("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f")
+    secret(kc)
+    nc = hb("070000004041424344454647")
+    ac = hb("50515253c0c1c2c3c4c5c6c7")
+    pc = ascii("Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.")
+    sc = chacha20poly1305.aead_seal(kc, nc, bytes.view(ac), bytes.view(pc))
+    fails = fails + check("chacha20poly1305 seal", sc, "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d63dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b3692ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc3ff4def08e4b7a9de576d26586cec64b61161ae10b594f09e26a7e902ecbd0600691")
+    oc, cerr = chacha20poly1305.aead_open(kc, nc, bytes.view(ac), bytes.view(sc))
+    if cerr != "" {
+        println("FAIL chacha20poly1305 open: ${cerr}")
+        fails = fails + 1
+    } else {
+        public(oc)
+        if bh(oc) == bh(pc) {
+            println("ok   chacha20poly1305 open")
+        } else {
+            println("FAIL chacha20poly1305 open")
+            fails = fails + 1
+        }
+        bytes.free(oc)
+    }
+    // RFC 8439 2.5.2: Poly1305 with a secret one-time key.
+    kp = hb("85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b")
+    secret(kp)
+    mp = ascii("Cryptographic Forum Research Group")
+    tp = chacha20poly1305.poly1305_mac(kp, bytes.view(mp))
+    fails = fails + check("poly1305", tp, "a8061dc1305136c6c22b8baf0c0127a9")
+    // RFC 4231 test case 2: HMAC-SHA-256 with key "Jefe".
+    kh = ascii("Jefe")
+    secret(kh)
+    mh = ascii("what do ya want for nothing?")
+    th = hmac.hmac_sha256(bytes.view(kh), bytes.view(mh))
+    fails = fails + check("hmac-sha256", th, "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843")
+    // RFC 5869 test case 1: HKDF-SHA-256 with secret input keying material.
+    ikm = hb("0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b")
+    secret(ikm)
+    salt = hb("000102030405060708090a0b0c")
+    info = hb("f0f1f2f3f4f5f6f7f8f9")
+    okm = hkdf.hkdf("sha256", bytes.view(salt), bytes.view(ikm), bytes.view(info), 42)
+    fails = fails + check("hkdf-sha256", okm, "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865")
+    // SHA-256 of a secret message ("abc").
+    ms = ascii("abc")
+    secret(ms)
+    ds = sha256(ms)
+    fails = fails + check("sha-256", ds, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+    aes.free(e128); aes.free(d128); aes.free(e256); aes.free(eg)
+    bytes.free(k128); bytes.free(pt); bytes.free(c128); bytes.free(p128); bytes.free(k256); bytes.free(c256)
+    bytes.free(kg); bytes.free(iv); bytes.free(aad); bytes.free(pg); bytes.free(sealed)
+    bytes.free(kc); bytes.free(nc); bytes.free(ac); bytes.free(pc); bytes.free(sc)
+    bytes.free(kp); bytes.free(mp); bytes.free(tp); bytes.free(kh); bytes.free(mh); bytes.free(th)
+    bytes.free(ikm); bytes.free(salt); bytes.free(info); bytes.free(okm); bytes.free(ms); bytes.free(ds)
+    return fails
+}
 main() {
     ct.set_declassify_hook(ct_shim_declassify_hook() as DeclassifyHook)
     if ct_shim_available() == 1 {
@@ -338,6 +433,7 @@ main() {
     fails = fails + secp256k1_cases()
     fails = fails + rsa_cases()
     fails = fails + eddsa_xdh_cases()
+    fails = fails + symmetric_cases()
     if fails > 0 {
         println("${fails} FAILED")
         exit(1)

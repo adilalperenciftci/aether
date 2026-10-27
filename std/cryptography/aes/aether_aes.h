@@ -3,12 +3,10 @@
 
 #include <stddef.h>
 
-/* Native AES core (#1394). The Aether implementation in module.ae reaches
- * every byte of state through bytes.get/bytes.set, which is about 15 million
- * calls per megabyte for AES-256 and measured 4.4 MB/s. This is the same
- * cipher over a raw pointer, used by the bulk modes when available; the
- * Aether path stays as the portable fallback and the reference the tests
- * compare against.
+/* Native AES core (#1394), constant time since #2600: the 64-bit
+ * bitsliced form of BearSSL's aes_ct64 (see aether_aes.c), with no branch
+ * and no table index on the key or the data. Every mode in module.ae runs
+ * through it.
  *
  * Returns 0 on failure (bad key length, allocation, unsupported length). */
 
