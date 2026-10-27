@@ -1542,6 +1542,7 @@ uint64_t scheduler_released_sends(void) {
 // actor is not counted yet, one taken from its queues is. A released target
 // means a send against the release contract.
 static void release_undelivered(ActorBase* actor, Message* msg) {
+    aether_mailbox_untake(actor, msg->type);   // its place under a bound (#2974)
     aether_message_drop(actor, msg);
     if (msg->_reply_slot) reply_slot_fail((ActorReplySlot*)msg->_reply_slot, AETHER_ASK_DEAD);
 }
@@ -1558,6 +1559,38 @@ static void send_to_dead_actor(ActorBase* actor, Message* msg) {
     } else if (actor) {
         scheduler_count_dead_sends(1);   // a panicked, killed or stopped one (#2974)
     }
+}
+
+// Plain sends dropped at a full bounded mailbox (#2974), and their one
+// diagnostic.
+static _Atomic uint64_t g_full_drops = 0;
+static atomic_flag g_full_drop_reported = ATOMIC_FLAG_INIT;
+
+uint64_t scheduler_full_drops(void) {
+    return atomic_load_explicit(&g_full_drops, memory_order_relaxed);
+}
+
+/* A send to a bounded actor (#2974): 1 when `msg` is accepted (or the
+ * actor has no bound). Refused, it is released here, never blocked on:
+ * an ask learns at once that the mailbox is full, a plain send is counted
+ * in the actor's full_drops and the total, reported once. It never took a
+ * place, so the release is not release_undelivered's. */
+static int bound_admits(ActorBase* actor, Message* msg) {
+    if (aether_mailbox_admit(actor, msg->type)) return 1;
+    aether_message_drop(actor, msg);
+    if (msg->_reply_slot) {
+        reply_slot_fail((ActorReplySlot*)msg->_reply_slot, AETHER_ASK_FULL);
+        return 0;
+    }
+    atomic_fetch_add_explicit(&actor->full_drops, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_full_drops, 1, memory_order_relaxed);
+    if (!atomic_flag_test_and_set_explicit(&g_full_drop_reported, memory_order_relaxed)) {
+        fprintf(stderr, "aether: message type %d to actor %d dropped: its mailbox is full "
+                        "(bound %d); counted by actors.full_drops (reported once)\n",
+                msg->type, actor->id,
+                atomic_load_explicit(&actor->mailbox_bound, memory_order_relaxed));
+    }
+    return 0;
 }
 
 /* #2912: a thread the scheduler does not own (the main thread, a std.worker
@@ -2940,6 +2973,9 @@ int scheduler_register_actor(ActorBase* actor, int preferred_core) {
     atomic_init(&actor->death_reason, NULL);
     atomic_init(&actor->exit_flags, 0);
     atomic_init(&actor->incarnation, 0);
+    atomic_init(&actor->mailbox_bound, 0);      // the generated spawn sets a bound (#2974)
+    atomic_init(&actor->mailbox_pending, 0);
+    atomic_init(&actor->full_drops, 0);
     return register_actor(actor, preferred_core);
 }
 
@@ -3153,7 +3189,44 @@ static int scheduler_io_poll(Scheduler* sched, int timeout_ms) {
 static AETHER_TLS int inline_depth = 0;
 #define MAX_INLINE_DEPTH 2
 
+static void send_local_admitted(ActorBase* actor, Message msg);
+static void send_remote_admitted(ActorBase* actor, Message msg, int from_core);
+
+/* A send's way in (#2974): a bounded actor's place is taken first, so every
+ * drop on the way, a dead target's included, gives one back. The bound is
+ * on the line `dead` is on. */
 void scheduler_send_local(ActorBase* actor, Message msg) {
+    if (unlikely(actor && atomic_load_explicit(&actor->mailbox_bound, memory_order_relaxed)) &&
+        !bound_admits(actor, &msg))
+        return;
+    send_local_admitted(actor, msg);
+}
+
+void scheduler_send_remote(ActorBase* actor, Message msg, int from_core) {
+    if (unlikely(actor && atomic_load_explicit(&actor->mailbox_bound, memory_order_relaxed)) &&
+        !bound_admits(actor, &msg))
+        return;
+    send_remote_admitted(actor, msg, from_core);
+}
+
+const char* scheduler_try_send(ActorBase* actor, Message msg) {
+    if (!actor || atomic_load_explicit(&actor->dead, memory_order_acquire)) {
+        aether_message_drop(actor, &msg);
+        return "the actor is dead";
+    }
+    if (!aether_mailbox_admit(actor, msg.type)) {
+        aether_message_drop(actor, &msg);
+        return "the mailbox is full";
+    }
+    int me = current_core_id;
+    if (me >= 0 && me == atomic_load_explicit(&actor->assigned_core, memory_order_relaxed))
+        send_local_admitted(actor, msg);
+    else
+        send_remote_admitted(actor, msg, me);
+    return "";
+}
+
+static void send_local_admitted(ActorBase* actor, Message msg) {
     AETHER_TRACE_EVENT(AE_TRACE_SEND_LOCAL, actor ? actor->id : 0,
                        msg.type, msg.sender_id);
     // Drop messages to dead actors: they can't process them and we don't
@@ -3253,7 +3326,7 @@ void scheduler_send_local(ActorBase* actor, Message msg) {
 
 static void send_through_core(ActorBase* actor, Message msg, int from_core);
 
-void scheduler_send_remote(ActorBase* actor, Message msg, int from_core) {
+static void send_remote_admitted(ActorBase* actor, Message msg, int from_core) {
     AETHER_TRACE_EVENT(AE_TRACE_SEND_REMOTE, actor ? actor->id : 0,
                        msg.type, msg.sender_id);
     // Drop messages to dead actors (see scheduler_send_local).
@@ -3421,8 +3494,10 @@ void scheduler_send_many(ActorBase* actor, const Message* msgs, int n) {
     // Not a core's thread, an actor with a thread of its own, or no actor:
     // each message by the path an unbuffered send of it takes (the shared
     // channel under its lock, refused while the scheduler is stopped, the
-    // inbox, the drop).
-    if (!actor || me < 0 || me >= num_cores || actor->auto_process) {
+    // inbox, the drop). So with a mailbox bound (#2974): each message takes
+    // its own place, or is refused, as it goes.
+    if (!actor || me < 0 || me >= num_cores || actor->auto_process ||
+        atomic_load_explicit(&actor->mailbox_bound, memory_order_relaxed)) {
         for (int i = 0; i < n; i++) scheduler_send_remote(actor, msgs[i], me);
         return;
     }
@@ -3513,6 +3588,12 @@ void scheduler_send_batch_start(void) {
 }
 
 void scheduler_send_batch_add(ActorBase* actor, Message msg) {
+    // A bounded actor's message takes its place now, or is refused, so it
+    // is not batched (#2974); sent unbatched, it goes behind the batch.
+    if (unlikely(actor && atomic_load_explicit(&actor->mailbox_bound, memory_order_relaxed))) {
+        scheduler_send_remote(actor, msg, current_core_id);
+        return;
+    }
     // Drop messages to dead actors (see scheduler_send_local).
     if (unlikely(!actor || atomic_load_explicit(&actor->dead, memory_order_acquire))) {
         send_to_dead_actor(actor, &msg);
@@ -3735,6 +3816,9 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
     atomic_init(&actor->death_reason, NULL);
     atomic_init(&actor->exit_flags, 0);
     atomic_init(&actor->incarnation, 0);
+    atomic_init(&actor->mailbox_bound, 0);      // the generated spawn sets a bound (#2974)
+    atomic_init(&actor->mailbox_pending, 0);
+    atomic_init(&actor->full_drops, 0);
     atomic_init(&actor->assigned_core, preferred_core);
     atomic_init(&actor->migrate_to, -1);
     atomic_init(&actor->reply_slot, NULL);

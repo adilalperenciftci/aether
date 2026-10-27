@@ -160,6 +160,7 @@ void scheduler_send_ref(AetherActorRef ref, Message msg) {
 static int coop_send_to_dead_actor(ActorBase* actor, Message* msg) {
     int dead = actor ? atomic_load_explicit(&actor->dead, memory_order_relaxed) : 1;
     if (!dead) return 0;
+    aether_mailbox_untake(actor, msg->type);   // #2974
     aether_message_drop(actor, msg);
     /* An ask to it gets no reply: its asker learns so at once (#3151). */
     if (msg->_reply_slot) ((ActorReplySlot*)msg->_reply_slot)->failed = AETHER_ASK_DEAD;
@@ -204,6 +205,51 @@ static void coop_deliver(ActorBase* actor, Message msg) {
                 msg.type, actor->id);
         abort();
     }
+}
+
+/* A bounded mailbox (#2974), as the threaded scheduler has it: a send takes
+ * its place first, or is refused and released, never blocked on. A refused
+ * ask fails at once; a refused plain send is counted, reported once. */
+static uint64_t g_coop_full_drops = 0;
+static int g_coop_full_drop_reported = 0;
+
+uint64_t scheduler_full_drops(void) {
+    return g_coop_full_drops;
+}
+
+static void coop_send(ActorBase* actor, Message msg) {
+    if (actor && atomic_load_explicit(&actor->mailbox_bound, memory_order_relaxed) &&
+        !aether_mailbox_admit(actor, msg.type)) {
+        aether_message_drop(actor, &msg);
+        if (msg._reply_slot) {
+            ((ActorReplySlot*)msg._reply_slot)->failed = AETHER_ASK_FULL;
+            return;
+        }
+        atomic_fetch_add_explicit(&actor->full_drops, 1, memory_order_relaxed);
+        g_coop_full_drops++;
+        if (!g_coop_full_drop_reported) {
+            g_coop_full_drop_reported = 1;
+            fprintf(stderr, "aether: message type %d to actor %d dropped: its mailbox is full "
+                            "(bound %d); counted by actors.full_drops (reported once)\n",
+                    msg.type, actor->id,
+                    atomic_load_explicit(&actor->mailbox_bound, memory_order_relaxed));
+        }
+        return;
+    }
+    coop_deliver(actor, msg);
+}
+
+const char* scheduler_try_send(ActorBase* actor, Message msg) {
+    if (!actor || atomic_load_explicit(&actor->dead, memory_order_relaxed)) {
+        aether_message_drop(actor, &msg);
+        return "the actor is dead";
+    }
+    if (!aether_mailbox_admit(actor, msg.type)) {
+        aether_message_drop(actor, &msg);
+        return "the mailbox is full";
+    }
+    coop_deliver(actor, msg);
+    return "";
 }
 
 // Moves what waits in the actor's inbox into its mailbox, as room allows.
@@ -374,6 +420,9 @@ int scheduler_register_actor(ActorBase* actor, int preferred_core) {
     atomic_store_explicit(&actor->death_reason, NULL, memory_order_relaxed);
     atomic_store_explicit(&actor->exit_flags, 0, memory_order_relaxed);
     atomic_store_explicit(&actor->incarnation, 0, memory_order_relaxed);
+    atomic_store_explicit(&actor->mailbox_bound, 0, memory_order_relaxed);   // #2974
+    atomic_store_explicit(&actor->mailbox_pending, 0, memory_order_relaxed);
+    atomic_store_explicit(&actor->full_drops, 0, memory_order_relaxed);
     return register_actor(actor, preferred_core);
 }
 
@@ -481,17 +530,17 @@ void scheduler_release_actor(ActorBase* actor) {
 // ============================================================================
 
 void scheduler_send_local(ActorBase* actor, Message msg) {
-    coop_deliver(actor, msg);
+    coop_send(actor, msg);
 }
 
 void scheduler_send_remote(ActorBase* actor, Message msg, int from_core) {
     (void)from_core;
     // In cooperative mode there's only one core — all sends are local
-    coop_deliver(actor, msg);
+    coop_send(actor, msg);
 }
 
 void scheduler_send_many(ActorBase* actor, const Message* msgs, int n) {
-    for (int i = 0; i < n; i++) coop_deliver(actor, msgs[i]);
+    for (int i = 0; i < n; i++) coop_send(actor, msgs[i]);
 }
 
 // Batch send — trivial in single-threaded mode
@@ -500,7 +549,7 @@ void scheduler_send_batch_start(void) {
 }
 
 void scheduler_send_batch_add(ActorBase* actor, Message msg) {
-    coop_deliver(actor, msg);
+    coop_send(actor, msg);
 }
 
 void scheduler_send_batch_flush(void) {
@@ -589,6 +638,7 @@ static void coop_finalize(ActorBase* actor) {
     for (;;) {
         coop_refill(actor);
         if (!mailbox_receive(&actor->mailbox, &discard)) break;
+        aether_mailbox_untake(actor, discard.type);
         aether_message_drop(actor, &discard);
         if (discard._reply_slot) ((ActorReplySlot*)discard._reply_slot)->failed = AETHER_ASK_DEAD;
         drained++;
@@ -715,7 +765,7 @@ void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg
     msg.zerocopy.owned = 0;
     msg._reply_slot = &slot;
 
-    coop_deliver(target, msg);
+    coop_send(target, msg);
     g_pending_reply_slot = NULL;
 
     // Process messages until reply is ready, or none can come. An asker

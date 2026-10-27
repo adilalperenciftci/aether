@@ -6424,6 +6424,9 @@ static Type* match_operand_type(ASTNode* m) {
  * as an operand (#2993) is a fourth: it is a statement whatever its form. */
 int is_control_value(CodeGenerator* gen, ASTNode* e) {
     if (!e) return 0;
+    /* #2974: try_send(ref, Msg { ... }), a send written as statements. */
+    if (e->type == AST_SEND_FIRE_FORGET)
+        return e->annotation && strcmp(e->annotation, "try_send") == 0;
     if (e->type == AST_MATCH_STATEMENT) return ast_match_is_operand(e) && match_operand_type(e);
     if (e->type == AST_OR_ELSE) {
         if (e->child_count < 2 || !e->children[1] || e->children[1]->type != AST_BLOCK) return 0;
@@ -11871,7 +11874,26 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             if (expr->child_count >= 2) {
                 ASTNode* target = expr->children[0];
                 ASTNode* message = expr->children[1];
-                
+                /* #2974: try_send(ref, Msg { ... }) is the same send, made
+                 * by scheduler_try_send (aether_try_send_message for a
+                 * payload), never batched, its answer a string. Run ahead
+                 * of its statement (is_control_value), its answer a
+                 * temporary the statement reads; a statement expression
+                 * where nothing can be declared ahead. */
+                const char* try_var = NULL;
+                int try_as_stmts = 0;
+                if (expr->annotation && strcmp(expr->annotation, "try_send") == 0) {
+                    static int try_send_seq = 0;
+                    try_var = cg_internf("_ts%d", try_send_seq++);
+                    try_as_stmts = g_ctl_emitting == expr;
+                    if (try_as_stmts) {
+                        hoist_declare(gen, "const char*", try_var);
+                        print_indent(gen);
+                    } else {
+                        fprintf(gen->output, "({ const char* %s = \"\"; ", try_var);
+                    }
+                }
+
                 if (message && message->type == AST_MESSAGE_CONSTRUCTOR) {
                     MessageDef* msg_def = lookup_message(gen->message_registry, message->value);
                     if (msg_def) {
@@ -11901,7 +11923,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             }
                             fprintf(gen->output, ", NULL, {NULL, 0, 0}}; ");
 
-                            if (gen->in_main_loop) {
+                            if (try_var) {
+                                fprintf(gen->output, "%s = scheduler_try_send(", try_var);
+                                emit_send_target(gen, target, "ActorBase*", "send");
+                                fprintf(gen->output, ", _imsg); }");
+                            } else if (gen->in_main_loop) {
                                 fprintf(gen->output, "scheduler_send_batch_add(");
                                 emit_send_target(gen, target, "ActorBase*", "send");
                                 fprintf(gen->output, ", _imsg); }");
@@ -11965,14 +11991,23 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             /* #3117: in a batched loop every send joins the
                              * batch, so a payload message keeps its place
                              * among the loop's one-int ones. */
-                            fprintf(gen->output, gen->in_main_loop ? "aether_send_message_batch("
-                                                                   : "aether_send_message(");
+                            if (try_var)
+                                fprintf(gen->output, "%s = aether_try_send_message(", try_var);
+                            else
+                                fprintf(gen->output, gen->in_main_loop ? "aether_send_message_batch("
+                                                                       : "aether_send_message(");
                             emit_send_target(gen, target, "void*", "send");
                             fprintf(gen->output, ", &_msg, sizeof(%s)); }", message->value);
                         }
                     } else {
                         fprintf(gen->output, "/* ERROR: unknown message type %s */", message->value ? message->value : "<?>");
                     }
+                }
+                if (try_var && try_as_stmts) {
+                    fprintf(gen->output, "\n");
+                    ctl_bind(expr, try_var);
+                } else if (try_var) {
+                    fprintf(gen->output, " %s; })", try_var);
                 }
             }
             break;

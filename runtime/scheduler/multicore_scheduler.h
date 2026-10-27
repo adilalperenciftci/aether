@@ -167,6 +167,11 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
      * NULL between handlers. */ \
     void* step_payload; \
     int step_type; \
+    /* The mailbox bound (#2974, `@mailbox(bound: N)`): at most this many \
+     * messages accepted for the actor and not yet taken by its step, 0 for \
+     * none. Set by the generated spawn; read by every send, on the line \
+     * `dead` is on. */ \
+    atomic_int mailbox_bound; \
     /* Bits (#2517): AETHER_ACTOR_PANICKED once the actor's step() unwound \
      * via aether_panic() or a caught signal, AETHER_ACTOR_RELEASED once it \
      * was released, AETHER_ACTOR_THREAD_GONE once its own thread (an \
@@ -231,7 +236,14 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
     atomic_int exit_flags; \
     /* How many times the actor was restarted in place, under the same ref \
      * (#2974): 0 for the actor spawned, one more at each rebirth. */ \
-    atomic_int incarnation;
+    atomic_int incarnation; \
+    /* With a mailbox bound (#2974): the messages accepted for it and not \
+     * yet taken by its step or dropped, wherever they are (a core's queue, \
+     * a sender's deferred sends, its overflow, its mailbox). System \
+     * messages (Down, IoReady) are neither counted nor refused. */ \
+    atomic_int mailbox_pending; \
+    /* Plain sends dropped because its mailbox was full (#2974). */ \
+    _Atomic(uint64_t) full_drops;
 
 typedef struct {
     AETHER_ACTOR_BASE_FIELDS
@@ -467,6 +479,60 @@ uint64_t scheduler_stopped_sends(void);
 uint64_t scheduler_dead_sends(void);
 void scheduler_count_dead_sends(int n);
 
+/* ------------------------------------------------------------------------
+ * A bounded mailbox (#2974): `@mailbox(bound: N)` on an actor. A send
+ * (scheduler_send_local, scheduler_send_remote and the paths built on
+ * them) is accepted while fewer than N messages are pending for the actor
+ * and refused otherwise, never blocked: a plain send is dropped, released
+ * and counted (full_drops, reported once on stderr), an ask fails at once
+ * with AETHER_ASK_FULL, and scheduler_try_send says so to its caller. The
+ * generated step of a bounded actor gives a message back as it takes it
+ * (aether_mailbox_took), and every drop of one not taken gives it back
+ * (aether_mailbox_untake), so `mailbox_pending` is exact. System messages
+ * are never refused nor counted.
+ * ------------------------------------------------------------------------ */
+
+static inline int aether_message_is_system(int type) {
+    return type == AETHER_MSG_DOWN || type == MSG_IO_READY;
+}
+
+/* Takes a place for one message of `type`: 1 when accepted. Exact: a send
+ * is refused only while `bound` messages are pending. */
+static inline int aether_mailbox_admit(ActorBase* a, int type) {
+    int bound = atomic_load_explicit(&a->mailbox_bound, memory_order_relaxed);
+    if (bound == 0 || aether_message_is_system(type)) return 1;
+    int p = atomic_load_explicit(&a->mailbox_pending, memory_order_relaxed);
+    while (p < bound) {
+        if (atomic_compare_exchange_weak_explicit(&a->mailbox_pending, &p, p + 1,
+                                                  memory_order_relaxed, memory_order_relaxed))
+            return 1;
+    }
+    return 0;
+}
+
+/* A message of `type` that was accepted is dropped before its step took it. */
+static inline void aether_mailbox_untake(ActorBase* a, int type) {
+    if (a && atomic_load_explicit(&a->mailbox_bound, memory_order_relaxed) != 0 &&
+        !aether_message_is_system(type))
+        atomic_fetch_sub_explicit(&a->mailbox_pending, 1, memory_order_relaxed);
+}
+
+/* The generated step of a bounded actor, after it takes a message. */
+static inline void aether_mailbox_took(ActorBase* a, int type) {
+    if (!aether_message_is_system(type))
+        atomic_fetch_sub_explicit(&a->mailbox_pending, 1, memory_order_relaxed);
+}
+
+/* Sends `msg` unless its target is dead or its mailbox is full, and says
+ * which: "" when sent, "the mailbox is full" or "the actor is dead" when
+ * not, the message released (and counted nowhere: the caller knows).
+ * `try_send(ref, Msg {...})` (aether_try_send_message for a payload). */
+const char* scheduler_try_send(ActorBase* actor, Message msg);
+const char* aether_try_send_message(void* actor, void* message_data, size_t message_size);
+
+/* Plain sends dropped because their target's mailbox was full. */
+uint64_t scheduler_full_drops(void);
+
 /* Ends `actor` with `reason` by death bit `bit` (KILLED, STOPPED), unless it
  * ended already; returns 1 when this call ended it. Its finalize runs on its
  * own thread once its current step (if any) returns. From any thread. */
@@ -509,6 +575,7 @@ void    aether_actor_trap_exits(int on) AETHER_NEEDS_PANIC_BARRIER;
 void    aether_actor_stop(void);
 void    aether_actor_kill(void* ref);
 int64_t aether_actor_dead_sends(void);
+int64_t aether_actor_full_drops(void* ref);
 
 /* Restart in place (#2974): a supervisor reruns a child's factory, and the
  * factory's spawn of the child's type takes the child's own block, so the
@@ -617,6 +684,7 @@ void* scheduler_ask_message(ActorBase* target, void* msg_data, size_t msg_size, 
 #define AETHER_ASK_NO_MEMORY  4   /* the ask could not be made */
 #define AETHER_ASK_NO_REPLY   5   /* the handler returned without replying */
 #define AETHER_ASK_KILLED     6   /* the asking actor was killed while it waited (#2974) */
+#define AETHER_ASK_FULL       7   /* the actor's mailbox bound was reached (#2974) */
 void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg_size,
                                    int timeout_ms, int* status);
 

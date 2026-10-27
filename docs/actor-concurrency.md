@@ -81,7 +81,7 @@ typedef struct {
 } CounterActor;
 ```
 
-The fields, in order: `active`, `id`, `mailbox`, `step`, `thread`, `auto_process`, `assigned_core`, `migrate_to`, `spsc_queue`, `reply_slot`, `step_lock`, `timeout_ns`, `last_activity_ns`, `step_payload`, `step_type`, `dead`, `alloc_size`, `destroy_state`, `release_message`, `scheduler_owned`, `inbox`, `thread_parked`, `inflight`, `death_watch`, `death_reason`, `exit_flags`. The header comments each one.
+The fields, in order: `active`, `id`, `mailbox`, `step`, `thread`, `auto_process`, `assigned_core`, `migrate_to`, `spsc_queue`, `reply_slot`, `step_lock`, `timeout_ns`, `last_activity_ns`, `step_payload`, `step_type`, `mailbox_bound`, `dead`, `alloc_size`, `destroy_state`, `release_message`, `scheduler_owned`, `inbox`, `thread_parked`, `inflight`, `death_watch`, `death_reason`, `exit_flags`, `incarnation`, `mailbox_pending`, `full_drops`. The header comments each one.
 
 An actor the compiler generates holds the base as its first member instead, `ActorBase _aether_base;`, followed by its states. So a state can be named like any of these fields (`state id`, `state active`); only a state named `_aether_base` is refused (#3094).
 
@@ -104,6 +104,15 @@ typedef struct {
 ```
 
 The mailbox is a single-producer single-consumer (SPSC) queue. The owning scheduler thread delivers messages and calls the actor's step function. `count` is `_Atomic` to handle the rare case where work-stealing transfers an actor between cores mid-flight. Cross-core messages arrive via the scheduler's per-sender lock-free incoming queues and are delivered to the mailbox by the owning core.
+
+### A bounded mailbox
+
+The 32 slots are not a limit: what a full mailbox cannot take waits in the core queues, the senders' deferred sends and the actor's overflow, without bound. An actor declared `@mailbox(bound: N)` (#2974) takes at most N messages that its step has not taken yet, wherever they wait. The generated spawn sets `ActorBase.mailbox_bound`; `mailbox_pending` counts the messages accepted for the actor and not yet taken or dropped:
+
+- A send takes its place before it routes (`aether_mailbox_admit`, a compare-and-swap loop, exact: refused only while N are pending), in `scheduler_send_local` and `scheduler_send_remote`; `scheduler_send_many` and the main thread's batch send a bounded actor's messages through them one at a time. The bound is read on the line `dead` is on, so an unbounded actor's send pays one load and a branch.
+- Refused, it is never blocked on (a blocked sender can be a core's thread that the actor's own core waits on): a plain `!` is released and counted (`ActorBase.full_drops`, `scheduler_full_drops()`, `actors.full_drops(ref)`), reported once on stderr; an ask fails at once with `AETHER_ASK_FULL`, "the mailbox is full"; `scheduler_try_send` (`try_send(ref, Msg { ... })`) returns the reason, "the mailbox is full" or "the actor is dead", to its caller, and counts nothing.
+- A place comes back when the generated step takes the message (`aether_mailbox_took`, emitted only for a bounded actor) or when a drop releases it before that (`release_undelivered` and the cooperative scheduler's drops: a death's drain, a message on its way to a dead actor, a teardown).
+- System messages (`Down`, `IoReady`) are neither counted nor refused.
 
 ### Message Structure
 
@@ -252,7 +261,7 @@ Both schedulers step inside one panic barrier (`runtime/actors/aether_step_barri
 A supervisor restarts a child under the ref its siblings and clients already hold (`std.supervise`, built on `actors.rebirth_begin`, `actors.rebirth_end` and `actors.incarnation`). It reruns the child's factory, so the factory's configuration (state writes, first messages) reaches the new incarnation too, and the factory's spawn of the child's actor type takes the child's own block instead of a new one:
 
 1. `actors.rebirth_begin(child)` claims the block when no message for it can still arrive: the child has ended, its death is finalized (what was queued is dropped and counted), its step lock is free (taken now, so nothing steps it), and no message is counted in flight for it. Otherwise it says "not yet" (0), and the supervisor tries again from a message to itself, so it never waits on its own core; or "never" (-1), for a live, released or C-registered actor.
-2. The spawn (`scheduler_spawn_actor`, which finds the claim in a runtime thread-local) resets the block: the old state destroyed (`destroy_state`) and zeroed, the mailbox, timeouts, watch lists and reason cleared, `incarnation` one more; `id`, `assigned_core` and the overflow's allocation kept. The generated spawn then runs the state initializers as on a new block.
+2. The spawn (`scheduler_spawn_actor`, which finds the claim in a runtime thread-local) resets the block: the old state destroyed (`destroy_state`) and zeroed, the mailbox, timeouts, watch lists and reason cleared, `incarnation` one more; `id`, `assigned_core`, the overflow's allocation and the mailbox bound and its pending count kept (every message counted against the bound is taken or dropped, so the count stays exact). The generated spawn then runs the state initializers as on a new block.
 3. Its last line, `scheduler_spawn_ready`, clears the death bits with a release store and lets go of the step lock: the child is alive. A fresh spawn is alive already, and this is one compare.
 4. `actors.rebirth_end(child)` returns 1, or undoes a rebirth the factory did not finish (it spawned no actor of that type, or panicked: the child stays ended, "the restart failed"). A panic of the supervisor's own handler undoes it as well.
 

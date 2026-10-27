@@ -26,6 +26,7 @@
     <li><a href="#kill">kill</a></li>
     <li><a href="#stop">stop</a></li>
     <li><a href="#dead_sends">dead_sends</a></li>
+    <li><a href="#full_drops">full_drops</a></li>
     <li><a href="#link">link</a></li>
     <li><a href="#unlink">unlink</a></li>
     <li><a href="#trap_exits">trap_exits</a></li>
@@ -195,6 +196,12 @@
       <h3 class="function-name">dead_sends <span class="kind">fn</span></h3>
       <pre class="usage"><code>dead_sends() <span class="arrow">-&gt;</span> long</code></pre>
       <p class="doc">Messages a panicked, killed or stopped actor did not handle: queued at its death or sent to it after, each released and counted once.</p>
+    </div>
+    <div class="function" id="full_drops" data-name="full_drops">
+      <h3 class="function-name">full_drops <span class="kind">fn</span></h3>
+      <pre class="usage"><code>full_drops(ref) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">ref: actor_ref</span></p>
+      <p class="doc">Plain sends (`!`) to `ref` dropped because its mailbox was full: an actor declared `@mailbox(bound: N)` takes at most N messages it has not handled yet. try_send(ref, Msg {...}) says &quot;the mailbox is full&quot; instead, and an ask fails with it; neither is counted here.</p>
     </div>
     <div class="function" id="link" data-name="link">
       <h3 class="function-name">link <span class="kind">fn</span></h3>

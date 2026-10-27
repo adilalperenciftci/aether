@@ -4035,6 +4035,11 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
         case AST_LITERAL:
             return clone_type(expr->node_type);
 
+        case AST_SEND_FIRE_FORGET:
+            /* #2974: try_send(ref, Msg { ... }) says whether it sent. */
+            return create_type(expr->annotation && strcmp(expr->annotation, "try_send") == 0
+                               ? TYPE_STRING : TYPE_UNKNOWN);
+
         case AST_NONE_LITERAL:
             // `none` — optional with as-yet-unknown inner; context pins the
             // concrete T (assignment / `??` / `==`). If already pinned, use it.
@@ -18111,6 +18116,17 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 ASTNode* message   = expr->children[1];
 
                 typecheck_expression(actor_ref, table);
+                if (expr->annotation && strcmp(expr->annotation, "try_send") == 0) {
+                    /* #2974: as a send statement checks its target. */
+                    Type* at = infer_type(actor_ref, table);
+                    int bad = at && at->kind != TYPE_ACTOR_REF && at->kind != TYPE_UNKNOWN;
+                    free_type(at);
+                    if (bad) {
+                        type_error("try_send(ref, Msg { ... }): ref is not an actor reference",
+                                   actor_ref->line, actor_ref->column);
+                        return 0;
+                    }
+                }
 
                 // Validate that the message type is a registered message definition
                 if (message->type == AST_MESSAGE_CONSTRUCTOR && message->value) {
@@ -18128,7 +18144,9 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 typecheck_message_constructor(message, table);
                 reject_unhandled_send(actor_ref, message, table);   /* #385 */
             }
-            set_node_type(expr, create_type(TYPE_VOID));
+            /* #2974: try_send(ref, Msg { ... }) says whether it sent. */
+            set_node_type(expr, create_type(expr->annotation && strcmp(expr->annotation, "try_send") == 0
+                                            ? TYPE_STRING : TYPE_VOID));
             return 1;
         }
 

@@ -1,0 +1,119 @@
+// A bounded mailbox refuses a send past its bound, never blocks it (#2974).
+//
+// `@mailbox(bound: N)` on an actor: at most N messages accepted for it and
+// not yet taken by its step. Past that, try_send says "the mailbox is
+// full", a plain `!` is dropped and counted (actors.full_drops), an ask
+// fails at once with the same reason, and a system message (Down) still
+// gets in. Each place comes back as the step takes a message or a drop
+// releases it. Without a bound the mailbox spills without limit.
+
+import std.actors
+import std.sync
+
+message Hold { started: ptr, gate: ptr }
+message Item { k: int }
+message Count {}
+message Watch { who: actor_ref }
+
+extern exit(code: int)
+
+@mailbox(bound: 3)
+actor Sink {
+    state n = 0
+    state last = 0
+    state disorder = 0
+    state downs = 0
+    receive {
+        Hold(started, gate) -> {
+            // Takes no message until the test lets it go.
+            sync.atomic_store(started, 1)
+            while sync.atomic_load(gate) == 0 {
+                sleep(1)
+            }
+        }
+        Item(k) -> {
+            if k <= last {
+                disorder = disorder + 1
+            }
+            last = k
+            n = n + 1
+        }
+        Count() -> { reply n }
+        Watch(who) -> { _id = actors.monitor(who) }
+        Down(ref, reason) -> { downs = downs + 1 }
+    }
+}
+
+actor Victim {
+    receive {
+        Count() -> { reply 0 }
+    }
+}
+
+check(label: string, ok: bool) -> int {
+    if !ok {
+        println("  FAIL ${label}")
+        return 1
+    }
+    println("  PASS ${label}")
+    return 0
+}
+
+main() {
+    println("=== a bounded mailbox refuses, never blocks (#2974) ===")
+    fails = 0
+    s = spawn(Sink())
+    v = spawn(Victim())
+    s ! Watch { who: v }
+    wait_for_idle()
+
+    started = sync.atomic_new(0)
+    gate = sync.atomic_new(0)
+    s ! Hold { started: started, gate: gate }
+    while sync.atomic_load(started) == 0 {
+        sleep(1)
+    }
+
+    // The handler holds: nothing is taken, so exactly 3 get in.
+    e1 = try_send(s, Item { k: 1 })
+    e2 = try_send(s, Item { k: 2 })
+    e3 = try_send(s, Item { k: 3 })
+    e4 = try_send(s, Item { k: 4 })
+    fails = fails + check("three sent, got \"${e1}\" \"${e2}\" \"${e3}\"", e1 == "" && e2 == "" && e3 == "")
+    fails = fails + check("the fourth: \"${e4}\"", e4 == "the mailbox is full")
+    s ! Item { k: 5 }
+    s ! Item { k: 6 }
+    fails = fails + check("two plain sends dropped and counted, got ${actors.full_drops(s)}",
+        actors.full_drops(s) == 2)
+    _cn, cerr = s ? Count {}
+    fails = fails + check("an ask fails at once: \"${cerr}\"", cerr == "the mailbox is full")
+    // A system message is never refused.
+    actors.kill(v)
+
+    sync.atomic_store(gate, 1)
+    wait_for_idle()
+    int got = s ? Count {}
+    fails = fails + check("the three accepted are handled, got ${got}", got == 3)
+    fails = fails + check("in order, out of order: ${s.disorder}", s.disorder == 0 && s.last == 3)
+    fails = fails + check("the Down got in past the bound, got ${s.downs}", s.downs == 1)
+    fails = fails + check("the counted drops are not more, got ${actors.full_drops(s)}",
+        actors.full_drops(s) == 2)
+    // Every place came back.
+    e5 = try_send(s, Item { k: 7 })
+    e6 = try_send(s, Item { k: 8 })
+    e7 = try_send(s, Item { k: 9 })
+    wait_for_idle()
+    fails = fails + check("room again, got \"${e5}\" \"${e6}\" \"${e7}\"", e5 == "" && e6 == "" && e7 == "")
+    actors.kill(s)
+    wait_for_idle()
+    e8 = try_send(s, Item { k: 10 })
+    fails = fails + check("a dead actor: \"${e8}\"", e8 == "the actor is dead")
+
+    sync.atomic_free(started)
+    sync.atomic_free(gate)
+    if fails > 0 {
+        println("FAIL: ${fails} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

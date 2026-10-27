@@ -3570,6 +3570,7 @@ destructured from there (`p, err = store ? GetRange {}`, then `lo, hi = p`).
 | `"the actor died before it replied"` | the handler panicked with the ask in hand |
 | `"the handler returned without replying"` | the handler that took the ask finished without a `reply` |
 | `"the asking actor was killed"` | the actor whose handler asked was killed while it waited (`actors.kill`), and the ask ended at once |
+| `"the mailbox is full"` | the actor has a mailbox bound (`@mailbox(bound: N)`) and N messages it has not handled yet; the ask was refused at once |
 
 An ask to a dead actor, in either form, ends at once rather than after the
 timeout, and so does one whose actor dies before replying or whose handler
@@ -3767,6 +3768,32 @@ how many times an actor was restarted.
 On wasi a panic ends the whole program (the target has no way to unwind), so
 `actors.monitor`, `actors.link` and `actors.trap_exits` are refused when
 compiling for it.
+
+### A bounded mailbox
+
+An actor's mailbox is unbounded unless the actor says otherwise: a send never
+blocks its sender, and what the actor has not handled yet waits in memory.
+`@mailbox(bound: N)` before an actor takes at most N messages it has not
+handled yet; past that, a send is refused at once, never blocked on:
+
+```aether,fragment
+@mailbox(bound: 1000)
+actor Ingest {
+    receive { Line(text) -> { /* ... */ } }
+}
+
+err = try_send(ingest, Line { text: t })   // "", or "the mailbox is full"
+ingest ! Line { text: t }                    // dropped and counted when full
+n, why = ingest ? Count {}                   // why: "the mailbox is full"
+```
+
+`try_send(ref, Msg { ... })` sends as `!` does and says what happened: `""`
+when it sent, `"the mailbox is full"` or `"the actor is dead"` when it did
+not (the message is released). A plain `!` past the bound is dropped,
+counted by `actors.full_drops(ref)`, and reported once on stderr. An ask past
+it fails at once with `"the mailbox is full"`. N counts every message
+accepted for the actor and not yet taken by its handler, wherever it waits,
+and a `Down` is never refused.
 
 ---
 
@@ -4961,6 +4988,7 @@ Rules:
 | Function | Description |
 |----------|-------------|
 | `spawn(ActorName())` | Create actor instance |
+| `try_send(ref, Msg { ... })` | Send as `ref ! Msg { ... }` does, and say whether it did: `""`, `"the mailbox is full"` or `"the actor is dead"` (see A bounded mailbox) |
 | `wait_for_idle()` | Wait for all actors to finish |
 
 ### Environment & Process

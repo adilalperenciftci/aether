@@ -107,8 +107,48 @@ On wasi a panic ends the program, so `monitor`, `link` and `trap_exits` are
 refused when compiling for it. See docs/actor-concurrency.md, "The end of an
 actor".
 
+## A bounded mailbox (#2974)
+
+A mailbox is unbounded by default: a send never blocks, and what an actor has
+not handled yet waits in memory. `@mailbox(bound: N)` on an actor takes at
+most N messages it has not handled yet. Past that a send is refused, never
+blocked: `try_send(ref, Msg { ... })` says `"the mailbox is full"` (or
+`"the actor is dead"`, and `""` when it sent), an ask fails at once with
+`"the mailbox is full"`, and a plain `!` is dropped and counted by
+`actors.full_drops(ref)`. A `Down` always gets in.
+
+```aether,run
+import std.actors
+
+message Item { k: int }
+
+@mailbox(bound: 2)
+actor Sink {
+    state n = 0
+    receive { Item(k) -> { n = n + 1 } }
+}
+
+main() {
+    s = spawn(Sink())
+    k = 0
+    full = 0
+    while k < 1000 {
+        if try_send(s, Item { k: k }) != "" {
+            full = full + 1
+        }
+        k = k + 1
+    }
+    wait_for_idle()
+    println("handled + refused = ${s.n + full}")
+}
+```
+```output
+handled + refused = 1000
+```
+
 ## Exports
 
 `register`, `whereis`, `unregister`, `is_registered`, `registry_size`,
-`registry_clear`, `monitor`, `demonitor`, `kill`, `stop`, `dead_sends`, `link`,
-`unlink`, `trap_exits`, `rebirth_begin`, `rebirth_end`, `incarnation`.
+`registry_clear`, `monitor`, `demonitor`, `kill`, `stop`, `dead_sends`,
+`full_drops`, `link`, `unlink`, `trap_exits`, `rebirth_begin`, `rebirth_end`,
+`incarnation`.

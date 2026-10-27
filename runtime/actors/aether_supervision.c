@@ -308,6 +308,11 @@ int64_t aether_actor_dead_sends(void) {
     return (int64_t)scheduler_dead_sends();
 }
 
+// Plain sends to `ref` dropped because its mailbox was full (#2974).
+int64_t aether_actor_full_drops(void* ref) {
+    return ref ? (int64_t)atomic_load_explicit(&((ActorBase*)ref)->full_drops, memory_order_relaxed) : 0;
+}
+
 void aether_actor_link(void* ref) {
     ActorBase* self = current_self("actors.link()");
     ActorBase* other = (ActorBase*)ref;
@@ -424,7 +429,8 @@ ActorBase* aether_rebirth_take(void (*step)(void*), size_t size) {
     rebirth_clear_state(a);
     Message discard;
     while (mailbox_receive(&a->mailbox, &discard)) {   // none: finalized, and nothing
-        aether_message_drop(a, &discard);              // is delivered to a dead actor
+        aether_mailbox_untake(a, discard.type);        // is delivered to a dead actor
+        aether_message_drop(a, &discard);
         scheduler_count_dead_sends(1);
     }
     a->step_payload = NULL;

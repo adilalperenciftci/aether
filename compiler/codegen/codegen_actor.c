@@ -1,5 +1,14 @@
 #include "codegen_internal.h"
 #include <string.h>
+#include <stdlib.h>
+
+/* #2974: the N of an actor's `@mailbox(bound: N)` (the parser's
+ * "mailbox_bound:N" annotation), 0 for an actor with no bound. */
+static int actor_mailbox_bound(const ASTNode* actor) {
+    const char* a = actor ? actor->annotation : NULL;
+    if (!a || strncmp(a, "mailbox_bound:", 14) != 0) return 0;
+    return atoi(a + 14);
+}
 
 /* The message name of the `_` arm's handler, `<Actor>_handle__aether_any`:
  * no message can be named so, `_aether` names being the compiler's. */
@@ -952,6 +961,8 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     print_line(gen, "return;");
     unindent(gen);
     print_line(gen, "}");
+    if (actor_mailbox_bound(actor) > 0)
+        print_line(gen, "aether_mailbox_took(&self->_aether_base, msg.type);   /* @mailbox (#2974) */");
     if (timeout_arm) {
         // A message disarms the timeout; its handling's end arms it again.
         print_line(gen, "self->_aether_base.last_activity_ns = 0;");
@@ -1222,6 +1233,9 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     /* Not `dead`: a fresh block is alive from scheduler_spawn_actor, and a
      * restart's block (#2974) stays dead until it is ready, below. */
     print_line(gen, "actor->_aether_base.auto_process = 0;");
+    if (actor_mailbox_bound(actor) > 0)
+        print_line(gen, "atomic_store_explicit(&actor->_aether_base.mailbox_bound, %d, memory_order_relaxed);   /* @mailbox (#2974) */",
+                   actor_mailbox_bound(actor));
     print_line(gen, "");
     
     for (int i = 0; i < actor->child_count; i++) {

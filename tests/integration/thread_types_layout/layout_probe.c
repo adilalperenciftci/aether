@@ -26,6 +26,7 @@ int main(void) {
     AT(ActorBase, step_lock);
     AT(ActorBase, timeout_ns);
     AT(ActorBase, last_activity_ns);
+    AT(ActorBase, mailbox_bound);
     AT(ActorBase, dead);
     AT(ActorBase, alloc_size);
     AT(ActorBase, destroy_state);
@@ -37,6 +38,8 @@ int main(void) {
     AT(ActorBase, death_reason);
     AT(ActorBase, exit_flags);
     AT(ActorBase, incarnation);
+    AT(ActorBase, mailbox_pending);
+    AT(ActorBase, full_drops);
     SIZE(ActorReplySlot);
     AT(ActorReplySlot, mutex);
     AT(ActorReplySlot, cond);

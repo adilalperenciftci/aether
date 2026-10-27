@@ -165,6 +165,15 @@ void aether_send_message(void* actor_ptr, void* message_data, size_t message_siz
 #endif
 }
 
+// try_send(ref, Msg {...}) of a payload message (#2974): sent as
+// aether_send_message sends it, unless the actor is dead or its mailbox
+// full, which it says ("" when sent).
+const char* aether_try_send_message(void* actor_ptr, void* message_data, size_t message_size) {
+    ActorBase* actor = (ActorBase*)actor_ptr;
+    if (!actor) return "the actor is dead";
+    return scheduler_try_send(actor, payload_message(actor, message_data, message_size));
+}
+
 // A typed message sent inside a batched loop (#3117): it joins the batch, as
 // the loop's one-int messages do, so the loop's sends keep their order.
 void aether_send_message_batch(void* actor_ptr, void* message_data, size_t message_size) {

@@ -1812,6 +1812,35 @@ static ASTNode* parse_primary_expression_inner(Parser* parser) {
         return create_ast_node(AST_NONE_LITERAL, NULL, token->line, token->column);
     }
 
+    /* #2974: `try_send(ref, Msg { ... })` sends as `ref ! Msg { ... }` does
+     * and says whether it did: "" when sent, "the mailbox is full" or "the
+     * actor is dead" when not. A send node marked "try_send", so the message
+     * is built, owned and released as a send's is. Contextual: only the name
+     * followed by `(` is it. */
+    if (token->type == TOKEN_IDENTIFIER && token->value &&
+        strcmp(token->value, "try_send") == 0 && peek_ahead(parser, 1) &&
+        peek_ahead(parser, 1)->type == TOKEN_LEFT_PAREN) {
+        advance_token(parser);   // try_send
+        advance_token(parser);   // (
+        ASTNode* target = parse_expression(parser);
+        if (!target) return NULL;
+        if (!expect_token(parser, TOKEN_COMMA)) return NULL;
+        Token* name = peek_token(parser);
+        if (!name || name->type != TOKEN_IDENTIFIER || !name->value ||
+            name->value[0] < 'A' || name->value[0] > 'Z') {
+            parser_error(parser, "try_send(ref, Msg { ... }) takes a message, as `!` does");
+            return NULL;
+        }
+        ASTNode* message = parse_message_constructor(parser);
+        if (!message) return NULL;
+        if (!expect_token(parser, TOKEN_RIGHT_PAREN)) return NULL;
+        ASTNode* send = create_ast_node(AST_SEND_FIRE_FORGET, NULL, token->line, token->column);
+        send->annotation = strdup("try_send");
+        add_child(send, target);
+        add_child(send, message);
+        return send;
+    }
+
     switch (token->type) {
         case TOKEN_NUMBER:
         case TOKEN_STRING_LITERAL:
@@ -8243,6 +8272,47 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                     node = cdef;
                     break;
                 }
+                // @mailbox(bound: N) actor A { ... } (#2974): at most N
+                // messages accepted for A and not yet taken by its step; a
+                // send past it is refused, never blocked on. Carried as the
+                // actor's "mailbox_bound:N" annotation.
+                if (attr && attr->type == TOKEN_IDENTIFIER && attr->value &&
+                    strcmp(attr->value, "mailbox") == 0) {
+                    advance_token(parser);  // consume 'mailbox'
+                    if (!expect_token(parser, TOKEN_LEFT_PAREN)) return NULL;
+                    Token* key = peek_token(parser);
+                    if (!key || key->type != TOKEN_IDENTIFIER || !key->value ||
+                        strcmp(key->value, "bound") != 0) {
+                        parser_error(parser, "@mailbox takes a bound, as in @mailbox(bound: 1000)");
+                        return NULL;
+                    }
+                    advance_token(parser);  // consume 'bound'
+                    if (!expect_token(parser, TOKEN_COLON)) return NULL;
+                    Token* num = peek_token(parser);
+                    char* end = NULL;
+                    long bound = (num && num->type == TOKEN_NUMBER && num->value)
+                                 ? strtol(num->value, &end, 10) : 0;
+                    if (!end || *end || bound < 1 || bound > 1000000000L) {
+                        parser_error(parser, "@mailbox(bound: N) takes a whole number N from 1 to 1000000000");
+                        return NULL;
+                    }
+                    advance_token(parser);  // consume the number
+                    if (!expect_token(parser, TOKEN_RIGHT_PAREN)) return NULL;
+                    Token* next_tok = peek_token(parser);
+                    if (!next_tok || next_tok->type != TOKEN_ACTOR) {
+                        parser_error(parser, "@mailbox(bound: N) must precede an `actor` definition");
+                        return NULL;
+                    }
+                    ASTNode* ad = parse_actor_definition(parser);
+                    if (ad) {
+                        char tag[48];
+                        snprintf(tag, sizeof(tag), "mailbox_bound:%ld", bound);
+                        free(ad->annotation);
+                        ad->annotation = strdup(tag);
+                    }
+                    node = ad;
+                    break;
+                }
                 // @derive(eq[, format, clone, hash]) struct T { ... }
                 //
                 // Issue #338: synthesize trait-shaped helpers from
@@ -8405,7 +8475,7 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                     break;
                 }
                 if (!attr || attr->type != TOKEN_EXTERN) {
-                    parser_error(parser, "unknown attribute (expected @extern(\"...\"), @c_callback, @derive, @quotable, or an effect tag @pure/@no_fs/@no_net/@no_os)");
+                    parser_error(parser, "unknown attribute (expected @extern(\"...\"), @c_callback, @derive, @mailbox, @quotable, or an effect tag @pure/@no_fs/@no_net/@no_os)");
                     advance_token(parser);
                     return NULL;
                 }
