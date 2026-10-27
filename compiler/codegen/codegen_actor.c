@@ -1219,7 +1219,8 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     print_line(gen, "if (!actor) return NULL;");
     print_line(gen, "atomic_init(&actor->_aether_base.active, 0);  // inactive until first message send");
     print_line(gen, "atomic_init(&actor->_aether_base.migrate_to, -1);");
-    print_line(gen, "atomic_init(&actor->_aether_base.dead, 0);");
+    /* Not `dead`: a fresh block is alive from scheduler_spawn_actor, and a
+     * restart's block (#2974) stays dead until it is ready, below. */
     print_line(gen, "actor->_aether_base.auto_process = 0;");
     print_line(gen, "");
     
@@ -1324,6 +1325,9 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
         print_line(gen, "atomic_store_explicit(&actor->_aether_base.active, 1, memory_order_release);  // Activate for timeout polling");
     }
 
+    /* Initialized: an actor restarted in place (#2974) comes alive here, under
+     * the ref its clients hold; a fresh one already is. */
+    print_line(gen, "scheduler_spawn_ready(&actor->_aether_base);");
     print_line(gen, "");
     print_line(gen, "return actor;");
     unindent(gen);

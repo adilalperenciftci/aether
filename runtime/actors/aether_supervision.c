@@ -363,3 +363,130 @@ void aether_actor_trap_exits(int on) {
     if (on) atomic_fetch_or_explicit(&self->exit_flags, AETHER_EXIT_TRAP, memory_order_acq_rel);
     else atomic_fetch_and_explicit(&self->exit_flags, ~AETHER_EXIT_TRAP, memory_order_acq_rel);
 }
+
+// ---------------------------------------------------------------------------
+// Restart in place (#2974)
+//
+// A supervisor restarts a child under the ref its siblings and clients hold:
+// it reruns the child's factory, and the factory's spawn of the child's type
+// takes the child's own block. The block is claimed only when no message for
+// it can still arrive: the child has ended and its death is finalized (what
+// was queued is dropped), its step lock is taken (nothing steps it), and no
+// message is counted in flight for it. A counted send reads its target's
+// death after counting itself (send_through_core), so one counted after that
+// check drops itself while the child is dead, and one that finds it alive
+// again reaches the new incarnation: nothing sent before the restart reaches
+// it. A local send reads the death on the child's core and drops. The child's
+// core touches a dead, quiescent actor through nothing else: it delivers only
+// counted messages and steps only under the step lock, which the rebirth
+// holds until the new incarnation is alive (scheduler_spawn_ready).
+//
+// The claim and the reborn block are this thread's (one rebirth at a time),
+// never named by generated code.
+// ---------------------------------------------------------------------------
+
+static AETHER_TLS ActorBase* t_rebirth_target = NULL;
+static AETHER_TLS ActorBase* t_reborn = NULL;
+
+int aether_actor_rebirth_begin(void* ref) {
+    ActorBase* a = (ActorBase*)ref;
+    if (!a || a->auto_process || !a->scheduler_owned) return -1;
+    int d = atomic_load_explicit(&a->dead, memory_order_acquire);
+    if (!(d & AETHER_ACTOR_ENDED) || (d & AETHER_ACTOR_RELEASED)) return -1;
+    if (t_rebirth_target || t_reborn) return -1;
+    if (!(atomic_load_explicit(&a->exit_flags, memory_order_acquire) & AETHER_EXIT_FINALIZED))
+        return 0;   // its death is still being finalized
+    if (atomic_flag_test_and_set_explicit(&a->step_lock, memory_order_acquire)) return 0;
+    if (atomic_load_explicit(&a->inflight, memory_order_acquire) != 0) {
+        // Messages sent before its death still on their way: each is
+        // dropped where it arrives, and then the child can be reborn.
+        atomic_flag_clear_explicit(&a->step_lock, memory_order_release);
+        return 0;
+    }
+    t_rebirth_target = a;
+    return 1;
+}
+
+/* The block made empty for the state initializers to fill: the old
+ * incarnation's state destroyed, its fields zeroed. */
+static void rebirth_clear_state(ActorBase* a) {
+    if (a->destroy_state) a->destroy_state(a);
+    if (a->alloc_size > sizeof(ActorBase))
+        memset((char*)a + sizeof(ActorBase), 0, a->alloc_size - sizeof(ActorBase));
+}
+
+ActorBase* aether_rebirth_take(void (*step)(void*), size_t size) {
+    ActorBase* a = t_rebirth_target;
+    if (likely(a == NULL) || a->step != step || a->alloc_size != size) return NULL;
+    t_rebirth_target = NULL;
+    t_reborn = a;
+    rebirth_clear_state(a);
+    Message discard;
+    while (mailbox_receive(&a->mailbox, &discard)) {   // none: finalized, and nothing
+        aether_message_drop(a, &discard);              // is delivered to a dead actor
+        scheduler_count_dead_sends(1);
+    }
+    a->step_payload = NULL;
+    a->step_type = 0;
+    a->timeout_ns = 0;
+    a->last_activity_ns = 0;
+    atomic_store_explicit(&a->active, 0, memory_order_relaxed);
+    atomic_store_explicit(&a->migrate_to, -1, memory_order_relaxed);
+    atomic_store_explicit(&a->reply_slot, NULL, memory_order_relaxed);
+    aether_watch_free(a);   // the old incarnation's lists and reason
+    atomic_store_explicit(&a->exit_flags, 0, memory_order_relaxed);
+    atomic_fetch_add_explicit(&a->incarnation, 1, memory_order_relaxed);
+    return a;
+}
+
+void scheduler_spawn_ready(ActorBase* a) {
+    if (likely(t_reborn != a) || !a) return;   // a fresh spawn: alive already
+    t_reborn = NULL;
+    // Its state is written: the release makes it visible to whoever reads
+    // the cleared bits (a sender, the core that steps it).
+    atomic_fetch_and_explicit(&a->dead,
+                              ~(AETHER_ACTOR_PANICKED | AETHER_ACTOR_KILLED | AETHER_ACTOR_STOPPED),
+                              memory_order_acq_rel);
+    atomic_flag_clear_explicit(&a->step_lock, memory_order_release);
+    scheduler_actor_revived(a);
+}
+
+/* A rebirth the factory did not finish: the child stays ended, finalized,
+ * with this reason, and its step lock goes. */
+static void rebirth_undo(ActorBase* a, int half_made) {
+    if (half_made) {
+        rebirth_clear_state(a);
+        aether_actor_claim_reason(a, "the restart failed");
+        atomic_fetch_or_explicit(&a->exit_flags, AETHER_EXIT_FINALIZED, memory_order_acq_rel);
+        aether_watch_notify(a, atomic_load_explicit(&a->death_reason, memory_order_acquire));
+    }
+    atomic_flag_clear_explicit(&a->step_lock, memory_order_release);
+}
+
+int aether_actor_rebirth_end(void* ref) {
+    ActorBase* a = (ActorBase*)ref;
+    if (!a) return 0;
+    if (t_rebirth_target == a) {   // the factory spawned no actor of its type
+        t_rebirth_target = NULL;
+        rebirth_undo(a, 0);
+        return 0;
+    }
+    if (t_reborn == a) {           // it panicked between the spawn and the ready
+        t_reborn = NULL;
+        rebirth_undo(a, 1);
+        return 0;
+    }
+    return !(atomic_load_explicit(&a->dead, memory_order_acquire) & AETHER_ACTOR_ENDED);
+}
+
+void aether_rebirth_abandon(void) {
+    if (likely(!t_rebirth_target && !t_reborn)) return;
+    if (t_rebirth_target) rebirth_undo(t_rebirth_target, 0);
+    if (t_reborn) rebirth_undo(t_reborn, 1);
+    t_rebirth_target = NULL;
+    t_reborn = NULL;
+}
+
+int aether_actor_incarnation(void* ref) {
+    return ref ? atomic_load_explicit(&((ActorBase*)ref)->incarnation, memory_order_acquire) : 0;
+}

@@ -174,7 +174,8 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
      * kill or a linked actor's death ended it, AETHER_ACTOR_STOPPED once \
      * it stopped itself (#2974). Non-zero actors are skipped by the \
      * scheduler and incoming messages are dropped. Bits are only ever \
-     * set. */ \
+     * set, but by a restart in place (#2974), which clears the death \
+     * bits (never RELEASED) once the new incarnation is ready. */ \
     atomic_int dead; \
     /* Full allocation size passed to scheduler_spawn_actor. numa_free() unmaps \
      * exactly [ptr, ptr+size), so freeing a derived actor with \
@@ -227,7 +228,10 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
      * bit; NULL while it lives. */ \
     _Atomic(char*) death_reason; \
     /* AETHER_EXIT_* bits (#2974). */ \
-    atomic_int exit_flags;
+    atomic_int exit_flags; \
+    /* How many times the actor was restarted in place, under the same ref \
+     * (#2974): 0 for the actor spawned, one more at each rebirth. */ \
+    atomic_int incarnation;
 
 typedef struct {
     AETHER_ACTOR_BASE_FIELDS
@@ -505,6 +509,30 @@ void    aether_actor_trap_exits(int on) AETHER_NEEDS_PANIC_BARRIER;
 void    aether_actor_stop(void);
 void    aether_actor_kill(void* ref);
 int64_t aether_actor_dead_sends(void);
+
+/* Restart in place (#2974): a supervisor reruns a child's factory, and the
+ * factory's spawn of the child's type takes the child's own block, so the
+ * ref its clients hold reaches the new incarnation. rebirth_begin claims an
+ * ended, finalized child with no message of it in flight (1; 0: not yet, try
+ * again; -1: alive, released, or not the scheduler's); the spawn then resets
+ * the block (its old state destroyed, its fields zeroed, its watch lists
+ * gone, incarnation + 1) and the generated spawn's state initializers run;
+ * scheduler_spawn_ready, the generated spawn's last line, brings it alive.
+ * rebirth_end says whether it is (1), or undoes a rebirth the factory did
+ * not finish (0: it spawned no actor of the type, or panicked), the child
+ * left ended. A send while it is dead is dropped and counted; one after the
+ * spawn returns reaches the new incarnation. */
+int  aether_actor_rebirth_begin(void* ref);
+int  aether_actor_rebirth_end(void* ref);
+int  aether_actor_incarnation(void* ref);
+/* The block scheduler_spawn_actor reuses for a rebirth on this thread, or
+ * NULL. */
+ActorBase* aether_rebirth_take(void (*step)(void*), size_t size);
+void scheduler_spawn_ready(ActorBase* actor);
+/* A panic left a rebirth half done on this thread: undone (the step barrier). */
+void aether_rebirth_abandon(void);
+/* The scheduler's part once a reborn actor is alive (wake its core). */
+void scheduler_actor_revived(ActorBase* actor);
 
 // #2527: a reference that knows which actor it was taken from. The block a
 // released actor leaves goes to the next spawn of its size, which gets an id

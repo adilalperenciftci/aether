@@ -972,6 +972,7 @@ TEST_SRC = tests/runtime/test_harness.c \
            tests/runtime/test_actor_thread_sends.c \
            tests/runtime/test_overflow_reentry.c \
            tests/runtime/test_actor_death.c \
+           tests/runtime/test_actor_rebirth.c \
            tests/runtime/test_http_server.c \
            tests/runtime/test_http_resolver.c \
            tests/runtime/test_resource_caps.c \

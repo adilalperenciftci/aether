@@ -247,6 +247,19 @@ Each actor's watchers live in its `death_watch` list (`runtime/actors/aether_sup
 
 Both schedulers step inside one panic barrier (`runtime/actors/aether_step_barrier.h`), so on the cooperative one too (Emscripten, esp32) a panic is a death with a `Down`. On wasi a panic ends the program, since the target has no setjmp to unwind with, so a death a monitor would watch cannot be caught there: `actors.monitor`, `actors.link` and `actors.trap_exits` (and `std.supervise`, built on them) are refused at compile time on that target, through an `unavailable` attribute on the runtime's declaration.
 
+### Restart in place
+
+A supervisor restarts a child under the ref its siblings and clients already hold (`std.supervise`, built on `actors.rebirth_begin`, `actors.rebirth_end` and `actors.incarnation`). It reruns the child's factory, so the factory's configuration (state writes, first messages) reaches the new incarnation too, and the factory's spawn of the child's actor type takes the child's own block instead of a new one:
+
+1. `actors.rebirth_begin(child)` claims the block when no message for it can still arrive: the child has ended, its death is finalized (what was queued is dropped and counted), its step lock is free (taken now, so nothing steps it), and no message is counted in flight for it. Otherwise it says "not yet" (0), and the supervisor tries again from a message to itself, so it never waits on its own core; or "never" (-1), for a live, released or C-registered actor.
+2. The spawn (`scheduler_spawn_actor`, which finds the claim in a runtime thread-local) resets the block: the old state destroyed (`destroy_state`) and zeroed, the mailbox, timeouts, watch lists and reason cleared, `incarnation` one more; `id`, `assigned_core` and the overflow's allocation kept. The generated spawn then runs the state initializers as on a new block.
+3. Its last line, `scheduler_spawn_ready`, clears the death bits with a release store and lets go of the step lock: the child is alive. A fresh spawn is alive already, and this is one compare.
+4. `actors.rebirth_end(child)` returns 1, or undoes a rebirth the factory did not finish (it spawned no actor of that type, or panicked: the child stays ended, "the restart failed"). A panic of the supervisor's own handler undoes it as well.
+
+No message sent before the restart reaches the new incarnation. A counted send reads its target's death after counting itself, so a message counted before the claim held it up (in flight), and one counted after it reads the death and drops itself (counted in `dead_sends`), until the release store, after which it reaches the new incarnation. A local send reads the death on the child's core, where the death was finalized. While the child is dead its core touches it only through counted messages (none) and steps it only under the step lock (the rebirth's), so the reset and the initializers run without a race against its core or its senders. A ref need not tell incarnations apart: the handle is the point. `actors.incarnation(ref)` says how many times it was restarted, and a monitor is per incarnation (a client re-monitors after a restart). A C `AetherActorRef` keeps its `id`, so it reaches the new incarnation too.
+
+`tests/runtime/test_actor_rebirth.c` restarts an actor that panics every 150 messages while three sender actors and the main thread send to it: each message is handled at most once and in its sender's order, handled plus dropped is what was sent, nothing reaches a half-made incarnation, and nothing a sender had finished sending when the child was claimed reaches the new one.
+
 ## Actor Timeouts
 
 The `after` clause on a `receive` block fires a handler if no message arrives within a given number of milliseconds:

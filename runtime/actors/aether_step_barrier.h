@@ -111,6 +111,8 @@ static inline void aether_step_barrier(ActorBase* actor,
 
     // What waits for it is dropped and credited, and its watchers told.
     finalize(actor);
+    // A restart in place its handler had begun is undone (#2974).
+    aether_rebirth_abandon();
 
     aether_fire_death_hook(actor->id, reason);
     /* A heap-built panic message (aether_panic_owned) belongs to whoever

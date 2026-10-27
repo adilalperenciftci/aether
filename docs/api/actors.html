@@ -29,6 +29,9 @@
     <li><a href="#link">link</a></li>
     <li><a href="#unlink">unlink</a></li>
     <li><a href="#trap_exits">trap_exits</a></li>
+    <li><a href="#rebirth_begin">rebirth_begin</a></li>
+    <li><a href="#rebirth_end">rebirth_end</a></li>
+    <li><a href="#incarnation">incarnation</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -209,6 +212,24 @@
       <pre class="usage"><code>trap_exits(on)</code></pre>
       <p class="signature"><span class="sig-params">on: bool</span></p>
       <p class="doc">From a handler: a linked actor's death reaches this actor as a Down (its id 0, never dropped by demonitor) instead of ending it, while `on`.</p>
+    </div>
+    <div class="function" id="rebirth_begin" data-name="rebirth_begin">
+      <h3 class="function-name">rebirth_begin <span class="kind">fn</span></h3>
+      <pre class="usage"><code>rebirth_begin(ref) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">ref: actor_ref</span></p>
+      <p class="doc">1 when `ref` is claimed for a restart on this thread: it has ended, its death is finalized and no message of it is in flight. 0 when not yet (try again soon), -1 when it cannot be (it is alive, released, or one a C host registered).</p>
+    </div>
+    <div class="function" id="rebirth_end" data-name="rebirth_end">
+      <h3 class="function-name">rebirth_end <span class="kind">fn</span></h3>
+      <pre class="usage"><code>rebirth_end(ref) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">ref: actor_ref</span></p>
+      <p class="doc">1 when `ref` is alive again. 0 when the factory spawned no actor of its type, or panicked first: the restart is undone and `ref` stays ended, &quot;the restart failed&quot;.</p>
+    </div>
+    <div class="function" id="incarnation" data-name="incarnation">
+      <h3 class="function-name">incarnation <span class="kind">fn</span></h3>
+      <pre class="usage"><code>incarnation(ref) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">ref: actor_ref</span></p>
+      <p class="doc">How many times `ref` was restarted in place: 0 for the actor spawned.</p>
     </div>
   </div>
 </main>

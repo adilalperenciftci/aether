@@ -16,6 +16,7 @@ void register_sender_move_order_tests(void);
 void register_actor_thread_sends_tests(void);
 void register_overflow_reentry_tests(void);
 void register_actor_death_tests(void);
+void register_actor_rebirth_tests(void);
 
 void print_test_help(const char* program) {
     printf("Aether Test Runner\n\n");
@@ -96,6 +97,7 @@ int main(int argc, char** argv) {
     register_actor_thread_sends_tests();
     register_overflow_reentry_tests();
     register_actor_death_tests();
+    register_actor_rebirth_tests();
     
     run_all_tests();
 

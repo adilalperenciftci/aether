@@ -36,6 +36,7 @@ int main(void) {
     AT(ActorBase, death_watch);
     AT(ActorBase, death_reason);
     AT(ActorBase, exit_flags);
+    AT(ActorBase, incarnation);
     SIZE(ActorReplySlot);
     AT(ActorReplySlot, mutex);
     AT(ActorReplySlot, cond);

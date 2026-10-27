@@ -61,7 +61,8 @@ exports(
     register, whereis, unregister, is_registered, registry_size,
     registry_clear,
     monitor, demonitor, kill, stop, dead_sends,
-    link, unlink, trap_exits
+    link, unlink, trap_exits,
+    rebirth_begin, rebirth_end, incarnation
 )
 
 // ---- Raw externs ----
@@ -84,6 +85,9 @@ extern aether_actor_dead_sends() -> long
 extern aether_actor_link(ref: actor_ref)
 extern aether_actor_unlink(ref: actor_ref)
 extern aether_actor_trap_exits(on: int)
+extern aether_actor_rebirth_begin(ref: actor_ref) -> int
+extern aether_actor_rebirth_end(ref: actor_ref) -> int
+extern aether_actor_incarnation(ref: actor_ref) -> int
 
 // ---- Aether-side wrappers ----
 
@@ -187,4 +191,34 @@ trap_exits(on: bool) {
     } else {
         aether_actor_trap_exits(0)
     }
+}
+
+// ---- Restart in place (#2974) ----
+//
+// What a supervisor (std.supervise) restarts a child with, under the ref its
+// siblings and clients already hold: rebirth_begin(child), then the child's
+// factory, whose spawn of the child's actor type takes the child's own block
+// and runs its state initializers, then rebirth_end(child). Messages queued
+// at the death, and sends while it is dead, are dropped and counted
+// (dead_sends); sends once the factory's spawn returns reach the new
+// incarnation.
+
+// 1 when `ref` is claimed for a restart on this thread: it has ended, its
+// death is finalized and no message of it is in flight. 0 when not yet (try
+// again soon), -1 when it cannot be (it is alive, released, or one a C host
+// registered).
+rebirth_begin(ref: actor_ref) -> int {
+    return aether_actor_rebirth_begin(ref)
+}
+
+// 1 when `ref` is alive again. 0 when the factory spawned no actor of its
+// type, or panicked first: the restart is undone and `ref` stays ended,
+// "the restart failed".
+rebirth_end(ref: actor_ref) -> int {
+    return aether_actor_rebirth_end(ref)
+}
+
+// How many times `ref` was restarted in place: 0 for the actor spawned.
+incarnation(ref: actor_ref) -> int {
+    return aether_actor_incarnation(ref)
 }

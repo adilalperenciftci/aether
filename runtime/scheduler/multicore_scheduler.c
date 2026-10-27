@@ -685,7 +685,10 @@ static void control_run(Scheduler* sched) {
         } else if (core != sched->core_id && core >= 0 && core < num_cores) {
             control_post(core, actor);
         } else if (!atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire)) {
-            actor_finalize(actor);
+            // Read again under the lock: a restart in place may have
+            // brought it alive meanwhile (#2974).
+            d = atomic_load_explicit(&actor->dead, memory_order_acquire);
+            if ((d & AETHER_ACTOR_ENDED) && !(d & AETHER_ACTOR_RELEASED)) actor_finalize(actor);
             atomic_flag_clear_explicit(&actor->step_lock, memory_order_release);
         }
         // else stepping lower on this thread: its step's end finalizes it.
@@ -712,6 +715,13 @@ static void wake_ended_asker(ActorBase* actor) {
         }
     }
     atomic_flag_clear_explicit(&s->actor_lock.lock, memory_order_release);
+}
+
+/* A reborn actor is alive (#2974): its core is woken, which steps it if a
+ * receive timeout of its is armed. */
+void scheduler_actor_revived(ActorBase* actor) {
+    int core = atomic_load_explicit(&actor->assigned_core, memory_order_acquire);
+    if (core >= 0 && core < num_cores) sched_wake(&schedulers[core]);
 }
 
 int scheduler_actor_end(ActorBase* actor, const char* reason, int bit) {
@@ -798,7 +808,9 @@ static void overflow_release(Scheduler* sched) {
         for (int i = b->head; i < b->head + b->count; i++) {
             ActorBase* actor = b->actors[i];
             if (actor && !actor->auto_process) inflight_leave(actor, 1);
-            scheduler_drop_dead_message(sched, actor, &b->msgs[i]);
+            // Not a death's drop: the cores are stopping.
+            release_undelivered(actor, &b->msgs[i]);
+            atomic_fetch_add_explicit(&sched->messages_processed, 1, memory_order_relaxed);
             dropped++;
         }
         free(b->actors);
@@ -1782,12 +1794,11 @@ static inline int has_pending_cross_core(Scheduler* sched) {
 static void scheduler_drop_dead_message(Scheduler* sched, ActorBase* actor, Message* msg) {
     release_undelivered(actor, msg);
     atomic_fetch_add_explicit(&sched->messages_processed, 1, memory_order_relaxed);
-    // On its way when its target died (#2974); a thread's leftovers at its
-    // exit and a released target are counted elsewhere.
-    if (actor) {
-        int d = atomic_load_explicit(&actor->dead, memory_order_relaxed);
-        if ((d & AETHER_ACTOR_ENDED) && !(d & AETHER_ACTOR_RELEASED)) scheduler_count_dead_sends(1);
-    }
+    // On its way when its target died (#2974); a released target's are its
+    // own count's. Counted by the caller's finding, the target dead: a
+    // restart in place may have cleared the bit since.
+    if (actor && !(atomic_load_explicit(&actor->dead, memory_order_relaxed) & AETHER_ACTOR_RELEASED))
+        scheduler_count_dead_sends(1);
 }
 
 // Whether nothing sent from core `core` is still on its way: no core's queue
@@ -1899,7 +1910,10 @@ static int make_room(Scheduler* sched, ActorBase* actor) {
     } else {
         AETHER_PAUSE();
     }
-    return 1;
+    // Dead by a step here (a panic, a stop): it takes no more. Its death
+    // drained the mailbox, and what the caller would put there next would
+    // wait, never handled nor credited, in a dead actor's mailbox.
+    return !atomic_load_explicit(&actor->dead, memory_order_acquire);
 }
 
 void* AETHER_HOT scheduler_thread(void* arg) {
@@ -2078,7 +2092,12 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                 // Dead, or never stepped (no handler): it takes no more
                 // messages, as a send to a dead actor is dropped.
                 inflight_leave(actor, 1);
-                scheduler_drop_dead_message(sched, actor, &sched->coalesce_buffer.messages[k]);
+                if (actor->step) {
+                    scheduler_drop_dead_message(sched, actor, &sched->coalesce_buffer.messages[k]);
+                } else {
+                    release_undelivered(actor, &sched->coalesce_buffer.messages[k]);
+                    atomic_fetch_add_explicit(&sched->messages_processed, 1, memory_order_relaxed);
+                }
             }
             int delivered = placed - i;
             i = run_end - 1;
@@ -2920,6 +2939,7 @@ int scheduler_register_actor(ActorBase* actor, int preferred_core) {
     atomic_init(&actor->death_watch, NULL);         // #2974
     atomic_init(&actor->death_reason, NULL);
     atomic_init(&actor->exit_flags, 0);
+    atomic_init(&actor->incarnation, 0);
     return register_actor(actor, preferred_core);
 }
 
@@ -3678,6 +3698,11 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
     }
     if (actor_size < sizeof(ActorBase)) actor_size = sizeof(ActorBase);
 
+    // A restart in place (#2974): the factory's spawn of the child's type
+    // takes the child's own block, already registered on its core.
+    ActorBase* reborn = aether_rebirth_take(step, actor_size);
+    if (reborn) return reborn;
+
     // A released actor's block of this size first (#2517), then the allocator.
     ActorBase* actor = tombstone_take(actor_size);
     if (!actor) {
@@ -3709,6 +3734,7 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
     atomic_init(&actor->death_watch, NULL);         // #2974
     atomic_init(&actor->death_reason, NULL);
     atomic_init(&actor->exit_flags, 0);
+    atomic_init(&actor->incarnation, 0);
     atomic_init(&actor->assigned_core, preferred_core);
     atomic_init(&actor->migrate_to, -1);
     atomic_init(&actor->reply_slot, NULL);

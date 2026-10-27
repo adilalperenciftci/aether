@@ -97,6 +97,12 @@ ends too, with the same reason, unless it is `"normal"`; an actor that called
 `actors.trap_exits(true)` gets a `Down` instead and lives on.
 `actors.unlink(ref)` takes the tie away.
 
+A supervisor restarts a child in place, under the ref its clients hold:
+`actors.rebirth_begin(child)`, then the child's factory (whose spawn of the
+child's actor type takes the child's block), then `actors.rebirth_end(child)`.
+`std.supervise` does this for you; `actors.incarnation(ref)` counts the
+restarts.
+
 On wasi a panic ends the program, so `monitor`, `link` and `trap_exits` are
 refused when compiling for it. See docs/actor-concurrency.md, "The end of an
 actor".
@@ -105,4 +111,4 @@ actor".
 
 `register`, `whereis`, `unregister`, `is_registered`, `registry_size`,
 `registry_clear`, `monitor`, `demonitor`, `kill`, `stop`, `dead_sends`, `link`,
-`unlink`, `trap_exits`.
+`unlink`, `trap_exits`, `rebirth_begin`, `rebirth_end`, `incarnation`.

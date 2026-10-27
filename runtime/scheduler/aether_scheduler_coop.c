@@ -373,6 +373,7 @@ int scheduler_register_actor(ActorBase* actor, int preferred_core) {
     atomic_store_explicit(&actor->death_watch, NULL, memory_order_relaxed);   // #2974
     atomic_store_explicit(&actor->death_reason, NULL, memory_order_relaxed);
     atomic_store_explicit(&actor->exit_flags, 0, memory_order_relaxed);
+    atomic_store_explicit(&actor->incarnation, 0, memory_order_relaxed);
     return register_actor(actor, preferred_core);
 }
 
@@ -397,6 +398,10 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
     (void)preferred_core;
     scheduler_init(1);  // no-op once initialized; see g_coop_initialized
     if (actor_size < sizeof(ActorBase)) actor_size = sizeof(ActorBase);
+
+    // A restart in place (#2974): the child's own block.
+    ActorBase* reborn = aether_rebirth_take(step, actor_size);
+    if (reborn) return reborn;
 
     // A released actor's block of this size first (#2517). Generated actor
     // structs are aligned(64), which calloc does not honour (#2485); the
@@ -595,6 +600,10 @@ static void coop_finalize(ActorBase* actor) {
 
 void scheduler_actor_thread_finalize(ActorBase* actor) {
     (void)actor;   // no actor has a thread of its own here
+}
+
+void scheduler_actor_revived(ActorBase* actor) {
+    (void)actor;   // the next poll steps it
 }
 
 /* An ask the step leaves without a reply: its asker, polling, sees why. */
