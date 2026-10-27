@@ -31,7 +31,7 @@
 
 #define AETHER_ADDR_MAX 8
 
-typedef struct {
+typedef struct AetherAddrList {
     struct sockaddr_storage ss[AETHER_ADDR_MAX];
     socklen_t len[AETHER_ADDR_MAX];
     int n;

@@ -820,8 +820,11 @@ collector is loop-safe (#3214), like the access log.
 A series is a method and the literal request path, both the client's to
 choose, so they are bounded: past 1024 series a request counts in one
 series labelled `method="(other)",path="(other)"`, and a client sending
-fresh paths cannot grow them, or the scrape, without end (#3265). Every
-series is in the scrape, however long it gets (#3264).
+fresh paths cannot grow them, or the scrape, without end (#3265). A client
+that sends that method and path itself counts in the same series, so no
+two series in a scrape share labels (#3279). Every series is in the scrape,
+however long it gets (#3264), and the scrape is written without holding the
+mutex the requests' counters take (#3280).
 
 Custom hooks: `http_server_use_request_hook(server, hook, ud)` is a
 C-level extension point (declared in `std/net/aether_http_server.h`,

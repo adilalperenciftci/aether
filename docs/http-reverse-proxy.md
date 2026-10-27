@@ -358,6 +358,20 @@ as the per-connection path's receive timeout closes it (#3243). So does one that
 takes no bytes of its response for as long, as the per-connection path's send
 timeout does (#3257).
 
+A driver never waits on a name lookup, which takes seconds when a name does
+not exist or the resolver is slow. An upstream given by name is looked up by
+the loop's own resolver, on a thread of its own, the first time a request
+dials it: the connection waits for the answer while the driver serves the
+rest, and stays on the driver. Requests waiting on one name share one lookup.
+The answer is kept and used for every dial after it; one older than ten
+seconds is looked up again behind the dial that uses it, so a changed record
+is seen about that soon, and the last answer stays in use while a lookup
+fails. A name that does not resolve is answered 502, as on the worker path,
+and is asked about again a second later. The request's upstream timeout
+(`request_timeout_sec`) covers the wait. Adding an upstream looks nothing up,
+and a program that does not proxy never starts the resolver (#3267, #3275,
+#3276, #3277).
+
 The driver serves HTTP/1.1 proxying, on a TLS-terminating server too: it
 carries the client's TLS handshake without waiting and reads and writes
 through the session. These keep the per-connection worker path, and need no
@@ -378,11 +392,6 @@ configuration to do so:
   the cores, eight at least): its total is the worker path's, not the cap
   times every connection a client opens (#3263). Every connection keeps at
   most 64 KiB of buffers between requests, on either path (#3262).
-- a request whose upstream name the server has not looked up: the driver
-  never waits on a resolver. An upstream's name is looked up as it is added
-  to its pool and again every ten seconds while it is in use, on a thread of
-  its own, and the driver dials from that answer; a name with none (one that
-  does not resolve) goes to the worker path, whose dial waits (#3267)
 - a server that terminates TLS with the pure-Aether stack (`AETHER_PURE_TLS=1`,
   or a build without OpenSSL): the driver's TLS is OpenSSL's (#3256)
 - a server whose first proxy mount has an https upstream: the driver dials

@@ -412,21 +412,18 @@ int  http_upstream_connected(HttpUpstreamConn* c);
  * the same state http_upstream_acquire leaves one, or -1. */
 int  http_upstream_has_next(HttpUpstreamConn* c);
 int  http_upstream_redial(const char* host, int port, HttpUpstreamConn* c);
+/* A caller's own name lookups, for one that must not block on a resolver:
+ * the proxy event loop's (#3267). See aether_http_internal.h. */
+typedef struct HttpResolver HttpResolver;
 /* http_upstream_acquire_ex that never waits on a name lookup, for a caller
  * that must not block (the proxy event loop, #3267): a fresh dial goes ahead
- * for a numeric address, or a name a dial has looked up (kept fresh by a
- * thread of its own every ten seconds while it is in use), and otherwise
- * fails with http_upstream_needs_lookup set, for the caller to give the
- * request to a path that can wait. A redial of such a connection does the
- * same. */
+ * from `resolver`'s answer (a numeric address needs none), and otherwise
+ * fails with http_upstream_lookup saying why: 1 when the answer is still to
+ * come, which the resolver says when it arrives, -1 when the name does not
+ * resolve. A redial of such a connection asks the same resolver. */
 int  http_upstream_acquire_nb(const char* host, int port, int allow_pool,
-                              HttpUpstreamConn* out);
-int  http_upstream_needs_lookup(const HttpUpstreamConn* c);
-/* Look up the name in an http:// URL now, blocking, so a no-lookup dial
- * finds it from then on (the proxy pool calls it as an upstream is added).
- * A no-op for a numeric address, https, and where there is no proxy event
- * loop, Windows among them (#3267). */
-void http_upstream_resolve_ahead(const char* url);
+                              HttpResolver* resolver, HttpUpstreamConn* out);
+int  http_upstream_lookup(const HttpUpstreamConn* c);
 void http_upstream_release(HttpUpstreamConn* c, int keep);
 /* Whether a response head lets its connection carry another request: not
  * when it says Connection: close, nor when it is HTTP/1.0 without a
@@ -434,7 +431,7 @@ void http_upstream_release(HttpUpstreamConn* c, int keep);
  * `header_bytes` bytes, the blank line's CRLFCRLF included; it is written
  * to and put back, so it must be writable. The framing is the caller's to
  * check. Both clients ask it before pooling a connection (#3259). */
-int  http_response_head_keeps_conn(char* head, size_t header_bytes);
+int  http_response_head_keeps_conn(const char* head, size_t header_bytes);
 
 /* The largest buffer worth keeping on an idle connection (#2160).
  *

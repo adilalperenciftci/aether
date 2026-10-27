@@ -125,11 +125,12 @@ struct HttpUpstreamConnOpaque {
      * for a pooled connection, and for a name with one address. */
     char dial_host[128];
     int  dial_port;
-    /* A dial that may not wait on a name lookup (http_upstream_acquire_nb,
-     * the proxy event loop's), and whether one failed for want of one: the
-     * name was neither numeric nor resolved lately (#3267). */
-    int  no_lookup;
-    int  needs_lookup;
+    /* The resolver a dial that may not wait on a name lookup asks
+     * (http_upstream_acquire_nb, the proxy event loop's), and why one failed
+     * for its name: 1 the answer is still to come, -1 the name does not
+     * resolve (#3267). */
+    HttpResolver* resolver;
+    int  lookup;
     char pool_key[512];
 };
 
@@ -246,5 +247,26 @@ void http_request_use_arena(HttpClientRequest* req, HttpArena* arena);
  * so the caller frees the result the same way either way. */
 HttpClientRequest* http_request_raw_arena(const char* method, const char* url,
                                           HttpArena* arena);
+
+/* The proxy event loop's name lookups, which its drivers never wait on
+ * (#3267). A resolver keeps the answers it gets, looks a name up once
+ * however many dials ask, and runs each lookup on a thread of its own,
+ * started when one is first needed. `answered` is called on that thread
+ * after a lookup some dial waited on, answered or not; it must not block.
+ * POSIX with threads only, where the loop runs: elsewhere _new gives NULL.
+ * Freeing waits for a lookup under way, and nothing may ask after. */
+struct AetherAddrList;
+HttpResolver* http_resolver_new(void (*answered)(void* ctx), void* ctx);
+void          http_resolver_free(HttpResolver* r);
+/* `host`:`port` into `out` without waiting: 1 with the addresses (a
+ * numeric address, or the kept answer), 0 when the lookup was asked for and
+ * `answered` will say so, -1 when the name does not resolve. */
+int           http_resolver_answer(HttpResolver* r, const char* host, int port,
+                                   struct AetherAddrList* out);
+/* For tests: the lookup the resolver's threads run, in place of
+ * getaddrinfo's (NULL puts that back). */
+void          http_resolver_set_lookup(HttpResolver* r,
+                                       int (*lookup)(const char* host, int port,
+                                                     struct AetherAddrList* out));
 
 #endif // AETHER_HTTP_INTERNAL_H

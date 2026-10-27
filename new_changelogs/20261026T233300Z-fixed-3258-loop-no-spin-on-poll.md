@@ -5,5 +5,6 @@
   its request waited on the upstream. Such a backend reports a ready
   descriptor on every wait, so the driver ran flat out, about 20000 to 30000
   wakeups a second for one idle connection. Each descriptor now holds only
-  what its connection's state waits on there; epoll and kqueue are
-  unchanged (#3258).
+  what its connection's state waits on there, and a connection whose
+  interest the poller will not take (a full poll set) is closed rather than
+  left waiting on nothing; epoll and kqueue are unchanged (#3258, #3278).

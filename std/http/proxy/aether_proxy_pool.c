@@ -323,10 +323,6 @@ const char* aether_proxy_upstream_add(AetherProxyPool* pool,
     if (strncmp(base_url, "https://", 8) == 0) atomic_fetch_add(&pool->tls_upstreams, 1);
 
     pthread_mutex_unlock(&pool->lock);
-    /* Its name looked up now, on the caller's thread and outside the lock,
-     * so the proxy event loop can dial it without a lookup of its own, which
-     * it never waits on (#3267). */
-    http_upstream_resolve_ahead(base_url);
     return "";
 }
 

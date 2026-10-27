@@ -485,8 +485,9 @@ typedef struct HttpConn {
      * was "only re-applied when it changes"; this is the guard that makes that
      * true. -1 rather than 0 because 0 is a valid "block indefinitely". */
     int   applied_recv_timeout_ms;
-    /* The SO_SNDTIMEO value on this socket, 0 when none has been applied
-     * (conn_apply_send_timeout, #3257). */
+    /* The send timeout, 0 when none has been applied: how long a send waits
+     * for the client to take more (conn_wait_io), and this socket's
+     * SO_SNDTIMEO (conn_apply_send_timeout, #3257). */
     int   applied_send_timeout_ms;
     /* Set when the server refused a request it had not finished reading, so
      * the client may still be sending: conn_close then closes in stages
@@ -520,32 +521,109 @@ static int conn_recv(HttpConn* c, void* buf, int len) {
     return (int)recv(c->fd, buf, len, 0);
 }
 
+#ifndef _WIN32
+static int64_t conn_now_ms(void);
+
+/* Wait for `c`'s socket to take more bytes (`events` POLLOUT), or for a TLS
+ * write that needs a read to finish (POLLIN), for no longer than the send
+ * timeout: 1 when it may go on, 0 when the time ran out, -1 on an error.
+ *
+ * This is what bounds a send on POSIX, not SO_SNDTIMEO (#3257). With the
+ * option alone, a blocking send to a client that read nothing for three
+ * seconds, under a one second timeout, never failed on Linux: all 96 MB of a
+ * test's responses arrived once it read again. A blocking send wakes for any
+ * room that frees, and the option times each send(2) afresh. poll(2) reports
+ * a socket writable only once a good part of its buffer is free, so a wait
+ * here ends when the client has taken next to nothing for that long: the
+ * proxy event loop's bound, and nginx's send_timeout. */
+static int conn_wait_io(HttpConn* c, short events) {
+    int ms = c->applied_send_timeout_ms;
+    int64_t due = ms > 0 ? conn_now_ms() + ms : 0;
+    for (;;) {
+        int wait = -1;
+        if (due) {
+            int64_t left = due - conn_now_ms();
+            if (left <= 0) return 0;
+            wait = (int)left;
+        }
+        struct pollfd pfd = { c->fd, events, 0 };
+        int r = poll(&pfd, 1, wait);
+        if (r > 0) return 1;      /* an error or a hangup: the retry reports it */
+        if (r == 0) return 0;
+        if (errno != EINTR) return -1;
+    }
+}
+
+/* `c`'s socket non-blocking or back to blocking, for a write that has no
+ * per-call flag for it (sendfile, OpenSSL's): the receive side reads it
+ * blocking, with its timeout. */
+static void conn_set_nonblocking(HttpConn* c, int on) {
+    int flags = fcntl(c->fd, F_GETFL, 0);
+    if (flags < 0) return;
+    int want = on ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK);
+    if (want != flags) fcntl(c->fd, F_SETFL, want);
+}
+#endif
+
 /* Every one of `len` bytes, or -1: a plain send(2) can take fewer than asked
  * (a signal cuts it short), and every caller here sends a whole response,
- * frame or event (#3108). */
+ * frame or event (#3108). A send that waits for the client waits no longer
+ * than the send timeout without progress, then fails (#3257): on POSIX in
+ * conn_wait_io, on Windows by SO_SNDTIMEO, which bounds each blocking send
+ * there (conn_apply_send_timeout). */
 static int conn_send(HttpConn* c, const void* buf, int len) {
     if (c->pure_tls) {
         return pt_server_send(c->pure_tls, buf, len);
     }
 #ifdef AETHER_HAS_OPENSSL
     if (c->ssl) {
+#ifdef _WIN32
         int n = SSL_write(c->ssl, buf, len);
         if (n <= 0) return -1;
         return n;
+#else
+        /* Non-blocking for the write, so a client that stops reading is
+         * waited on in conn_wait_io, as a plain one is. A record cut short
+         * goes again with the same arguments, which is what OpenSSL asks.
+         * No read runs meanwhile: OpenSSL lets one thread at a time use a
+         * session, so the flag is this write's alone. */
+        conn_set_nonblocking(c, 1);
+        int n;
+        for (;;) {
+            ERR_clear_error();
+            n = SSL_write(c->ssl, buf, len);
+            if (n > 0) break;
+            int e = SSL_get_error(c->ssl, n);
+            short want = e == SSL_ERROR_WANT_WRITE ? POLLOUT
+                       : e == SSL_ERROR_WANT_READ  ? POLLIN : 0;
+            if (!want || conn_wait_io(c, want) != 1) { n = -1; break; }
+        }
+        conn_set_nonblocking(c, 0);
+        return n;
+#endif
     }
 #endif
     const char* p = (const char*)buf;
     int sent = 0;
     while (sent < len) {
+#ifdef _WIN32
         int n = (int)send(c->fd, p + sent, (size_t)(len - sent), AE_SEND_NOSIGNAL);
         if (n > 0) {
             sent += n;
             continue;
         }
-#ifdef _WIN32
         if (n < 0 && WSAGetLastError() == WSAEINTR) continue;
 #else
+        int n = (int)send(c->fd, p + sent, (size_t)(len - sent),
+                          AE_SEND_NOSIGNAL | MSG_DONTWAIT);
+        if (n > 0) {
+            sent += n;
+            continue;
+        }
         if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) &&
+            conn_wait_io(c, POLLOUT) == 1)
+            continue;
 #endif
         return -1;
     }
@@ -616,9 +694,15 @@ static void conn_uncork_for_body(HttpConn* c) {
  * call by checking conn->ssl == NULL. */
 static long long conn_sendfile_drain(HttpConn* c, int in_fd, long long size) {
     if (!c || c->fd < 0 || in_fd < 0 || size < 0) return -1;
+    /* Non-blocking for the drain, and a client that stops reading waited on
+     * for no longer than the send timeout, as conn_send waits (#3257). A
+     * blocking sendfile was bounded by SO_SNDTIMEO, which a stalled client
+     * whose window grew a little at a time never let expire, and then by a
+     * five second poll whatever the server's timeout. */
 #if defined(__linux__)
     off_t off = 0;
     long long total = 0;
+    conn_set_nonblocking(c, 1);
     while (total < size) {
         size_t want = (size_t)(size - total);
         ssize_t n = sendfile(c->fd, in_fd, &off, want);
@@ -628,23 +712,21 @@ static long long conn_sendfile_drain(HttpConn* c, int in_fd, long long size) {
         }
         if (n < 0) {
             if (errno == EINTR) continue;
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                /* Edge case for non-blocking sockets — cooperate
-                 * with poll. The server's accepted sockets are
-                 * blocking by default so this branch is rare. */
-                struct pollfd pfd = { c->fd, POLLOUT, 0 };
-                if (poll(&pfd, 1, 5000) <= 0) return -1;
+            if ((errno == EAGAIN || errno == EWOULDBLOCK) &&
+                conn_wait_io(c, POLLOUT) == 1)
                 continue;
-            }
-            return -1;
+            total = -1;
+            break;
         }
         /* n == 0: EOF on input or kernel said zero. Either way
          * we've sent all that's coming. */
         break;
     }
+    conn_set_nonblocking(c, 0);
     return total;
 #elif defined(__APPLE__)
     long long total = 0;
+    conn_set_nonblocking(c, 1);
     while (total < size) {
         off_t len = (off_t)(size - total);
         int rc = sendfile(in_fd, c->fd, (off_t)total, &len, NULL, 0);
@@ -654,13 +736,13 @@ static long long conn_sendfile_drain(HttpConn* c, int in_fd, long long size) {
         if (len > 0) total += (long long)len;
         if (rc == 0) break;
         if (errno == EINTR) continue;
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            struct pollfd pfd = { c->fd, POLLOUT, 0 };
-            if (poll(&pfd, 1, 5000) <= 0) return -1;
+        if ((errno == EAGAIN || errno == EWOULDBLOCK) &&
+            conn_wait_io(c, POLLOUT) == 1)
             continue;
-        }
-        return -1;
+        total = -1;
+        break;
     }
+    conn_set_nonblocking(c, 0);
     return total;
 #else
     /* Windows / FreeBSD / unsupported. */
@@ -1522,7 +1604,9 @@ typedef struct MetricsRoute {
  * without a bound, a client sending fresh paths grew them for as long as it
  * liked, each in every scrape, and the lookup walked all of them under one
  * lock on every request (#3265). Past the bound a request counts in one
- * series labelled "(other)", which no request path can be. */
+ * series labelled "(other)", which is found in the table as any series is:
+ * a client may send that method and path itself, and that request counts
+ * in it too rather than in a second series with the same labels (#3279). */
 #define METRICS_MAX_SERIES 1024
 #define METRICS_BUCKETS    1024   /* a power of two */
 
@@ -1580,26 +1664,40 @@ static MetricsRoute* metrics_route_new(MetricsState* st, const char* method,
     return r;
 }
 
-/* The series for a method and path, made when there is room, else the
- * "(other)" one (#3265). Called with the lock held. */
-static MetricsRoute* metrics_route_for(MetricsState* st,
-                                       const char* method,
-                                       const char* pattern) {
+/* The series for a method and path, found by hash, or made and put in the
+ * table when `make` says so (*made then 1); NULL when there is none, or the
+ * allocator refused one. Called with the lock held. */
+static MetricsRoute* metrics_route_find(MetricsState* st, const char* method,
+                                        const char* pattern, int make, int* made) {
     unsigned h = metrics_hash(method, pattern);
     MetricsRoute** slot = &st->buckets[h & (METRICS_BUCKETS - 1)];
+    *made = 0;
     for (MetricsRoute* r = *slot; r; r = r->chain) {
         if (r->hash == h && strcmp(r->method, method) == 0 &&
             strcmp(r->path_pattern, pattern) == 0) return r;
     }
-    if (st->series < METRICS_MAX_SERIES) {
-        MetricsRoute* r = metrics_route_new(st, method, pattern, h);
-        if (!r) return NULL;
-        r->chain = *slot;
-        *slot = r;
-        st->series++;
-        return r;
-    }
-    if (!st->other) st->other = metrics_route_new(st, "(other)", "(other)", 0);
+    if (!make) return NULL;
+    MetricsRoute* r = metrics_route_new(st, method, pattern, h);
+    if (!r) return NULL;
+    r->chain = *slot;
+    *slot = r;
+    *made = 1;
+    return r;
+}
+
+/* The series for a method and path, made when there is room, else the
+ * "(other)" one (#3265), made one past the bound, unless a client already
+ * sent those labels itself, which is then the same series (#3279). Called
+ * with the lock held. */
+static MetricsRoute* metrics_route_for(MetricsState* st,
+                                       const char* method,
+                                       const char* pattern) {
+    int made = 0;
+    MetricsRoute* r = metrics_route_find(st, method, pattern,
+                                         st->series < METRICS_MAX_SERIES, &made);
+    if (made) st->series++;
+    if (r || st->series < METRICS_MAX_SERIES) return r;
+    if (!st->other) st->other = metrics_route_find(st, "(other)", "(other)", 1, &made);
     return st->other;
 }
 
@@ -1727,8 +1825,16 @@ static void metrics_handler(HttpRequest* req, HttpServerResponse* res, void* use
         "aether_http_parked_connections %d\n",
         st->server ? http_park_count((HttpParkLot*)st->server->park_lot) : 0) == 0;
 
+    /* The list as it stands, then the formatting without the lock, which
+     * every request's hook takes, the proxy event loop's drivers' among them:
+     * held for the whole scrape, up to a thousand series of it, it stalled
+     * them all for as long as that took (#3280). Safe unlocked: a series is
+     * only ever put at the head, its links never change once it is in, its
+     * counters are atomics, and none is freed while the server runs. */
     pthread_mutex_lock(&st->lock);
-    for (MetricsRoute* r = st->head; r && ok; r = r->next) {
+    MetricsRoute* listed = st->head;
+    pthread_mutex_unlock(&st->lock);
+    for (MetricsRoute* r = listed; r && ok; r = r->next) {
         char m[64], p[256];
         metrics_escape(m, sizeof(m), r->method);
         metrics_escape(p, sizeof(p), r->path_pattern);
@@ -1763,7 +1869,6 @@ static void metrics_handler(HttpRequest* req, HttpServerResponse* res, void* use
             m, p, (double)sum / 1e6,
             m, p, total) == 0;
     }
-    pthread_mutex_unlock(&st->lock);
 
     if (!ok) {
         /* A partial scrape reads as counters that went backwards. */
@@ -6191,10 +6296,12 @@ static void conn_apply_recv_timeout(HttpServer* server, HttpConn* c) {
                              ? server->keep_alive_idle_ms : 30000);
 }
 
-/* Per-send socket timeout, the same idle timeout: a send that makes no
- * progress for that long fails and the connection closes. Without one a
- * client that stopped reading blocked its worker in send() for as long as it
- * kept the connection open, one worker per such client (#3257). */
+/* The send timeout, the same idle timeout: a send that makes no progress for
+ * that long fails and the connection closes. Without one a client that
+ * stopped reading blocked its worker in send() for as long as it kept the
+ * connection open, one worker per such client (#3257). conn_send waits on it
+ * itself on POSIX (conn_wait_io); SO_SNDTIMEO is the bound on Windows, and
+ * for the pure-Aether TLS server's writes, which std.tcp waits on by it. */
 static void conn_apply_send_timeout(HttpServer* server, HttpConn* c) {
     int ms = server->keep_alive_idle_ms > 0 ? server->keep_alive_idle_ms : 30000;
     if (c->applied_send_timeout_ms == ms) return;

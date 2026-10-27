@@ -482,25 +482,67 @@ int tcp_send_bytes_raw(TcpSocket* sock, const void* data, int length) {
     return sent < 0 ? -1 : sent;
 }
 
+#ifndef _WIN32
+/* Wait for `fd` to take more bytes, for no longer than its send timeout
+ * (SO_SNDTIMEO; none set, no bound): 1 when it can, else 0. For a blocking
+ * socket only: one its owner made non-blocking asked not to be waited on. */
+static int net_wait_writable(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || (flags & O_NONBLOCK)) return 0;
+    struct timeval tv = { 0, 0 };
+    socklen_t tl = sizeof tv;
+    long long ms = getsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, &tl) == 0
+                 ? (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000 : 0;
+    long long due = ms > 0 ? (long long)(aether_now_ns() / 1000000) + ms : 0;
+    for (;;) {
+        int wait = -1;
+        if (due) {
+            long long left = due - (long long)(aether_now_ns() / 1000000);
+            if (left <= 0) return 0;
+            wait = left > INT_MAX ? INT_MAX : (int)left;
+        }
+        struct pollfd pfd = { fd, POLLOUT, 0 };
+        int r = poll(&pfd, 1, wait);
+        if (r > 0) return 1;      /* an error or a hangup: the send reports it */
+        if (r == 0 || errno != EINTR) return 0;
+    }
+}
+#endif
+
 /* #3108: every one of `length` bytes, as many send(2) calls as it takes:
  * one can take fewer than asked (the send timeout expiring while the peer
  * reads slowly, a signal). An interrupted send is retried; the first that
  * fails, or times out having sent nothing, ends it. Returns the bytes sent:
- * `length` once every one is out, fewer when a send failed. */
+ * `length` once every one is out, fewer when a send failed.
+ *
+ * The send timeout is the time the peer may take nothing (#3257). On POSIX
+ * each send goes without blocking and a full socket is waited on in
+ * net_wait_writable. A blocking send wakes for any room that frees and the
+ * option times each send(2) afresh: on Linux a peer that read nothing for
+ * three seconds kept a send under a one second timeout going all that time.
+ * The pure-Aether TLS server writes through here. */
 int tcp_send_all_raw(TcpSocket* sock, const void* data, int length) {
     if (!sock || !sock->connected || length <= 0 || !data) return 0;
     const char* p = (const char*)data;
     int sent = 0;
     while (sent < length) {
+#ifdef _WIN32
         int n = send(sock->fd, p + sent, (size_t)(length - sent), 0);
         if (n > 0) {
             sent += n;
             continue;
         }
-#ifdef _WIN32
         if (n < 0 && WSAGetLastError() == WSAEINTR) continue;
 #else
+        int n = (int)send(sock->fd, p + sent, (size_t)(length - sent), MSG_DONTWAIT);
+        if (n > 0) {
+            sent += n;
+            continue;
+        }
         if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) &&
+            net_wait_writable(sock->fd))
+            continue;
 #endif
         break;
     }

@@ -3,4 +3,6 @@
   without limit, in a list every request walked under one lock: a client
   requesting fresh paths grew them, and slowed every request, for as long as
   it liked. Past 1024 series a request now counts in one series labelled
-  `(other)`, and a series is found by hash (#3265).
+  `(other)`, the same series a request sending those labels itself counts
+  in, so no two series share labels, and a series is found by hash (#3265,
+  #3279).
