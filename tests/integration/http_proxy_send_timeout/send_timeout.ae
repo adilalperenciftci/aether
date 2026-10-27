@@ -11,8 +11,8 @@
 // Three pipelined GETs for 32 MB each, more than loopback buffers hold, through
 // a bare proxy (the event loop on Linux and macOS) and through one behind a
 // program's middleware (the worker path), each with a one second idle
-// timeout. The client reads nothing for three seconds, then reads to the
-// end: the responses must have been cut short. Three, because Windows takes
+// timeout. The client reads nothing for three seconds after the first byte
+// arrives, then reads to the end: the responses must have been cut short. Three, because Windows takes
 // a whole send into the kernel when the socket has nothing queued, so the
 // first response never blocks there; the next one does. Every server
 // listens on 127.0.0.1 and a port the kernel picks.
@@ -81,6 +81,19 @@ late_reader(port: int) -> string {
     }
     get = "GET /big HTTP/1.1\r\nHost: x\r\n\r\n"
     tcp.write(sock, "${get}${get}${get}")
+    // The three seconds of not reading count from the server's first byte,
+    // not from the request: a slow build (a sanitizer's) can take seconds to
+    // fetch the body upstream, and a stall that began before the server sent
+    // anything was over before it had to wait.
+    waited = 0
+    while waited < 300 {
+        first, _ferr = tcp.poll(sock, 100)
+        if first {
+            waited = 300
+        } else {
+            waited = waited + 1
+        }
+    }
     sleep(3000)
     total = 0
     quiet = 0
