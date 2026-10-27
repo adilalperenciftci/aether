@@ -42,6 +42,7 @@
     <li><a href="#sha256_bytes">sha256_bytes</a></li>
     <li><a href="#hash_bytes">hash_bytes</a></li>
     <li><a href="#random_bytes">random_bytes</a></li>
+    <li><a href="#random_buffer">random_buffer</a></li>
     <li><a href="#random_hex">random_hex</a></li>
     <li><a href="#random_base64">random_base64</a></li>
     <li><a href="#digest_new">digest_new</a></li>
@@ -292,6 +293,12 @@
       <pre class="usage"><code>random_bytes(n) <span class="arrow">-&gt;</span> (string, int, string)</code></pre>
       <p class="signature"><span class="sig-params">n: int</span></p>
       <p class="doc">Draw `n` cryptographically-secure random bytes from the OS CSPRNG. Returns (bytes, length, &quot;&quot;) on success — `bytes` is an owned AetherString preserving every byte including embedded NULs. Returns (&quot;&quot;, 0, error) on failure (n &lt; 0, allocation failure, syscall failure). The OS sources are: - Linux:    getrandom(2) → /dev/urandom fallback - macOS/BSD: arc4random_buf(3) - Windows:  BCryptGenRandom (CNG) std.math.random_int / random_float are SEEDABLE PRNGs (fine for sampling, NOT for secrets). When the value is unpredictability — bearer tokens, session keys, opaque storage filenames — this is the right primitive. n == 0 succeeds with a length-0 result.</p>
+    </div>
+    <div class="function" id="random_buffer" data-name="random_buffer">
+      <h3 class="function-name">random_buffer <span class="kind">fn</span></h3>
+      <pre class="usage"><code>random_buffer(n) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">n: int</span></p>
+      <p class="doc">Draw `n` cryptographically-secure random bytes into a fresh std.bytes buffer of length n (caller frees). Returns (null, error) on failure, never a buffer of zeros. Same OS sources as random_bytes. This is the shape for key material: the bytes go from the OS straight into the buffer. Copying random_bytes' string into a buffer with bytes.copy_from_string makes its C side ask whether the source is a string by reading the source's first bytes, the key's own: a branch on the secret, and a misread when they look like a string header.</p>
     </div>
     <div class="function" id="random_hex" data-name="random_hex">
       <h3 class="function-name">random_hex <span class="kind">fn</span></h3>

@@ -225,12 +225,8 @@ fn send_plaintext_alert(sock: ptr, level: int, desc: int) {
 // derived inside p256.ecdsa_sign, because a predictable or repeated nonce
 // discloses the private key outright.)
 fn rand_into(n: int) -> ptr {
-    s, sn, err = cryptography.random_bytes(n)
+    b, err = cryptography.random_buffer(n)
     if string.equals(err, "") != 1 { return null }
-    if sn < n { return null }
-    b = bytes.new(n)
-    if n > 0 { bytes.set(b, n - 1, 0) }
-    bytes.copy_from_string(b, 0, s, n)
     return b
 }
 

@@ -1382,15 +1382,11 @@ decaps_check(p: *MlkemParams, dk: ptr, ct: ptr) -> string {
 
 // 32 fresh bytes from the OS CSPRNG, or null and the error. KeyGen and Encaps
 // return an error when the CSPRNG fails (FIPS 203 Algorithms 19 and 20); a
-// zero-filled seed would make the key or the shared secret predictable.
+// zero-filled seed would make the key or the shared secret predictable. The
+// seed goes from the OS into the buffer (cryptography.random_buffer), never
+// through a string.
 rand32() -> (ptr, string) {
-    s, n, err = cryptography.random_bytes(SYM)
-    if err != "" {
-        return null, err
-    }
-    b = bytes.new(SYM)
-    bytes.copy_from_string(b, 0, s, n)
-    return b, ""
+    return cryptography.random_buffer(SYM)
 }
 
 // ---- Checked ML-KEM (shared by the per-variant API) ----

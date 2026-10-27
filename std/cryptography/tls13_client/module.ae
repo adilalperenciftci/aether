@@ -593,12 +593,8 @@ fn send_plaintext_handshake(sock: ptr, msg: byte[]) -> string {
 // key-share scalars and the client random, and handing back zeros instead
 // would make every session's keys predictable.
 fn rand_into(n: int) -> ptr {
-    s, sn, err = cryptography.random_bytes(n)
+    b, err = cryptography.random_buffer(n)
     if string.equals(err, "") != 1 { return null }
-    if sn < n { return null }
-    b = bytes.new(n)
-    if n > 0 { bytes.set(b, n - 1, 0) }
-    bytes.copy_from_string(b, 0, s, n)
     return b
 }
 

@@ -27,7 +27,7 @@ header comment is the authoritative description.
 | `std.clapae` | Command-line argument parser, modelled on clap. | 32 | [guide](../std/clapae/README.md) · [source](../std/clapae/module.ae) |
 | `std.collections` | Dynamic list, hash map and packed int array, with the raw externs the alias modules re-export. | 44 | [guide](../std/collections/README.md) · [source](../std/collections/module.ae) |
 | `std.config` | Process-global immutable string to string store. | 6 | [guide](../std/config/README.md) · [source](../std/config/module.ae) |
-| `std.cryptography` | Cryptographic hashes, HMAC, and the Base64 codec. | 34 | [full section](#cryptography-stdcryptography) |
+| `std.cryptography` | Cryptographic hashes, HMAC, and the Base64 codec. | 35 | [full section](#cryptography-stdcryptography) |
 | `std.decimal` | Arbitrary-precision decimal fixed-point arithmetic with explicit rounding modes, for money math. | 43 | [guide](../std/decimal/README.md) · [source](../std/decimal/module.ae) |
 | `std.deque` | Fixed-capacity double-ended queue over `long` values. | 16 | [guide](../std/deque/README.md) · [source](../std/deque/module.ae) |
 | `std.dir` | Directory operations, re-exported from `std.fs`. | 11 | [guide](../std/dir/README.md) · [source](../std/dir/module.ae) |
@@ -1943,6 +1943,7 @@ main() {
 
 **Cryptographically-secure random** (OS CSPRNG, `getrandom(2)` / `/dev/urandom` on Linux, `arc4random_buf(3)` on macOS/BSD):
 - `cryptography.random_bytes(n)` → `(string, int, string)` - `n` random bytes as `(bytes, length, error)`; `bytes` preserves embedded NULs.
+- `cryptography.random_buffer(n)` → `(ptr, string)` - `n` random bytes in a fresh `std.bytes` buffer, or `(null, error)`. The shape for key material: the bytes go from the OS into the buffer without passing through a string.
 - `cryptography.random_hex(n)` → `(string, string)` - `n` random bytes as a `2*n`-char lowercase-hex string. For opaque bearer-token / API-key minting.
 - `cryptography.random_base64(n)` → `(string, string)` - `n` random bytes as RFC 4648 §4 unpadded Base64 (~33% denser than hex).
 

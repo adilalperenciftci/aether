@@ -51,7 +51,7 @@ exports(
     sha1_hex, sha256_hex, sha256_file, hash_hex, hash_supported,
     md4_hex, md5_hex, hmac_sha256_hex, hmac_sha256_bytes,
     md4_bytes, md5_bytes, sha1_bytes, sha256_bytes, hash_bytes,
-    random_bytes, random_hex, random_base64,
+    random_bytes, random_buffer, random_hex, random_base64,
     digest_new, digest_update, digest_final_hex, digest_final_bytes,
     digest_free
 )
@@ -470,6 +470,37 @@ random_bytes(n: int) -> {
     owned = string_new_with_length(raw, out_n)
     cryptography_release_random_bytes()
     return owned, out_n, ""
+}
+
+// Draw `n` cryptographically-secure random bytes into a fresh std.bytes
+// buffer of length n (caller frees). Returns (null, error) on failure,
+// never a buffer of zeros. Same OS sources as random_bytes.
+//
+// This is the shape for key material: the bytes go from the OS straight
+// into the buffer. Copying random_bytes' string into a buffer with
+// bytes.copy_from_string makes its C side ask whether the source is a
+// string by reading the source's first bytes, the key's own: a branch on
+// the secret, and a misread when they look like a string header.
+random_buffer(n: int) -> (ptr, string) {
+    if n < 0 {
+        return null, "random_buffer: negative length"
+    }
+    ok = cryptography_random_bytes_raw(n)
+    if ok == 0 {
+        return null, "random_bytes failed"
+    }
+    raw = cryptography_get_random_bytes()
+    out_n = cryptography_get_random_bytes_length()
+    if out_n != n {
+        cryptography_release_random_bytes()
+        return null, "random_bytes returned short"
+    }
+    b = bytes.from_ptr(raw, n)
+    cryptography_release_random_bytes()
+    if b == null {
+        return null, "random_buffer: allocation failed"
+    }
+    return b, ""
 }
 
 // Draw `n` cryptographically-secure random bytes and return them as a

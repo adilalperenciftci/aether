@@ -534,20 +534,23 @@ emit_be64_words(c: *Sha2Ctx, out: ptr) {
     }
 }
 
-// Finalize and return the raw digest bytes as an owned AetherString of
-// digest_len bytes. FREES the context.
+// Finalize and return the raw digest as a std.bytes buffer of digest_len
+// bytes. FREES the context.
+//
+// The digest stays in the byte buffer it was written to. It used to go
+// through a string (bytes.finish) and back (bytes.copy_from_string), whose C
+// side asks whether its argument is a string by reading its first bytes,
+// which here are the digest: a branch on HMAC's secret state, which the
+// constant-time test found in RFC 6979's HMAC-DRBG (#2600), and a misread
+// for any digest that starts like a string header.
 final_bytes(ctx: ptr) -> ptr {
     c = ctx as *Sha2Ctx
     out = finalize_to_bytes(c)
-    dl = c.digest_len
-    s = bytes.finish(out, dl)
+    // SHA-512/224 serializes four whole 64-bit words: keep digest_len.
+    bytes.set_length(out, c.digest_len)
     free_internals(c)
     free(ctx)
-    // Wrap the AetherString back into a bytes buffer so callers get a
-    // ptr (matching the requested signature). Length is dl.
-    res = bytes.new(dl)
-    bytes.copy_from_string(res, 0, s, dl)
-    return res
+    return out
 }
 
 // Finalize and return the digest as lowercase hex. FREES the context.
