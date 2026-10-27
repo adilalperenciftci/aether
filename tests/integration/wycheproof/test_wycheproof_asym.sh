@@ -1,15 +1,11 @@
 #!/bin/sh
-# Wycheproof adversarial vector suites — RSA / Ed25519 / X448.
+# Wycheproof adversarial vector suites: RSA signatures and X448.
 #
-# Split from test_wycheproof.sh: these route through variable-time
-# std.bignum, and the harness kills any single shell test at 180s.
-# Budget shape at CI's -O0:
-#   rsa v1.5 full 259 cases   (~40-60s: one small-e modexp per case)
-#   rsa pss  full 108 cases   (~40s, same op + MGF1)
-#   x448     stride 25 of 510 (~40s)
-# (ed25519 rides in test_wycheproof.sh; ECDSA has its own slot.)
-# WYCHEPROOF_FULL=1 (the nightly) sweeps everything; WYCHEPROOF_STRIDE=N
-# picks a custom density.
+# Every case: RSA PKCS#1 v1.5 verify (259) and PSS verify (108), the public
+# std.bignum operation, and X448 (510) on the fixed-width field since
+# #2600 (stride 25 on std.bignum before). About 6 s at the -O0 of `ae run`.
+# (ed25519 rides in test_wycheproof.sh; ECDSA and ECDH have their own
+# slots.) WYCHEPROOF_STRIDE=N samples every Nth case.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"

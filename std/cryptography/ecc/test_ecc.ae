@@ -1,6 +1,7 @@
 // std.cryptography.ecc: the field engine (Montgomery arithmetic, inversion,
-// reduction of wide inputs) and, for each Weierstrass curve, the generator
-// multiples, ECDH agreement both ways, and a sign/verify round trip.
+// reduction of wide inputs), for each Weierstrass curve the generator
+// multiples, ECDH agreement both ways and a sign/verify round trip, and the
+// Edwards scalar arithmetic and encodings.
 
 import std.bytes
 import std.string
@@ -154,8 +155,37 @@ fn curve_cases(name: string, curve: int, nb: int, gx: string, gy: string, g2x: s
     return fails
 }
 
+// Edwards: scalars mod L, and the identity / base point encodings.
+fn edwards_cases() -> int {
+    fails = 0
+    // L + 5, little-endian, reduces to 5.
+    lp5 = hb("f2d3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010")
+    r = ecc.ed_reduce(ecc.ED25519, lp5)
+    fails = fails + ck(bh(r) == "0500000000000000000000000000000000000000000000000000000000000000", "ed25519 reduce(L + 5) = 5")
+    // 0 * B is the identity, encoded as y = 1, x = 0.
+    z = small(32, 0)
+    id = ecc.ed_scalar_mult_base(ecc.ED25519, z)
+    fails = fails + ck(bh(id) == "0100000000000000000000000000000000000000000000000000000000000000", "ed25519 0*B is the identity")
+    // 1 * B: y = 4/5, x even.
+    one = bytes.new(32)
+    i = 0
+    while i < 32 {
+        bytes.set(one, i, 0)
+        i = i + 1
+    }
+    bytes.set(one, 0, 1)
+    b = ecc.ed_scalar_mult_base(ecc.ED25519, one)
+    fails = fails + ck(bh(b) == "5866666666666666666666666666666666666666666666666666666666666666", "ed25519 1*B encodes as RFC 8032's B")
+    // (r + k a) mod L with r = 1, k = 1, a = L - 1: 0.
+    lm1 = hb("ecd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010")
+    s = ecc.ed_sign_s(ecc.ED25519, one, one, lm1)
+    fails = fails + ck(bh(s) == "0000000000000000000000000000000000000000000000000000000000000000", "ed25519 1 + 1 * (L - 1) = 0 mod L")
+    bytes.free(lp5); bytes.free(r); bytes.free(z); bytes.free(id); bytes.free(one); bytes.free(b); bytes.free(lm1); bytes.free(s)
+    return fails
+}
 main() {
     fails = field_cases()
+    fails = fails + edwards_cases()
     fails = fails + curve_cases("P-256", ecc.P256, 32,
         "6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296",
         "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",

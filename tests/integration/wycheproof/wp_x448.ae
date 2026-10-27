@@ -1,11 +1,9 @@
 // Wycheproof adversarial vectors — X448 (#739).
 //
 // Same driver shape as wp_x25519.ae (see there for the semantics table);
-// 56-byte keys/outputs. One deliberate difference from x25519: our
-// x448() does NOT reject an all-zero shared secret (x25519.agree does),
-// so ZeroSharedSecret cases are accepted here and must then MATCH the
-// vector's (all-zero) shared value — which Wycheproof permits for
-// "acceptable" results. The API asymmetry is noted in #1298.
+// 56-byte keys/outputs, through x448.agree, which refuses an all-zero
+// shared secret as x25519.agree does (#1298): ZeroSharedSecret cases are
+// "acceptable" and count as rejected-acceptable, as in wp_x25519.ae.
 
 import std.cryptography.x448
 import std.os
@@ -56,13 +54,10 @@ fn bytes_eq_hex(b: ptr, n: int, hexs: string) -> int {
 }
 
 main() {
-    // x448 routes through variable-time std.bignum (~1-2s per agreement),
-    // so the full 510-case sweep costs ~10 minutes and even stride 5 blew
-    // the test harness's 180s per-test budget on CI's slower runners.
-    // Default stride 25 (~20 cases, every flag class still hit — Wycheproof
-    // orders cases so edge-case families are contiguous); the nightly sets
-    // WYCHEPROOF_FULL=1 for the complete sweep.
-    stride = 25
+    // Every case runs: an agreement is about a millisecond on the
+    // fixed-width field since #2600 (it was 1-2 s on std.bignum, stride 25).
+    // WYCHEPROOF_STRIDE=N samples every Nth case.
+    stride = 1
     wf = os.getenv("WYCHEPROOF_FULL")
     if wf == "1" { stride = 1 }
     sv = os.getenv("WYCHEPROOF_STRIDE")
@@ -116,7 +111,7 @@ main() {
 
             priv = from_hex(priv_hex)
             pub = from_hex(pub_hex)
-            shared = x448.x448(priv, pub)
+            shared, _aerr = x448.agree(priv, pub)
             if shared == null {
                 if res == "valid" {
                     println("FAIL tcId=${tc_id} (valid): rejected")

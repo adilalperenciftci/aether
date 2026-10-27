@@ -13,6 +13,10 @@ import std.cryptography.p384
 import std.cryptography.p521
 import std.cryptography.secp256k1
 import std.cryptography.rsa
+import std.cryptography.ed25519
+import std.cryptography.ed448
+import std.cryptography.x25519
+import std.cryptography.x448
 import std.cryptography.sha2
 
 extern ct_shim_available() -> int
@@ -270,6 +274,56 @@ fn rsa_cases() -> int {
     rsa.key_free(k)
     return fails
 }
+
+// ---- EdDSA signing, X25519 and X448: the seed or scalar secret ----
+
+fn eddsa_xdh_cases() -> int {
+    fails = 0
+    // RFC 8032 7.1 TEST 2: Ed25519 public key and signature of 0x72.
+    s1 = hb("4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb")
+    secret(s1)
+    m1 = hb("72")
+    sig1 = ed25519.sign(s1, bytes.view(m1))
+    fails = fails + check("ed25519 sign", sig1, "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00")
+    p1 = ed25519.publickey(s1)
+    fails = fails + check("ed25519 publickey", p1, "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c")
+    // RFC 8032 7.4 "Blank": Ed448 signature of the empty message.
+    s2 = hb("6c82a562cb808d10d632be89c8513ebf6c929f34ddfa8c9f63c9960ef6e348a3528c8a3fcc2f044e39a3fc5b94492f8f032e7549a20098f95b")
+    secret(s2)
+    e0 = bytes.new(0)
+    sig2 = ed448.sign(s2, bytes.view(e0)[0..0])
+    fails = fails + check("ed448 sign", sig2, "533a37f6bbe457251f023c0d88f976ae2dfb504a843e34d2074fd823d41a591f2b233f034f628281f2fd7a22ddd47d7828c59bd0a21bfd3980ff0d2028d4b18a9df63e006c5d1c2d345b925d8dc00b4104852db99ac5c7cdda8530a113a0f4dbb61149f05a7363268c71d95808ff2e652600")
+    // RFC 7748 6.1: X25519 public key and shared secret, Alice's scalar secret.
+    ak = hb("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
+    secret(ak)
+    apub = x25519.base_point(ak)
+    fails = fails + check("x25519 base_point", apub, "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a")
+    bpub = hb("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f")
+    sh1, xerr = x25519.agree(ak, bpub)
+    if xerr != "" {
+        println("FAIL x25519 agree: ${xerr}")
+        fails = fails + 1
+    } else {
+        fails = fails + check("x25519 agree", sh1, "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742")
+        bytes.free(sh1)
+    }
+    // RFC 7748 6.2: X448 shared secret, Alice's scalar secret.
+    xk = hb("9a8f4925d1519f5775cf46b04b5800d4ee9ee8bae8bc5565d498c28dd9c9baf574a9419744897391006382a6f127ab1d9ac2d8c0a598726b")
+    secret(xk)
+    xpub = hb("3eb7a829b0cd20f5bcfc0b599b6feccf6da4627107bdb0d4f345b43027d8b972fc3e34fb4232a13ca706dcb57aec3dae07bdc1c67bf33609")
+    sh2, yerr = x448.agree(xk, xpub)
+    if yerr != "" {
+        println("FAIL x448 agree: ${yerr}")
+        fails = fails + 1
+    } else {
+        fails = fails + check("x448 agree", sh2, "07fff4181ac6cc95ec1c16a94a0f74d12da232ce40a77552281d282bb60c0b56fd2464c335543936521c24403085d59a449a5037514a879d")
+        bytes.free(sh2)
+    }
+    bytes.free(s1); bytes.free(m1); bytes.free(sig1); bytes.free(p1)
+    bytes.free(s2); bytes.free(e0); bytes.free(sig2)
+    bytes.free(ak); bytes.free(apub); bytes.free(bpub); bytes.free(xk); bytes.free(xpub)
+    return fails
+}
 main() {
     ct.set_declassify_hook(ct_shim_declassify_hook() as DeclassifyHook)
     if ct_shim_available() == 1 {
@@ -283,6 +337,7 @@ main() {
     fails = fails + p521_cases()
     fails = fails + secp256k1_cases()
     fails = fails + rsa_cases()
+    fails = fails + eddsa_xdh_cases()
     if fails > 0 {
         println("${fails} FAILED")
         exit(1)

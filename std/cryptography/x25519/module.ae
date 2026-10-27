@@ -37,6 +37,7 @@
 //     Aether has no fixed-size inline array fields.
 
 import std.bytes
+import std.cryptography.ct
 
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
@@ -892,7 +893,9 @@ agree(scalar: ptr, u: ptr) -> (ptr, string) {
         acc = acc | (bytes.get(r, i) & 255)
         i = i + 1
     }
-    if acc == 0 {
+    // Whether the result is zero is public (the handshake ends on it): the
+    // one value the constant-time harness lets decide a branch here.
+    if ct.declassify(ct.eq(acc, 0)) == 1 {
         bytes.free(r)
         return null, "x25519: all-zero shared secret (small-order point)"
     }

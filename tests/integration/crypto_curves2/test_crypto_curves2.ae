@@ -1,8 +1,10 @@
 // Validate std.cryptography.secp256k1 (ECDSA with RFC 6979 nonces, ECDH,
-// the off-curve refusal), x448 (RFC 7748) and ed448 (RFC 8032) against
+// the off-curve refusal), x448 (RFC 7748, and agree refusing an all-zero
+// shared secret as x25519.agree does) and ed448 (RFC 8032) against
 // published test vectors.
 import std.cryptography.secp256k1
 import std.cryptography.x448
+import std.cryptography.x25519
 import std.cryptography.ed448
 import std.cryptography.sha2
 import std.bignum
@@ -116,6 +118,24 @@ main() {
     bpub = hb("3eb7a829b0cd20f5bcfc0b599b6feccf6da4627107bdb0d4f345b43027d8b972fc3e34fb4232a13ca706dcb57aec3dae07bdc1c67bf33609")
     ss = x448.x448(apriv, bpub)
     fails = fails + ck("x448 dh", bh(ss), "07fff4181ac6cc95ec1c16a94a0f74d12da232ce40a77552281d282bb60c0b56fd2464c335543936521c24403085d59a449a5037514a879d")
+    // agree() runs the same check for both curves (#1298): the RFC 7748 6.2
+    // shared secret comes back, and an all-zero one (u = 0, small order) is
+    // refused, where the raw functions return the zeros.
+    ss2, _aerr = x448.agree(apriv, bpub)
+    fails = fails + ck("x448 agree", bh(ss2), "07fff4181ac6cc95ec1c16a94a0f74d12da232ce40a77552281d282bb60c0b56fd2464c335543936521c24403085d59a449a5037514a879d")
+    z56 = hb("0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000")
+    z32 = hb("0000000000000000000000000000000000000000000000000000000000000000")
+    s32 = hb("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4")
+    raw448 = x448.x448(apriv, z56)
+    raw25519, _rerr = x25519.scalar_mult(s32, z32)
+    zs448, zerr448 = x448.agree(apriv, z56)
+    zs25519, zerr25519 = x25519.agree(s32, z32)
+    if zs448 == null && string.contains(zerr448, "all-zero") == 1 && zs25519 == null && string.contains(zerr25519, "all-zero") == 1 {
+        println("ok   x448.agree and x25519.agree both refuse an all-zero shared secret")
+    } else { println("FAIL an all-zero shared secret was accepted"); fails = fails + 1 }
+    fails = fails + ck("x448 raw zero", bh(raw448), "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000")
+    fails = fails + ck("x25519 raw zero", bh(raw25519), "0000000000000000000000000000000000000000000000000000000000000000")
+    bytes.free(ss2); bytes.free(z56); bytes.free(z32); bytes.free(s32); bytes.free(raw448); bytes.free(raw25519)
 
     // --- Ed448 RFC 8032 §7.4 Blank (empty message) ---
     seed = hb("6c82a562cb808d10d632be89c8513ebf6c929f34ddfa8c9f63c9960ef6e348a3528c8a3fcc2f044e39a3fc5b94492f8f032e7549a20098f95b")

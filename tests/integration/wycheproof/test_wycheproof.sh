@@ -1,7 +1,7 @@
 #!/bin/sh
-# Wycheproof adversarial vector suites — fast families (symmetric, KDF,
-# and stride-sampled ed25519; the tcId-151 forgery stays pinned in
-# tests/integration/crypto_ed25519 regardless of sampling).
+# Wycheproof adversarial vector suites: fast families (symmetric, KDF and
+# ed25519, every case; the tcId-151 forgery also stays pinned in
+# tests/integration/crypto_ed25519).
 #
 # Runs the cheap drivers against the pinned vector JSONs in
 # tests/vectors/wycheproof/ (provenance + licence in the README there).
