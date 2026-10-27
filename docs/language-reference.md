@@ -3525,8 +3525,10 @@ core waiting on that very actor when there is one, else an idle one. So an
 asked actor on another core that asks one of them in turn gets its answer.
 Nothing else is run inside the waiting handler: an actor of the core that
 asks the waiting actor waits until its handler is done, as it would have. An
-actor with more messages queued than its mailbox holds stays until the ask
-ends, since moved, its later messages could overtake them (#3241).
+actor with more messages queued than its mailbox holds moves as well, with
+all of them in order: what its mailbox cannot take goes into an overflow of
+its own that moves with it, and what it is sent later goes behind that, so
+each sender's messages still arrive in the order they were sent (#3241).
 
 ### Reply Statement
 

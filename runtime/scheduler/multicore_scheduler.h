@@ -182,7 +182,11 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
     int scheduler_owned; \
     /* An auto_process actor's inbox (#2598): every sender puts its \
      * messages here and only the actor's thread takes them. Made by the \
-     * first send, NULL until then. */ \
+     * first send, NULL until then. For an actor a core runs, its overflow \
+     * (#3241): a waiting core's relief starts it with the messages a full \
+     * mailbox could not take, every delivery goes behind it while it holds \
+     * anything, and each step refills the mailbox from it. Made by the \
+     * first such relief, NULL until then. */ \
     _Atomic(struct ActorInbox*) inbox; \
     /* 1 while the actor's own thread sleeps in its idle park (#2592): a \
      * sender that has just put a message in the inbox and reads 1 wakes \
@@ -190,8 +194,9 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
     atomic_int thread_parked; \
     /* Messages for this actor on their way through a core's queues or a \
      * sender's overflow buffer: counted before the sender reads \
-     * assigned_core, uncounted when the message reaches the mailbox \
-     * (#3090, #3093). The actor moves to another core only while this is \
+     * assigned_core, uncounted when the message reaches the mailbox or \
+     * the actor's overflow (#3090, #3093, #3241). The actor moves to \
+     * another core only while this is \
      * 0, with AETHER_INFLIGHT_MOVING set for the move, so no message is \
      * left behind on the core it leaves. */ \
     atomic_int inflight;
@@ -221,7 +226,8 @@ static inline void inflight_enter(ActorBase* actor, int n) {
     }
 }
 
-/* `n` counted messages reached the actor's mailbox (or were dropped). */
+/* `n` counted messages reached the actor's mailbox or overflow (or were
+ * dropped). */
 static inline void inflight_leave(ActorBase* actor, int n) {
     atomic_fetch_sub_explicit(&actor->inflight, n, memory_order_release);
 }

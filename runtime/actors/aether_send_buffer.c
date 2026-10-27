@@ -1,5 +1,6 @@
 #include "aether_send_buffer.h"
 #include "aether_spsc_queue.h"
+#include "aether_actor_inbox.h"
 #include "../scheduler/multicore_scheduler.h"
 #include "../scheduler/lockfree_queue.h"
 #include <string.h>
@@ -27,9 +28,15 @@ void send_buffer_flush(void) {
         return;
     }
     int target_core = atomic_load_explicit(&actor->assigned_core, memory_order_relaxed);
-    
+
+    // While the actor's overflow holds anything (#3241) its messages go
+    // behind it, which the core's own delivery does: they take the slow
+    // path below, through this core's own queue.
+    ActorInbox* behind = atomic_load_explicit(&actor->inbox, memory_order_acquire);
+    int overflowing = behind && atomic_load_explicit(&behind->count, memory_order_relaxed) > 0;
+
     // Fast path: same core, use lock-free SPSC queue
-    if (g_send_buffer.core_id == target_core && g_send_buffer.core_id >= 0) {
+    if (g_send_buffer.core_id == target_core && g_send_buffer.core_id >= 0 && !overflowing) {
         // Try SPSC queue first (lock-free, fastest path)
         // spsc_queue is lazy-allocated (NULL for regular actors); allocate if needed
         if (!actor->spsc_queue) {
