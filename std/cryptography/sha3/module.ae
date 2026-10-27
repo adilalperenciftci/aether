@@ -359,13 +359,15 @@ final_bytes(ctx: ptr, out_len: int) -> ptr {
         n = out_len
     }
     do_pad(c)
+    // The output stays in the buffer it was squeezed into: it used to go
+    // through a string and back, and a secret (Ed448's expanded key and
+    // nonce are SHAKE256 output) does not belong in a string (#2600, the
+    // constant-time test's finding; see sha2.final_bytes).
     out = squeeze(c, n)
-    s = bytes.finish(out, n)
+    bytes.set_length(out, n)
     free_internals(c)
     free(ctx)
-    res = bytes.new(n)
-    bytes.copy_from_string(res, 0, s, n)
-    return res
+    return out
 }
 
 // Finalize and return the digest as lowercase hex. FREES the ctx; do
