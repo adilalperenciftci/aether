@@ -1171,6 +1171,8 @@ static void narrowing_message(char* msg, size_t size, const char* nm, TypeKind a
     }
 }
 
+static int is_definition(const ASTNode* n);
+
 void type_error(const char* message, int line, int column) {
     AetherErrorCode code = AETHER_ERR_TYPE_MISMATCH;
     if (strstr(message, "not exported")) code = AETHER_ERR_NOT_EXPORTED;
@@ -4484,6 +4486,16 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
             if (expr->value && strcmp(expr->value, "make") == 0 &&
                 expr->node_type && expr->node_type->kind == TYPE_ARRAY)
                 return clone_type(expr->node_type);
+            /* `append(xs, v)` is `xs`'s slice type, unless a function of
+             * the program's own takes the name. */
+            if (expr->value && strcmp(expr->value, "append") == 0 && expr->child_count == 2) {
+                Symbol* as = lookup_symbol(table, "append");
+                if (!(as && is_definition(as->node))) {
+                    Type* st = infer_type(expr->children[0], table);
+                    if (type_is_slice(st)) return st;
+                    if (st) free_type(st);
+                }
+            }
             /* select(...) yields whatever its branches yield. Nothing inferred
              * it before, so it fell to unresolved and codegen defaulted to int:
              * a select over strings assigned a pointer into an int slot and
@@ -5658,6 +5670,10 @@ static void place_to_array_literal(ASTNode* value, Type* place) {
     set_node_type(value, create_array_type(clone_type(place->element_type), value->child_count));
 }
 
+static int reject_view_owner_op(ASTNode* arg, ASTNode* at, const char* verb);
+#define APPEND_VIEW_HINT "`append` grows a buffer the program owns: copy the elements into " \
+                         "one (`make([]T, 0)` and `append` each), or start from `[]`"
+
 /* #3072: `free` of what the checker can see owns nothing (R1, R2): a
  * read-only view of a string's bytes, a view of another slice's or an
  * array's elements, a local bound once to either, or an array `T[N]`, which
@@ -5666,6 +5682,12 @@ static void place_to_array_literal(ASTNode* value, Type* place) {
  * free). A view the checker cannot see is the run-time check's
  * (aether_slice_free). Returns 1 when it reported. */
 static int reject_free_of_view(ASTNode* arg, ASTNode* at) {
+    return reject_view_owner_op(arg, at, "free");
+}
+
+/* `verb` (`free`, or `append to`, which releases the old buffer as it
+ * grows) of a view the checker can see, which owns nothing. */
+static int reject_view_owner_op(ASTNode* arg, ASTNode* at, const char* verb) {
     if (!arg) return 0;
     int local = arg->type == AST_IDENTIFIER && arg->value;
     const ASTNode* src = local ? local_single_init(arg->value) : arg;
@@ -5677,22 +5699,28 @@ static int reject_free_of_view(ASTNode* arg, ASTNode* at) {
     Type* t = arg->node_type;
     if (t && type_is_sized_array(t) && t->array_size > 0) {
         snprintf(msg, sizeof(msg),
-                 "cannot free %s: an array `%s` lives in its function or its struct, not in "
+                 "cannot %s %s: an array `%s` lives in its function or its struct, not in "
                  "an allocation",
-                 what, type_spelled(t));
-        hint = "`free` takes a buffer `make([]T, n)` gave; an array needs no freeing";
+                 verb, what, type_spelled(t));
+        hint = strcmp(verb, "free") == 0
+                   ? "`free` takes a buffer `make([]T, n)` gave; an array needs no freeing"
+                   : APPEND_VIEW_HINT;
     } else if (src && is_readonly_view_source(src, 0)) {
         snprintf(msg, sizeof(msg),
-                 "cannot free %s: it is a read-only view of a string's bytes (string.bytes), "
+                 "cannot %s %s: it is a read-only view of a string's bytes (string.bytes), "
                  "which owns nothing",
-                 what);
-        hint = "the string owns its bytes: release the string when it is done, not the view";
+                 verb, what);
+        hint = strcmp(verb, "free") == 0
+                   ? "the string owns its bytes: release the string when it is done, not the view"
+                   : APPEND_VIEW_HINT;
     } else if (src && is_borrowed_view_source(src)) {
         snprintf(msg, sizeof(msg),
-                 "cannot free %s: it is a view of elements another slice or an array holds, "
+                 "cannot %s %s: it is a view of elements another slice or an array holds, "
                  "which owns nothing",
-                 what);
-        hint = "free the buffer `make` gave, once, through the slice that holds it";
+                 verb, what);
+        hint = strcmp(verb, "free") == 0
+                   ? "free the buffer `make` gave, once, through the slice that holds it"
+                   : APPEND_VIEW_HINT;
     } else {
         return 0;
     }
@@ -20001,6 +20029,76 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
         }
         set_node_type(call, create_type(TYPE_VOID));
         return 1;
+    }
+
+    /* `append(xs, v)`: `xs`, a `T[]` the program owns (a `make` buffer, one
+     * `append` gave, or the empty slice), one element longer, `v` at its end.
+     * The buffer grows in place with its capacity doubling, so n appends cost
+     * O(n) in all (aether_slice_grow1). Not a function symbol: a program's or
+     * a module's own `append` (std.strbuilder's, in its body or imported by
+     * name) keeps the name. */
+    if (call->value && strcmp(call->value, "append") == 0 && call->child_count == 2) {
+        Symbol* as = lookup_symbol(table, "append");
+        if (!(as && is_definition(as->node))) {
+            typecheck_expression(call->children[0], table);
+            typecheck_expression(call->children[1], table);
+            if (reject_view_owner_op(call->children[0], call, "append to")) {
+                set_node_type(call, create_type(TYPE_UNKNOWN));
+                return 0;
+            }
+            Type* st = infer_type(call->children[0], table);
+            if (!type_is_slice(st) || !st->element_type) {
+                char msg[300];
+                snprintf(msg, sizeof(msg),
+                         "append(xs, v) takes a slice `T[]` as its first argument, got %s",
+                         st ? type_spelled(st) : "an unknown type");
+                type_error_hint(msg, "start one with `make([]T, 0)` or a `T[]` bound to `[]`",
+                                call->line, call->column);
+                if (st) free_type(st);
+                set_node_type(call, create_type(TYPE_UNKNOWN));
+                return 0;
+            }
+            if (type_is_sized_array(st->element_type)) {
+                char msg[300];
+                snprintf(msg, sizeof(msg),
+                         "append(xs, v) does not take a slice of arrays (%s) yet",
+                         type_spelled(st));
+                type_error_hint(msg, "wrap the array in a struct, and append those",
+                                call->line, call->column);
+                free_type(st);
+                set_node_type(call, create_type(TYPE_UNKNOWN));
+                return 0;
+            }
+            /* A named function given as the value is its function value. */
+            Type* vt = NULL;
+            if (st->element_type->kind == TYPE_FUNCTION && st->element_type->is_fnptr &&
+                fn_name_matches_signature(table, call->children[1], st->element_type)) {
+                set_node_type(call->children[1], clone_type(st->element_type));
+                vt = clone_type(st->element_type);
+            } else {
+                if (st->element_type->kind == TYPE_FUNCTION)
+                    function_value_annotate(call->children[1], table);
+                vt = infer_type(call->children[1], table);
+            }
+            int fits = !vt || is_type_compatible(vt, st->element_type);
+            ASTNode* a0 = call->children[0];
+            if (fits && vt &&
+                reject_closure_in_fnptr_slot(table, call->children[1], vt, st->element_type,
+                                             FNPTR_SLOT_ELEMENT,
+                                             a0->type == AST_IDENTIFIER ? a0->value : "append",
+                                             call->children[1]->line, call->children[1]->column))
+                fits = 0;
+            else if (!fits) {
+                char msg[300];
+                snprintf(msg, sizeof(msg),
+                         "append(xs, v): v is %s, but the elements of xs are %s",
+                         type_spelled(vt), type_spelled(st->element_type));
+                type_error(msg, call->children[1]->line, call->children[1]->column);
+            }
+            if (vt) free_type(vt);
+            set_node_type(call, st);
+            return fits;
+        }
     }
 
     /* `call(f, x)` through a typed C function pointer (a `fn(int)` parameter

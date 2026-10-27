@@ -3357,7 +3357,7 @@ static int is_builtin_name(const char* name) {
     static const char* builtins[] = {
         "print", "println", "make", "spawn", "exit", "sleep", "free",
         "getenv", "atoi", "clock_ns", "typeof", "is_type", "convert_type",
-        "print_char", "wait_for_idle", "each", "map", "filter", "__slice_readonly",
+        "print_char", "wait_for_idle", "each", "map", "filter", "__slice_readonly", "append",
         NULL
     };
     for (int i = 0; builtins[i]; i++) {
@@ -9612,6 +9612,37 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     if (expr->child_count > 0) generate_expression(gen, expr->children[0]);
                     else fprintf(gen->output, "0");
                     fprintf(gen->output, "), sizeof(%s))", get_c_type(expr->node_type->element_type));
+                }
+                else if (strcmp(func_name, "append") == 0 && expr->child_count == 2 &&
+                         type_is_slice(expr->node_type) && expr->node_type->element_type &&
+                         type_is_slice(expr->children[0]->node_type) &&
+                         !find_function_definition_by_name(gen->program, "append")) {
+                    /* `append(xs, v)`: `v` taken first (it may read `xs`,
+                     * whose storage the growth may move), then `xs` one
+                     * element longer (aether_slice_grow1: in place, or the
+                     * buffer reallocated to twice its capacity), and `v`
+                     * stored into the new, zeroed last element as a store
+                     * into an element takes it (#2921). The result is the
+                     * slice; `xs` itself is unchanged, and invalid if the
+                     * buffer moved, as after `free`. */
+                    Type* et = expr->node_type->element_type;
+                    const char* ect = get_c_type(et);
+                    TempSeq s;
+                    seq_open(gen, &s);
+                    const char* v = seq_let(gen, &s, ect, "_ae_apv");
+                    emit_value_take(gen, expr->children[1], et);
+                    seq_next(gen, &s);
+                    const char* g = seq_let(gen, &s, "AetherSlice", "_ae_apg");
+                    fprintf(gen->output, "aether_slice_grow1(");
+                    generate_expression(gen, expr->children[0]);
+                    fprintf(gen->output, ", sizeof(%s), ", ect);
+                    emit_slice_diag_file(gen, expr);
+                    fprintf(gen->output, ", %d)", expr->line);
+                    seq_next(gen, &s);
+                    fprintf(gen->output, "((%s*)%s.ptr)[%s.len - 1] = %s", ect, g, g, v);
+                    seq_next(gen, &s);
+                    fprintf(gen->output, "%s", g);
+                    seq_close(gen, &s);
                 }
                 else if (strcmp(func_name, "typeof") == 0) {
                     fprintf(gen->output, "aether_typeof(");

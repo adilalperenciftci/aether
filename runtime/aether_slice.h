@@ -26,6 +26,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "actors/aether_panic.h"
 
 #ifdef __cplusplus
@@ -63,6 +64,15 @@ typedef struct AetherSlice {
  * holds before the buffer goes. A view of a raw pointer is not marked: its
  * elements are C's, and a store there takes nothing. */
 #define AETHER_SLICE_MADE 4u
+
+/* `append(s, v)`: a `make` buffer `append` has grown. Its capacity is not
+ * stored: it is the smallest power of two, at least 4, that holds its
+ * length (aether_slice_grown_cap), so `append` doubles the buffer when the
+ * length reaches one and writes in place otherwise, amortised O(1), with
+ * the slice still `{ ptr, len, flags }`. A buffer that is not marked holds
+ * exactly its length. A sub-slice, a pattern's tail or an array view is
+ * BORROWED, so the mark never describes a length it was not grown to. */
+#define AETHER_SLICE_GROWN 8u
 
 /* `const void*`: a view is made over an array of strings too, `const char*
  * xs[N]`. Taken as `void*`, cl.exe read the elements' `const` as the array's
@@ -244,6 +254,53 @@ static inline AetherSlice aether_slice_from(AetherSlice s, int64_t lo,
         return d;
     }
     return aether_slice_sub(s, lo, (int64_t)s.len, elem_size, file, line);
+}
+
+/* The capacity of a buffer marked AETHER_SLICE_GROWN of length `len`. */
+static inline uint64_t aether_slice_grown_cap(uint64_t len) {
+    uint64_t c = 4;
+    while (c < len) c <<= 1;
+    return c;
+}
+
+/* `append(s, v)`, its first half: `s` one element longer, the new last
+ * element zeroed for the generated code to store `v` into (a store that
+ * takes the value, as `s[i] = v` does). `s` must be a buffer the program
+ * owns, which `free(s)` would release: one `make` or `append` handed out,
+ * or the empty slice (`[]`, `null`), which starts a buffer. When the buffer
+ * is full it is reallocated to twice its capacity: the old storage goes, as
+ * `free` would release it, and its elements move to the new storage with
+ * what they hold. A view (a sub-slice, an array, a string's bytes, C
+ * memory) owns nothing, so growing it is a named panic, as freeing it is. */
+static inline AetherSlice aether_slice_grow1(AetherSlice s, size_t elem_size,
+                                             const char* file, int line) {
+    if (s.len == AETHER_SLICE_UNBOUNDED)
+        aether_slice_panicf("%s:%d: append to a view of unknown length, which owns nothing",
+                            file, line);
+    if (s.flags & AETHER_SLICE_READONLY)
+        aether_slice_panicf("%s:%d: append to a read-only view of a string, which owns nothing",
+                            file, line);
+    if (s.flags & AETHER_SLICE_BORROWED)
+        aether_slice_panicf("%s:%d: append to a view of elements another slice or an array "
+                            "holds, which owns nothing", file, line);
+    int empty = s.ptr == NULL && s.len == 0;
+    if (!empty && !(s.flags & AETHER_SLICE_MADE))
+        aether_slice_panicf("%s:%d: append to a view of memory the program did not make "
+                            "(make([]T, n) or append), which it cannot grow", file, line);
+    uint64_t len = empty ? 0 : s.len;
+    int grown = !empty && (s.flags & AETHER_SLICE_GROWN);
+    if (!grown || len == aether_slice_grown_cap(len)) {
+        uint64_t cap = aether_slice_grown_cap(len + 1);
+        if (cap > SIZE_MAX / (elem_size ? elem_size : 1))
+            aether_slice_panicf("%s:%d: append: out of memory", file, line);
+        void* p = realloc(empty ? NULL : s.ptr, (size_t)cap * elem_size);
+        if (!p) aether_slice_panicf("%s:%d: append: out of memory", file, line);
+        s.ptr = p;
+        s.flags = AETHER_SLICE_MADE | AETHER_SLICE_GROWN;
+    }
+    memset((char*)s.ptr + len * elem_size, 0, elem_size);
+    s.len = len + 1;
+    return s;
 }
 
 /* #3072: `free(s)`: the buffer `make([]T, n)` handed out, or a pointer the

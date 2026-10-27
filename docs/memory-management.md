@@ -234,6 +234,18 @@ values that hold each other through `ptr` slots, live until the program
 ends. Break the cycle (store `none`, release the slot) before dropping the
 last outside reference.
 
+### Slices
+
+A slice (`T[]`) is a view and counts nothing. The buffer `make([]T, n)`
+hands out, and one `append(xs, v)` grows, is freed by the program, once,
+with `free(xs)`; `defer free(xs)` keeps that beside the binding, and reads
+`xs` when it runs, so a slice re-bound by `xs = append(xs, v)` in between
+frees the buffer the last append gave. The buffer's elements are places: a
+string, a closure or a struct that holds one is taken when it is stored or
+appended, and `free` releases each. `append` releases the old storage when
+it grows, so the slice it was given, and every copy of it, is then as a
+freed one ([Slices](language-reference.md#slices-t)).
+
 ## Handles and `defer`
 
 A handle is a `ptr` to memory a module or C allocated: a list, a map, a set,

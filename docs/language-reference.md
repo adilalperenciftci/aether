@@ -420,6 +420,38 @@ main() {
 - A slice does not own the storage it views. It is valid for exactly as long as that storage: an array in an enclosing scope, a `make` buffer until its `free`, a C buffer until C reclaims it. The elements are the storage's: a string read out of a `string[]` slice (`t = s[i]`, a return, a field) takes a reference of its own, and a store into an element (`s[i] = v`) takes the new string and releases the one it replaces, as a store into the array itself does. Memory C owns, viewed as `p as string[]`, owns nothing: a store there gives C the characters and takes no reference ([memory-management.md](memory-management.md#ptr-slots)).
 - **A slice of a function's own storage stays in the function** (E0900). An array literal in a slice slot, and a function's own fixed-size array, live in its frame, which ends when the function returns. A slice of either may be used while the function runs and passed down to the functions it calls, but it may not leave the function: returned (alone, in a struct or tuple, or in a closure that captured it), stored in a module-level `var`, or stored in a field of something that may outlive the function: a struct behind a pointer, or a global (a struct value of the function's own may take it, and is then itself such a slice). Each of those is refused at the value that leaves, `'lit' returns a slice of its own storage (an array literal)`. Keep such a slice in storage that lives as long as it: a `make([]T, n)` buffer, a slice the caller passed in, or a module-level array. A slice parameter (`xs: int[]`) views the caller's storage and may be returned; a fixed-size array parameter (`a: int[3]`) is the function's own copy of the caller's array, so a slice of it is a slice of the function's storage. What a name holds where it leaves is what counts, path by path: a local or a field of a local struct re-bound to a `make` buffer before the `return` holds no slice of the frame any more, but one that still holds it on any path to the `return` (an `if` that re-binds it in one branch only, a loop that may `break` before the re-bind) is refused. A call of a closure the function binds (`reset()` after `reset = || { v = make([]int, 4) }`) counts what the closure re-binds for sure: a name of the function it binds on every way through its body before any `return` (both branches of an `if`, every arm of a `match` that covers its value, not a loop's body) holds what the closure gave it after the call. The name is the function's own when the function binds it ahead of the closure, in a block around it, and the closure does not declare one of its own first; a closure bound more than once, or called before it is bound, re-binds nothing that counts. A `try` around such a call starts its handler from what held a slice before any statement of its body ran, or after any. The other way is counted, conservatively: a closure that may store a slice of the function's storage into one of its names (`setview = || { v = arr }`) gives that name a slice from where the closure is written on, whether and whenever it is called, and a store a closure makes through a pointer or into a module-level `var` is judged as the same store written in the function. What the closure stores is judged as the function's own stores are: a fixed-size array of the function or an array literal, a name that holds such a slice at some point of the function, a local of the closure bound to one, or a parameter of the closure it is called with one for (any parameter that can hold a slice, when the closure is passed on or stored). A slice parameter of the function, a `make` buffer, a module-level `var` or `[]` stored by a closure leaves the name as it was. A call's result is taken to be no view of the caller, so a function that hands back the slice it was given is not seen through, in a closure (`v = same(arr)`) or not.
 
+**Growing a slice: `append(xs, v)`.** `append` gives `xs` one element longer, with `v` at its end, and is used as `xs = append(xs, v)`. The buffer grows in place: its capacity doubles when it is full, so `n` appends cost O(n) in all, and between growths an append writes in place. The result is an ordinary `T[]` (`xs[i]`, `.len`, a `T[]` parameter, a sub-slice), and `free(xs)` releases it, with `defer free(xs)` keeping the free beside the binding (a `defer` reads `xs` when it runs, so it frees the buffer the last append gave).
+
+```aether,run
+range_list(n: int) -> int[] {
+    int[] xs = []                   // the empty slice starts a buffer
+    for i in 0..n {
+        xs = append(xs, i * i)
+    }
+    return xs
+}
+
+main() {
+    xs = range_list(5)
+    defer free(xs)
+    names = make([]string, 0)
+    defer free(names)
+    for i in 0..3 {
+        names = append(names, "n${i}")   // the element takes the string
+    }
+    println("${xs.len} ${xs[4]} ${names[2]}")
+}
+```
+```output
+5 16 n2
+```
+
+- **What it grows is a buffer the program owns**: the empty slice (`[]`, `null`), a `make([]T, n)` buffer, or one an earlier `append` gave, the slices `free` releases. Growing moves the buffer, as `free` and a fresh `make` would, so it needs what `free` needs: an `append` to a view (a sub-slice, an array, `string.bytes(s)`, C memory viewed as a slice) is refused where the checker sees it, `cannot append to 's': it is a view of elements another slice or an array holds, which owns nothing` (E0200), and is a named panic at run time anywhere else. Copy a view's elements into a buffer of your own to grow them.
+- **`xs` is consumed.** When the buffer is full it is reallocated, and `xs`, with every other copy of the slice and every view into it, then points at storage that is gone, as after `free(xs)`. Use only what `append` returns, and keep one slice that holds a buffer, as with `make`. A slice parameter may be grown and handed back (`grow(xs: int[]) -> int[]`), and the caller then holds the result in place of what it passed.
+- **Its elements are places, as a `make` buffer's are.** Appending a string, a closure or a struct that holds one takes a reference to it (a fresh value is moved in), the elements move with the buffer when it grows, and `free` releases each before the buffer goes. `v` is evaluated before `xs` grows, so `xs = append(xs, xs[0])` reads the element where it is.
+- The element type may be a number, `bool`, `byte`, a `string`, a struct, a tuple, an optional or a closure. A slice of fixed-size arrays (`int[2][]`) is not grown yet: wrap the array in a struct. `v` must be of the element type, as for `xs[i] = v`. A function of the program's own named `append`, or a module's (`strbuilder.append`), keeps its name: the builtin is the one `append` that is not otherwise defined.
+- The slice is still `{ ptr, len, flags }`: a buffer `append` has grown is marked, and its capacity is the smallest power of two, at least 4, that holds its length. A sub-slice is a view, so it never carries the mark.
+
 **Views over a raw pointer are unbounded.** `p as T[]` (the typed-array cast) and a `T[]` handed back by a C extern have no length the compiler can know. Such a view indexes without a check, as it always did, and its `.len` is `-1`. Bound it with an explicit end to get checking back:
 
 ```aether,fragment
