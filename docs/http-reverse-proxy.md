@@ -389,7 +389,12 @@ A request the proxy does not own, a health endpoint, an admin route, or
 anything another middleware answers, is handed to the general server path
 along with whatever has already been read from the socket, and a pool worker
 serves the connection from then on, as it does an accepted one: a slow route
-handler never holds up the driver's other connections (#3230). Routing,
+handler never holds up the driver's other connections (#3230). The pool adds
+workers while all of them are busy, up to 64, and queues up to 256
+connections; past that a driver handing a connection over waits for a place
+in the queue, as the accept thread does, and its other connections wait with
+it. That is the server's backpressure, the same one an accepted connection
+meets, rather than a queue without end. Routing,
 middleware and handlers behave exactly as they do without the driver: a request the
 middleware before the first mount already ran on goes on from the middleware
 after the mount, so none of it runs twice and a rate limiter counts it once.
