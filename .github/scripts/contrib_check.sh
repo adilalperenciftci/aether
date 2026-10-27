@@ -130,6 +130,7 @@ TESTS=(
   "tinyweb/integration|$TW/test_integration.ae||run|"
   "tinyweb/schema_api|$TW/test_schema_api.ae||run|"
   "tinyweb/streams|$TW/test_streams.ae||run|"
+  "tinyweb/monitor|$TW/test_monitor.ae||run|"
   "i18n/collate|$I18N/collate/test_collate.ae|$I18N/aether_i18n.c std/unicode/utf8proc/utf8proc.c $I18N/ducet/ducet_data.c|leak|"
   # png: pure Aether over std.zlib; its test decodes what it encoded.
   "png/encode|contrib/png/test_png.ae||leak|"
