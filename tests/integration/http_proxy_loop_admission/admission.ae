@@ -134,6 +134,44 @@ probe(port: int, raw: string) -> string {
     return "${answer} ${state}"
 }
 
+// `raw`, written on a connection of its own and read until the server closes
+// it or sends nothing for a second: the status of each response that came
+// back, in order, then "closed" or "open".
+answers(port: int, raw: string) -> string {
+    sock, cerr = tcp.connect("127.0.0.1", port)
+    if cerr != "" {
+        return "connect failed"
+    }
+    tcp.write(sock, raw)
+    wire = ""
+    state = "open"
+    idle = 0
+    waited = 0
+    while state == "open" && waited < 80 && idle < 10 {
+        ready, _perr = tcp.poll(sock, 100)
+        if ready {
+            chunk, rerr = tcp.read(sock, 65536)
+            if rerr != "" || string.length(chunk) == 0 {
+                state = "closed"
+            } else {
+                wire = string.concat(wire, chunk)
+                idle = 0
+            }
+        } else {
+            idle = idle + 1
+        }
+        waited = waited + 1
+    }
+    tcp.close(sock)
+    statuses = ""
+    at = string.index_of(wire, "HTTP/1.1 ")
+    while at >= 0 {
+        statuses = string.concat(statuses, "${string.substring(wire, at + 9, at + 12)} ")
+        at = string.index_of_from(wire, "HTTP/1.1 ", at + 9)
+    }
+    return "${statuses}${state}"
+}
+
 // The same request to both gateways, and the answer expected of both.
 both(label: string, ports: int[], raw: string, want: string) -> int {
     bad = 0
@@ -141,6 +179,24 @@ both(label: string, ports: int[], raw: string, want: string) -> int {
     g = 0
     while g < 2 {
         got = probe(ports[g], raw)
+        if got != want {
+            println("  FAIL ${label} (${names[g]}): got '${got}', expected '${want}'")
+            bad = bad + 1
+        } else {
+            println("  PASS ${label} (${names[g]})")
+        }
+        g = g + 1
+    }
+    return bad
+}
+
+// `both` for several requests on one connection (`answers`).
+both_all(label: string, ports: int[], raw: string, want: string) -> int {
+    bad = 0
+    names = ["event loop", "worker path"]
+    g = 0
+    while g < 2 {
+        got = answers(ports[g], raw)
         if got != want {
             println("  FAIL ${label} (${names[g]}): got '${got}', expected '${want}'")
             bad = bad + 1
@@ -215,14 +271,19 @@ main() {
         "GET ${long_path} HTTP/1.1\r\nHost: x\r\n\r\n", "414 request line is too long\r\n closed")
 
     // #3237: what a request may make the server hold. A head that has not
-    // ended in 16 KiB closes the connection; a body declared larger than the
-    // proxy forwards is refused before it is read, so this one is never
+    // ended in 16 KiB is refused, 431 (#3252); a body declared larger than
+    // the proxy forwards is refused before it is read, so this one is never
     // sent.
     endless = string.pad_end("GET /p HTTP/1.1\r\nHost: x\r\nX-Big: ", 40000, 98)
-    bad = bad + both("a head that does not end in 16 KiB", ports, endless, "(no answer) closed")
+    head_too_large = "431 request head is too large\n closed"
+    bad = bad + both("a head that does not end in 16 KiB", ports, endless, head_too_large)
     bad = bad + both("a body declared over the proxy's cap", ports,
         "POST /p HTTP/1.1\r\nHost: x\r\nContent-Length: 1000000\r\n\r\nabc",
         "502 request body exceeds proxy cap\n open")
+    // #3252: the refusal closes in stages, so the response to the request
+    // before it, already sent, is not destroyed by a reset.
+    bad = bad + both_all("a request, then a head that does not end in 16 KiB", ports,
+        string.concat("GET /p HTTP/1.1\r\nHost: x\r\n\r\n", endless), "200 431 closed")
 
     http.server_stop(worker_gw)
     http.server_stop(loop_gw)

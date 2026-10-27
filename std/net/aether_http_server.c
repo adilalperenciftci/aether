@@ -5014,6 +5014,23 @@ static void conn_send_headers_too_large(HttpConn* conn) {
     conn->linger_on_close = 1;
 }
 
+/* A head that does not fit the connection buffer: answered 431 and closed in
+ * stages like every refusal of a request not read to its end (#3252). It was
+ * closed with nothing written and the rest of the head unread, and the reset
+ * that sends could destroy the response to the request before it, which the
+ * client had received but not yet read. */
+static void conn_send_head_too_large(HttpConn* conn) {
+    static const char msg[] =
+        "HTTP/1.1 431 Request Header Fields Too Large\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: 26\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "request head is too large\n";
+    conn_send(conn, msg, (int)(sizeof(msg) - 1));
+    conn->linger_on_close = 1;
+}
+
 static void conn_send_uri_too_long(HttpConn* conn) {
     static const char msg[] =
         "HTTP/1.1 414 URI Too Long\r\n"
@@ -5193,7 +5210,8 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
             if (hdr_end) break;
         }
         if (conn->write_pos + 1 >= conn->buf_cap) {
-            /* Header section exceeded buffer capacity; bail. */
+            /* Header section exceeded buffer capacity (#3252). */
+            conn_send_head_too_large(conn);
             return 0;
         }
         int n = conn->write_pos == conn->read_pos
