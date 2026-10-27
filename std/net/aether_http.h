@@ -421,4 +421,18 @@ void http_upstream_release(HttpUpstreamConn* c, int keep);
  * check. Both clients ask it before pooling a connection (#3259). */
 int  http_response_head_keeps_conn(char* head, size_t header_bytes);
 
+/* The largest buffer worth keeping on an idle connection (#2160).
+ *
+ * Keeping it is what makes a pooled connection stop allocating; keeping an
+ * unbounded one would let a single large response pin that much memory for
+ * as long as the connection sits idle, on every idle connection. 64 KiB
+ * holds any ordinary response in full, and bounds what the idle pool can
+ * pin at http_pool_max_idle * 64 KiB -- 4 MiB at the default 64 -- where
+ * one outsized body would otherwise pin its whole size. A bigger buffer is
+ * freed and the next request grows a fresh one, which is what every
+ * request did before. A server connection keeps its buffers by the same
+ * bound between requests, on the worker path and the proxy event loop
+ * (#3262). */
+#define HTTP_RX_KEEP_MAX (64u * 1024u)
+
 #endif

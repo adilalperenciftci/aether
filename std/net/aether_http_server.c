@@ -930,6 +930,23 @@ static void conn_buf_compact(HttpConn* c) {
     c->read_pos = 0;
 }
 
+/* Give back a read buffer grown past HTTP_RX_KEEP_MAX for one request (a
+ * chunked body is decoded in it, up to HTTP_MAX_CHUNKED_BODY), once that
+ * request is done: back to its first size when what is left in it (the next
+ * request, pipelined) fits. Kept, it pinned the largest body for as long as
+ * the connection stayed open, parked included, where a pooled client
+ * connection keeps at most HTTP_RX_KEEP_MAX (#3262). */
+static void conn_buf_trim(HttpConn* c) {
+    if (!c->buf || c->buf_cap <= (int)HTTP_RX_KEEP_MAX) return;
+    conn_buf_compact(c);
+    if (c->write_pos + 1 > HTTP_CONN_BUF_CAP) return;
+    char* nb = (char*)aether_caps_realloc(c->buf, (size_t)c->buf_cap,
+                                          (size_t)HTTP_CONN_BUF_CAP);
+    if (!nb) return;
+    c->buf = nb;
+    c->buf_cap = HTTP_CONN_BUF_CAP;
+}
+
 /* Grow the read buffer to at least the given capacity. */
 static int conn_buf_ensure(HttpConn* c, int needed) {
     if (c->buf_cap >= needed) return 0;
@@ -4663,6 +4680,7 @@ static int finish_response(HttpServer* server, HttpConn* conn,
     // Cleanup
     http_request_free(req);
     http_server_response_free(res);
+    if (will_keep_alive) conn_buf_trim(conn);
     return will_keep_alive;
 }
 

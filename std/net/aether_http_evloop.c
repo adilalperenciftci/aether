@@ -304,6 +304,13 @@ static void ev_conn_reset_request(EvConn* c) {
     size_t carried = c->in_len > c->in_total ? c->in_len - c->in_total : 0;
     if (carried) memmove(c->in, c->in + c->in_total, carried);
     c->in_len = carried;
+    /* A buffer grown for one large body goes back to the first size once
+     * that request is done, as the client pool's receive buffers do: kept,
+     * it pinned the largest body for the connection's life (#3262). */
+    if (c->in_cap > HTTP_RX_KEEP_MAX && carried + 1 <= 8192) {
+        char* small = (char*)realloc(c->in, 8192);
+        if (small) { c->in = small; c->in_cap = 8192; }
+    }
     c->in_total = 0;
     c->in_scanned = 0;
     c->in_hdr_end = 0;
@@ -314,16 +321,28 @@ static void ev_conn_reset_request(EvConn* c) {
     c->head_len = 0;
 
     /* Keep the accumulator rather than returning it; the next request on this
-     * connection reuses it at whatever size it has grown to. */
+     * connection reuses it. Up to HTTP_RX_KEEP_MAX, as a pooled connection
+     * keeps one: kept at any size, one large response pinned that much for
+     * the connection's life (#3262). */
     if (c->x.buf) {
-        if (c->rxbuf) aether_caps_free(c->rxbuf, c->rxcap);
-        c->rxbuf = c->x.buf;
-        c->rxcap = c->x.cap;
+        if (c->x.cap <= HTTP_RX_KEEP_MAX) {
+            if (c->rxbuf) aether_caps_free(c->rxbuf, c->rxcap);
+            c->rxbuf = c->x.buf;
+            c->rxcap = c->x.cap;
+        } else {
+            aether_caps_free(c->x.buf, c->x.cap);
+        }
     }
     memset(&c->x, 0, sizeof(c->x));
 
-    /* The buffer stays with the connection and is only grown; a connection
-     * serving many requests stops allocating and freeing one per request. */
+    /* The buffer stays with the connection; a connection serving many
+     * requests stops allocating and freeing one per request. Not one grown
+     * past HTTP_RX_KEEP_MAX for a large response (#3262). */
+    if (c->out_cap > HTTP_RX_KEEP_MAX) {
+        free(c->out);
+        c->out = NULL;
+        c->out_cap = 0;
+    }
     c->out_len = c->out_sent = 0;
     c->out_body = NULL;
     c->out_body_len = c->out_body_sent = 0;
