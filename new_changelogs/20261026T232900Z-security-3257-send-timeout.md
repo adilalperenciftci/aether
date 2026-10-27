@@ -11,4 +11,5 @@
   with sendfile and OpenSSL's writes are bounded the same way. std.tcp's
   `write_all`, which the pure-Aether TLS server writes through, waits the
   same way and keeps what its send timeout meant: a period of it in which
-  nothing went ends the write (#3257).
+  nothing went ends the write. A TLS response written in many pieces
+  changes the socket's mode once, not around each piece (#3257, #3285).

@@ -10,12 +10,17 @@
 // every request, for as long as it liked. Past 1024 series, requests now
 // count in one series labelled "(other)", which is the same series a client
 // sending that method and path itself counts in: it was a second series
-// with the same labels, which a Prometheus scrape rejects (#3279).
+// with the same labels, which a Prometheus scrape rejects (#3279). A label
+// is cut at 255 bytes, and two paths that agreed that far were two series
+// written with one label; and a path's bytes went into its label as sent,
+// one that is not UTF-8 included, which a scrape rejects too (#3282).
 //
-// A request whose method and path are both "(other)", requests to distinct
-// paths, then a scrape: the requests the scrape counts must add up to every
-// request made, it may list no more than 1025 series, and none twice. The
-// server listens on 127.0.0.1 and a port the kernel picks.
+// A request whose method and path are both "(other)", two whose paths
+// differ only past 300 bytes, one with a byte that is not UTF-8, requests to
+// distinct paths, then a scrape: the requests the scrape counts must add up
+// to every request made, it may list no more than 1025 series, none twice,
+// and no byte that is not UTF-8. The server listens on 127.0.0.1 and a port
+// the kernel picks.
 
 import std.http
 import std.string
@@ -84,6 +89,18 @@ series_and_total(scrape: string) -> (int, int) {
     return series, total
 }
 
+// One request on a connection of its own, its response read, then closed.
+alone(port: int, request: string) {
+    sock, err = tcp.connect("127.0.0.1", port)
+    if err != "" {
+        println("FAIL: connect")
+        exit(1)
+    }
+    tcp.write(sock, request)
+    read_response(sock)
+    tcp.close(sock)
+}
+
 // How many times `needle` is in `hay`.
 occurrences(hay: string, needle: string) -> int {
     n = 0
@@ -123,23 +140,25 @@ main() {
     }
 
     bad = 0
-    // The overflow series' labels, sent by a client, on a connection of its
-    // own: the server may close one whose request it refuses.
-    odd, oerr = tcp.connect("127.0.0.1", port)
-    if oerr != "" {
-        println("FAIL: connect")
-        exit(1)
-    }
-    tcp.write(odd, "(other) (other) HTTP/1.1\r\nHost: x\r\n\r\n")
-    read_response(odd)
-    tcp.close(odd)
+    // The overflow series' labels sent by a client, and a path that is not
+    // UTF-8, each on a connection of its own: the server may close one whose
+    // request it refuses.
+    alone(port, "(other) (other) HTTP/1.1\r\nHost: x\r\n\r\n")
+    alone(port, "GET /bad\xff HTTP/1.1\r\nHost: x\r\n\r\n")
+
+    // Two paths the label cannot tell apart.
+    long_path = string.pad_end("/", 301, 97)
+    tcp.write(sock, "GET ${long_path}1 HTTP/1.1\r\nHost: x\r\n\r\n")
+    read_response(sock)
+    tcp.write(sock, "GET ${long_path}2 HTTP/1.1\r\nHost: x\r\n\r\n")
+    read_response(sock)
 
     // 120 series: past what 64 KB of scrape held, well within the bound.
     spray(sock, 0, 120)
     tcp.write(sock, "GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n")
     series, total = series_and_total(read_response(sock))
-    if total != 121 {
-        println("  FAIL the scrape counts every request: ${total} of 121 in ${series} series")
+    if total != 124 {
+        println("  FAIL the scrape counts every request: ${total} of 124 in ${series} series")
         bad = bad + 1
     } else {
         println("  PASS the scrape counts every request")
@@ -156,18 +175,25 @@ main() {
     } else {
         println("  PASS the series a client can create are bounded")
     }
-    if total != 1622 {
-        println("  FAIL the bounded scrape still counts every request: ${total} of 1622")
+    if total != 1625 {
+        println("  FAIL the bounded scrape still counts every request: ${total} of 1625")
         bad = bad + 1
     } else {
         println("  PASS the bounded scrape still counts every request")
     }
     others = occurrences(scrape, "aether_http_requests_total{method=\"(other)\",path=\"(other)\"}")
-    if others != 1 {
-        println("  FAIL no two series share labels: the (other) series is listed ${others} times")
+    longs = occurrences(scrape, "aether_http_requests_total{method=\"GET\",path=\"${string.substring(long_path, 0, 255)}")
+    if others != 1 || longs != 1 {
+        println("  FAIL no two series share labels: the (other) series is listed ${others} times, the long path's ${longs}")
         bad = bad + 1
     } else {
         println("  PASS no two series share labels")
+    }
+    if string.index_of(scrape, "\xff") >= 0 || occurrences(scrape, "path=\"/bad?\"") == 0 {
+        println("  FAIL every label is UTF-8")
+        bad = bad + 1
+    } else {
+        println("  PASS every label is UTF-8")
     }
 
     tcp.close(sock)

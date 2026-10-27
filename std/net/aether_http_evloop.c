@@ -152,10 +152,16 @@ typedef struct EvConn {
     size_t   body_reserved;
     /* Waiting on the loop's resolver (EV_UPSTREAM_LOOKUP, #3267): on this
      * driver's list of such connections, which ev_resume_lookups dials
-     * again when an answer arrives. */
+     * again when the name it waits on (lookup_name, http_resolver_name) is
+     * answered. */
     int      lookup_waiting;
+    unsigned lookup_name;
     struct EvConn* lookup_prev;
     struct EvConn* lookup_next;
+    /* This attempt's upstream deadline was armed when it began waiting on
+     * the resolver, and the dial after the wait keeps it: the lookup counts
+     * in the upstream timeout, once (#3283). */
+    int      lookup_deadline;
 
     /* The response accumulator, kept between requests. It starts at 16 KiB,
      * and allocating and freeing one per request had the kernel handing back
@@ -220,9 +226,17 @@ typedef struct {
      * write to wake_w only while it is (ev_names_answered). */
     atomic_int     started;
     /* Connections waiting on the resolver (EV_UPSTREAM_LOOKUP), and whether
-     * it has answered since this driver last looked (#3267). */
+     * it has answered since this driver last looked (#3267). The names it
+     * answered meanwhile, by http_resolver_name, for this driver to wake
+     * only the connections waiting on them (#3283); `answered_all` when more
+     * came than the list holds. Written by the resolver's threads, read by
+     * this driver, under answered_lock. */
     EvConn*        lookups;
     atomic_int     answered;
+    pthread_mutex_t answered_lock;
+    unsigned       answered_names[16];
+    int            answered_count;
+    int            answered_all;
 
     /* Connections with a deadline, earliest first. A proxy has to give up on
      * an upstream that never answers, and the loop needs to know when the
@@ -306,6 +320,10 @@ int64_t http_evloop_wakeups(HttpEvLoop* loop) {
     for (int i = 0; i < loop->driver_count; i++)
         total += atomic_load_explicit(&loop->drivers[i].wakeups, memory_order_relaxed);
     return total;
+}
+
+struct HttpResolver* http_evloop_resolver(HttpEvLoop* loop) {
+    return loop ? loop->resolver : NULL;
 }
 
 /* ---- buffers ---- */
@@ -418,6 +436,7 @@ static void ev_conn_reset_request(EvDriver* d, EvConn* c) {
      * upstream were answered 502 instead of being sent again (#3261). */
     c->up_stale_retried = 0;
     c->dial_fresh = 0;
+    c->lookup_deadline = 0;
 }
 
 /* Remember which connection a descriptor belongs to. The poller reports a
@@ -1128,16 +1147,22 @@ static int ev_begin_retry(EvDriver* d, EvConn* c) {
  * (ev_resume_lookups) or the request's deadline passes (ev_expire). The
  * driver goes on with every other connection meanwhile: it used to look the
  * name up itself, and they all waited with it. The dial goes again from the
- * start, a fresh one if this one was to be. */
-static int ev_lookup_wait(EvDriver* d, EvConn* c, int fresh) {
+ * start, a fresh one if this one was to be. The upstream deadline starts
+ * with the first wait and is not moved by another (#3283): the dial after
+ * it keeps it, so the request's upstream timeout covers the lookup. */
+static int ev_lookup_wait(EvDriver* d, EvConn* c, int fresh, unsigned name) {
     c->state = EV_UPSTREAM_LOOKUP;
     c->dial_fresh = fresh;
+    c->lookup_name = name;
     c->lookup_prev = NULL;
     c->lookup_next = d->lookups;
     if (d->lookups) d->lookups->lookup_prev = c;
     d->lookups = c;
     c->lookup_waiting = 1;
-    ev_arm_deadline(d, c);
+    if (!c->lookup_deadline) {
+        ev_arm_deadline(d, c);
+        c->lookup_deadline = 1;
+    }
     return 0;
 }
 
@@ -1170,7 +1195,7 @@ static int ev_dial(EvDriver* d, EvConn* c, int next_addr) {
          * hand, or the name does not resolve, which the exchange answers as
          * the worker path's dial would. */
         int lookup = http_upstream_lookup(&c->up);
-        if (lookup > 0) return ev_lookup_wait(d, c, fresh);
+        if (lookup > 0) return ev_lookup_wait(d, c, fresh, http_resolver_name(host, port));
         return ev_upstream_failed(d, c, lookup < 0 ? "could not resolve host"
                                                    : "connection failed", 0);
     }
@@ -1201,7 +1226,9 @@ static int ev_dial(EvDriver* d, EvConn* c, int next_addr) {
     http_exchange_init(&c->x, &c->up.t, c->head, c->head_len, body, body_len,
                        http_request_method_of(c->px.outbound));
     ev_lend_rxbuf(c);
-    ev_arm_deadline(d, c);
+    /* A dial a lookup held up keeps the deadline its wait armed (#3283). */
+    if (c->lookup_deadline) c->lookup_deadline = 0;
+    else                    ev_arm_deadline(d, c);
     if (c->up.connecting) {
         c->state = EV_UPSTREAM_DIAL;
         c->up_writable_watched = 1;
@@ -1408,6 +1435,7 @@ static int ev_expire(EvDriver* d, EvConn* c) {
  * was taken and has to be given up first. */
 static int ev_upstream_failed(EvDriver* d, EvConn* c, const char* why, int release) {
     ev_timer_set(d, c, 0);
+    c->lookup_deadline = 0;   /* the attempt is over (#3283) */
     if (release) ev_drop_upstream(d, c);
     ev_reclaim_rxbuf(c);
     HttpResponse* resp = http_response_alloc_failed(why);
@@ -1844,32 +1872,56 @@ static int ev_advance_states(EvDriver* d, EvConn* c) {
  * progress, which is the whole difference from a worker per connection.
  */
 
-/* The resolver answered a name a connection on some driver waits on (#3267):
- * runs on the resolver's thread, and tells each running driver down its
- * pipe. One note per driver until it reads it: the flag says one is on its
- * way, and a pipe too full to take one wakes the driver anyway. */
-static void ev_names_answered(void* ctx) {
+/* The resolver answered `name`, which a connection on some driver may wait
+ * on (#3267): runs on the resolver's thread, puts the name in each running
+ * driver's list and tells it down its pipe. One note per driver until it
+ * reads it: the flag says one is on its way, and a pipe too full to take one
+ * wakes the driver anyway. */
+static void ev_names_answered(void* ctx, unsigned name) {
     HttpEvLoop* loop = (HttpEvLoop*)ctx;
     for (int i = 0; i < loop->driver_count; i++) {
         EvDriver* d = &loop->drivers[i];
-        if (!atomic_load(&d->started) || atomic_exchange(&d->answered, 1)) continue;
+        if (!atomic_load(&d->started)) continue;
+        pthread_mutex_lock(&d->answered_lock);
+        int cap = (int)(sizeof(d->answered_names) / sizeof(d->answered_names[0]));
+        if (d->answered_count < cap) d->answered_names[d->answered_count++] = name;
+        else                         d->answered_all = 1;
+        pthread_mutex_unlock(&d->answered_lock);
+        if (atomic_exchange(&d->answered, 1)) continue;
         int note = EV_NOTE_ANSWERED;
         ssize_t ignored = write(d->wake_w, &note, sizeof(note));
         (void)ignored;
     }
 }
 
-/* Every connection here waiting on the resolver dials again (#3267). The
- * answer it waits for has arrived, or another's has and it waits again: a
- * dial with no answer yet parks it back on the list, which is taken whole
- * first so that it is not walked twice. */
+/* The connections here waiting on a name the resolver answered dial again
+ * (#3267); the rest keep waiting, not sent through the resolver's lock for
+ * a name that is not theirs (#3283). A dial whose name has no answer after
+ * all (two names sharing a hash) parks again. The list is taken whole first
+ * so that none is walked twice. */
 static void ev_resume_lookups(EvDriver* d) {
+    unsigned names[16];
+    pthread_mutex_lock(&d->answered_lock);
+    int count = d->answered_count, all = d->answered_all;
+    memcpy(names, d->answered_names, (size_t)count * sizeof(names[0]));
+    d->answered_count = 0;
+    d->answered_all = 0;
+    pthread_mutex_unlock(&d->answered_lock);
+
     EvConn* list = d->lookups;
     d->lookups = NULL;
     while (list) {
         EvConn* c = list;
         list = c->lookup_next;
         c->lookup_prev = c->lookup_next = NULL;
+        int answered = all;
+        for (int i = 0; i < count && !answered; i++) answered = names[i] == c->lookup_name;
+        if (!answered) {
+            c->lookup_next = d->lookups;              /* back on the list */
+            if (d->lookups) d->lookups->lookup_prev = c;
+            d->lookups = c;
+            continue;
+        }
         c->lookup_waiting = 0;
         int r = ev_dial(d, c, 0);
         if (r > 0) r = ev_advance(d, c);
@@ -2013,14 +2065,19 @@ static int ev_driver_init(HttpEvLoop* loop, EvDriver* d, int index) {
     atomic_init(&d->wakeups, 0);
     atomic_init(&d->started, 0);
     atomic_init(&d->answered, 0);
+    if (pthread_mutex_init(&d->answered_lock, NULL) != 0) return -1;
 
-    if (aether_io_poller_init(&d->poller) != 0) return -1;
+    if (aether_io_poller_init(&d->poller) != 0) {
+        pthread_mutex_destroy(&d->answered_lock);
+        return -1;
+    }
     d->edge_triggered = aether_io_poller_edge_capable();
 
     int pipefd[2];
     /* #3046: close-on-exec, so a child the server starts never holds it. */
     if (aether_pipe_cloexec(pipefd) != 0) {
         aether_io_poller_destroy(&d->poller);
+        pthread_mutex_destroy(&d->answered_lock);
         return -1;
     }
     d->wake_r = pipefd[0];
@@ -2036,6 +2093,7 @@ static void ev_driver_destroy(EvDriver* d) {
     if (d->wake_r >= 0) close(d->wake_r);
     if (d->wake_w >= 0) close(d->wake_w);
     aether_io_poller_destroy(&d->poller);
+    pthread_mutex_destroy(&d->answered_lock);
     free(d->by_fd);
 }
 
@@ -2131,6 +2189,7 @@ int  http_evloop_submit(HttpEvLoop* loop, int client_fd) {
 int  http_evloop_active(HttpEvLoop* loop) { (void)loop; return 0; }
 int  http_evloop_taken(HttpEvLoop* loop)  { (void)loop; return 0; }
 int64_t http_evloop_wakeups(HttpEvLoop* loop) { (void)loop; return 0; }
+struct HttpResolver* http_evloop_resolver(HttpEvLoop* loop) { (void)loop; return NULL; }
 void http_evloop_stop(HttpEvLoop* loop)   { (void)loop; }
 
 #endif /* AETHER_EVLOOP_SUPPORTED && AETHER_HAS_THREADS */

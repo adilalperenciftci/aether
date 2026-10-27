@@ -510,7 +510,7 @@ static int net_wait_writable(int fd, NetSendWait* w) {
         struct timeval tv = { 0, 0 };
         socklen_t tl = sizeof tv;
         w->timeout_ms = getsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, &tl) == 0
-                      ? (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000 : 0;
+                      ? (long long)tv.tv_sec * 1000 + (tv.tv_usec + 999) / 1000 : 0;
     }
     if (w->timeout_ms > 0 && !w->due_ms) w->due_ms = net_now_ms() + w->timeout_ms;
     for (;;) {

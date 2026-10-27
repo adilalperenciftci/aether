@@ -822,7 +822,10 @@ choose, so they are bounded: past 1024 series a request counts in one
 series labelled `method="(other)",path="(other)"`, and a client sending
 fresh paths cannot grow them, or the scrape, without end (#3265). A client
 that sends that method and path itself counts in the same series, so no
-two series in a scrape share labels (#3279). Every series is in the scrape,
+two series in a scrape share labels (#3279). A label is the method cut to
+63 bytes or the path to 255, valid UTF-8 (a byte that is not part of a
+character is written `?`), and a series is the labels as written: two
+paths that differ only past 255 bytes count in one series (#3282). Every series is in the scrape,
 however long it gets (#3264), and the scrape is written without holding the
 mutex the requests' counters take (#3280).
 

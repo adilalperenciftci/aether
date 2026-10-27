@@ -252,12 +252,17 @@ HttpClientRequest* http_request_raw_arena(const char* method, const char* url,
  * (#3267). A resolver keeps the answers it gets, looks a name up once
  * however many dials ask, and runs each lookup on a thread of its own,
  * started when one is first needed. `answered` is called on that thread
- * after a lookup some dial waited on, answered or not; it must not block.
- * POSIX with threads only, where the loop runs: elsewhere _new gives NULL.
- * Freeing waits for a lookup under way, and nothing may ask after. */
+ * after a lookup some dial waited on, answered or not, with the name's
+ * http_resolver_name; it must not block. POSIX with threads only, where the
+ * loop runs: elsewhere _new gives NULL. Freeing waits for a lookup under
+ * way, and nothing may ask after. */
 struct AetherAddrList;
-HttpResolver* http_resolver_new(void (*answered)(void* ctx), void* ctx);
+HttpResolver* http_resolver_new(void (*answered)(void* ctx, unsigned name), void* ctx);
 void          http_resolver_free(HttpResolver* r);
+/* The hash `answered` names `host`:`port` by. Two names may share one, so a
+ * caller that matches on it may wake a dial whose name is still to come,
+ * which then waits again. */
+unsigned      http_resolver_name(const char* host, int port);
 /* `host`:`port` into `out` without waiting: 1 with the addresses (a
  * numeric address, or the kept answer), 0 when the lookup was asked for and
  * `answered` will say so, -1 when the name does not resolve. */

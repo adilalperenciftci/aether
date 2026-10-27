@@ -489,6 +489,14 @@ typedef struct HttpConn {
      * for the client to take more (conn_wait_io), and this socket's
      * SO_SNDTIMEO (conn_apply_send_timeout, #3257). */
     int   applied_send_timeout_ms;
+    /* The descriptor's file status flags without O_NONBLOCK, once read
+     * (fl_known), and whether O_NONBLOCK is on: set for a write that has no
+     * per-call flag for it, an OpenSSL one or a sendfile drain, and off
+     * again before a read (conn_set_nonblocking, #3285). A connection on the
+     * worker path starts blocking: accepted so, or adopted and cleared. */
+    int   fl_flags;
+    int   fl_known;
+    int   nonblocking;
     /* Set when the server refused a request it had not finished reading, so
      * the client may still be sending: conn_close then closes in stages
      * (conn_linger) rather than resetting the refusal away. */
@@ -507,10 +515,33 @@ typedef struct HttpConn {
  * it: the descriptor to watch, and a way to close what it still owns. */
 int http_conn_fd(HttpConn* conn) { return conn ? conn->fd : -1; }
 
+#ifndef _WIN32
+/* `c`'s socket non-blocking or back to blocking, for a write that has no
+ * per-call flag for it (sendfile, OpenSSL's): reads want it blocking, with
+ * their timeout. One fcntl a change, none when it is already so: the flags
+ * are read once and the mode is kept here, so a TLS response written in
+ * many pieces turns it on once, and the next read turns it off (#3285). */
+static void conn_set_nonblocking(HttpConn* c, int on) {
+    on = on ? 1 : 0;
+    if (c->nonblocking == on) return;
+    if (!c->fl_known) {
+        int flags = fcntl(c->fd, F_GETFL, 0);
+        if (flags < 0) return;
+        c->fl_flags = flags & ~O_NONBLOCK;
+        c->fl_known = 1;
+    }
+    if (fcntl(c->fd, F_SETFL, on ? (c->fl_flags | O_NONBLOCK) : c->fl_flags) == 0)
+        c->nonblocking = on;
+}
+#endif
+
 static int conn_recv(HttpConn* c, void* buf, int len) {
     if (c->pure_tls) {
         return pt_server_recv(c->pure_tls, buf, len);
     }
+#ifndef _WIN32
+    conn_set_nonblocking(c, 0);   /* a TLS write may have left it on */
+#endif
 #ifdef AETHER_HAS_OPENSSL
     if (c->ssl) {
         int n = SSL_read(c->ssl, buf, len);
@@ -553,16 +584,6 @@ static int conn_wait_io(HttpConn* c, short events) {
         if (errno != EINTR) return -1;
     }
 }
-
-/* `c`'s socket non-blocking or back to blocking, for a write that has no
- * per-call flag for it (sendfile, OpenSSL's): the receive side reads it
- * blocking, with its timeout. */
-static void conn_set_nonblocking(HttpConn* c, int on) {
-    int flags = fcntl(c->fd, F_GETFL, 0);
-    if (flags < 0) return;
-    int want = on ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK);
-    if (want != flags) fcntl(c->fd, F_SETFL, want);
-}
 #endif
 
 /* Every one of `len` bytes, or -1: a plain send(2) can take fewer than asked
@@ -586,7 +607,10 @@ static int conn_send(HttpConn* c, const void* buf, int len) {
          * waited on in conn_wait_io, as a plain one is. A record cut short
          * goes again with the same arguments, which is what OpenSSL asks.
          * No read runs meanwhile: OpenSSL lets one thread at a time use a
-         * session, so the flag is this write's alone. */
+         * session. Left so for the writes that follow, until conn_recv
+         * (#3285): every read of a TLS connection goes through it, and none
+         * is handed on as a bare descriptor (http_response_accept_tunnel
+         * refuses TLS). */
         conn_set_nonblocking(c, 1);
         int n;
         for (;;) {
@@ -598,7 +622,6 @@ static int conn_send(HttpConn* c, const void* buf, int len) {
                        : e == SSL_ERROR_WANT_READ  ? POLLIN : 0;
             if (!want || conn_wait_io(c, want) != 1) { n = -1; break; }
         }
-        conn_set_nonblocking(c, 0);
         return n;
 #endif
     }
@@ -1580,6 +1603,8 @@ const char* http_server_set_access_log_raw(HttpServer* server,
  * overflowed after 35.8 minutes of summed request time (minutes of traffic
  * on a busy server) and a count after 2^31 requests (#3096). */
 typedef struct MetricsRoute {
+    /* The labels as the scrape writes them (metrics_escape): the method cut
+     * to 63 bytes and the path to 255, escaped, valid UTF-8 (#3282). */
     char* method;
     char* path_pattern;
     _Atomic int64_t total_requests;
@@ -1701,6 +1726,8 @@ static MetricsRoute* metrics_route_for(MetricsState* st,
     return st->other;
 }
 
+static void metrics_escape(char* dst, size_t cap, const char* src);
+
 static void metrics_hook(HttpRequest* req, HttpServerResponse* res,
                          int64_t duration_us, void* user_data) {
     MetricsState* st = (MetricsState*)user_data;
@@ -1712,9 +1739,10 @@ static void metrics_hook(HttpRequest* req, HttpServerResponse* res,
      * matched pattern back to the dispatch path. v1 buckets by
      * literal request path; the user can collapse via labels in a
      * follow-up. Bounded at METRICS_MAX_SERIES series, found by hash
-     * (#3265). */
-    const char* method = req->method ? req->method : "-";
-    const char* pattern = req->path ? req->path : "-";
+     * (#3265), and keyed on the labels the scrape writes (#3282). */
+    char method[64], pattern[256];
+    metrics_escape(method, sizeof(method), req->method ? req->method : "-");
+    metrics_escape(pattern, sizeof(pattern), req->path ? req->path : "-");
 
     pthread_mutex_lock(&st->lock);
     MetricsRoute* r = metrics_route_for(st, method, pattern);
@@ -1743,21 +1771,49 @@ static void metrics_hook(HttpRequest* req, HttpServerResponse* res,
     if (duration_us <= 10000000)atomic_fetch_add(&r->bucket_le_10s,    1);
 }
 
-/* Escape a pattern for use as a Prometheus label value. */
+/* How many bytes of `s` make one well-formed UTF-8 character: 1 for ASCII,
+ * 2 to 4 for a valid sequence, 0 when the bytes there are not one (a stray
+ * continuation byte, an overlong form, a surrogate, past U+10FFFF, cut
+ * short). */
+static int metrics_utf8_len(const unsigned char* s) {
+    unsigned char c = s[0];
+    if (c < 0x80) return 1;
+    int len;
+    unsigned char lo = 0x80, hi = 0xBF;
+    if (c >= 0xC2 && c <= 0xDF)      len = 2;
+    else if (c == 0xE0)              { len = 3; lo = 0xA0; }
+    else if (c == 0xED)              { len = 3; hi = 0x9F; }
+    else if (c >= 0xE1 && c <= 0xEF) len = 3;
+    else if (c == 0xF0)              { len = 4; lo = 0x90; }
+    else if (c == 0xF4)              { len = 4; hi = 0x8F; }
+    else if (c >= 0xF1 && c <= 0xF3) len = 4;
+    else return 0;
+    if (s[1] < lo || s[1] > hi) return 0;
+    for (int i = 2; i < len; i++)
+        if (s[i] < 0x80 || s[i] > 0xBF) return 0;
+    return len;
+}
+
+/* A request's method or path as a Prometheus label value, in a buffer of
+ * `cap` bytes: `"`, `\` and a newline escaped, a byte that is not part of
+ * well-formed UTF-8 written as `?`, and cut short only between characters.
+ * A series is keyed on this, not on what the client sent: two paths that
+ * agree on the bytes kept are one series, and the scrape never lists two
+ * with the same labels, nor a label a Prometheus server refuses (#3282). */
 static void metrics_escape(char* dst, size_t cap, const char* src) {
+    const unsigned char* s = (const unsigned char*)src;
     size_t n = 0;
-    for (; *src && n + 2 < cap; src++) {
-        if (*src == '"' || *src == '\\') {
-            if (n + 2 >= cap) break;
-            dst[n++] = '\\';
-            dst[n++] = *src;
-        } else if (*src == '\n') {
-            if (n + 2 >= cap) break;
-            dst[n++] = '\\';
-            dst[n++] = 'n';
-        } else {
-            dst[n++] = *src;
-        }
+    while (*s) {
+        int len = metrics_utf8_len(s);
+        const char* put = (const char*)s;
+        int put_len = len;
+        if (*s == '"' || *s == '\\') { put = *s == '"' ? "\\\"" : "\\\\"; put_len = 2; }
+        else if (*s == '\n')         { put = "\\n"; put_len = 2; }
+        else if (len == 0)           { put = "?"; put_len = 1; len = 1; }
+        if (n + (size_t)put_len + 1 > cap) break;
+        memcpy(dst + n, put, (size_t)put_len);
+        n += (size_t)put_len;
+        s += len;
     }
     dst[n] = '\0';
 }
@@ -1835,9 +1891,9 @@ static void metrics_handler(HttpRequest* req, HttpServerResponse* res, void* use
     MetricsRoute* listed = st->head;
     pthread_mutex_unlock(&st->lock);
     for (MetricsRoute* r = listed; r && ok; r = r->next) {
-        char m[64], p[256];
-        metrics_escape(m, sizeof(m), r->method);
-        metrics_escape(p, sizeof(p), r->path_pattern);
+        /* Kept as written (metrics_hook escaped them). */
+        const char* m = r->method;
+        const char* p = r->path_pattern;
         long long total = atomic_load(&r->total_requests);
         long long errs  = atomic_load(&r->total_errors);
         long long c4xx  = atomic_load(&r->total_4xx);
