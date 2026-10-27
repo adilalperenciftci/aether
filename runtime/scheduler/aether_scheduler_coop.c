@@ -472,6 +472,10 @@ void scheduler_send_remote(ActorBase* actor, Message msg, int from_core) {
     coop_deliver(actor, msg);
 }
 
+void scheduler_send_many(ActorBase* actor, const Message* msgs, int n) {
+    for (int i = 0; i < n; i++) coop_deliver(actor, msgs[i]);
+}
+
 // Batch send — trivial in single-threaded mode
 void scheduler_send_batch_start(void) {
     // No-op

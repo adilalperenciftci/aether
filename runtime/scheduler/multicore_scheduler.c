@@ -2115,26 +2115,6 @@ void* AETHER_HOT scheduler_thread(void* arg) {
             }
 
             if (likely(actor->step)) {
-                // Drain SPSC queue (lock-free same-core messages, only for auto_process actors)
-                Message spsc_msgs[128];
-                int spsc_count = actor->spsc_queue
-                    ? spsc_dequeue_batch(actor->spsc_queue, spsc_msgs, 128) : 0;
-                if (spsc_count > 0) {
-                    // Behind the overflow while it holds anything (#3241).
-                    ActorInbox* behind = actor_overflow_pending(actor);
-                    int sent_count = spsc_count;
-                    if (unlikely(behind != NULL)) {
-                        for (int m = 0; m < spsc_count; m++) actor_overflow_push(actor, behind, spsc_msgs[m]);
-                    } else {
-                        sent_count = mailbox_send_batch(&actor->mailbox, spsc_msgs, spsc_count);
-                    }
-                    for (int m = sent_count; m < spsc_count; m++) {
-                        // Into the queues: counted as every such message is.
-                        inflight_enter(actor, 1);
-                        requeue_own(sched->core_id, actor, spsc_msgs[m]);
-                    }
-                }
-
                 int processed = 0;
                 if (!atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire)) {
                     while (atomic_load_explicit(&actor->mailbox.count, memory_order_relaxed) > 0 &&
@@ -3308,6 +3288,66 @@ static void send_through_core(ActorBase* actor, Message msg, int from_core) {
     AETHER_STAT_INC(queue_sends);
 }
 
+/* Messages to an actor of another core, enqueued in one batch. */
+#define SEND_MANY_CHUNK 256
+
+void scheduler_send_many(ActorBase* actor, const Message* msgs, int n) {
+    const int me = current_core_id;
+    // Not a core's thread, an actor with a thread of its own, or no actor:
+    // each message by the path an unbuffered send of it takes (the shared
+    // channel under its lock, refused while the scheduler is stopped, the
+    // inbox, the drop).
+    if (!actor || me < 0 || me >= num_cores || actor->auto_process) {
+        for (int i = 0; i < n; i++) scheduler_send_remote(actor, msgs[i], me);
+        return;
+    }
+    int i = 0;
+    while (i < n) {
+        // Dead, or this core's own: one message as aether_send_message
+        // sends it (a local send goes behind what is queued for the actor
+        // and its overflow, #3093, #3241, and may step it inline).
+        if (atomic_load_explicit(&actor->dead, memory_order_acquire) ||
+            atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == me) {
+            if (atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == me)
+                scheduler_send_local(actor, msgs[i]);
+            else
+                scheduler_send_remote(actor, msgs[i], me);
+            i++;
+            continue;
+        }
+        // Another core's: counted in flight before its core is read again
+        // (#3090), as send_through_core does, then one batch through this
+        // core's channel to it. Behind this thread's deferred sends to that
+        // core, or the batch would pass them (#3093): with any, one message
+        // goes the way send_through_core takes it.
+        int k = n - i < SEND_MANY_CHUNK ? n - i : SEND_MANY_CHUNK;
+        inflight_enter(actor, k);
+        int tc = atomic_load_explicit(&actor->assigned_core, memory_order_acquire);
+        if (tc == me || tc < 0 || tc >= num_cores || tls_overflow[tc].count > 0) {
+            inflight_leave(actor, k);
+            scheduler_send_remote(actor, msgs[i], me);
+            i++;
+            continue;
+        }
+        void* actors[SEND_MANY_CHUNK];
+        for (int j = 0; j < k; j++) actors[j] = actor;
+        int enq = queue_enqueue_batch(&schedulers[tc].from_queues[me], actors,
+                                      (Message*)(msgs + i), k);
+        // What the queue had no room for waits in this thread's deferred
+        // sends, in order and still counted, as a single send's would.
+        for (int j = enq; j < k; j++) overflow_append(tc, actor, msgs[i + j]);
+        schedulers[me].messages_sent += k;
+        if (enq > 0) {
+            atomic_fetch_add_explicit(&schedulers[tc].work_count, enq, memory_order_relaxed);
+            sched_wake(&schedulers[tc]);
+        }
+        // The gather a single send asks for (#3090), not for an ask (#3196).
+        if (!g_pending_reply_slot)
+            atomic_store_explicit(&actor->migrate_to, me, memory_order_relaxed);
+        i += k;
+    }
+}
+
 // ==============================================================================
 // BATCH SEND OPTIMIZATION (for main thread fan-out patterns)
 // ==============================================================================
@@ -3547,7 +3587,7 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
     atomic_init(&actor->active, 0);  // inactive until first message send
     actor->thread = 0;
     actor->auto_process = 0;
-    actor->spsc_queue = NULL;  // Lazy-allocated by send_buffer_flush
+    actor->spsc_queue = NULL;  // filled by nothing since #3292
     atomic_init(&actor->inbox, NULL);
     atomic_init(&actor->thread_parked, 0);
     atomic_init(&actor->inflight, 0);

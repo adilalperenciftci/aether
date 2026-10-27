@@ -129,7 +129,10 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
     atomic_int assigned_core; \
     /* Affinity hint: core to migrate to (-1 = none) */ \
     atomic_int migrate_to; \
-    /* Same-core batches from send_buffer_flush (lazy) */ \
+    /* NULL: the send buffer's same-core batches went here, outside every \
+     * ordering rule, and were drained only while the mailbox held \
+     * something; it sends through scheduler_send_many now (#3292). Kept \
+     * for the layout; an actor's end frees one a C caller set. */ \
     SPSCQueue* spsc_queue; \
     /* Non-NULL only while an ask/reply is in flight */ \
     _Atomic(ActorReplySlot*) reply_slot; \
@@ -354,6 +357,11 @@ int scheduler_register_actor(ActorBase* actor, int preferred_core);
 void scheduler_deregister_actor(ActorBase* actor);
 void scheduler_send_local(ActorBase* actor, Message msg);
 void scheduler_send_remote(ActorBase* actor, Message msg, int from_core);
+/* `n` messages from this thread to one actor, in order, as `n` sends one
+ * after another would go: counted as sent, behind whatever is queued for the
+ * actor, and kept when a queue is full. To an actor of another core, from a
+ * core's thread, they go in one batch (#3292). From any thread. */
+void scheduler_send_many(ActorBase* actor, const Message* msgs, int n);
 
 // Batch send for main thread fan-out patterns (fork-join)
 void scheduler_send_batch_start(void);

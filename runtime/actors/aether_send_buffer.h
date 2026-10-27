@@ -43,27 +43,25 @@ static inline void send_buffer_init(int core_id) {
 // Forward declare flush function (implemented in .c file)
 void send_buffer_flush(void);
 
-// Buffered send - accumulates messages before flushing
+// Buffered send - accumulates messages before flushing. A flush sends every
+// message it holds (#3292), but a send in it can step a handler inline that
+// buffers sends of its own, for another target: those are flushed too, so
+// the message below is stored in a buffer with room, for its own target.
 static inline void send_buffered(struct ActorBase* actor, Message msg) {
-    // Flush if target changed or buffer full
-    if (g_send_buffer.target != actor || g_send_buffer.count >= SEND_BUFFER_SIZE) {
-        if (g_send_buffer.count > 0) {
-            send_buffer_flush();
-        }
-        g_send_buffer.target = actor;
+    while (g_send_buffer.count > 0 &&
+           (g_send_buffer.target != actor || g_send_buffer.count >= SEND_BUFFER_SIZE)) {
+        send_buffer_flush();
     }
-    
-    // Add to buffer
+    g_send_buffer.target = actor;
     g_send_buffer.buffer[g_send_buffer.count++] = msg;
 }
 
 // Force flush of pending messages (call before blocking operations)
 static inline void send_buffer_force_flush(void) {
-    if (g_send_buffer.count > 0) {
+    while (g_send_buffer.count > 0) {
         send_buffer_flush();
-        g_send_buffer.target = NULL;
-        g_send_buffer.count = 0;
     }
+    g_send_buffer.target = NULL;
 }
 
 // Get buffer stats for monitoring

@@ -24,7 +24,7 @@ The actor runtime includes several performance optimizations applied automatical
 - Uses ascending core-id lock ordering consistent with migration to prevent deadlock
 
 **Message Delivery:**
-- Same-core messages: direct mailbox or SPSC queue write (no queue overhead)
+- Same-core messages: direct mailbox write (no queue overhead)
 - Cross-core messages: lock-free queue with batch dequeue
 - Adaptive batch processing: 64 to 1024 messages per scheduler cycle
 
@@ -44,7 +44,7 @@ a scheduler thread runs the handler, from the first actor on (#3112).
 
 **Direct Send:**
 - Bypasses incoming queue for same-core actors
-- Writes directly to actor mailbox or SPSC queue
+- Writes directly to the actor's mailbox
 - Guarded by `current_core_id` to prevent data races from non-scheduler threads
 
 **Adaptive Batching:**
@@ -387,7 +387,7 @@ Measured on Windows (i7-13700K, 1,000,000 messages, 10 runs, M msg/s, medians) a
 
 ### Message Routing
 
-- **Same-core messages:** Direct mailbox or SPSC queue write (verified via `current_core_id`), behind any message of the actor still in the queues
+- **Same-core messages:** Direct mailbox write (verified via `current_core_id`), behind any message of the actor still in the queues or its overflow (#3241)
 - **Cross-core messages:** Counted in the target's `inflight`, then enqueued to the target core's lock-free incoming queue
 - **A message on a core the actor has left:** Only one routed by a stale read or by the runtime itself, since a counted message holds the actor where it was routed; forwarded to the actor's current core, still counted
 
