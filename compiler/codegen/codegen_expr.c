@@ -11834,7 +11834,24 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             !index_literal_within(expr->children[1],
                                                   base->node_type->array_size);
                 if (str_base) fprintf(gen->output, "_aether_safe_str(");
-                generate_expression(gen, base);
+                /* `[10, 20, 30][i]`: a literal indexed in place is the
+                 * statement's temporary, as one passed as an argument is,
+                 * filled, owning what it holds and dropped when its block is
+                 * done. C has no array value to index otherwise: the bare
+                 * `{10, 20, 30}[i]` was refused. Where no temporary can be
+                 * declared, one whose elements own nothing is a compound
+                 * literal. */
+                int lit_base = base && base->type == AST_ARRAY_LITERAL &&
+                               !gen->generating_lvalue && type_is_sized_array(base->node_type);
+                int compound = lit_base && !hoist_ready(gen) &&
+                               !own_type_owns(gen, base->node_type);
+                if (compound)
+                    fprintf(gen->output, "((%s[%d])",
+                            get_c_type(base->node_type->element_type),
+                            base->node_type->array_size);
+                if (!(lit_base && !compound && array_literal_arg_temp(gen, base)))
+                    generate_expression(gen, base);
+                if (compound) fprintf(gen->output, ")");
                 if (str_base) fprintf(gen->output, ")");
                 fprintf(gen->output, "[");
                 if (sized) fprintf(gen->output, "aether_array_index((int64_t)(");
