@@ -204,6 +204,28 @@ TEST_CATEGORY(http_upstream_connected_contract, TEST_CATEGORY_NETWORK) {
 }
 #endif  /* !_WIN32 */
 
+/* Whether a response lets its connection carry another request, the rule both
+ * clients pool by (#3259): not after Connection: close, nor after HTTP/1.0
+ * unless it says keep-alive. The head is read where it lies and put back. */
+static int keeps_conn(const char* raw) {
+    char buf[256];
+    snprintf(buf, sizeof(buf), "%s", raw);
+    const char* end = strstr(buf, "\r\n\r\n");
+    if (!end) return -1;
+    size_t header_bytes = (size_t)((end + 4) - buf);
+    int keep = http_response_head_keeps_conn(buf, header_bytes);
+    if (strcmp(buf, raw) != 0) return -2;   /* the head was not put back */
+    return keep;
+}
+
+TEST_CATEGORY(http_response_head_keeps_conn_rule, TEST_CATEGORY_NETWORK) {
+    ASSERT_EQ(1, keeps_conn("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"));
+    ASSERT_EQ(0, keeps_conn("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n"));
+    ASSERT_EQ(0, keeps_conn("HTTP/1.1 200 OK\r\nconnection: Close\r\n\r\n"));
+    ASSERT_EQ(0, keeps_conn("HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nok"));
+    ASSERT_EQ(1, keeps_conn("HTTP/1.0 200 OK\r\nConnection: keep-alive\r\n\r\n"));
+}
+
 #if !defined(_WIN32)
 /* A reverse proxy holds an upstream connection for the length of one request
  * and hands it back, so it needs as many as it has requests in flight. Left

@@ -2900,6 +2900,26 @@ int http_upstream_connected(HttpUpstreamConn* c) {
 /* Hand the connection back to the idle pool, or close it. A connection is
  * only worth keeping when the response that came over it ended where its own
  * framing said it would, which is the caller's decision to make. */
+/* Read where it lies: the head is NUL-terminated at its blank line for the
+ * header lookup and the byte put back. One rule for both clients, so the
+ * proxy event loop stops pooling a connection the upstream said it would
+ * close (#3259). */
+int http_response_head_keeps_conn(char* head, size_t header_bytes) {
+    if (!head || header_bytes < 4) return 0;
+    int keep = 1;
+    char saved = head[header_bytes - 4];
+    head[header_bytes - 4] = '\0';
+    char* conn_hdr = http_extract_response_header(head, "Connection");
+    if (conn_hdr) {
+        if (http_strcasestr_local(conn_hdr, "close")) keep = 0;
+        free(conn_hdr);
+    } else if (strncmp(head, "HTTP/1.0", 8) == 0) {
+        keep = 0;   /* HTTP/1.0 closes unless it says otherwise */
+    }
+    head[header_bytes - 4] = saved;
+    return keep;
+}
+
 void http_upstream_release(HttpUpstreamConn* c, int keep) {
     if (!c || c->t.sockfd < 0) return;
     if (keep && http_pool_enabled) {
@@ -3519,16 +3539,7 @@ send_request:
         int keep = pool_this && !recv_err && framing.definite &&
                    (framing.chunked || total_len == framing.body_target);
         if (keep && framing.header_bytes > 0) {
-            char saved = full_response[framing.header_bytes - 4];
-            full_response[framing.header_bytes - 4] = '\0';
-            char* conn_hdr = http_extract_response_header(full_response, "Connection");
-            if (conn_hdr) {
-                if (http_strcasestr_local(conn_hdr, "close")) keep = 0;
-                free(conn_hdr);
-            } else if (strncmp(full_response, "HTTP/1.0", 8) == 0) {
-                keep = 0;   /* HTTP/1.0 closes unless it says otherwise */
-            }
-            full_response[framing.header_bytes - 4] = saved;
+            keep = http_response_head_keeps_conn(full_response, framing.header_bytes);
         } else {
             keep = 0;
         }

@@ -413,5 +413,12 @@ int  http_upstream_connected(HttpUpstreamConn* c);
 int  http_upstream_has_next(HttpUpstreamConn* c);
 int  http_upstream_redial(const char* host, int port, HttpUpstreamConn* c);
 void http_upstream_release(HttpUpstreamConn* c, int keep);
+/* Whether a response head lets its connection carry another request: not
+ * when it says Connection: close, nor when it is HTTP/1.0 without a
+ * Connection header saying otherwise. `head` is the response's first
+ * `header_bytes` bytes, the blank line's CRLFCRLF included; it is written
+ * to and put back, so it must be writable. The framing is the caller's to
+ * check. Both clients ask it before pooling a connection (#3259). */
+int  http_response_head_keeps_conn(char* head, size_t header_bytes);
 
 #endif

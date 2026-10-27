@@ -1418,9 +1418,15 @@ static int ev_finish_upstream(EvDriver* d, EvConn* c) {
     ev_timer_set(d, c, 0);       /* the upstream answered; nothing to give up on */
 
     /* The connection is worth keeping only when the response ended where its
-     * own framing said it would. Released before the response is looked at,
-     * because nothing about releasing it depends on that. */
-    int keep = c->x.complete && !c->x.framing.invalid;
+     * own framing said it would, and did not say the connection closes
+     * (Connection: close, or HTTP/1.0 without keep-alive), as the worker
+     * path's client decides: pooled anyway, the next request took a
+     * connection the upstream had closed (#3259). Released before the
+     * response is looked at, because nothing about releasing it depends on
+     * that. */
+    int keep = c->x.complete && !c->x.framing.invalid &&
+               c->x.framing.header_bytes > 0 &&
+               http_response_head_keeps_conn(c->x.buf, c->x.framing.header_bytes);
     int was_reused = c->up.reused;
     size_t got = c->x.len;
     if (c->up_watched) aether_io_poller_remove(&d->poller, c->up.t.sockfd);
