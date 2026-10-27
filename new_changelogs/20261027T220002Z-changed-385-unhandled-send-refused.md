@@ -6,3 +6,6 @@
   `actor_ref[Writer]`, an actor from an imported module) such a send is now
   refused (E0600), naming the actor and the message; a `_` arm takes every
   message, and a bare `actor_ref` is not checked (#385).
+  Code that sent such a message compiled before and lost it at run time; to
+  build it again, add the arm, a `_` arm, or send through a parameter typed
+  bare `actor_ref`.

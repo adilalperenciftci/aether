@@ -11,3 +11,5 @@
   declare `@frees`, std.bytes' growing calls `@moves` and its views `@into`,
   and an Aether function's declaration is checked against its body (E0904).
   The check found a freed snapshot read on a test's failure path (#1300).
+  A program E0903 now refuses has a use after free on every path through
+  it: move the use before the free, or bind the local to a fresh value.
