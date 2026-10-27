@@ -398,6 +398,9 @@ static void emit_actor_destroy_state(CodeGenerator* gen, ASTNode* actor) {
     for (int i = 0; i < actor->child_count; i++) {
         ASTNode* child = actor->children[i];
         if (!child || child->type != AST_STATE_DECLARATION || !child->node_type) continue;
+        /* #3142: an owned pointer the state holds. */
+        if (emit_owned_ptr_drop(gen, child->node_type, cg_internf("self->%s", child->value)))
+            continue;
         if (!own_type_owns(gen, child->node_type) || state_field_is_ptr(gen, actor, child->value))
             continue;
         own_emit_part(gen, child->node_type, cg_internf("self->%s", child->value), OWN_DROP);
@@ -724,6 +727,23 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                                 Type* fsig = message_field_type(gen->program, pattern->value,
                                                                 field->value);
                                 if (is_fnptr_type(fsig)) register_fnptr_local(gen, var_name, fsig);
+                                /* #3142: an owned pointer moves from the
+                                 * message into the binding, which the
+                                 * handler's every exit releases (unless it
+                                 * was moved on); the message, emptied,
+                                 * releases nothing of it after the arm. */
+                                if (tc_type_is_owned(fsig)) {
+                                    print_line(gen, "_pattern->%s = NULL;", field->value);
+                                    ASTNode* carrier = create_ast_node(AST_EXPRESSION_STATEMENT, NULL,
+                                                                       field->line, field->column);
+                                    if (carrier) {
+                                        carrier->annotation = strdup(cg_internf("owned_exit_drop:%s:%s", var_name,
+                                                                        tc_owned_drop_c(fsig)));
+                                        codegen_own_node(gen, carrier);
+                                        push_defer(gen, carrier);
+                                    }
+                                    continue;
+                                }
                                 /* The binding is a view of the message's
                                  * field, which the message releases: one the
                                  * arm rebinds takes a reference of its own
@@ -777,6 +797,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                              * store into a state field takes a reference of
                              * its own (R3). */
                             push_heap_string_exit_free_defers(gen, arm_body);
+                            hoist_owned_locals(gen, arm_body);   /* #3142 */
                             for (int k = 0; k < arm_body->child_count; k++) {
                                 generate_statement(gen, arm_body->children[k]);
                             }
@@ -905,6 +926,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                 hoist_heap_string_trackers(gen, tbody);
                 hoist_opt_string_locals(gen, tbody);
                 push_heap_string_exit_free_defers(gen, tbody);
+                hoist_owned_locals(gen, tbody);   /* #3142 */
                 for (int j = 0; j < tbody->child_count; j++) {
                     generate_statement(gen, tbody->children[j]);
                 }

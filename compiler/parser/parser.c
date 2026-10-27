@@ -7906,6 +7906,47 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                     match_token(parser, TOKEN_SEMICOLON);
                     return d;
                 }
+                /* #3142: `type Name = owned ptr drop f`, a pointer with one
+                 * owner, released by `f` when its owner lets go. A distinct
+                 * type over `ptr` that carries `owned_drop:<f>`. `owned` and
+                 * `drop` are words only here. */
+                if (dk && dk->type == TOKEN_IDENTIFIER && dk->value &&
+                    strcmp(dk->value, "owned") == 0) {
+                    advance_token(parser);                   // consume 'owned'
+                    Type* base = parse_type(parser);
+                    if (!base) {
+                        parser_error(parser, "expected `ptr` after `owned`: `type Name = owned ptr drop f`");
+                        return NULL;
+                    }
+                    Token* dw = peek_token(parser);
+                    if (!dw || dw->type != TOKEN_IDENTIFIER || !dw->value ||
+                        strcmp(dw->value, "drop") != 0) {
+                        parser_error(parser, "an owned type names the function that releases it: "
+                                             "`type Name = owned ptr drop f`");
+                        free_type(base);
+                        return NULL;
+                    }
+                    advance_token(parser);                   // consume 'drop'
+                    Token* fn = expect_token(parser, TOKEN_IDENTIFIER);
+                    if (!fn) { free_type(base); return NULL; }
+                    char qname[256];
+                    snprintf(qname, sizeof(qname), "%s", fn->value);
+                    while (peek_token(parser) && peek_token(parser)->type == TOKEN_DOT &&
+                           peek_ahead(parser, 1) && peek_ahead(parser, 1)->type == TOKEN_IDENTIFIER) {
+                        advance_token(parser);
+                        Token* part = expect_token(parser, TOKEN_IDENTIFIER);
+                        size_t used = strlen(qname);
+                        snprintf(qname + used, sizeof(qname) - used, ".%s", part->value);
+                    }
+                    ASTNode* d = create_ast_node(AST_DISTINCT_TYPE_DEF,
+                                                 name->value, name->line, name->column);
+                    d->node_type = base;
+                    size_t n = strlen(qname) + sizeof("owned_drop:");
+                    d->annotation = malloc(n);
+                    if (d->annotation) snprintf(d->annotation, n, "owned_drop:%s", qname);
+                    match_token(parser, TOKEN_SEMICOLON);
+                    return d;
+                }
                 // #2200: `type Name = fn(T1, T2) -> R` — a named C function-
                 // pointer type, the alias form of `cfn Name(a: T1, b: T2) -> R`
                 // (no new word; the signature is written as a use site would

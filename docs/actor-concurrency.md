@@ -183,7 +183,7 @@ A handled message's fields are released by the step after its handler: `_aether_
 - the message a handler panicked on: the step records it in `step_payload` while the handler runs, and the step's panic barrier drops it, since the release after the handler never ran;
 - a message refused because the scheduler is not running, or that could not be queued for lack of memory.
 
-The receiver's own definitions interpret the payload, as its dispatch does, so a message is released as the program that defined it lays it out. A `ptr` field owns nothing (R4), so a buffer sent with `move` and dropped undelivered is not freed: that needs a type that owns a `ptr`, which #3142 tracks. A message sent through a C `AetherActorRef` whose actor was released has only its payload freed, since the block may hold another actor by then, whose definitions need not be the sender's.
+The receiver's own definitions interpret the payload, as its dispatch does, so a message is released as the program that defined it lays it out. A `ptr` field owns nothing (R4), so a buffer sent with `move` in one and dropped undelivered is not freed; a field of an owned type (`type Buf = owned ptr drop bytes.free`, #3142) is, by this same release, and a handler that binds such a field takes it out of the message, so the release after the handler finds nothing left of it. A message sent through a C `AetherActorRef` whose actor was released has only its payload freed, since the block may hold another actor by then, whose definitions need not be the sender's.
 
 ### Asking
 

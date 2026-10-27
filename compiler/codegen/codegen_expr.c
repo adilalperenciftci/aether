@@ -5206,6 +5206,7 @@ void emit_closure_definitions(CodeGenerator* gen) {
             hoist_heap_string_trackers(gen, body);
             hoist_opt_string_locals(gen, body);
             push_heap_string_exit_free_defers(gen, body);
+            hoist_owned_locals(gen, body);   /* #3142 */
             for (int i = 0; i < body->child_count; i++) {
                 generate_statement(gen, body->children[i]);
             }
@@ -9389,7 +9390,15 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
         case AST_UNARY_EXPRESSION:
             if (expr->child_count >= 1 && expr->value && strcmp(expr->value, "move") == 0) {
                 ASTNode* operand = expr->children[0];
-                if (operand && operand->type == AST_IDENTIFIER && operand->value) {
+                if (operand && operand->type == AST_IDENTIFIER && operand->value &&
+                    tc_type_is_owned(operand->node_type)) {
+                    /* #3142: an owned pointer leaves the place it is moved
+                     * from (a local, a binding, a state field `self->x`)
+                     * holding nothing, so that place's release skips it. */
+                    fprintf(gen->output, "aether_owned_take((void**)&(");
+                    generate_expression(gen, operand);
+                    fprintf(gen->output, "))");
+                } else if (operand && operand->type == AST_IDENTIFIER && operand->value) {
                     const char* var_name = safe_value_name(operand->value);
                     const char* ctype = order_c11_type(operand);
                     if (!ctype) ctype = "void*";

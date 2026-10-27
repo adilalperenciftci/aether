@@ -5425,6 +5425,14 @@ static void prune_collect_calls(ASTNode* node, NameSet* seen, NameStack* worklis
 static void prune_collect_calls_in(ASTNode* node, NameSet* seen, NameStack* worklist,
                                    const NameSet* locals, int in_dsl_block) {
     if (!node) return;
+    /* #3142: an owned type's drop function is called by the code that
+     * releases its values, which the tree does not spell. */
+    if (node->type == AST_DISTINCT_TYPE_DEF && node->annotation &&
+        strncmp(node->annotation, "owned_drop:", 11) == 0) {
+        const char* f = node->annotation + 11;
+        if (*f && nameset_add(seen, f)) namestack_push(worklist, f);
+        return;
+    }
     if (prune_is_function_scope(node)) {
         NameSet own = {0};
         prune_collect_locals(node, &own);
@@ -5621,6 +5629,8 @@ void module_mark_unreachable(ASTNode* program) {
              * string = strfns.lit`) is reached: swept, it was undeclared
              * where the static was defined. */
             case AST_CONST_DECLARATION:
+            /* #3142: an owned type, whose drop function its values call. */
+            case AST_DISTINCT_TYPE_DEF:
                 prune_collect_calls(c, &reachable, &worklist);
                 break;
             case AST_FUNCTION_DEFINITION:

@@ -2517,6 +2517,69 @@ A store that copies what it is given keeps nothing: a map's key, a set's item. `
 
 ---
 
+### Owned pointers, `type T = owned ptr drop f`
+
+A `ptr` owns nothing (R4): whoever frees it does so by hand. An **owned
+pointer** type names the function that releases it, and then the place that
+holds one releases it when it lets go (#3142):
+
+```aether,fragment
+import std.bytes
+
+type Buf = owned ptr drop bytes.free
+
+message Chunk { data: Buf }
+
+actor Sink {
+    state kept: Buf = null
+    receive {
+        Chunk(data) -> {
+            use(data)                // lent to a function, as a `ptr` is
+            if keep_it() {
+                kept = move data     // the state keeps it, releasing what it held
+            }
+        }                            // else the binding releases it here
+    }
+}
+
+main() {
+    s = spawn(Sink())
+    b = bytes.new(64) as Buf         // `as` makes a pointer owned
+    s ! Chunk { data: move b }       // b holds nothing now
+}
+```
+
+A value of an owned type has one holder at a time, and that holder releases
+it with the type's drop function:
+
+- **Who holds it.** A local (released at every exit of its function, and
+  when the local is bound again), a handler's binding of a message field
+  (taken out of the message, released when the handler ends), an actor's
+  state field (released when it is stored into, and when the actor ends), a
+  message field (released when the message is dropped undelivered: its actor
+  died, it was never handled). `null` is a value holding nothing; the state
+  field above starts empty.
+- **`move` hands it on**, and leaves the place it left holding nothing: into
+  a message field (`data: move b`), a state field (`kept = move data`), a
+  local (`c = move b`). A `return` of a local is a `move`. The move checker
+  refuses a later use of the name ([`move`](isolated.md#move-handing-a-buffer-over-2975)).
+- **A function borrows it**, as a `ptr`: an owned value goes where a bare
+  `ptr` is taken, and the holder keeps it. A parameter of an owned type is
+  borrowed too, so it is neither rebound nor returned.
+- **Refused** (E0905): a copy into a second holder without `move` (`c = b`),
+  a message field set from a holder without `move`, a call that would free
+  it (an `@frees` parameter, C's `free`, `heap.free`, through a cast too) or
+  keep it (`@keep`, `@retain`, a std container), a `move` into a function
+  argument, and a holder that could not release it: a struct field, an
+  element, a module-level `var`, a closure's capture, an optional `T?` (use
+  `T` and `null`).
+- **The drop function** takes one `ptr` and frees it: C's `free`, or a
+  function or extern whose parameter is `@frees` (`bytes.free`, a function of
+  the program's own). The type's base is a bare `ptr`.
+
+A handler that panics while it holds an owned binding does not release it;
+the message's other owned fields are released with the message.
+
 ## Optionals
 
 An optional type `T?` holds either a value of type `T` or the empty sentinel `none`. It is the type for "maybe a value", distinct from the `(value, err)` result convention, which is for *fallible* operations. Use `(value, err)` when an operation can fail and you want to say why; use `T?` when a value is simply present or absent (a missing map key, an empty list's first element, a search that found nothing).
@@ -4869,6 +4932,7 @@ An error stops the build and prints its code, `error[E0301]: ...`, with the sour
 | `E0902` | A function keeps a `ptr` parameter not declared `@keep`, an `@into` parameter reaches anything but the function's result, a call's result that holds a borrowed `ptr` parameter (through an `@into` argument) escapes, `@into` is declared where it cannot apply (not a bare `ptr`, a result that cannot hold a pointer, beside `@keep`, `@retain` or `@noescape`), a `string` is given to a `@keep ptr` or an `@into ptr` without `string.keep` (a `*StringSeq` without `string.seq_retain`), a string C memory viewed as `string[]` would read after its owner frees it (one built in the statement, or any but a pinned literal where the memory outlives the function), or a function with a `@keep` or `@into` parameter goes where a call through it would be checked as borrowing (a bare `fn`, a closure type with a weaker mode, a `ptr`, a typed C function pointer, an `as fn(...)` cast) ([String ownership](#string-ownership)) |
 | `E0903` | A local used or freed again after it was freed on every path to that point, a free a loop repeats on its next turn, or a view (a slice, a cast, an `@into` call's result) read after its storage was freed or may have moved ([String ownership](#string-ownership)) |
 | `E0904` | A function's `@frees` parameter not freed (or found null) on every path, or bound to something else first, or a `@moves` parameter no call may move, or either mode where it does not apply |
+| `E0905` | An owned pointer (`type T = owned ptr drop f`) given a second holder without `move`, freed or kept behind its holder's back, moved into a function, held where it cannot be released (a struct field, an element, a module `var`, a closure, an optional), or a drop function that does not free what it is given ([Owned pointers](#owned-pointers-type-t--owned-ptr-drop-f)) |
 | `E1000` | A file defines a function under a name it also imports selectively (`import std.string (length)` beside its own `length`), so a bare call in the function's body would reach itself ([module-system-design.md](module-system-design.md)) |
 
 ### Limits

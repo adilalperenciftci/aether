@@ -1,0 +1,112 @@
+// An owned pointer (`type Buf = owned ptr drop f`) is released exactly once
+// by whoever holds it last (#3142).
+//
+// The bug: a buffer handed to an actor with `move` (#2975) was the
+// receiver's to free, and leaked when the handler returned without freeing
+// it or when the message was never delivered (its actor died first). A
+// `ptr` owns nothing, so nothing could release it. An owned type names its
+// release function, and every place that holds one releases it: a handler's
+// binding at the handler's end, an actor's state field when it is replaced
+// or the actor ends, a message that is dropped undelivered, a local at its
+// function's exit or when it is bound again. `move` hands it on and leaves
+// the place it left holding nothing, so nothing is released twice. Pre-fix
+// the program does not compile (no owned types); each count below is what
+// a leak or a double release would change, and the leaks gates check the
+// rest.
+
+import std.bytes
+import std.sync
+
+var drops: ptr = null
+
+// The release, counted: every Buf released goes through here once.
+release_counted(p: @frees ptr) {
+    sync.atomic_add(drops, 1)
+    bytes.free(p)
+}
+
+type Buf = owned ptr drop release_counted
+
+message Chunk { data: Buf }
+message Boom {}
+message Count {}
+
+actor Sink {
+    state kept: Buf = null
+    state got = 0
+
+    receive {
+        Chunk(data) -> {
+            got = got + bytes.length(data)
+            if got >= 8 {
+                kept = move data // the state keeps it; the old one is released
+            }
+        } // otherwise the binding releases it here
+        Boom() -> { panic("boom") }
+        Count() -> { reply got }
+    }
+}
+
+fill(n: int) -> Buf {
+    b = bytes.new(n) as Buf
+    i = 0
+    while i < n {
+        bytes.set(b, i, 65)
+        i = i + 1
+    }
+    return b // handed to the caller, not released
+}
+
+// Two locals' worth: the first released when `l` is bound again, the second
+// at the function's exit.
+locals() -> int {
+    l = fill(1)
+    l = fill(2)
+    return bytes.length(l)
+}
+
+expect(label: string, want: int) {
+    got = sync.atomic_load(drops)
+    if got != want {
+        println("FAIL: ${label}: ${got} released, expected ${want}")
+        exit(1)
+    }
+}
+
+main() {
+    drops = sync.atomic_new(0)
+
+    s = spawn(Sink())
+    a = fill(3)
+    s ! Chunk { data: move a } // a holds nothing now
+    n = s ? Count {}
+    expect("a handler that lets its buffer go", 1)
+
+    s ! Chunk { data: fill(5) } // got 8: kept, not released
+    n = s ? Count {}
+    expect("a buffer the state keeps", 1)
+
+    s ! Chunk { data: fill(4) } // kept again: the old one is released
+    n = s ? Count {}
+    if n != 12 {
+        println("FAIL: the sink saw ${n} bytes, expected 12")
+        exit(1)
+    }
+    expect("a state field that is replaced", 2)
+
+    // A dead actor's messages are dropped undelivered, and released.
+    d = spawn(Sink())
+    d ! Boom {}
+    d ! Chunk { data: fill(2) }
+    d ! Chunk { data: fill(2) }
+    wait_for_idle()
+    expect("messages to an actor that died", 4)
+
+    if locals() != 2 {
+        println("FAIL: the rebound local holds the wrong buffer")
+        exit(1)
+    }
+    expect("a local bound again and one at its exit", 6)
+
+    println("owned ptr release: all checks passed (6)")
+}

@@ -5469,6 +5469,48 @@ void emit_promoted_param_cell(CodeGenerator* gen, const char* name,
  * `"heap_string_exit_free:<name>"` that emit_defers_* recognise
  * (try_emit_heap_string_exit_free). Each local is also journaled here, so a
  * panic releases what it holds. */
+/* #3142: the owned-pointer locals `n` binds, not counting a closure's own. */
+static void collect_owned_locals(ASTNode* n, const char** names, Type** types, int* count, int cap) {
+    if (!n || *count >= cap) return;
+    if (n->type == AST_CLOSURE && !ast_is_trailing_block(n)) return;
+    if (n->type == AST_VARIABLE_DECLARATION && n->value && tc_type_is_owned(n->node_type)) {
+        int seen = 0;
+        for (int i = 0; i < *count && !seen; i++) seen = strcmp(names[i], n->value) == 0;
+        if (!seen) {
+            names[*count] = n->value;
+            types[(*count)++] = n->node_type;
+        }
+    }
+    for (int i = 0; i < n->child_count; i++) collect_owned_locals(n->children[i], names, types, count, cap);
+}
+
+/* #3142: an owned-pointer local is one variable for the whole function, as a
+ * string local is: declared at its top holding nothing, and released at
+ * every exit. A `move` of it (a `return` of it is one) leaves it holding
+ * nothing first, and a binding of it releases what it held. A state field
+ * or a module-level `var` is not a local here. */
+void hoist_owned_locals(CodeGenerator* gen, ASTNode* body) {
+    if (!gen || !body) return;
+    const char* names[64];
+    Type* types[64];
+    int count = 0;
+    collect_owned_locals(body, names, types, &count, 64);
+    for (int i = 0; i < count; i++) {
+        const char* name = names[i];
+        const char* drop = tc_owned_drop_c(types[i]);
+        if (!drop || is_actor_state_var(gen, name) || is_module_global_var(gen, name)) continue;
+        if (!is_var_declared(gen, name)) {
+            print_line(gen, "void* %s = NULL;", name);
+            mark_var_declared(gen, name);
+        }
+        ASTNode* carrier = create_ast_node(AST_EXPRESSION_STATEMENT, NULL, body->line, body->column);
+        if (!carrier) continue;
+        carrier->annotation = heap_strf("owned_exit_drop:%s:%s", name, drop);
+        codegen_own_node(gen, carrier);
+        push_defer(gen, carrier);
+    }
+}
+
 void push_heap_string_exit_free_defers(CodeGenerator* gen, ASTNode* body) {
     if (!gen || !body) return;
     if (gen->heap_string_var_count <= 0) return;
@@ -9479,6 +9521,28 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
 
         case AST_VARIABLE_DECLARATION: {
             if (emit_composite_local_binding(gen, stmt)) break;   /* #2921 */
+            /* #3142: an owned pointer, in a local (declared by
+             * hoist_owned_locals) or a state field: the place takes the new
+             * value (a `move` or a fresh one, the checker made sure) and
+             * releases what it held. */
+            if (stmt->value && tc_type_is_owned(stmt->node_type)) {
+                const char* drop = tc_owned_drop_c(stmt->node_type);
+                int state = gen->current_actor && is_actor_state_var(gen, stmt->value);
+                const char* lv = state ? cg_internf("self->%s", stmt->value) : stmt->value;
+                if (!state && !is_var_declared(gen, stmt->value)) {
+                    print_line(gen, "void* %s = NULL;", stmt->value);
+                    mark_var_declared(gen, stmt->value);
+                }
+                print_indent(gen);
+                fprintf(gen->output, "{ void* _ae_on = (void*)(");
+                if (stmt->child_count > 0 && stmt->children[0])
+                    generate_expression(gen, stmt->children[0]);
+                else
+                    fprintf(gen->output, "NULL");
+                fprintf(gen->output, "); void* _ae_oo = %s; %s = _ae_on; if (_ae_oo) %s(_ae_oo); }\n",
+                        lv, lv, drop ? drop : "(void)");
+                break;
+            }
             // #340: optional-typed local (`x: T? = ...`). Emit the
             // declaration / re-bind with implicit `T -> T?` coercion of the
             // initializer (a bare value wraps, `none` zero-inits, an optional

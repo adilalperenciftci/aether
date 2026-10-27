@@ -33,6 +33,7 @@ typedef enum {
     AETHER_ERR_KEEPS_BORROWED = 902,     // a function keeps a `ptr` parameter not declared `@keep` (#2926)
     AETHER_ERR_USE_AFTER_FREE = 903,     // a value used or freed after it was freed, or a view after its storage went (#1300)
     AETHER_ERR_FREES_MODE = 904,         // a `@frees` or `@moves` parameter its function does not honour (#1300)
+    AETHER_ERR_OWNED = 905,              // an owned `ptr` given a second owner, freed, or kept where it cannot be (#3142)
     // Warnings (W-series)
     AETHER_WARN_UNUSED_VAR = 1001,
     AETHER_WARN_UNREACHABLE = 1002,
