@@ -1,0 +1,41 @@
+// A function whose parameter or result is `actor_ref[Actor]` compiles
+// (#3290).
+//
+// The bug: such a function is declared in C as taking or returning
+// `Actor*`, and the function forward declarations were emitted before the
+// actors' forward typedefs, so the C compile failed with "unknown type
+// name". Pre-fix this program does not build. The fix forward-declares each
+// actor's typedef with the structs', ahead of every function declaration.
+
+message Add { n: int }
+message Total {}
+
+actor Counter {
+    state sum = 0
+
+    receive {
+        Add(n) -> { sum = sum + n }
+        Total() -> { reply sum }
+    }
+}
+
+add_twice(c: actor_ref[Counter], n: int) {
+    c ! Add { n: n }
+    c ! Add { n: n }
+}
+
+make_counter() -> actor_ref[Counter] {
+    return spawn(Counter())
+}
+
+main() {
+    c = make_counter()
+    add_twice(c, 5)
+    add_twice(c, 1)
+    got = c ? Total {}
+    if got != 12 {
+        println("FAIL: total ${got}, expected 12")
+        exit(1)
+    }
+    println("actor_ref typed signature: all checks passed (1)")
+}
