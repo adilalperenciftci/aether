@@ -51,6 +51,9 @@ int tcp_server_poll_raw(TcpServer* server, int timeout_ms);
 // TCP_NODELAY on a connected socket: 0 on success, -1 on a null/closed
 // handle or setsockopt failure.
 int tcp_set_nodelay_raw(TcpSocket* sock, int on);
+// SO_RCVBUF on a connected socket, which also stops the kernel growing it:
+// 0 on success, -1 on a null/closed handle, bytes <= 0, or setsockopt failure.
+int tcp_set_read_buffer_raw(TcpSocket* sock, int bytes);
 TcpSocket* tcp_accept_raw(TcpServer* server);
 int tcp_server_close(TcpServer* server);
 

@@ -1,0 +1,128 @@
+// An upstream connection whose response said it closes is not pooled by the
+// proxy event loop (#3259).
+//
+// The worker path's client keeps an upstream connection for the next request
+// only when the response ended where its framing said and neither side
+// asked to close: not after "Connection: close", nor after an HTTP/1.0
+// response that did not say keep-alive. The proxy event loop on Linux and
+// macOS looked at the framing alone and pooled the connection anyway, so the
+// next request to that upstream took a connection the upstream had closed,
+// and paid a failed attempt to find out.
+//
+// An upstream with keep-alive turned off answers every request with
+// "Connection: close". One request through a bare proxy (the event loop on
+// Linux and macOS) and one through a proxy behind a program's middleware
+// (the worker path): neither may leave a connection in the client pool.
+// Every server listens on 127.0.0.1 and a port the kernel picks.
+
+import std.http
+import std.http.proxy
+import std.string
+import std.tcp
+
+extern exit(code: int)
+
+handle_up(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_body(res, "up")
+}
+
+@c_callback mw_pass(req: ptr, res: ptr, ud: ptr) -> int {
+    return 1
+}
+
+start(server: ptr) -> int {
+    if http.server_bind(server, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    err = http.server_start_background(server)
+    if err != "" {
+        println("FAIL: ${err}")
+        exit(1)
+    }
+    return http.server_port(server)
+}
+
+gateway(up_url: string, worker: int) -> ptr {
+    s = http.server_create(0)
+    http.server_set_host(s, "127.0.0.1")
+    if worker == 1 {
+        http.server_use_middleware(s, mw_pass, 0)
+    }
+    merr = proxy.mount_simple(s, "/", up_url, 5)
+    if merr != "" {
+        println("FAIL: mount: ${merr}")
+        exit(1)
+    }
+    return s
+}
+
+// One GET on a connection of its own; the status code.
+status_of(port: int) -> string {
+    sock, cerr = tcp.connect("127.0.0.1", port)
+    if cerr != "" {
+        return "connect failed"
+    }
+    tcp.write(sock, "GET /p HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    wire = ""
+    tries = 0
+    while tries < 50 {
+        ready, _perr = tcp.poll(sock, 100)
+        if ready {
+            chunk, rerr = tcp.read(sock, 4096)
+            if rerr != "" || string.length(chunk) == 0 {
+                tries = 50
+            } else {
+                wire = string.concat(wire, chunk)
+            }
+        }
+        tries = tries + 1
+    }
+    tcp.close(sock)
+    if string.length(wire) < 12 {
+        return "none"
+    }
+    return string.substring(wire, 9, 12)
+}
+
+main() {
+    println("=== a response that says it closes leaves nothing in the pool (#3259) ===")
+    upstream = http.server_create(0)
+    http.server_set_host(upstream, "127.0.0.1")
+    http.server_get(upstream, "/p", handle_up, 0)
+    kerr = http.server_set_keepalive(upstream, 0, 0, 1s)
+    if kerr != "" {
+        println("FAIL: keepalive: ${kerr}")
+        exit(1)
+    }
+    up_url = "http://127.0.0.1:${start(upstream)}"
+
+    names = ["event loop", "worker path"]
+    bad = 0
+    g = 0
+    while g < 2 {
+        s = gateway(up_url, g)
+        port = start(s)
+        sleep(100)
+        http.client_pool_clear()
+        got = status_of(port)
+        sleep(100)
+        idle = http.client_pool_idle_count()
+        if got != "200" || idle != 0 {
+            println("  FAIL a Connection: close answer (${names[g]}): got ${got} with ${idle} pooled, expected 200 with 0")
+            bad = bad + 1
+        } else {
+            println("  PASS a Connection: close answer (${names[g]})")
+        }
+        http.server_stop(s)
+        g = g + 1
+    }
+
+    http.server_stop(upstream)
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

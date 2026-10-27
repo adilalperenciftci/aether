@@ -31,7 +31,7 @@
 
 #define AETHER_ADDR_MAX 8
 
-typedef struct {
+typedef struct AetherAddrList {
     struct sockaddr_storage ss[AETHER_ADDR_MAX];
     socklen_t len[AETHER_ADDR_MAX];
     int n;
@@ -101,8 +101,10 @@ static inline int aether_addr_split_authority(const char* a, size_t alen, char* 
     return 0;
 }
 
-/* Every address `host` resolves to, port filled in, for dialling. Returns 0,
- * or -1 when nothing resolves. */
+/* Every address `host` resolves to, port filled in, for dialling. Returns 0;
+ * -2 when the resolver says the name does not exist (EAI_NONAME, or
+ * EAI_NODATA where there is one), which a cache drops the name for; or -1
+ * for any other failure, a resolver that did not answer among them. */
 static inline int aether_addr_resolve(const char* host, int port, AetherAddrList* out) {
     char bare[256];
     out->n = 0;
@@ -113,7 +115,12 @@ static inline int aether_addr_resolve(const char* host, int port, AetherAddrList
     memset(&hints, 0, sizeof hints);
     hints.ai_family   = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo(bare, port_str, &hints, &res) != 0 || !res) return -1;
+    int rc = getaddrinfo(bare, port_str, &hints, &res);
+    if (rc == EAI_NONAME) return -2;
+#ifdef EAI_NODATA
+    if (rc == EAI_NODATA) return -2;
+#endif
+    if (rc != 0 || !res) return -1;
     for (struct addrinfo* r = res; r && out->n < AETHER_ADDR_MAX; r = r->ai_next) {
         if (r->ai_family != AF_INET && r->ai_family != AF_INET6) continue;
         if ((size_t)r->ai_addrlen > sizeof out->ss[0]) continue;

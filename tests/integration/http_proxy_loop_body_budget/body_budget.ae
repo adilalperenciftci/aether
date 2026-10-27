@@ -1,0 +1,175 @@
+// The proxy event loop holds no more request bodies at once than the worker
+// path would (#3263).
+//
+// The loop reads a request's whole body before it proxies it, one body of up
+// to the mount's cap per connection, and it holds as many connections as
+// clients open. The worker path holds one body per worker and leaves every
+// other connection waiting, unread. So a client that opened many connections
+// and sent each a large declared body slowly made the loop hold the cap
+// times the number of connections. Now the loop holds at most one cap per
+// worker the worker path would run (AETHER_HTTP_WORKERS, else twice the
+// cores, eight at least), and a request past that goes to the worker path,
+// which streams its body.
+//
+// Eight workers and a 64 KB cap leave room for eight 60000 byte bodies at
+// once. Ten connections each send a head declaring one and the first 1000
+// bytes, and stop: the loop may hold eight of them, not ten. Then the rest
+// of every body is sent and all ten must be answered 200, through a bare
+// proxy (the event loop on Linux and macOS) and through one behind a
+// program's middleware (the worker path). Every server listens on 127.0.0.1
+// and a port the kernel picks.
+
+import std.http
+import std.http.proxy
+import std.os
+import std.string
+import std.tcp
+
+extern exit(code: int)
+extern http_server_evloop_active(server: ptr) -> int
+
+const CONNS = 10
+
+handle_len(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_body(res, "len=${string.length(http.request_body(req))}")
+}
+
+@c_callback mw_pass(req: ptr, res: ptr, ud: ptr) -> int {
+    return 1
+}
+
+start(server: ptr) -> int {
+    if http.server_bind(server, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    err = http.server_start_background(server)
+    if err != "" {
+        println("FAIL: ${err}")
+        exit(1)
+    }
+    return http.server_port(server)
+}
+
+need(label: string, err: string) {
+    if err != "" {
+        println("FAIL: ${label}: ${err}")
+        exit(1)
+    }
+}
+
+gateway(up_url: string, worker: int) -> ptr {
+    s = http.server_create(0)
+    http.server_set_host(s, "127.0.0.1")
+    if worker == 1 {
+        http.server_use_middleware(s, mw_pass, 0)
+    }
+    pool = proxy.upstream_pool_new("round_robin", 10, 0, 0)
+    need("upstream_add", proxy.upstream_add(pool, up_url, 1))
+    opts = proxy.opts_new()
+    need("opts_set_body_cap", proxy.opts_set_body_cap(opts, 65536))
+    need("mount", proxy.mount(s, "/", pool, opts))
+    return s
+}
+
+dial(port: int) -> ptr {
+    sock, cerr = tcp.connect("127.0.0.1", port)
+    if cerr != "" {
+        println("FAIL: connect: ${cerr}")
+        exit(1)
+    }
+    return sock
+}
+
+// The status of the one response `sock` sends, "none" without one in five
+// seconds.
+status_of(sock: ptr) -> string {
+    wire = ""
+    tries = 0
+    while tries < 50 && string.index_of(wire, "len=") < 0 {
+        ready, _perr = tcp.poll(sock, 100)
+        if ready {
+            chunk, rerr = tcp.read(sock, 4096)
+            if rerr != "" || string.length(chunk) == 0 {
+                tries = 50
+            } else {
+                wire = string.concat(wire, chunk)
+            }
+        }
+        tries = tries + 1
+    }
+    if string.length(wire) < 12 {
+        return "none"
+    }
+    return string.substring(wire, 9, 12)
+}
+
+main() {
+    println("=== the event loop holds no more bodies at once than the worker path would (#3263) ===")
+    serr = os.setenv("AETHER_HTTP_WORKERS", "8")
+    if serr != "" {
+        println("FAIL: setenv: ${serr}")
+        exit(1)
+    }
+    upstream = http.server_create(0)
+    http.server_set_host(upstream, "127.0.0.1")
+    http.server_post(upstream, "/p", handle_len, 0)
+    up_url = "http://127.0.0.1:${start(upstream)}"
+
+    head = "POST /p HTTP/1.1\r\nHost: x\r\nContent-Length: 60000\r\nConnection: close\r\n\r\n"
+    first = string.pad_end("", 1000, 98)
+    rest = string.pad_end("", 59000, 98)
+    names = ["event loop", "worker path"]
+    bad = 0
+    g = 0
+    while g < 2 {
+        s = gateway(up_url, g)
+        port = start(s)
+        sleep(100)
+        socks = [dial(port), dial(port), dial(port), dial(port), dial(port),
+            dial(port), dial(port), dial(port), dial(port), dial(port)]
+        i = 0
+        while i < CONNS {
+            tcp.write(socks[i], "${head}${first}")
+            i = i + 1
+        }
+        sleep(300)
+        held = http_server_evloop_active(s)
+        i = 0
+        while i < CONNS {
+            tcp.write(socks[i], rest)
+            i = i + 1
+        }
+        ok = 0
+        i = 0
+        while i < CONNS {
+            if status_of(socks[i]) == "200" {
+                ok = ok + 1
+            }
+            tcp.close(socks[i])
+            i = i + 1
+        }
+        if held > 8 {
+            println("  FAIL bodies held at once (${names[g]}): ${held} connections, at most 8 fit")
+            bad = bad + 1
+        } else {
+            println("  PASS bodies held at once (${names[g]})")
+        }
+        if ok != CONNS {
+            println("  FAIL every body answered (${names[g]}): ${ok} of ${CONNS} answered 200")
+            bad = bad + 1
+        } else {
+            println("  PASS every body answered (${names[g]})")
+        }
+        http.server_stop(s)
+        g = g + 1
+    }
+
+    http.server_stop(upstream)
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

@@ -354,7 +354,28 @@ client's `Connection` header, HTTP/1.0), and says so in its `Connection`
 header, as on the per-connection path (#3229). A client that sends nothing
 for the keep-alive idle timeout (30 seconds unless set), before its first
 request, between requests or partway through one, has its connection closed,
-as the per-connection path's receive timeout closes it (#3243).
+as the per-connection path's receive timeout closes it (#3243). So does one that
+takes no bytes of its response for as long, as the per-connection path's send
+timeout does (#3257).
+
+A driver never waits on a name lookup, which takes seconds when a name does
+not exist or the resolver is slow. An upstream given by name is looked up by
+the loop's own resolver, on a thread of its own, the first time a request
+dials it: the connection waits for the answer while the driver serves the
+rest, and stays on the driver. Requests waiting on one name share one lookup.
+The answer is kept and used for every dial after it; one older than ten
+seconds is looked up again behind the dial that uses it, so a changed record
+is seen about that soon. While lookups of the name fail, the last answer
+stays in use, for up to a day, as RFC 8767 serves stale answers (#3286);
+when the resolver says the name does not exist, it goes. A name that does
+not resolve is answered 502, as on the worker path, and is asked about again
+a second later. The request's upstream timeout (`request_timeout_sec`)
+covers the wait and the call after it together (#3283). Up to four lookups
+run at once, each on a thread of its own, so a slow name holds up only its
+own requests until four are slow together (#3284). Adding an upstream looks
+nothing up, and a program that does not proxy never starts the resolver
+(#3267, #3275, #3276, #3277). Stopping the server waits for a lookup under
+way to end, as it did when the driver looked names up itself.
 
 The driver serves HTTP/1.1 proxying, on a TLS-terminating server too: it
 carries the client's TLS handshake without waiting and reads and writes
@@ -371,6 +392,11 @@ configuration to do so:
   is never read as the next request (#3255), and a head that has not ended in
   16 KiB, which it refuses with 431 (#3252): the driver never buffers more
   (#3237)
+- a request body over 16 KiB once the driver already holds as many bodies of
+  the cap as the worker path has workers (`AETHER_HTTP_WORKERS`, else twice
+  the cores, eight at least): its total is the worker path's, not the cap
+  times every connection a client opens (#3263). Every connection keeps at
+  most 64 KiB of buffers between requests, on either path (#3262).
 - a server that terminates TLS with the pure-Aether stack (`AETHER_PURE_TLS=1`,
   or a build without OpenSSL): the driver's TLS is OpenSSL's (#3256)
 - a server whose first proxy mount has an https upstream: the driver dials
@@ -382,7 +408,12 @@ A request the proxy does not own, a health endpoint, an admin route, or
 anything another middleware answers, is handed to the general server path
 along with whatever has already been read from the socket, and a pool worker
 serves the connection from then on, as it does an accepted one: a slow route
-handler never holds up the driver's other connections (#3230). Routing,
+handler never holds up the driver's other connections (#3230). The pool adds
+workers while all of them are busy, up to 64, and queues up to 256
+connections; past that a driver handing a connection over waits for a place
+in the queue, as the accept thread does, and its other connections wait with
+it. That is the server's backpressure, the same one an accepted connection
+meets, rather than a queue without end. Routing,
 middleware and handlers behave exactly as they do without the driver: a request the
 middleware before the first mount already ran on goes on from the middleware
 after the mount, so none of it runs twice and a rate limiter counts it once.

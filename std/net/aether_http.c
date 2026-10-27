@@ -1705,24 +1705,6 @@ int http_chunked_complete(const char* buf, size_t len) {
 
 static void http_socket_set_nonblocking(int fd, int on);
 
-/* Case-insensitive substring search, for header values. */
-static const char* http_strcasestr_local(const char* hay, const char* needle) {
-    if (!hay || !needle || !*needle) return NULL;
-    size_t nlen = strlen(needle);
-    for (const char* p = hay; *p; p++) {
-        size_t i = 0;
-        while (i < nlen) {
-            char a = p[i], b = needle[i];
-            if (a >= 'A' && a <= 'Z') a = (char)(a + 32);
-            if (b >= 'A' && b <= 'Z') b = (char)(b + 32);
-            if (a != b) break;
-            i++;
-        }
-        if (i == nlen) return p;
-    }
-    return NULL;
-}
-
 /* The status code from a response header block. */
 /* The status code from a status line, or 0 when the line does not carry one.
  *
@@ -1933,6 +1915,380 @@ static void transport_apply_timeouts(Transport* t, int64_t timeout_ns) {
     http_apply_timeouts(t->sockfd, want);
     t->applied_timeout_ns = want;
 }
+
+/* Where the proxy event loop runs (POSIX with threads), and so where its
+ * resolver does (#3267). */
+#if !defined(_WIN32) && !defined(__wasi__) && !defined(__EMSCRIPTEN__) && AETHER_HAS_THREADS
+#define HTTP_RESOLVER 1
+#else
+#define HTTP_RESOLVER 0
+#endif
+
+#if HTTP_RESOLVER
+/* The proxy event loop's name lookups (#3267, #3275, #3276, #3277).
+ *
+ * getaddrinfo blocks, for seconds when a name does not exist or the resolver
+ * is slow, and a driver thread holds many connections, so it may not wait on
+ * one. The loop asks here instead (http_resolver_answer). A lookup it has to
+ * wait for runs on a thread of this resolver's while the driver goes on with
+ * its other connections, and the answer wakes it (`answered`) for the dial
+ * to go ahead; the connection stays on the loop. Dials waiting on one name
+ * share one lookup.
+ *
+ * Answers are kept, so a name is looked up once and not on every dial. One
+ * older than HTTP_RESOLVE_VALID_MS is still used, and looked up again behind
+ * the dial, so a changed record is seen about that soon with no dial waiting
+ * on it; one older than HTTP_RESOLVE_KEEP_MS is too old to use, and the dial
+ * waits for a fresh one, unless the last lookup failed: while lookups of the
+ * name fail, the last answer stays in use up to HTTP_RESOLVE_STALE_MS old,
+ * a DNS outage served stale as RFC 8767 serves it (#3286). A lookup that
+ * says the name does not exist (aether_addr_resolve's -2) is no outage: the
+ * answer goes with it. A name with no answer fails its dials for
+ * HTTP_RESOLVE_NEGATIVE_MS, then is asked again. At most HTTP_RESOLVE_MAX
+ * names are kept, the least recently used given up first, in a hash table:
+ * two names never take each other's place. A lookup waits for a thread only
+ * while all HTTP_RESOLVE_THREADS are busy (#3284).
+ *
+ * A resolver belongs to one loop and lives as long as it: its threads start
+ * when a lookup first has to wait, and stop with the loop. Nothing else uses
+ * it, so a program that does not run the loop starts no thread and makes no
+ * lookup it did not ask for (#3276), and adding an upstream looks nothing up
+ * (#3277). POSIX only, as the loop is. */
+#define HTTP_RESOLVE_VALID_MS    10000
+#define HTTP_RESOLVE_KEEP_MS     300000
+#define HTTP_RESOLVE_STALE_MS    86400000  /* a day; RFC 8767 suggests one to three */
+#define HTTP_RESOLVE_NEGATIVE_MS 1000
+#define HTTP_RESOLVE_MAX         1024
+#define HTTP_RESOLVE_BUCKETS     1024      /* a power of two */
+#define HTTP_RESOLVE_THREADS     4
+
+enum { RESOLVE_IDLE, RESOLVE_QUEUED, RESOLVE_ASKING };
+
+typedef struct HttpResolveName {
+    struct HttpResolveName* chain;         /* the rest of its bucket */
+    struct HttpResolveName* newer;         /* use order, the newest first */
+    struct HttpResolveName* older;
+    struct HttpResolveName* queue_next;    /* queued for a thread */
+    char*          host;                   /* fixed once made */
+    int            port;
+    unsigned       hash;
+    int            state;                  /* RESOLVE_* */
+    int            waited;                 /* a dial waits on this lookup */
+    int            failed;                 /* the last lookup failed */
+    int64_t        at_ms;                  /* answered; 0: never */
+    int64_t        tried_ms;               /* the last lookup ended */
+    AetherAddrList addrs;
+} HttpResolveName;
+
+struct HttpResolver {
+    pthread_mutex_t  lock;
+    pthread_cond_t   work;
+    HttpResolveName* buckets[HTTP_RESOLVE_BUCKETS];
+    HttpResolveName* newest;
+    HttpResolveName* oldest;
+    int              count;
+    HttpResolveName* queue_head;
+    HttpResolveName* queue_tail;
+    int              queued;          /* names on the queue */
+    pthread_t        threads[HTTP_RESOLVE_THREADS];
+    int              thread_count;
+    int              idle_threads;    /* waiting for work, a signalled one too */
+    int              stopping;
+    int            (*lookup)(const char* host, int port, AetherAddrList* out);
+    int64_t        (*now)(void);     /* http_now_ms; a test's clock (http_resolver_set_clock) */
+    void           (*answered)(void* ctx, unsigned name);
+    void*            ctx;
+};
+
+static int resolve_lookup_default(const char* host, int port, AetherAddrList* out) {
+    return aether_addr_resolve(host, port, out);
+}
+
+static unsigned resolve_hash(const char* host, int port) {
+    unsigned h = 2166136261u;
+    for (const char* p = host; *p; p++) h = (h ^ (unsigned char)*p) * 16777619u;
+    return (h ^ (unsigned)port) * 16777619u;
+}
+
+unsigned http_resolver_name(const char* host, int port) {
+    return host ? resolve_hash(host, port) : 0;
+}
+
+static HttpResolveName** resolve_bucket(HttpResolver* r, unsigned hash) {
+    return &r->buckets[hash & (HTTP_RESOLVE_BUCKETS - 1)];
+}
+
+static HttpResolveName* resolve_find(HttpResolver* r, const char* host, int port,
+                                     unsigned hash) {
+    for (HttpResolveName* n = *resolve_bucket(r, hash); n; n = n->chain)
+        if (n->hash == hash && n->port == port && strcmp(n->host, host) == 0) return n;
+    return NULL;
+}
+
+static void resolve_unlink_use(HttpResolver* r, HttpResolveName* n) {
+    if (n->newer) n->newer->older = n->older; else r->newest = n->older;
+    if (n->older) n->older->newer = n->newer; else r->oldest = n->newer;
+    n->newer = n->older = NULL;
+}
+
+static void resolve_link_newest(HttpResolver* r, HttpResolveName* n) {
+    n->newer = NULL;
+    n->older = r->newest;
+    if (r->newest) r->newest->newer = n; else r->oldest = n;
+    r->newest = n;
+}
+
+/* Room for one more name: the least recently used that no lookup holds goes.
+ * 0 when every name is held by one. Locked. */
+static int resolve_make_room(HttpResolver* r) {
+    if (r->count < HTTP_RESOLVE_MAX) return 1;
+    for (HttpResolveName* n = r->oldest; n; n = n->newer) {
+        if (n->state != RESOLVE_IDLE) continue;
+        HttpResolveName** pp = resolve_bucket(r, n->hash);
+        while (*pp != n) pp = &(*pp)->chain;
+        *pp = n->chain;
+        resolve_unlink_use(r, n);
+        free(n->host);
+        free(n);
+        r->count--;
+        return 1;
+    }
+    return 0;
+}
+
+static void* resolve_main(void* arg);
+
+/* Queue `n` for a lookup, starting a thread when the names queued would
+ * outnumber the threads free to take them: a signalled thread counts as free
+ * until it wakes, so "none free" started too few, and a second name waited
+ * behind a slow first with thread slots to spare (#3284). 0 when no thread
+ * runs to take it. Locked. */
+static int resolve_ask(HttpResolver* r, HttpResolveName* n) {
+    if (r->queued + 1 > r->idle_threads && r->thread_count < HTTP_RESOLVE_THREADS &&
+        pthread_create(&r->threads[r->thread_count], NULL, resolve_main, r) == 0)
+        r->thread_count++;
+    if (r->thread_count == 0) return 0;
+    n->state = RESOLVE_QUEUED;
+    n->queue_next = NULL;
+    if (r->queue_tail) r->queue_tail->queue_next = n; else r->queue_head = n;
+    r->queue_tail = n;
+    r->queued++;
+    pthread_cond_signal(&r->work);
+    return 1;
+}
+
+/* A resolver thread: the queued names, one lookup at a time, each outside
+ * the lock. A name being looked up is never given up (resolve_make_room) and
+ * its host never changes, so the lookup reads it unlocked. */
+static void* resolve_main(void* arg) {
+    HttpResolver* r = (HttpResolver*)arg;
+    pthread_mutex_lock(&r->lock);
+    for (;;) {
+        while (!r->queue_head && !r->stopping) {
+            r->idle_threads++;
+            pthread_cond_wait(&r->work, &r->lock);
+            r->idle_threads--;
+        }
+        if (r->stopping) break;
+        HttpResolveName* n = r->queue_head;
+        r->queue_head = n->queue_next;
+        if (!r->queue_head) r->queue_tail = NULL;
+        r->queued--;
+        n->queue_next = NULL;
+        n->state = RESOLVE_ASKING;
+        int (*lookup)(const char*, int, AetherAddrList*) = r->lookup;
+        pthread_mutex_unlock(&r->lock);
+
+        AetherAddrList addrs;
+        int rc = lookup(n->host, n->port, &addrs);
+        int ok = rc == 0 && addrs.n > 0;
+
+        pthread_mutex_lock(&r->lock);
+        int64_t now = r->now();
+        if (ok) {
+            n->addrs = addrs;
+            n->at_ms = now;
+        } else if (rc == -2) {
+            n->at_ms = 0;           /* the name is gone, and its answer with it */
+        }
+        n->failed = !ok;
+        n->tried_ms = now;
+        n->state = RESOLVE_IDLE;
+        int wake = n->waited;
+        unsigned name = n->hash;
+        n->waited = 0;
+        if (wake && r->answered) {
+            /* Outside the lock: the loop's side takes its own. By its hash,
+             * not the name itself, which another thread may give up once
+             * the lock is let go (resolve_make_room). */
+            pthread_mutex_unlock(&r->lock);
+            r->answered(r->ctx, name);
+            pthread_mutex_lock(&r->lock);
+        }
+    }
+    pthread_mutex_unlock(&r->lock);
+    return NULL;
+}
+
+HttpResolver* http_resolver_new(void (*answered)(void* ctx, unsigned name), void* ctx) {
+    HttpResolver* r = (HttpResolver*)calloc(1, sizeof(HttpResolver));
+    if (!r) return NULL;
+    if (pthread_mutex_init(&r->lock, NULL) != 0) { free(r); return NULL; }
+    if (pthread_cond_init(&r->work, NULL) != 0) {
+        pthread_mutex_destroy(&r->lock);
+        free(r);
+        return NULL;
+    }
+    r->lookup = resolve_lookup_default;
+    r->now = http_now_ms;
+    r->answered = answered;
+    r->ctx = ctx;
+    return r;
+}
+
+void http_resolver_set_lookup(HttpResolver* r,
+                              int (*lookup)(const char* host, int port, AetherAddrList* out)) {
+    if (!r) return;
+    pthread_mutex_lock(&r->lock);
+    r->lookup = lookup ? lookup : resolve_lookup_default;
+    pthread_mutex_unlock(&r->lock);
+}
+
+void http_resolver_set_clock(HttpResolver* r, int64_t (*now)(void)) {
+    if (!r) return;
+    pthread_mutex_lock(&r->lock);
+    r->now = now ? now : http_now_ms;
+    pthread_mutex_unlock(&r->lock);
+}
+
+void http_resolver_free(HttpResolver* r) {
+    if (!r) return;
+    pthread_mutex_lock(&r->lock);
+    r->stopping = 1;
+    pthread_cond_broadcast(&r->work);
+    pthread_mutex_unlock(&r->lock);
+    /* A lookup under way ends first: getaddrinfo cannot be cut short. Nobody
+     * asks any more (the loop's drivers stopped first), so the count holds. */
+    for (int i = 0; i < r->thread_count; i++) pthread_join(r->threads[i], NULL);
+    for (int b = 0; b < HTTP_RESOLVE_BUCKETS; b++) {
+        HttpResolveName* n = r->buckets[b];
+        while (n) {
+            HttpResolveName* next = n->chain;
+            free(n->host);
+            free(n);
+            n = next;
+        }
+    }
+    pthread_cond_destroy(&r->work);
+    pthread_mutex_destroy(&r->lock);
+    free(r);
+}
+
+static int resolve_numeric(const char* host, int port, AetherAddrList* out);
+
+int http_resolver_answer(HttpResolver* r, const char* host, int port,
+                         AetherAddrList* out) {
+    if (!r || !host || !out) return -1;
+    if (resolve_numeric(host, port, out)) return 1;
+    unsigned hash = resolve_hash(host, port);
+    int got;
+    pthread_mutex_lock(&r->lock);
+    int64_t now = r->now();
+    HttpResolveName* n = resolve_find(r, host, port, hash);
+    if (n) {
+        if (r->newest != n) {
+            resolve_unlink_use(r, n);
+            resolve_link_newest(r, n);
+        }
+    } else {
+        char* copy = strdup(host);
+        if (copy && resolve_make_room(r)) n = (HttpResolveName*)calloc(1, sizeof(*n));
+        if (!n) {
+            free(copy);
+            pthread_mutex_unlock(&r->lock);
+            return -1;
+        }
+        n->host = copy;
+        n->port = port;
+        n->hash = hash;
+        HttpResolveName** b = resolve_bucket(r, hash);
+        n->chain = *b;
+        *b = n;
+        resolve_link_newest(r, n);
+        r->count++;
+    }
+    /* The last answer, unless it is too old: past HTTP_RESOLVE_KEEP_MS while
+     * lookups go through, past HTTP_RESOLVE_STALE_MS while they fail
+     * (#3286). A name that does not exist has none (resolve_main). */
+    int64_t age = now - n->at_ms;
+    if (n->at_ms && (age < HTTP_RESOLVE_KEEP_MS ||
+                     (n->failed && age < HTTP_RESOLVE_STALE_MS))) {
+        *out = n->addrs;
+        got = 1;
+        /* Due again: looked up behind this dial, which goes ahead. */
+        if (n->state == RESOLVE_IDLE && now - n->tried_ms >= HTTP_RESOLVE_VALID_MS)
+            resolve_ask(r, n);
+    } else if (n->state == RESOLVE_IDLE && n->failed &&
+               now - n->tried_ms < HTTP_RESOLVE_NEGATIVE_MS) {
+        got = -1;
+    } else if (n->state == RESOLVE_IDLE && !resolve_ask(r, n)) {
+        got = -1;                        /* no thread to look it up on */
+    } else {
+        n->waited = 1;
+        got = 0;
+    }
+    pthread_mutex_unlock(&r->lock);
+    return got;
+}
+
+/* `host`:`port` into `out` without asking a resolver: a lookup with
+ * AI_NUMERICHOST only parses. 1 for a numeric address, else 0. */
+static int resolve_numeric(const char* host, int port, AetherAddrList* out) {
+    char bare[256];
+    out->n = 0;
+    if (!aether_addr_unbracket(host, bare, sizeof bare) || !bare[0]) return 0;
+    char port_str[16];
+    snprintf(port_str, sizeof port_str, "%d", port);
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family   = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags    = AI_NUMERICHOST;
+    if (getaddrinfo(bare, port_str, &hints, &res) == 0 && res) {
+        for (struct addrinfo* r = res; r && out->n < AETHER_ADDR_MAX; r = r->ai_next) {
+            if (r->ai_family != AF_INET && r->ai_family != AF_INET6) continue;
+            if ((size_t)r->ai_addrlen > sizeof out->ss[0]) continue;
+            memset(&out->ss[out->n], 0, sizeof out->ss[0]);
+            memcpy(&out->ss[out->n], r->ai_addr, r->ai_addrlen);
+            out->len[out->n] = (socklen_t)r->ai_addrlen;
+            out->n++;
+        }
+        freeaddrinfo(res);
+    }
+    return out->n > 0;
+}
+#else
+HttpResolver* http_resolver_new(void (*answered)(void* ctx, unsigned name), void* ctx) {
+    (void)answered; (void)ctx;
+    return NULL;
+}
+void http_resolver_set_lookup(HttpResolver* r,
+                              int (*lookup)(const char* host, int port, AetherAddrList* out)) {
+    (void)r; (void)lookup;
+}
+void http_resolver_free(HttpResolver* r) { (void)r; }
+void http_resolver_set_clock(HttpResolver* r, int64_t (*now)(void)) { (void)r; (void)now; }
+unsigned http_resolver_name(const char* host, int port) {
+    (void)host; (void)port;
+    return 0;
+}
+int http_resolver_answer(HttpResolver* r, const char* host, int port,
+                         AetherAddrList* out) {
+    (void)r; (void)host; (void)port;
+    if (out) out->n = 0;
+    return -1;
+}
+#endif
 
 /* Resolve `host`:`port` into `out`, at most once per request (#1719).
  *
@@ -2727,6 +3083,8 @@ static void upstream_reset(HttpUpstreamConn* out) {
     out->addr_total = 0;
     out->dial_host[0] = '\0';
     out->dial_port = 0;
+    out->resolver = NULL;
+    out->lookup = 0;
 }
 
 /* FNV-1a over an address's family, port and bytes: what tells one resolved
@@ -2759,6 +3117,19 @@ static unsigned upstream_addr_hash(const struct sockaddr_storage* a) {
 static int upstream_dial(const char* host, int port, HttpUpstreamConn* out) {
     AetherAddrList addrs;
     int resolved = 0;
+#if HTTP_RESOLVER
+    /* A caller that may not wait dials from its resolver's answer, and is
+     * told when the answer is still to come or the name does not resolve
+     * (#3267). */
+    if (out->resolver) {
+        int got = http_resolver_answer(out->resolver, host, port, &addrs);
+        if (got <= 0) {
+            out->lookup = got == 0 ? 1 : -1;
+            return -1;
+        }
+        resolved = 1;
+    }
+#endif
     if (!resolve_dial_addr(host, port, &addrs, &resolved)) return -1;
     /* The family that last connected to this upstream first: a connect in
      * flight is waited on, not cut short, so the order is what keeps a slow
@@ -2822,8 +3193,8 @@ static int upstream_dial(const char* host, int port, HttpUpstreamConn* out) {
  * connection the upstream had closed. Taking another one from the same pool
  * could hand it a second corpse, and the retry after that is the one the
  * client never gets an answer from. */
-int http_upstream_acquire_ex(const char* host, int port, int allow_pool,
-                             HttpUpstreamConn* out) {
+static int upstream_acquire(const char* host, int port, int allow_pool,
+                            HttpResolver* resolver, HttpUpstreamConn* out) {
     if (!out || !host || port <= 0) return -1;
     /* Field by field, not memset over the struct. Most of this object is a
      * 512 byte pool key, and blanking it wrote nine cache lines per request
@@ -2845,7 +3216,13 @@ int http_upstream_acquire_ex(const char* host, int port, int allow_pool,
         }
         return out->t.sockfd;
     }
+    out->resolver = resolver;
     return upstream_dial(host, port, out);
+}
+
+int http_upstream_acquire_ex(const char* host, int port, int allow_pool,
+                             HttpUpstreamConn* out) {
+    return upstream_acquire(host, port, allow_pool, NULL, out);
 }
 
 int http_upstream_has_next(HttpUpstreamConn* c) {
@@ -2854,14 +3231,26 @@ int http_upstream_has_next(HttpUpstreamConn* c) {
 
 int http_upstream_redial(const char* host, int port, HttpUpstreamConn* c) {
     if (!http_upstream_has_next(c) || !host) return -1;
-    /* A fresh transport; the tried set carries over. */
+    /* A fresh transport; the tried set carries over, and so does the
+     * resolver a dial that may not wait asks (#3267). */
     unsigned tried[8];
     int n_tried = c->addr_n_tried;
+    HttpResolver* resolver = c->resolver;
     memcpy(tried, c->addr_tried, sizeof tried);
     upstream_reset(c);
     memcpy(c->addr_tried, tried, sizeof tried);
     c->addr_n_tried = n_tried;
+    c->resolver = resolver;
     return upstream_dial(host, port, c);
+}
+
+int http_upstream_acquire_nb(const char* host, int port, int allow_pool,
+                             HttpResolver* resolver, HttpUpstreamConn* out) {
+    return upstream_acquire(host, port, allow_pool, resolver, out);
+}
+
+int http_upstream_lookup(const HttpUpstreamConn* c) {
+    return c ? c->lookup : 0;
 }
 
 /* Did the connect this driver started actually succeed? A refused connection
@@ -2895,6 +3284,31 @@ int http_upstream_connected(HttpUpstreamConn* c) {
         c->dial_host[0] = '\0';
     }
     return 1;
+}
+
+/* Does `v`, `vl` bytes not NUL-terminated, hold `needle`, ignoring case? */
+static int http_span_has_ci(const char* v, size_t vl, const char* needle) {
+    size_t nl = strlen(needle);
+    for (size_t i = 0; i + nl <= vl; i++)
+        if (strncasecmp(v + i, needle, nl) == 0) return 1;
+    return 0;
+}
+
+/* One rule for both clients, so the proxy event loop stops pooling a
+ * connection the upstream said it would close (#3259). The Connection value
+ * is read where it lies: the loop asks this of every response it pools a
+ * connection after, and copying the value out to look at it was an
+ * allocation on each one that had the header (#3281). */
+int http_response_head_keeps_conn(const char* head, size_t header_bytes) {
+    if (!head || header_bytes < 4) return 0;
+    const char* end = head + header_bytes - 4;
+    const char* status_end = (const char*)memchr(head, '\n', (size_t)(end - head));
+    const char* v = NULL;
+    size_t vl = 0;
+    if (status_end &&
+        http_find_header_span(status_end + 1, end, "Connection", NULL, 0, NULL, &v, &vl) > 0)
+        return !http_span_has_ci(v, vl, "close");
+    return strncmp(head, "HTTP/1.0", 8) != 0;   /* 1.0 closes unless it says otherwise */
 }
 
 /* Hand the connection back to the idle pool, or close it. A connection is
@@ -3014,18 +3428,6 @@ int http_exchange_recv(HttpExchange* x) {
         }
     }
 }
-
-/* The largest receive buffer worth keeping on an idle connection (#2160).
- *
- * Keeping it is what makes a pooled connection stop allocating; keeping an
- * unbounded one would let a single large response pin that much memory for
- * as long as the connection sits idle, on every idle connection. 64 KiB
- * holds any ordinary response in full, and bounds what the idle pool can
- * pin at http_pool_max_idle * 64 KiB -- 4 MiB at the default 64 -- where
- * one outsized body would otherwise pin its whole size. A bigger buffer is
- * freed and the next request grows a fresh one, which is what every
- * request did before. */
-#define HTTP_RX_KEEP_MAX (64u * 1024u)
 
 /* Finish with a connection the blocking path used: back to the pool with its
  * receive buffer, or closed and the buffer freed. The one place a request's
@@ -3519,16 +3921,7 @@ send_request:
         int keep = pool_this && !recv_err && framing.definite &&
                    (framing.chunked || total_len == framing.body_target);
         if (keep && framing.header_bytes > 0) {
-            char saved = full_response[framing.header_bytes - 4];
-            full_response[framing.header_bytes - 4] = '\0';
-            char* conn_hdr = http_extract_response_header(full_response, "Connection");
-            if (conn_hdr) {
-                if (http_strcasestr_local(conn_hdr, "close")) keep = 0;
-                free(conn_hdr);
-            } else if (strncmp(full_response, "HTTP/1.0", 8) == 0) {
-                keep = 0;   /* HTTP/1.0 closes unless it says otherwise */
-            }
-            full_response[framing.header_bytes - 4] = saved;
+            keep = http_response_head_keeps_conn(full_response, framing.header_bytes);
         } else {
             keep = 0;
         }

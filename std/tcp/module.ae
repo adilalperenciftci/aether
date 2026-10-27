@@ -8,12 +8,12 @@ exports(
     tcp_connect_raw, tcp_send_raw,
     tcp_receive_raw, tcp_receive_n_raw, tcp_close,
     tcp_listen_raw, tcp_listen_on_raw, tcp_accept_raw, tcp_server_close,
-    tcp_server_port_raw, tcp_server_poll_raw, tcp_set_nodelay_raw,
+    tcp_server_port_raw, tcp_server_poll_raw, tcp_set_nodelay_raw, tcp_set_read_buffer_raw,
     tcp_fd_raw, tcp_server_fd_raw, tcp_poll_raw, tcp_poll2_raw,
     tcp_send_bytes_raw, tcp_receive_into_raw,
     connect, write, write_n, write_slice, write_all, read, read_n, read_into,
     listen, listen_on, accept, fd, server_fd,
-    server_port, server_poll, set_nodelay, poll, poll2
+    server_port, server_poll, set_nodelay, set_read_buffer, poll, poll2
 )
 
 // Raw externs - escape hatch
@@ -40,6 +40,7 @@ extern tcp_listen_on_raw(address: string, port: int) -> ptr
 extern tcp_server_port_raw(server: ptr) -> int
 extern tcp_server_poll_raw(server: ptr, timeout_ms: int) -> int
 extern tcp_set_nodelay_raw(sock: ptr, on: int) -> int
+extern tcp_set_read_buffer_raw(sock: ptr, bytes: int) -> int
 extern tcp_accept_raw(server: ptr) -> ptr
 extern tcp_server_close(server: ptr) -> int
 extern tcp_fd_raw(sock: ptr) -> int
@@ -259,6 +260,19 @@ set_nodelay(sock: ptr, on: bool) -> string {
     if on { flag = 1 }
     if tcp_set_nodelay_raw(sock, flag) != 0 {
         return "set_nodelay failed"
+    }
+    return ""
+}
+
+// SO_RCVBUF: how many bytes the kernel holds for this socket before the
+// reader takes them. Setting it also stops the kernel growing the buffer
+// by itself while data arrives, which Linux, macOS and Windows do whether
+// the program reads or not. A client that must stop taking bytes when it
+// stops reading (a test of a server's send timeout, say) sets it small.
+// Returns "" on success or an error.
+set_read_buffer(sock: ptr, bytes: int) -> string {
+    if tcp_set_read_buffer_raw(sock, bytes) != 0 {
+        return "set_read_buffer failed"
     }
     return ""
 }

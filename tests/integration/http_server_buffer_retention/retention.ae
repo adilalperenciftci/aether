@@ -1,0 +1,187 @@
+// A kept-alive connection gives back a large buffer once its request is done
+// (#3262).
+//
+// A connection keeps its buffers between requests, so the next request does
+// not allocate them again. Kept at whatever size they had grown to, one
+// large request pinned that much memory for as long as the connection
+// stayed open, idle or not: the proxy event loop on Linux and macOS kept a
+// receive buffer the size of the largest response it had proxied, and the
+// worker path kept a read buffer the size of the largest chunked request
+// body it had decoded. The client pool keeps a receive buffer of at most
+// 64 KiB for the same reason, and so does a connection now.
+//
+// On one kept connection each, through a bare proxy (the event loop on Linux
+// and macOS) and through one behind a program's middleware (the worker
+// path): a 1 MB response, then a 1 MB chunked request body. After each, the
+// bytes the runtime's accounted allocators hold, with the connection still
+// open, must be back near where they were before it. Every server listens
+// on 127.0.0.1 and a port the kernel picks.
+
+import std.http
+import std.http.proxy
+import std.string
+import std.tcp
+
+extern exit(code: int)
+extern aether_caps_used_bytes() -> long
+
+const BIG = 1048576
+
+handle_big(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_body(res, string.pad_end("", BIG, 120))
+}
+
+handle_len(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_body(res, "len=${string.length(http.request_body(req))}")
+}
+
+@c_callback mw_pass(req: ptr, res: ptr, ud: ptr) -> int {
+    return 1
+}
+
+start(server: ptr) -> int {
+    if http.server_bind(server, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    err = http.server_start_background(server)
+    if err != "" {
+        println("FAIL: ${err}")
+        exit(1)
+    }
+    return http.server_port(server)
+}
+
+need(label: string, err: string) {
+    if err != "" {
+        println("FAIL: ${label}: ${err}")
+        exit(1)
+    }
+}
+
+gateway(up_url: string, worker: int) -> ptr {
+    s = http.server_create(0)
+    http.server_set_host(s, "127.0.0.1")
+    if worker == 1 {
+        http.server_use_middleware(s, mw_pass, 0)
+    }
+    pool = proxy.upstream_pool_new("round_robin", 10, 0, 0)
+    need("upstream_add", proxy.upstream_add(pool, up_url, 1))
+    opts = proxy.opts_new()
+    need("opts_set_body_cap", proxy.opts_set_body_cap(opts, 4194304))
+    need("mount", proxy.mount(s, "/", pool, opts))
+    return s
+}
+
+// Read one response off `sock`: until its declared body is in, or a second
+// passes with nothing. The bytes read.
+read_response(sock: ptr) -> int {
+    wire = ""
+    total = 0
+    want = -1
+    quiet = 0
+    while quiet < 10 && (want < 0 || total < want) {
+        ready, _perr = tcp.poll(sock, 100)
+        if ready {
+            chunk, rerr = tcp.read(sock, 65536)
+            if rerr != "" || string.length(chunk) == 0 {
+                quiet = 10
+            } else {
+                total = total + string.length(chunk)
+                if want < 0 {
+                    wire = string.concat(wire, chunk)
+                    end = string.index_of(wire, "\r\n\r\n")
+                    if end >= 0 {
+                        at = string.index_of(wire, "Content-Length: ")
+                        stop = string.index_of_from(wire, "\r\n", at)
+                        want = end + 4 + string.get_int(string.substring(wire, at + 16, stop))
+                    }
+                }
+                quiet = 0
+            }
+        } else {
+            quiet = quiet + 1
+        }
+    }
+    return total
+}
+
+// A chunked POST of `n` bytes in 64 KiB chunks.
+chunked_post(n: int) -> string {
+    piece = string.pad_end("", 65536, 98)
+    out = "POST /len HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+    sent = 0
+    while sent < n {
+        out = string.concat(out, "10000\r\n${piece}\r\n")
+        sent = sent + 65536
+    }
+    return string.concat(out, "0\r\n\r\n")
+}
+
+main() {
+    println("=== a kept-alive connection gives back a large buffer once its request is done (#3262) ===")
+    upstream = http.server_create(0)
+    http.server_set_host(upstream, "127.0.0.1")
+    http.server_get(upstream, "/big", handle_big, 0)
+    http.server_get(upstream, "/small", handle_len, 0)
+    http.server_post(upstream, "/len", handle_len, 0)
+    up_url = "http://127.0.0.1:${start(upstream)}"
+
+    names = ["event loop", "worker path"]
+    post = chunked_post(BIG)
+    bad = 0
+    g = 0
+    while g < 2 {
+        s = gateway(up_url, g)
+        port = start(s)
+        sleep(100)
+        sock, cerr = tcp.connect("127.0.0.1", port)
+        if cerr != "" {
+            println("FAIL: connect")
+            exit(1)
+        }
+        // Settle the connection's ordinary buffers first.
+        tcp.write(sock, "GET /small HTTP/1.1\r\nHost: x\r\n\r\n")
+        read_response(sock)
+        tcp.write(sock, "GET /small HTTP/1.1\r\nHost: x\r\n\r\n")
+        read_response(sock)
+        sleep(100)
+
+        before = aether_caps_used_bytes()
+        tcp.write(sock, "GET /big HTTP/1.1\r\nHost: x\r\n\r\n")
+        got = read_response(sock)
+        sleep(200)
+        kept = aether_caps_used_bytes() - before
+        if got < BIG || kept >= 262144 {
+            println("  FAIL after a 1 MB response (${names[g]}): read ${got}, ${kept} bytes still held")
+            bad = bad + 1
+        } else {
+            println("  PASS after a 1 MB response (${names[g]})")
+        }
+
+        before = aether_caps_used_bytes()
+        tcp.write_all(sock, string.bytes(post))
+        got = read_response(sock)
+        sleep(200)
+        kept = aether_caps_used_bytes() - before
+        if got == 0 || kept >= 262144 {
+            println("  FAIL after a 1 MB chunked request body (${names[g]}): read ${got}, ${kept} bytes still held")
+            bad = bad + 1
+        } else {
+            println("  PASS after a 1 MB chunked request body (${names[g]})")
+        }
+
+        tcp.close(sock)
+        http.server_stop(s)
+        g = g + 1
+    }
+
+    http.server_stop(upstream)
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

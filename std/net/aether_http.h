@@ -412,6 +412,39 @@ int  http_upstream_connected(HttpUpstreamConn* c);
  * the same state http_upstream_acquire leaves one, or -1. */
 int  http_upstream_has_next(HttpUpstreamConn* c);
 int  http_upstream_redial(const char* host, int port, HttpUpstreamConn* c);
+/* A caller's own name lookups, for one that must not block on a resolver:
+ * the proxy event loop's (#3267). See aether_http_internal.h. */
+typedef struct HttpResolver HttpResolver;
+/* http_upstream_acquire_ex that never waits on a name lookup, for a caller
+ * that must not block (the proxy event loop, #3267): a fresh dial goes ahead
+ * from `resolver`'s answer (a numeric address needs none), and otherwise
+ * fails with http_upstream_lookup saying why: 1 when the answer is still to
+ * come, which the resolver says when it arrives, -1 when the name does not
+ * resolve. A redial of such a connection asks the same resolver. */
+int  http_upstream_acquire_nb(const char* host, int port, int allow_pool,
+                              HttpResolver* resolver, HttpUpstreamConn* out);
+int  http_upstream_lookup(const HttpUpstreamConn* c);
 void http_upstream_release(HttpUpstreamConn* c, int keep);
+/* Whether a response head lets its connection carry another request: not
+ * when it says Connection: close, nor when it is HTTP/1.0 without a
+ * Connection header saying otherwise. `head` is the response's first
+ * `header_bytes` bytes, the blank line's CRLFCRLF included, read in place
+ * (#3281). The framing is the caller's to check. Both clients ask it before
+ * pooling a connection (#3259). */
+int  http_response_head_keeps_conn(const char* head, size_t header_bytes);
+
+/* The largest buffer worth keeping on an idle connection (#2160).
+ *
+ * Keeping it is what makes a pooled connection stop allocating; keeping an
+ * unbounded one would let a single large response pin that much memory for
+ * as long as the connection sits idle, on every idle connection. 64 KiB
+ * holds any ordinary response in full, and bounds what the idle pool can
+ * pin at http_pool_max_idle * 64 KiB -- 4 MiB at the default 64 -- where
+ * one outsized body would otherwise pin its whole size. A bigger buffer is
+ * freed and the next request grows a fresh one, which is what every
+ * request did before. A server connection keeps its buffers by the same
+ * bound between requests, on the worker path and the proxy event loop
+ * (#3262). */
+#define HTTP_RX_KEEP_MAX (64u * 1024u)
 
 #endif

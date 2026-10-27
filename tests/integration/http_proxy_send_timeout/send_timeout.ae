@@ -1,0 +1,198 @@
+// A client that stops reading its response is cut off after the idle
+// timeout, on the proxy event loop and on the worker path alike (#3257).
+//
+// Neither path bounded a send. The worker path wrote a response with a
+// blocking send and no send timeout, so a client that never read held the
+// worker for good; the proxy event loop on Linux and macOS waited for the
+// client's socket to drain with no deadline, so the connection and its
+// response were held for good. Both now give up after the server's
+// keep-alive idle timeout without progress, as a receive does.
+//
+// Three pipelined GETs for 32 MB each, more than loopback buffers hold, through
+// a bare proxy (the event loop on Linux and macOS), through one behind a
+// program's middleware (the worker path), and for a file the server sends
+// with sendfile(2) on Linux and macOS, each with a one second idle timeout.
+// The client reads nothing for three seconds after the first byte arrives,
+// then reads to the end: the responses must have been cut short. Three,
+// because Windows takes a whole send into the kernel when the socket has
+// nothing queued, so the first response never blocks there; the next one
+// does. Every server listens on 127.0.0.1 and a port the kernel picks.
+
+import std.fs
+import std.http
+import std.http.proxy
+import std.string
+import std.tcp
+
+extern exit(code: int)
+
+const BIG = 33554432
+
+handle_big(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "application/octet-stream")
+    http.response_set_body(res, string.pad_end("", BIG, 120))
+}
+
+@c_callback mw_pass(req: ptr, res: ptr, ud: ptr) -> int {
+    return 1
+}
+
+// The file named in the request's X-File header, by serve_file, which takes
+// the sendfile(2) path where there is one.
+handle_file(req: ptr, res: ptr, ud: ptr) {
+    http.serve_file(res, http.get_header(req, "X-File"))
+}
+
+start(server: ptr) -> int {
+    if http.server_bind(server, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    err = http.server_start_background(server)
+    if err != "" {
+        println("FAIL: ${err}")
+        exit(1)
+    }
+    return http.server_port(server)
+}
+
+need(label: string, err: string) {
+    if err != "" {
+        println("FAIL: ${label}: ${err}")
+        exit(1)
+    }
+}
+
+gateway(up_url: string, worker: int) -> ptr {
+    s = http.server_create(0)
+    http.server_set_host(s, "127.0.0.1")
+    if worker == 1 {
+        http.server_use_middleware(s, mw_pass, 0)
+    }
+    need("keepalive", http.server_set_keepalive(s, 1, 0, 1s))
+    pool = proxy.upstream_pool_new("round_robin", 10, 0, 0)
+    need("upstream_add", proxy.upstream_add(pool, up_url, 1))
+    opts = proxy.opts_new()
+    // Room for the response: the proxy refuses one over its cap with 502.
+    need("opts_set_body_cap", proxy.opts_set_body_cap(opts, 67108864))
+    need("mount", proxy.mount(s, "/", pool, opts))
+    return s
+}
+
+// The responses to three `get`s whose reading starts three seconds late:
+// "whole" when every byte of all three arrived, else "cut short".
+late_reader(port: int, get: string) -> string {
+    sock, cerr = tcp.connect("127.0.0.1", port)
+    if cerr != "" {
+        return "connect failed"
+    }
+    // A client that stops reading has to stop taking bytes: left to grow
+    // its receive buffer by itself, the kernel went on taking them a little
+    // at a time through the stall (macOS, now and then), and the server was
+    // right not to give up on a client its sends still reached.
+    berr = tcp.set_read_buffer(sock, 16384)
+    if berr != "" {
+        return berr
+    }
+    tcp.write(sock, "${get}${get}${get}")
+    // The three seconds of not reading count from the server's first byte,
+    // not from the request: a slow build (a sanitizer's) can take seconds to
+    // fetch the body upstream, and a stall that began before the server sent
+    // anything was over before it had to wait.
+    waited = 0
+    while waited < 300 {
+        first, _ferr = tcp.poll(sock, 100)
+        if first {
+            waited = 300
+        } else {
+            waited = waited + 1
+        }
+    }
+    sleep(3000)
+    total = 0
+    quiet = 0
+    closed = 0
+    while quiet < 20 {
+        ready, _perr = tcp.poll(sock, 100)
+        if ready {
+            chunk, rerr = tcp.read(sock, 65536)
+            if rerr != "" || string.length(chunk) == 0 {
+                closed = 1
+                quiet = 20
+            } else {
+                total = total + string.length(chunk)
+                quiet = 0
+            }
+        } else {
+            quiet = quiet + 1
+        }
+    }
+    tcp.close(sock)
+    if total > 3 * BIG {
+        return "whole (${total} bytes, closed ${closed})"
+    }
+    return "cut short"
+}
+
+main() {
+    println("=== a client that stops reading is cut off after the idle timeout (#3257) ===")
+    upstream = http.server_create(0)
+    http.server_set_host(upstream, "127.0.0.1")
+    http.server_get(upstream, "/big", handle_big, 0)
+    up_url = "http://127.0.0.1:${start(upstream)}"
+
+    names = ["event loop", "worker path"]
+    bad = 0
+    g = 0
+    while g < 2 {
+        s = gateway(up_url, g)
+        port = start(s)
+        sleep(100)
+        got = late_reader(port, "GET /big HTTP/1.1\r\nHost: x\r\n\r\n")
+        if got != "cut short" {
+            println("  FAIL a response nobody reads (${names[g]}): got '${got}', expected 'cut short'")
+            bad = bad + 1
+        } else {
+            println("  PASS a response nobody reads (${names[g]})")
+        }
+        http.server_stop(s)
+        g = g + 1
+    }
+    http.server_stop(upstream)
+
+    // A file, sent with sendfile(2) where there is one (#3257).
+    dir, derr = fs.make_temp_dir("", "ae3257")
+    if derr != "" {
+        println("FAIL: temp dir: ${derr}")
+        exit(1)
+    }
+    file = "${dir}/big.bin"
+    werr = fs.write(file, string.pad_end("", BIG, 120))
+    if werr != "" {
+        println("FAIL: write: ${werr}")
+        exit(1)
+    }
+    files = http.server_create(0)
+    http.server_set_host(files, "127.0.0.1")
+    need("keepalive", http.server_set_keepalive(files, 1, 0, 1s))
+    http.server_get(files, "/file", handle_file, 0)
+    port = start(files)
+    sleep(100)
+    got = late_reader(port, "GET /file HTTP/1.1\r\nHost: x\r\nX-File: ${file}\r\n\r\n")
+    if got != "cut short" {
+        println("  FAIL a file nobody reads: got '${got}', expected 'cut short'")
+        bad = bad + 1
+    } else {
+        println("  PASS a file nobody reads")
+    }
+    http.server_stop(files)
+    fs.delete(file)
+    fs.delete_dir(dir)
+
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

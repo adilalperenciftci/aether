@@ -26,6 +26,7 @@
 
 #include "aether_http.h"
 #include "aether_http_internal.h"
+#include "aether_http_pool.h"
 #include "../http/proxy/aether_proxy_internal.h"
 #include "../../runtime/scheduler/aether_io_poller.h"
 #include "../../runtime/aether_resource_caps.h"
@@ -63,6 +64,8 @@
 typedef enum {
     EV_TLS_HANDSHAKE,    /* completing a TLS handshake with the client */
     EV_READ_REQUEST,     /* reading a request from the client */
+    EV_UPSTREAM_LOOKUP,  /* waiting on the loop's resolver for the upstream's
+                          * name (#3267) */
     EV_UPSTREAM_DIAL,    /* a connect this driver started is still in flight */
     EV_UPSTREAM_SEND,    /* writing the request to the upstream */
     EV_UPSTREAM_RECV,    /* reading the response from the upstream */
@@ -82,6 +85,13 @@ typedef struct EvConn {
                              * pieces would otherwise rescan from the start
                              * every time */
     int      client_in_poller, up_in_poller;
+    /* On a backend with no edge mode, the interest each descriptor holds while
+     * it is in the poller, set by ev_level_settle (#3258). */
+    uint32_t client_events, up_events;
+    /* What the client's TLS session last waited for: 1 to read, 2 to write,
+     * which a level-triggered backend has to know to wait on the right
+     * readiness (#3258). */
+    int      tls_want;
 #ifdef AETHER_HAS_OPENSSL
     /* The client's TLS session, when this connection has one. A TLS
      * connection used to be refused by this driver and given a thread of its
@@ -94,6 +104,10 @@ typedef struct EvConn {
                              * still arriving is asked again, and resuming the
                              * search would then look past the terminator and
                              * never find it. 0 means not found yet */
+    /* The head's verdict, made once when its end is found (#3269): -1 the
+     * worker path's to answer, else the body length it declares. Checked on
+     * every read of the body before, the head scanned again each time. */
+    long     in_declared;
 
     /* Bytes of `in` belonging to the request being served. A client may send
      * the next request in the same segment; what sits past this offset is
@@ -115,6 +129,8 @@ typedef struct EvConn {
     char*            head;       /* serialised upstream request */
     size_t           head_len, head_cap;
 
+    int64_t  idle_due;           /* when a quiet client is closed, 0 = not
+                                  * waiting on it (ev_arm_idle, #3269) */
     int64_t  deadline_ms;        /* when the upstream call gives up, 0 = none;
                                   * a `long` before, 32 bits on Windows, where
                                   * the clock went negative after 24.8 days of
@@ -126,7 +142,26 @@ typedef struct EvConn {
     /* A connection taken from the pool that turned out to be closed has been
      * dialled again once. One retry only: a fresh connection that answers
      * nothing is the upstream's answer, not a stale descriptor. */
-    int      up_stale_retried;
+    int      up_stale_retried;   /* per request (#3261) */
+    /* The next dial is that retry: a fresh connection, not another from the
+     * pool, which may hold more that died the same way, as the worker path's
+     * client does (#3260). One-shot; ev_dial clears it. */
+    int      dial_fresh;
+    /* The declared body this request holds against the loop's total
+     * (ev_request_complete), given back when the request ends (#3263). */
+    size_t   body_reserved;
+    /* Waiting on the loop's resolver (EV_UPSTREAM_LOOKUP, #3267): on this
+     * driver's list of such connections, which ev_resume_lookups dials
+     * again when the name it waits on (lookup_name, http_resolver_name) is
+     * answered. */
+    int      lookup_waiting;
+    unsigned lookup_name;
+    struct EvConn* lookup_prev;
+    struct EvConn* lookup_next;
+    /* This attempt's upstream deadline was armed when it began waiting on
+     * the resolver, and the dial after the wait keeps it: the lookup counts
+     * in the upstream timeout, once (#3283). */
+    int      lookup_deadline;
 
     /* The response accumulator, kept between requests. It starts at 16 KiB,
      * and allocating and freeing one per request had the kernel handing back
@@ -187,13 +222,38 @@ typedef struct {
     int            by_fd_cap;
     int            wake_r;       /* a submitted descriptor arrives here */
     int            wake_w;
-    int            started;
+    /* Running: read by the accept path and the resolver's threads, which
+     * write to wake_w only while it is (ev_names_answered). */
+    atomic_int     started;
+    /* Connections waiting on the resolver (EV_UPSTREAM_LOOKUP), and whether
+     * it has answered since this driver last looked (#3267). The names it
+     * answered meanwhile, by http_resolver_name, for this driver to wake
+     * only the connections waiting on them (#3283); `answered_all` when more
+     * came than the list holds. Written by the resolver's threads, read by
+     * this driver, under answered_lock. */
+    EvConn*        lookups;
+    atomic_int     answered;
+    pthread_mutex_t answered_lock;
+    unsigned       answered_names[16];
+    int            answered_count;
+    int            answered_all;
 
     /* Connections with a deadline, earliest first. A proxy has to give up on
      * an upstream that never answers, and the loop needs to know when the
      * next one is due without walking everything it owns. */
     EvConn**       timers;
     int            timer_count, timer_cap;
+
+    /* Returns from the poller with events, for http_evloop_wakeups. Written
+     * by this driver alone; read relaxed by whoever asks (#3258). */
+    _Atomic int64_t wakeups;
+    int64_t        next_idle_sweep_ms;   /* ev_sweep_idle (#3269) */
+
+    /* What serving a request here takes from the server (whether the loop
+     * may, the proxy's options, the middleware ahead of it), kept and
+     * recomputed only when the server says it changed: three walks of the
+     * chain on every request before (#3269). */
+    HttpLoopPlan   plan;
 } EvDriver;
 
 struct HttpEvLoop {
@@ -204,7 +264,18 @@ struct HttpEvLoop {
     atomic_int  taken;           /* connections taken since the start (#3214) */
     atomic_int  stopping;
     atomic_int  next_driver;     /* round-robin placement of new connections */
+    /* Request bodies over the worker's buffer size the drivers hold now, by
+     * declared length, against body_slots bodies of the mount's cap: the
+     * workers the worker path would run (#3263). */
+    atomic_llong body_held;
+    int          body_slots;
+    /* The upstreams' names, looked up off the drivers' threads (#3267). */
+    HttpResolver* resolver;
 };
+
+/* What the resolver writes down a driver's pipe, where the accept path writes
+ * a descriptor and a stop writes -1 (ev_names_answered). */
+#define EV_NOTE_ANSWERED (-2)
 
 static int ev_timer_set(EvDriver* d, EvConn* c, int64_t deadline_ms);
 
@@ -243,6 +314,18 @@ int http_evloop_taken(HttpEvLoop* loop) {
     return loop ? atomic_load(&loop->taken) : 0;
 }
 
+int64_t http_evloop_wakeups(HttpEvLoop* loop) {
+    int64_t total = 0;
+    if (!loop) return 0;
+    for (int i = 0; i < loop->driver_count; i++)
+        total += atomic_load_explicit(&loop->drivers[i].wakeups, memory_order_relaxed);
+    return total;
+}
+
+struct HttpResolver* http_evloop_resolver(HttpEvLoop* loop) {
+    return loop ? loop->resolver : NULL;
+}
+
 /* ---- buffers ---- */
 
 static int ev_in_reserve(EvConn* c, size_t extra) {
@@ -277,10 +360,24 @@ static void ev_release_attempt(EvConn* c) {
  * long as the client keeps talking. The head and the response accumulator go
  * through the capability allocator, so they come back through it too, with
  * the size they were charged at. */
-static void ev_conn_reset_request(EvConn* c) {
+static void ev_conn_reset_request(EvDriver* d, EvConn* c) {
+    /* The request's share of the loop's body total goes back with it, on
+     * every way a request ends: answered, handed to the worker path, closed
+     * (#3263). */
+    if (c->body_reserved) {
+        atomic_fetch_sub(&d->loop->body_held, (long long)c->body_reserved);
+        c->body_reserved = 0;
+    }
     size_t carried = c->in_len > c->in_total ? c->in_len - c->in_total : 0;
     if (carried) memmove(c->in, c->in + c->in_total, carried);
     c->in_len = carried;
+    /* A buffer grown for one large body goes back to the first size once
+     * that request is done, as the client pool's receive buffers do: kept,
+     * it pinned the largest body for the connection's life (#3262). */
+    if (c->in_cap > HTTP_RX_KEEP_MAX && carried + 1 <= 8192) {
+        char* small = (char*)realloc(c->in, 8192);
+        if (small) { c->in = small; c->in_cap = 8192; }
+    }
     c->in_total = 0;
     c->in_scanned = 0;
     c->in_hdr_end = 0;
@@ -291,16 +388,28 @@ static void ev_conn_reset_request(EvConn* c) {
     c->head_len = 0;
 
     /* Keep the accumulator rather than returning it; the next request on this
-     * connection reuses it at whatever size it has grown to. */
+     * connection reuses it. Up to HTTP_RX_KEEP_MAX, as a pooled connection
+     * keeps one: kept at any size, one large response pinned that much for
+     * the connection's life (#3262). */
     if (c->x.buf) {
-        if (c->rxbuf) aether_caps_free(c->rxbuf, c->rxcap);
-        c->rxbuf = c->x.buf;
-        c->rxcap = c->x.cap;
+        if (c->x.cap <= HTTP_RX_KEEP_MAX) {
+            if (c->rxbuf) aether_caps_free(c->rxbuf, c->rxcap);
+            c->rxbuf = c->x.buf;
+            c->rxcap = c->x.cap;
+        } else {
+            aether_caps_free(c->x.buf, c->x.cap);
+        }
     }
     memset(&c->x, 0, sizeof(c->x));
 
-    /* The buffer stays with the connection and is only grown; a connection
-     * serving many requests stops allocating and freeing one per request. */
+    /* The buffer stays with the connection; a connection serving many
+     * requests stops allocating and freeing one per request. Not one grown
+     * past HTTP_RX_KEEP_MAX for a large response (#3262). */
+    if (c->out_cap > HTTP_RX_KEEP_MAX) {
+        free(c->out);
+        c->out = NULL;
+        c->out_cap = 0;
+    }
     c->out_len = c->out_sent = 0;
     c->out_body = NULL;
     c->out_body_len = c->out_body_sent = 0;
@@ -322,6 +431,12 @@ static void ev_conn_reset_request(EvConn* c) {
     c->hooked = 0;
     c->t_start_us = 0;
     c->close_after = 0;
+    /* The stale-connection retry is each request's: kept from one request to
+     * the next, a client connection's later requests that drew a dead pooled
+     * upstream were answered 502 instead of being sent again (#3261). */
+    c->up_stale_retried = 0;
+    c->dial_fresh = 0;
+    c->lookup_deadline = 0;
 }
 
 /* Remember which connection a descriptor belongs to. The poller reports a
@@ -346,8 +461,20 @@ static void ev_untrack(EvDriver* d, int fd) {
     if (fd >= 0 && fd < d->by_fd_cap) d->by_fd[fd] = NULL;
 }
 
+/* Off its driver's list of connections waiting on the resolver, if it is
+ * on it (#3267). */
+static void ev_lookup_unlink(EvDriver* d, EvConn* c) {
+    if (!c->lookup_waiting) return;
+    if (c->lookup_prev) c->lookup_prev->lookup_next = c->lookup_next;
+    else                d->lookups = c->lookup_next;
+    if (c->lookup_next) c->lookup_next->lookup_prev = c->lookup_prev;
+    c->lookup_prev = c->lookup_next = NULL;
+    c->lookup_waiting = 0;
+}
+
 static void ev_conn_close(EvDriver* d, EvConn* c) {
     if (!c) return;
+    ev_lookup_unlink(d, c);
     if (c->up.t.sockfd >= 0) {
         aether_io_poller_remove(&d->poller, c->up.t.sockfd);
         ev_untrack(d, c->up.t.sockfd);
@@ -361,7 +488,7 @@ static void ev_conn_close(EvDriver* d, EvConn* c) {
         close(c->client_fd);
     }
     ev_timer_set(d, c, 0);
-    ev_conn_reset_request(c);
+    ev_conn_reset_request(d, c);
     if (c->req) http_request_free(c->req);
     if (c->res) http_server_response_free(c->res);
     if (c->rxbuf) aether_caps_free(c->rxbuf, c->rxcap);
@@ -382,6 +509,38 @@ static void ev_conn_close(EvDriver* d, EvConn* c) {
     atomic_fetch_sub(&d->loop->active, 1);
 }
 
+/* A head whose end was just found, judged: the body length it declares, or
+ * -1 when the request is the worker path's to answer or decode. */
+static long ev_head_verdict(EvConn* c, size_t body_limit) {
+    /* The same bound on a head found whole: one read can bring in more than
+     * 16 KiB once the buffer has grown for an earlier body, and a head that
+     * ended past the bound was taken here, though the worker path refuses
+     * it on a fresh connection (#3253). It goes there, which answers 431. */
+    if (c->in_hdr_end >= HTTP_CONN_BUF_CAP) return -1;
+    char* hdr_end = c->in + c->in_hdr_end - 4;
+    /* The worker path's own checks on the head (#3236): the request line's
+     * length, each header line's shape, Content-Length and
+     * Transfer-Encoding. This driver read Content-Length alone, so it
+     * forwarded heads the worker refuses ("Content-Length : 5", an obs-fold
+     * line, more headers than the parser holds), and a refusal is the
+     * worker path's to answer. So is a chunked body: Transfer-Encoding
+     * decides where a body ends, and this driver dropped a chunked one and
+     * took Content-Length bytes as the body of a request with both (#3228);
+     * the worker path decodes it and bounds it, which keeps one decoder
+     * rather than two for a framing proxied clients rarely use. */
+    long declared = 0;
+    int chunked = 0;
+    if (http_request_head_check(c->in, hdr_end, &declared, &chunked) != HTTP_HEAD_OK || chunked)
+        return -1;
+    /* The body is read whole before anything looks at the request, so a
+     * declared length is what this driver will hold: 2 GiB declared, and it
+     * set out to buffer 2 GiB (#3237). One longer than the proxy forwards
+     * goes to the worker path, which streams a body that size and where the
+     * proxy refuses it, 502, without reading it. */
+    if ((size_t)declared > body_limit) return -1;
+    return declared;
+}
+
 /* Is a whole request in the buffer yet?
  *
  * Deliberately the same question the worker path asks, and the answer has to
@@ -392,7 +551,8 @@ static void ev_conn_close(EvDriver* d, EvConn* c) {
  * larger than this driver buffers (#3237). `body_limit` is the largest body
  * the proxy forwards.
  */
-static int ev_request_complete(EvConn* c, size_t body_limit, size_t* out_total) {
+static int ev_request_complete(HttpEvLoop* loop, EvConn* c, size_t body_limit,
+                               size_t* out_total) {
     if (c->in_len == 0) return 0;
     c->in[c->in_len] = '\0';
 
@@ -420,35 +580,29 @@ static int ev_request_complete(EvConn* c, size_t body_limit, size_t* out_total) 
             return 0;
         }
         c->in_hdr_end = (size_t)((found + 4) - c->in);
+        c->in_declared = ev_head_verdict(c, body_limit);
     }
-    /* The same bound on a head found whole: one read can bring in more than
-     * 16 KiB once the buffer has grown for an earlier body, and a head that
-     * ended past the bound was taken here, though the worker path refuses
-     * it on a fresh connection (#3253). It goes there, which answers 431. */
-    if (c->in_hdr_end >= HTTP_CONN_BUF_CAP) return -1;
-
+    /* The head was judged once, when its end was found; a request whose body
+     * is still arriving comes back here on every read (#3269). */
+    if (c->in_declared < 0) return -1;
+    long declared = c->in_declared;
     size_t header_bytes = c->in_hdr_end;
-    char* hdr_end = c->in + header_bytes - 4;
-    /* The worker path's own checks on the head (#3236): the request line's
-     * length, each header line's shape, Content-Length and
-     * Transfer-Encoding. This driver read Content-Length alone, so it
-     * forwarded heads the worker refuses ("Content-Length : 5", an obs-fold
-     * line, more headers than the parser holds), and a refusal is the
-     * worker path's to answer. So is a chunked body: Transfer-Encoding
-     * decides where a body ends, and this driver dropped a chunked one and
-     * took Content-Length bytes as the body of a request with both (#3228);
-     * the worker path decodes it and bounds it, which keeps one decoder
-     * rather than two for a framing proxied clients rarely use. */
-    long declared = 0;
-    int chunked = 0;
-    if (http_request_head_check(c->in, hdr_end, &declared, &chunked) != HTTP_HEAD_OK || chunked)
-        return -1;
-    /* The body is read whole before anything looks at the request, so a
-     * declared length is what this driver will hold: 2 GiB declared, and it
-     * set out to buffer 2 GiB (#3237). One longer than the proxy forwards
-     * goes to the worker path, which streams a body that size and where the
-     * proxy refuses it, 502, without reading it. */
-    if ((size_t)declared > body_limit) return -1;
+    /* And no more bodies at once than the worker path holds: one per worker
+     * it would run, each up to the cap. Every connection may hold a body
+     * the size of the worker's own buffer; a larger one is admitted against
+     * the loop's total, or goes to the worker path, which streams it. Held
+     * per connection only, the loop buffered the cap times the connections a
+     * client cared to open (#3263). */
+    if ((size_t)declared > HTTP_CONN_BUF_CAP && !c->body_reserved) {
+        long long budget = (long long)loop->body_slots * (long long)body_limit;
+        long long held = atomic_fetch_add(&loop->body_held, (long long)declared)
+                       + (long long)declared;
+        if (held > budget) {
+            atomic_fetch_sub(&loop->body_held, (long long)declared);
+            return -1;
+        }
+        c->body_reserved = (size_t)declared;
+    }
     if (c->in_len < header_bytes + (size_t)declared) return 0;
     *out_total = header_bytes + (size_t)declared;
     return 1;
@@ -531,7 +685,7 @@ static int ev_next_timeout_ms(EvDriver* d, int cap_ms) {
 static void ev_arm_deadline(EvDriver* d, EvConn* c);
 static int  ev_expire(EvDriver* d, EvConn* c);
 static int  ev_hand_back(EvDriver* d, EvConn* c);
-static int  ev_hand_to_tls(EvDriver* d, EvConn* c);
+static int  ev_hand_to_worker(EvDriver* d, EvConn* c);
 static int  ev_watch_upstream(EvDriver* d, EvConn* c);
 static void ev_lend_rxbuf(EvConn* c);
 static int  ev_respond_from(EvDriver* d, EvConn* c);
@@ -573,42 +727,98 @@ static int ev_in_poller(const EvConn* c, int fd) {
     return fd == c->client_fd ? c->client_in_poller : c->up_in_poller;
 }
 
+/* On an edge-triggered backend a descriptor is registered once, for both
+ * readinesses, and left: EPOLLOUT and EV_CLEAR report a transition, not a
+ * state, so an interest nothing waits on never wakes anything. Registering
+ * write interest once is what removes the pair of epoll_ctl calls a blocking
+ * write used to pay, which the profile put at 1.7% of the driver's time in
+ * do_epoll_ctl.
+ *
+ * A level-triggered backend (poll()) reports a descriptor on every wait for
+ * as long as it is ready, so there an interest nothing waits on spins the
+ * driver: a writable client after its send had to wait, a client that sent
+ * its next request while this one waits on the upstream (#3258). There these
+ * calls only remember which connection a descriptor belongs to, and the
+ * descriptors' interests are set when the connection parks, to exactly what
+ * its state waits on (ev_level_settle). */
 static int ev_watch(EvDriver* d, int fd, EvConn* c) {
     if (ev_track(d, fd, c) != 0) return -1;
-    ev_mark_in_poller(c, fd, 1);
-    /* On an edge-triggered backend, write interest costs nothing to leave in
-     * place: EPOLLOUT and EV_CLEAR report the transition to writable, not the
-     * state, so an idle writable descriptor never wakes anything. Registering
-     * it once here is what removes the pair of epoll_ctl calls a blocking
-     * write used to pay, which the profile put at 1.7% of the driver's time
-     * in do_epoll_ctl.
-     *
-     * A level-triggered backend must not carry it: there a writable
-     * descriptor is ready on every single wait. */
-    uint32_t events = AETHER_IO_READ | AETHER_IO_EDGE;
-    if (d->edge_triggered) events |= AETHER_IO_WRITE;
-    return aether_io_poller_add(&d->poller, fd, c, events);
-}
-
-static int ev_watch_writable(EvDriver* d, int fd, EvConn* c) {
-    /* On an edge-triggered backend ev_watch asked for write interest already,
-     * so a descriptor that is in the poller needs no call here. One that is
-     * not in it yet -- the upstream, before its first wait -- still does, and
-     * ev_watch gives it both interests at once. */
-    if (d->edge_triggered)
-        return ev_in_poller(c, fd) ? 0 : ev_watch(d, fd, c);
-
-    if (ev_track(d, fd, c) != 0) return -1;
+    if (!d->edge_triggered) return 0;
     ev_mark_in_poller(c, fd, 1);
     return aether_io_poller_add(&d->poller, fd, c,
                                 AETHER_IO_READ | AETHER_IO_WRITE | AETHER_IO_EDGE);
 }
 
-/* Back to watching for readable only, now that the write has drained. On an
- * edge-triggered backend there is nothing to undo. */
-static int ev_unwatch_writable(EvDriver* d, int fd, EvConn* c) {
-    if (d->edge_triggered) return 0;
+static int ev_watch_writable(EvDriver* d, int fd, EvConn* c) {
+    /* ev_watch asked for write interest already, so a descriptor that is in
+     * the poller needs no call here. One that is not in it yet (the upstream,
+     * before its first wait) still does. */
+    if (d->edge_triggered && ev_in_poller(c, fd)) return 0;
     return ev_watch(d, fd, c);
+}
+
+/* Back to watching for readable only, now that the write has drained: on an
+ * edge-triggered backend there is nothing to undo, and on a level-triggered
+ * one ev_level_settle does it. */
+static int ev_unwatch_writable(EvDriver* d, int fd, EvConn* c) {
+    (void)d; (void)fd; (void)c;
+    return 0;
+}
+
+/* One descriptor's interest on a level-triggered backend, `want` 0 for none:
+ * registered to stay (AETHER_IO_EDGE, which such a backend keeps
+ * level-triggered), changed or removed only when it differs. -1 when the
+ * poller would not take it (a full poll set): a connection parked with no
+ * interest is never woken, so the caller closes it (#3278). */
+static int ev_level_set(EvDriver* d, EvConn* c, int fd, int* in_poller,
+                        uint32_t* have, uint32_t want) {
+    if (fd < 0) return 0;
+    uint32_t cur = *in_poller ? *have : 0;
+    if (cur == want) return 0;
+    if (!want) {
+        aether_io_poller_remove(&d->poller, fd);
+        *in_poller = 0;
+        *have = 0;
+        return 0;
+    }
+    if (aether_io_poller_add(&d->poller, fd, c, want | AETHER_IO_EDGE) != 0) return -1;
+    *in_poller = 1;
+    *have = want;
+    return 0;
+}
+
+/* What a parked connection waits on, as the interest each of its descriptors
+ * holds on a level-triggered backend (#3258): the client while a request is
+ * read or a handshake carried (readable, or writable when TLS asked to
+ * write) and while a response is written (writable, or readable when TLS
+ * asked to read); the upstream while it is dialled or written (writable)
+ * and read (readable); nothing at all during a backoff, which waits on its
+ * timer, or a lookup, which the resolver ends. -1 when the poller would not
+ * take an interest, for the caller to close the connection (#3278). */
+static int ev_level_settle(EvDriver* d, EvConn* c) {
+    uint32_t client = 0, up = 0;
+    switch (c->state) {
+    case EV_READ_REQUEST:
+    case EV_TLS_HANDSHAKE:
+        client = c->tls_want == 2 ? AETHER_IO_WRITE : AETHER_IO_READ;
+        break;
+    case EV_CLIENT_SEND:
+        client = c->tls_want == 1 ? AETHER_IO_READ : AETHER_IO_WRITE;
+        break;
+    case EV_UPSTREAM_DIAL:
+    case EV_UPSTREAM_SEND:
+        up = AETHER_IO_WRITE;
+        break;
+    case EV_UPSTREAM_RECV:
+        up = AETHER_IO_READ;
+        break;
+    default:
+        break;
+    }
+    if (ev_level_set(d, c, c->client_fd, &c->client_in_poller, &c->client_events,
+                     client) != 0)
+        return -1;
+    return ev_level_set(d, c, c->up.t.sockfd, &c->up_in_poller, &c->up_events, up);
 }
 
 
@@ -646,7 +856,7 @@ static void ev_reclaim_rxbuf(EvConn* c) {
  * for the next request to inherit. */
 static void ev_drop_upstream(EvDriver* d, EvConn* c) {
     if (c->up.t.sockfd < 0) return;
-    if (c->up_watched) aether_io_poller_remove(&d->poller, c->up.t.sockfd);
+    if (c->up_watched || c->up_in_poller) aether_io_poller_remove(&d->poller, c->up.t.sockfd);
     ev_untrack(d, c->up.t.sockfd);
     c->up_in_poller = 0;
     c->up_watched = c->up_writable_watched = 0;
@@ -664,18 +874,21 @@ static int ev_watch_upstream(EvDriver* d, EvConn* c) {
  * Both return what a socket call would: bytes moved, or -1 with errno set to
  * EAGAIN when the caller should wait. OpenSSL reports the same condition as
  * SSL_ERROR_WANT_READ or WANT_WRITE, and a TLS record can need the socket
- * readable to finish a write or writable to finish a read; the driver keeps
+  * readable to finish a write or writable to finish a read; the driver keeps
  * both interests registered on an edge-triggered backend, so either wake
- * brings it back here and the distinction does not have to be carried.
+ * brings it back here. A level-triggered one waits on the one asked for,
+ * which tls_want carries (#3258).
  */
 static ssize_t ev_client_read(EvConn* c, void* buf, size_t n) {
 #ifdef AETHER_HAS_OPENSSL
     if (c->ssl) {
         ERR_clear_error();
+        c->tls_want = 0;
         int r = SSL_read(c->ssl, buf, (int)n);
         if (r > 0) return r;
         int e = SSL_get_error(c->ssl, r);
         if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
+            c->tls_want = e == SSL_ERROR_WANT_WRITE ? 2 : 1;   /* #3258 */
             errno = EAGAIN;
             return -1;
         }
@@ -687,23 +900,25 @@ static ssize_t ev_client_read(EvConn* c, void* buf, size_t n) {
     return recv(c->client_fd, buf, n, 0);
 }
 
-static ssize_t ev_client_write(EvConn* c, const void* buf, size_t n) {
 #ifdef AETHER_HAS_OPENSSL
-    if (c->ssl) {
-        ERR_clear_error();
-        int r = SSL_write(c->ssl, buf, (int)n);
-        if (r > 0) return r;
-        int e = SSL_get_error(c->ssl, r);
-        if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
-            errno = EAGAIN;
-            return -1;
-        }
-        errno = EIO;
+/* A write to a TLS client. Only the TLS branch of ev_step_client_send writes
+ * one segment at a time; a plain client is written with sendmsg there, so a
+ * build without OpenSSL has no use for this and defines none (#3271). */
+static ssize_t ev_client_write(EvConn* c, const void* buf, size_t n) {
+    ERR_clear_error();
+    c->tls_want = 0;
+    int r = SSL_write(c->ssl, buf, (int)n);
+    if (r > 0) return r;
+    int e = SSL_get_error(c->ssl, r);
+    if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
+        c->tls_want = e == SSL_ERROR_WANT_WRITE ? 2 : 1;   /* #3258 */
+        errno = EAGAIN;
         return -1;
     }
-#endif
-    return send(c->client_fd, buf, n, AE_SEND_NOSIGNAL);
+    errno = EIO;
+    return -1;
 }
+#endif
 
 #ifdef AETHER_HAS_OPENSSL
 /* Carry the handshake as far as it will go without waiting.
@@ -717,12 +932,15 @@ static int ev_step_tls_handshake(EvDriver* d, EvConn* c) {
     ERR_clear_error();
     int r = SSL_accept(c->ssl);
     if (r == 1) {
+        c->tls_want = 0;
         c->state = EV_READ_REQUEST;
         return 1;
     }
     int e = SSL_get_error(c->ssl, r);
-    if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE)
+    if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
+        c->tls_want = e == SSL_ERROR_WANT_WRITE ? 2 : 1;   /* #3258 */
         return ev_watch_writable(d, c->client_fd, c) == 0 ? 0 : -1;
+    }
 
     /* Drain the error queue, or the next handshake on this thread starts with
      * someone else's failure still on it. */
@@ -744,9 +962,10 @@ static int ev_step_read_request(EvDriver* d, EvConn* c) {
             if (!c->t_start_us && d->loop->server->request_hook_chain)
                 c->t_start_us = http_server_clock_us();
             size_t total = 0;
-            AetherProxyOpts* opts = (AetherProxyOpts*)http_server_proxy_opts(d->loop->server);
+            http_server_loop_plan(d->loop->server, &d->plan);   /* #3269 */
+            AetherProxyOpts* opts = (AetherProxyOpts*)d->plan.proxy_opts;
             size_t body_limit = opts ? (size_t)opts->max_body_bytes : 0;
-            int complete = ev_request_complete(c, body_limit, &total);
+            int complete = ev_request_complete(d->loop, c, body_limit, &total);
             /* Framing this driver cannot resolve: the worker path has the
              * answer for it (a 400 for a length that is no length), so the
              * connection goes there with the bytes read, rather than being
@@ -907,7 +1126,7 @@ static int ev_answer(EvDriver* d, EvConn* c) {
 /* The proxy asked for another attempt, against whichever upstream it picked
  * this time. Same path as the first attempt: a connection, a head, an
  * exchange. */
-static int ev_begin_retry_ex(EvDriver* d, EvConn* c, int next_addr);
+static int ev_dial(EvDriver* d, EvConn* c, int next_addr);
 static int ev_begin_retry(EvDriver* d, EvConn* c) {
     /* A retry's backoff is waited out on a timer (#3232). The exchange used
      * to sleep it, on this thread, and every connection the driver held
@@ -919,12 +1138,40 @@ static int ev_begin_retry(EvDriver* d, EvConn* c) {
         c->state = EV_BACKOFF;
         return ev_timer_set(d, c, due) == 0 ? 0 : -1;
     }
-    return ev_begin_retry_ex(d, c, 0);
+    return ev_dial(d, c, 0);
 }
 
-/* `next_addr` 1: the connect to one of the upstream's addresses failed and
- * it has another, so dial that rather than starting over. */
-static int ev_begin_retry_ex(EvDriver* d, EvConn* c, int next_addr) {
+/* The upstream's name has no answer yet (#3267). The loop's resolver is
+ * looking it up on a thread of its own, and the connection waits here,
+ * holding nothing the driver needs, until the answer arrives
+ * (ev_resume_lookups) or the request's deadline passes (ev_expire). The
+ * driver goes on with every other connection meanwhile: it used to look the
+ * name up itself, and they all waited with it. The dial goes again from the
+ * start, a fresh one if this one was to be. The upstream deadline starts
+ * with the first wait and is not moved by another (#3283): the dial after
+ * it keeps it, so the request's upstream timeout covers the lookup. */
+static int ev_lookup_wait(EvDriver* d, EvConn* c, int fresh, unsigned name) {
+    c->state = EV_UPSTREAM_LOOKUP;
+    c->dial_fresh = fresh;
+    c->lookup_name = name;
+    c->lookup_prev = NULL;
+    c->lookup_next = d->lookups;
+    if (d->lookups) d->lookups->lookup_prev = c;
+    d->lookups = c;
+    c->lookup_waiting = 1;
+    if (!c->lookup_deadline) {
+        ev_arm_deadline(d, c);
+        c->lookup_deadline = 1;
+    }
+    return 0;
+}
+
+/* The proxy picked an upstream; dial it, or take one from the pool, and get
+ * the head and the exchange ready to send: a request's first attempt, a
+ * retry, and a dial a lookup held up all come here. `next_addr` 1: the
+ * connect to one of the upstream's addresses failed and it has another, so
+ * dial that rather than starting over. */
+static int ev_dial(EvDriver* d, EvConn* c, int next_addr) {
     const char* url = http_request_url_of(c->px.outbound);
     /* The path is sized from the URL; a fixed path[1024] cut a long client
      * path, and the proxy forwarded the cut one (#2674). */
@@ -933,13 +1180,24 @@ static int ev_begin_retry_ex(EvDriver* d, EvConn* c, int next_addr) {
     int port = 0, use_tls = 0;
     if (!url || !parse_url_alloc(url, host, sizeof(host), &port, &path, &use_tls))
         return -1;
-    if (use_tls) { free(path); return ev_hand_to_tls(d, c); }   /* #3231 */
+    /* this driver dials plain HTTP only: an https upstream is the worker
+     * path's (#3231) */
+    if (use_tls) { free(path); return ev_hand_to_worker(d, c); }
 
+    int fresh = c->dial_fresh;
+    c->dial_fresh = 0;
     int fd = next_addr ? http_upstream_redial(host, port, &c->up)
-                       : http_upstream_acquire(host, port, &c->up);
+                       : http_upstream_acquire_nb(host, port, !fresh, d->loop->resolver,
+                                                  &c->up);
     if (fd < 0) {
         free(path);
-        return ev_upstream_failed(d, c, "connection failed", 0);
+        /* Never a name lookup on this thread (#3267): the resolver has it in
+         * hand, or the name does not resolve, which the exchange answers as
+         * the worker path's dial would. */
+        int lookup = http_upstream_lookup(&c->up);
+        if (lookup > 0) return ev_lookup_wait(d, c, fresh, http_resolver_name(host, port));
+        return ev_upstream_failed(d, c, lookup < 0 ? "could not resolve host"
+                                                   : "connection failed", 0);
     }
 
     int body_len = 0;
@@ -968,7 +1226,9 @@ static int ev_begin_retry_ex(EvDriver* d, EvConn* c, int next_addr) {
     http_exchange_init(&c->x, &c->up.t, c->head, c->head_len, body, body_len,
                        http_request_method_of(c->px.outbound));
     ev_lend_rxbuf(c);
-    ev_arm_deadline(d, c);
+    /* A dial a lookup held up keeps the deadline its wait armed (#3283). */
+    if (c->lookup_deadline) c->lookup_deadline = 0;
+    else                    ev_arm_deadline(d, c);
     if (c->up.connecting) {
         c->state = EV_UPSTREAM_DIAL;
         c->up_writable_watched = 1;
@@ -1063,15 +1323,15 @@ static int ev_hand_over(EvDriver* d, EvConn* c) {
     return ev_hand_over_from(d, c, 0);
 }
 
-/* The proxy picked an https upstream, which this driver cannot dial: it has
- * no TLS client, and it used to close the client's connection with nothing
- * written (#3231). A server with one is not served here at all
- * (http_server_evloop_serves); one added while this request was on its way,
- * or picked by a retry, lands here. The pick goes back, and the request goes
- * to the worker path, whose client speaks TLS: from the mount itself when
- * the middleware ahead of it already ran here, else with its bytes, as if
- * this driver had never read it. */
-static int ev_hand_to_tls(EvDriver* d, EvConn* c) {
+/* The proxy picked an upstream this driver cannot dial: an https one. It
+ * has no TLS client, and it used to close the client's connection with
+ * nothing written (#3231); a server with one is not served here at all
+ * (http_server_evloop_serves), so one added while this request was on its
+ * way, or picked by a retry, lands here. The pick goes back, and the request
+ * goes to the worker path: from the mount itself when the middleware ahead
+ * of it already ran here, else with its bytes, as if this driver had never
+ * read it. */
+static int ev_hand_to_worker(EvDriver* d, EvConn* c) {
     aether_proxy_exchange_abandon(&c->px);
     ev_release_attempt(c);
     if (!c->before_proxy) return ev_hand_back(d, c);
@@ -1083,7 +1343,7 @@ static int ev_hand_to_tls(EvDriver* d, EvConn* c) {
  * path gets this from the socket, and a driver that never blocks has to keep
  * the time itself. */
 static void ev_arm_deadline(EvDriver* d, EvConn* c) {
-    AetherProxyOpts* opts = (AetherProxyOpts*)http_server_proxy_opts(d->loop->server);
+    AetherProxyOpts* opts = (AetherProxyOpts*)d->plan.proxy_opts;   /* current: ev_begin_upstream */
     int secs = (opts && opts->pool) ? opts->pool->request_timeout_sec : 0;
     if (secs <= 0) { ev_timer_set(d, c, 0); return; }
     ev_timer_set(d, c, aether_proxy_now_ms() + (int64_t)secs * 1000);
@@ -1096,23 +1356,54 @@ static void ev_arm_deadline(EvDriver* d, EvConn* c) {
  * restarts with each receive; a TLS handshake has it once, start to finish,
  * and the request after it starts afresh. With no timeout at all, a client held
  * a connection for as long as it kept it open, idle or halfway through a
- * request (#3243). */
+ * request (#3243). The same bound covers writing a response to a client that
+ * stopped reading, moved each time it takes bytes, as the worker path's send
+ * timeout (conn_apply_send_timeout) restarts with each send (#3257).
+ *
+ * Kept as a time on the connection rather than in the deadline heap: a kept
+ * connection waits on its client between every two requests, and a heap
+ * insertion and removal for each was work on every request for a timeout
+ * that almost never fires (#3269). ev_sweep_idle closes the ones past it,
+ * a few times a second. */
 static void ev_arm_idle(EvDriver* d, EvConn* c) {
     int ms = d->loop->server->keep_alive_idle_ms > 0
            ? d->loop->server->keep_alive_idle_ms : 30000;
-    ev_timer_set(d, c, aether_proxy_now_ms() + ms);
+    c->idle_due = aether_proxy_now_ms() + ms;
 }
 
-/* The upstream did not answer in time. The client is owed an answer anyway,
- * and it is the same one the blocking path gives. */
+/* How often ev_sweep_idle looks, and so how late past its idle timeout a
+ * quiet connection may close. */
+#define EV_IDLE_SWEEP_MS 250
+
+/* Close every connection whose client has been quiet past its idle timeout
+ * (ev_arm_idle): one waiting on a request or a handshake, as the worker
+ * path closes on its receive timeout (#3243), or on a client that stopped
+ * reading its response, as the worker path's send fails on its send timeout
+ * (#3257). */
+static void ev_sweep_idle(EvDriver* d, int64_t now) {
+    if (now < d->next_idle_sweep_ms) return;
+    d->next_idle_sweep_ms = now + EV_IDLE_SWEEP_MS;
+    for (int fd = 0; fd < d->by_fd_cap; fd++) {
+        EvConn* c = d->by_fd[fd];
+        if (!c || c->client_fd != fd || !c->idle_due || c->idle_due > now) continue;
+        if (c->state == EV_READ_REQUEST || c->state == EV_TLS_HANDSHAKE ||
+            c->state == EV_CLIENT_SEND)
+            ev_conn_close(d, c);
+    }
+}
+
+/* A deadline in the heap has passed: a retry's backoff is over, or the
+ * upstream did not answer in time. */
 static int ev_expire(EvDriver* d, EvConn* c) {
     ev_timer_set(d, c, 0);
     /* Not a timeout: the backoff before a retry is over (#3232). */
-    if (c->state == EV_BACKOFF) return ev_begin_retry_ex(d, c, 0);
-    /* The client went quiet for the idle timeout while this driver waited on
-     * it (ev_arm_idle): closed, as the worker path closes on its receive
-     * timeout (#3243). */
-    if (c->state == EV_READ_REQUEST || c->state == EV_TLS_HANDSHAKE) return -1;
+    if (c->state == EV_BACKOFF) return ev_dial(d, c, 0);
+    /* The upstream's name took longer to look up than the request may wait:
+     * a timeout like any other, from the exchange, and no longer a waiter. */
+    if (c->state == EV_UPSTREAM_LOOKUP) {
+        ev_lookup_unlink(d, c);
+        return ev_upstream_failed(d, c, "request timed out before the response arrived", 0);
+    }
     /* The upstream did not answer in time: a failed call, which goes back to
      * the proxy exchange as the worker path's driver sends its own (#3250).
      * The exchange decrements the upstream's in-flight count, tells its
@@ -1144,6 +1435,7 @@ static int ev_expire(EvDriver* d, EvConn* c) {
  * was taken and has to be given up first. */
 static int ev_upstream_failed(EvDriver* d, EvConn* c, const char* why, int release) {
     ev_timer_set(d, c, 0);
+    c->lookup_deadline = 0;   /* the attempt is over (#3283) */
     if (release) ev_drop_upstream(d, c);
     ev_reclaim_rxbuf(c);
     HttpResponse* resp = http_response_alloc_failed(why);
@@ -1181,7 +1473,7 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
      * middleware ahead of the proxy, or a request hook, that is not
      * loop-safe (#3214): from this request on the worker path serves the
      * connection, and nothing of the request has run here yet. */
-    if (!http_server_evloop_serves(server)) return ev_hand_back(d, c);
+    if (!http_server_loop_plan(server, &d->plan)) return ev_hand_back(d, c);
 
     if (!c->meta_ready) {
         /* The connection's peer, which the proxy names in X-Forwarded-For
@@ -1193,7 +1485,7 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
         http_conn_meta_from_fd(&c->meta, c->client_fd, is_tls);
         c->meta_ready = 1;
     }
-    c->before_proxy = http_server_has_before_proxy(server);
+    c->before_proxy = d->plan.before_proxy;
     c->hooked = server->request_hook_chain != NULL;
     if (c->hooked && !c->t_start_us) c->t_start_us = http_server_clock_us();
 
@@ -1250,7 +1542,7 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
     if (c->before_proxy && !http_server_run_before_proxy(server, c->req, c->res))
         return ev_answer(d, c);   /* 1: the client write is next */
 
-    void* opts = http_server_proxy_opts(server);
+    void* opts = d->plan.proxy_opts;
     int r = aether_proxy_exchange_begin(&c->px, c->req, c->res, opts,
                                         c->arena_ready ? &c->arena : NULL);
     if (r == 1) {
@@ -1267,51 +1559,8 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
          * is already filled in. */
         return ev_respond_from(d, c);   /* 1: the client write is next */
     }
-
-    const char* url = http_request_url_of(c->px.outbound);
-    /* The path is sized from the URL; a fixed path[1024] cut a long client
-     * path, and the proxy forwarded the cut one (#2674). */
-    char host[256];
-    char* path = NULL;
-    int port = 0, use_tls = 0;
-    if (!url || !parse_url_alloc(url, host, sizeof(host), &port, &path, &use_tls))
-        return -1;
-    /* this driver dials plain HTTP only: an https upstream is the worker
-     * path's (#3231) */
-    if (use_tls) { free(path); return ev_hand_to_tls(d, c); }   /* #3231 */
-
-    int fd = http_upstream_acquire(host, port, &c->up);
-    if (fd < 0) {
-        free(path);
-        return ev_upstream_failed(d, c, "connection failed", 0);
-    }
-
-    int body_len = 0;
-    const char* body = http_request_body_of(c->px.outbound, &body_len);
-    HttpReqHead head_params = {
-        c->px.outbound, http_request_method_of(c->px.outbound), path,
-        host, port, 0, 0, body, body_len,
-        http_request_content_type_of(c->px.outbound), 1
-    };
-    c->head = http_build_request_head_into(&head_params, &c->head, &c->head_cap,
-                                           &c->head_len);
-    free(path);   /* the head holds the request line now */
-    if (!c->head) return -1;
-
-    http_exchange_init(&c->x, &c->up.t, c->head, c->head_len, body, body_len,
-                       http_request_method_of(c->px.outbound));
-    ev_lend_rxbuf(c);
-    ev_arm_deadline(d, c);
-    if (c->up.connecting) {
-        c->state = EV_UPSTREAM_DIAL;
-        c->up_writable_watched = 1;
-        c->up_watched = 1;
-        return ev_watch_writable(d, fd, c) == 0 ? 0 : -1;
-    }
-    c->up_writable_watched = 0;
-    c->up_watched = 0;
-    c->state = EV_UPSTREAM_SEND;
-    return ev_track(d, fd, c) == 0 ? 1 : -1;
+    /* The upstream, through the same dial a retry takes (#3267). */
+    return ev_dial(d, c, 0);
 }
 
 /* Append to the response head being built in `out`, growing it as the
@@ -1379,10 +1628,12 @@ static int ev_try_direct(EvDriver* d, EvConn* c) {
      * path's response carries after every other header (#3229): they go
      * before the blank line that ends the head, and fail the same way. */
     char lines[160];
+    size_t lines_len = 0;
     int keep = http_server_keep_alive_lines(d->loop->server, c->req, direct.status,
-                                            c->requests_served, lines, sizeof(lines));
+                                            c->requests_served, lines, sizeof(lines),
+                                            &lines_len);
     head_len -= 2;
-    if (ev_out_put(c, &head_len, lines, strlen(lines)) != 0 ||
+    if (ev_out_put(c, &head_len, lines, lines_len) != 0 ||
         ev_out_put(c, &head_len, "\r\n", 2) != 0) return -1;
     c->close_after = !keep;
 
@@ -1413,12 +1664,18 @@ static int ev_finish_upstream(EvDriver* d, EvConn* c) {
     ev_timer_set(d, c, 0);       /* the upstream answered; nothing to give up on */
 
     /* The connection is worth keeping only when the response ended where its
-     * own framing said it would. Released before the response is looked at,
-     * because nothing about releasing it depends on that. */
-    int keep = c->x.complete && !c->x.framing.invalid;
+     * own framing said it would, and did not say the connection closes
+     * (Connection: close, or HTTP/1.0 without keep-alive), as the worker
+     * path's client decides: pooled anyway, the next request took a
+     * connection the upstream had closed (#3259). Released before the
+     * response is looked at, because nothing about releasing it depends on
+     * that. */
+    int keep = c->x.complete && !c->x.framing.invalid &&
+               c->x.framing.header_bytes > 0 &&
+               http_response_head_keeps_conn(c->x.buf, c->x.framing.header_bytes);
     int was_reused = c->up.reused;
     size_t got = c->x.len;
-    if (c->up_watched) aether_io_poller_remove(&d->poller, c->up.t.sockfd);
+    if (c->up_watched || c->up_in_poller) aether_io_poller_remove(&d->poller, c->up.t.sockfd);
     ev_untrack(d, c->up.t.sockfd);
     c->up_in_poller = 0;
     c->up_watched = c->up_writable_watched = 0;
@@ -1434,6 +1691,7 @@ static int ev_finish_upstream(EvDriver* d, EvConn* c) {
      * "HTTP/1.1 0 Unknown". */
     if (got == 0 && was_reused && !c->up_stale_retried) {
         c->up_stale_retried = 1;
+        c->dial_fresh = 1;          /* #3260 */
         ev_reclaim_rxbuf(c);
         return ev_begin_retry(d, c);
     }
@@ -1470,9 +1728,17 @@ static int ev_finish_upstream(EvDriver* d, EvConn* c) {
  * Called when a descriptor it owns is ready, and again after each state
  * completes, so a request that can run start to finish without waiting does
  * so in one visit. Returns 0 when the connection is parked on a descriptor,
- * -1 when it is finished with.
+ * -1 when it is finished with. A parked connection's descriptors then hold
+ * what its state waits on, on a backend with no edge mode (#3258).
  */
+static int ev_advance_states(EvDriver* d, EvConn* c);
 static int ev_advance(EvDriver* d, EvConn* c) {
+    int r = ev_advance_states(d, c);
+    if (r == 0 && !d->edge_triggered && ev_level_settle(d, c) != 0) return -1;   /* #3278 */
+    return r;
+}
+
+static int ev_advance_states(EvDriver* d, EvConn* c) {
     for (;;) {
         switch (c->state) {
         case EV_READ_REQUEST: {
@@ -1480,9 +1746,9 @@ static int ev_advance(EvDriver* d, EvConn* c) {
             int r = ev_step_read_request(d, c);
             /* Waiting on the client: no longer than the idle timeout since
              * its last byte (#3243). */
-            if (r == 0 && (c->in_len != had || c->deadline_ms == 0)) ev_arm_idle(d, c);
+            if (r == 0 && (c->in_len != had || c->idle_due == 0)) ev_arm_idle(d, c);
             if (r <= 0) return r;
-            ev_timer_set(d, c, 0);   /* the request is here */
+            c->idle_due = 0;   /* the request is here */
             r = ev_begin_upstream(d, c);
             if (r <= 0) return r;
             continue;
@@ -1490,9 +1756,9 @@ static int ev_advance(EvDriver* d, EvConn* c) {
 #ifdef AETHER_HAS_OPENSSL
         case EV_TLS_HANDSHAKE: {
             int r = ev_step_tls_handshake(d, c);
-            if (r == 0 && c->deadline_ms == 0) ev_arm_idle(d, c);   /* #3243 */
+            if (r == 0 && c->idle_due == 0) ev_arm_idle(d, c);   /* #3243 */
             if (r <= 0) return r;
-            ev_timer_set(d, c, 0);
+            c->idle_due = 0;
             continue;
         }
 #endif
@@ -1504,7 +1770,7 @@ static int ev_advance(EvDriver* d, EvConn* c) {
                  * before calling the upstream down. */
                 ev_drop_upstream(d, c);
                 ev_reclaim_rxbuf(c);
-                int r = ev_begin_retry_ex(d, c, 1);
+                int r = ev_dial(d, c, 1);
                 if (r <= 0) return r;
                 continue;
             }
@@ -1526,6 +1792,7 @@ static int ev_advance(EvDriver* d, EvConn* c) {
              * being dropped without an answer. */
             if (r < 0 && c->up.reused && !c->up_stale_retried) {
                 c->up_stale_retried = 1;
+                c->dial_fresh = 1;          /* #3260 */
                 ev_drop_upstream(d, c);
                 ev_reclaim_rxbuf(c);
                 r = ev_begin_retry(d, c);
@@ -1549,6 +1816,7 @@ static int ev_advance(EvDriver* d, EvConn* c) {
              * since nothing had arrived: dial fresh and send once more. */
             if (r < 0 && c->x.len == 0 && c->up.reused && !c->up_stale_retried) {
                 c->up_stale_retried = 1;
+                c->dial_fresh = 1;          /* #3260 */
                 ev_drop_upstream(d, c);
                 ev_reclaim_rxbuf(c);
                 r = ev_begin_retry(d, c);
@@ -1567,9 +1835,17 @@ static int ev_advance(EvDriver* d, EvConn* c) {
         }
         case EV_BACKOFF:
             return 0;    /* the timer moves it on (ev_expire) */
+        case EV_UPSTREAM_LOOKUP:
+            return 0;    /* the resolver moves it on (ev_resume_lookups) */
         case EV_CLIENT_SEND: {
+            size_t had = c->out_sent + c->out_body_sent;
             int r = ev_step_client_send(d, c);
+            /* Waiting on a client that is not reading: no longer than the
+             * idle timeout since the last byte it took (#3257). */
+            if (r == 0 && (c->out_sent + c->out_body_sent != had || c->idle_due == 0))
+                ev_arm_idle(d, c);
             if (r <= 0) return r;
+            c->idle_due = 0;   /* written */
             c->requests_served++;
             /* A middleware's answer settled as closing the connection
              * (ev_answer) closes it now that it is written, as the worker
@@ -1578,7 +1854,7 @@ static int ev_advance(EvDriver* d, EvConn* c) {
             /* Done with this request. The connection stays, and the next one
              * is read the same way the first was, so a client that keeps
              * talking never costs another accept. */
-            ev_conn_reset_request(c);
+            ev_conn_reset_request(d, c);
             c->state = EV_READ_REQUEST;
             continue;
         }
@@ -1595,6 +1871,64 @@ static int ev_advance(EvDriver* d, EvConn* c) {
  * thread sleeps only in the poll, and only when nothing it owns can make
  * progress, which is the whole difference from a worker per connection.
  */
+
+/* The resolver answered `name`, which a connection on some driver may wait
+ * on (#3267): runs on the resolver's thread, puts the name in each running
+ * driver's list and tells it down its pipe. One note per driver until it
+ * reads it: the flag says one is on its way, and a pipe too full to take one
+ * wakes the driver anyway. */
+static void ev_names_answered(void* ctx, unsigned name) {
+    HttpEvLoop* loop = (HttpEvLoop*)ctx;
+    for (int i = 0; i < loop->driver_count; i++) {
+        EvDriver* d = &loop->drivers[i];
+        if (!atomic_load(&d->started)) continue;
+        pthread_mutex_lock(&d->answered_lock);
+        int cap = (int)(sizeof(d->answered_names) / sizeof(d->answered_names[0]));
+        if (d->answered_count < cap) d->answered_names[d->answered_count++] = name;
+        else                         d->answered_all = 1;
+        pthread_mutex_unlock(&d->answered_lock);
+        if (atomic_exchange(&d->answered, 1)) continue;
+        int note = EV_NOTE_ANSWERED;
+        ssize_t ignored = write(d->wake_w, &note, sizeof(note));
+        (void)ignored;
+    }
+}
+
+/* The connections here waiting on a name the resolver answered dial again
+ * (#3267); the rest keep waiting, not sent through the resolver's lock for
+ * a name that is not theirs (#3283). A dial whose name has no answer after
+ * all (two names sharing a hash) parks again. The list is taken whole first
+ * so that none is walked twice. */
+static void ev_resume_lookups(EvDriver* d) {
+    unsigned names[16];
+    pthread_mutex_lock(&d->answered_lock);
+    int count = d->answered_count, all = d->answered_all;
+    memcpy(names, d->answered_names, (size_t)count * sizeof(names[0]));
+    d->answered_count = 0;
+    d->answered_all = 0;
+    pthread_mutex_unlock(&d->answered_lock);
+
+    EvConn* list = d->lookups;
+    d->lookups = NULL;
+    while (list) {
+        EvConn* c = list;
+        list = c->lookup_next;
+        c->lookup_prev = c->lookup_next = NULL;
+        int answered = all;
+        for (int i = 0; i < count && !answered; i++) answered = names[i] == c->lookup_name;
+        if (!answered) {
+            c->lookup_next = d->lookups;              /* back on the list */
+            if (d->lookups) d->lookups->lookup_prev = c;
+            d->lookups = c;
+            continue;
+        }
+        c->lookup_waiting = 0;
+        int r = ev_dial(d, c, 0);
+        if (r > 0) r = ev_advance(d, c);
+        else if (r == 0 && !d->edge_triggered && ev_level_settle(d, c) != 0) r = -1;
+        if (r < 0) ev_conn_close(d, c);
+    }
+}
 
 /* A submitted descriptor arrives down a pipe rather than through a lock: the
  * accept path writes, the driver reads, and the driver's own poller is what
@@ -1642,6 +1976,10 @@ static void ev_take_submissions(EvDriver* d) {
         if (ev_watch(d, fd, c) != 0) { ev_conn_close(d, c); continue; }
         if (ev_advance(d, c) < 0) ev_conn_close(d, c);
     }
+    /* The resolver answered (ev_names_answered): the flag is read after the
+     * pipe is, so an answer that lands after it was cleared writes a note the
+     * next wait sees. */
+    if (atomic_exchange(&d->answered, 0)) ev_resume_lookups(d);
     /* One-shot registration: the pipe has to be armed again for the next one. */
     aether_io_poller_add(&d->poller, d->wake_r, NULL, AETHER_IO_READ);
 }
@@ -1659,6 +1997,10 @@ static void* ev_driver_main(void* arg) {
          * visible. */
         int n = aether_io_poller_poll(&d->poller, events, 64,
                                       ev_next_timeout_ms(d, 200));
+        if (n > 0)
+            atomic_store_explicit(&d->wakeups,
+                                  atomic_load_explicit(&d->wakeups, memory_order_relaxed) + 1,
+                                  memory_order_relaxed);
 
         /* Pin the clock for this pass, after the wait and not before: the poll
          * above can block for its whole timeout. Everything below then shares
@@ -1681,6 +2023,10 @@ static void* ev_driver_main(void* arg) {
             if (r < 0) { ev_conn_close(d, c); continue; }
             if (ev_advance(d, c) < 0) ev_conn_close(d, c);
         }
+        /* Quiet clients past their idle timeout, which the heap no longer
+         * carries (#3269). The wait above is capped well under the sweep's
+         * period, so it runs on time. */
+        ev_sweep_idle(d, now);
 
         /* Released before waiting again, so the next wait's timeout is
          * computed from the real clock rather than from this pass's. */
@@ -1702,7 +2048,7 @@ int http_evloop_submit(HttpEvLoop* loop, int client_fd) {
     int start = atomic_fetch_add(&loop->next_driver, 1);
     for (int i = 0; i < loop->driver_count; i++) {
         EvDriver* d = &loop->drivers[(start + i) % loop->driver_count];
-        if (!d->started) continue;
+        if (!atomic_load(&d->started)) continue;
         if (write(d->wake_w, &client_fd, sizeof(client_fd)) == (ssize_t)sizeof(client_fd))
             return 0;
     }
@@ -1716,14 +2062,22 @@ static int ev_driver_init(HttpEvLoop* loop, EvDriver* d, int index) {
     d->loop = loop;
     d->index = index;
     d->wake_r = d->wake_w = -1;
+    atomic_init(&d->wakeups, 0);
+    atomic_init(&d->started, 0);
+    atomic_init(&d->answered, 0);
+    if (pthread_mutex_init(&d->answered_lock, NULL) != 0) return -1;
 
-    if (aether_io_poller_init(&d->poller) != 0) return -1;
+    if (aether_io_poller_init(&d->poller) != 0) {
+        pthread_mutex_destroy(&d->answered_lock);
+        return -1;
+    }
     d->edge_triggered = aether_io_poller_edge_capable();
 
     int pipefd[2];
     /* #3046: close-on-exec, so a child the server starts never holds it. */
     if (aether_pipe_cloexec(pipefd) != 0) {
         aether_io_poller_destroy(&d->poller);
+        pthread_mutex_destroy(&d->answered_lock);
         return -1;
     }
     d->wake_r = pipefd[0];
@@ -1739,6 +2093,7 @@ static void ev_driver_destroy(EvDriver* d) {
     if (d->wake_r >= 0) close(d->wake_r);
     if (d->wake_w >= 0) close(d->wake_w);
     aether_io_poller_destroy(&d->poller);
+    pthread_mutex_destroy(&d->answered_lock);
     free(d->by_fd);
 }
 
@@ -1761,6 +2116,17 @@ HttpEvLoop* http_evloop_start(HttpServer* server, int threads) {
     atomic_init(&loop->taken, 0);
     atomic_init(&loop->stopping, 0);
     atomic_init(&loop->next_driver, 0);
+    atomic_init(&loop->body_held, 0);
+    loop->body_slots = http_pool_default_workers();
+    /* Before the drivers, which ask it from their first dial. Without one a
+     * dial would look names up on the driver's thread, so no resolver, no
+     * loop (#3267). */
+    loop->resolver = http_resolver_new(ev_names_answered, loop);
+    if (!loop->resolver) {
+        free(loop->drivers);
+        free(loop);
+        return NULL;
+    }
 
     int started = 0;
     for (int i = 0; i < threads; i++) {
@@ -1770,10 +2136,11 @@ HttpEvLoop* http_evloop_start(HttpServer* server, int threads) {
             ev_driver_destroy(d);
             continue;
         }
-        d->started = 1;
+        atomic_store(&d->started, 1);
         started++;
     }
     if (started == 0) {
+        http_resolver_free(loop->resolver);
         free(loop->drivers);
         free(loop);
         return NULL;      /* the caller keeps the worker path */
@@ -1786,7 +2153,7 @@ void http_evloop_stop(HttpEvLoop* loop) {
     atomic_store(&loop->stopping, 1);
     for (int i = 0; i < loop->driver_count; i++) {
         EvDriver* d = &loop->drivers[i];
-        if (!d->started) continue;
+        if (!atomic_load(&d->started)) continue;
         /* Wake a driver parked in poll so it sees the stop. */
         int sentinel = -1;
         ssize_t ignored = write(d->wake_w, &sentinel, sizeof(sentinel));
@@ -1794,8 +2161,15 @@ void http_evloop_stop(HttpEvLoop* loop) {
     }
     for (int i = 0; i < loop->driver_count; i++) {
         EvDriver* d = &loop->drivers[i];
-        if (!d->started) continue;
+        if (!atomic_load(&d->started)) continue;
         pthread_join(d->thread, NULL);
+    }
+    /* After the drivers, which ask it, and before their pipes close, which
+     * its threads write to until a lookup under way has ended (#3267). */
+    http_resolver_free(loop->resolver);
+    for (int i = 0; i < loop->driver_count; i++) {
+        EvDriver* d = &loop->drivers[i];
+        if (!atomic_load(&d->started)) continue;
         free(d->timers);
         ev_driver_destroy(d);
     }
@@ -1814,6 +2188,8 @@ int  http_evloop_submit(HttpEvLoop* loop, int client_fd) {
 }
 int  http_evloop_active(HttpEvLoop* loop) { (void)loop; return 0; }
 int  http_evloop_taken(HttpEvLoop* loop)  { (void)loop; return 0; }
+int64_t http_evloop_wakeups(HttpEvLoop* loop) { (void)loop; return 0; }
+struct HttpResolver* http_evloop_resolver(HttpEvLoop* loop) { (void)loop; return NULL; }
 void http_evloop_stop(HttpEvLoop* loop)   { (void)loop; }
 
 #endif /* AETHER_EVLOOP_SUPPORTED && AETHER_HAS_THREADS */

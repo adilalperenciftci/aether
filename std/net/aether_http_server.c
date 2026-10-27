@@ -151,6 +151,8 @@ void http_server_use_request_hook_loop_safe(HttpServer* s, HttpRequestHook h, vo
     (void)s; (void)h; (void)u;
 }
 int http_server_evloop_connections(HttpServer* s) { (void)s; return 0; }
+int64_t http_server_evloop_wakeups(HttpServer* s) { (void)s; return 0; }
+int http_server_evloop_active(HttpServer* s) { (void)s; return 0; }
 const char* http_server_set_access_log_raw(HttpServer* s, const char* f, const char* p) {
     (void)s; (void)f; (void)p; return "";
 }
@@ -483,6 +485,18 @@ typedef struct HttpConn {
      * was "only re-applied when it changes"; this is the guard that makes that
      * true. -1 rather than 0 because 0 is a valid "block indefinitely". */
     int   applied_recv_timeout_ms;
+    /* The send timeout, 0 when none has been applied: how long a send waits
+     * for the client to take more (conn_wait_io), and this socket's
+     * SO_SNDTIMEO (conn_apply_send_timeout, #3257). */
+    int   applied_send_timeout_ms;
+    /* The descriptor's file status flags without O_NONBLOCK, once read
+     * (fl_known), and whether O_NONBLOCK is on: set for a write that has no
+     * per-call flag for it, an OpenSSL one or a sendfile drain, and off
+     * again before a read (conn_set_nonblocking, #3285). A connection on the
+     * worker path starts blocking: accepted so, or adopted and cleared. */
+    int   fl_flags;
+    int   fl_known;
+    int   nonblocking;
     /* Set when the server refused a request it had not finished reading, so
      * the client may still be sending: conn_close then closes in stages
      * (conn_linger) rather than resetting the refusal away. */
@@ -501,10 +515,33 @@ typedef struct HttpConn {
  * it: the descriptor to watch, and a way to close what it still owns. */
 int http_conn_fd(HttpConn* conn) { return conn ? conn->fd : -1; }
 
+#ifndef _WIN32
+/* `c`'s socket non-blocking or back to blocking, for a write that has no
+ * per-call flag for it (sendfile, OpenSSL's): reads want it blocking, with
+ * their timeout. One fcntl a change, none when it is already so: the flags
+ * are read once and the mode is kept here, so a TLS response written in
+ * many pieces turns it on once, and the next read turns it off (#3285). */
+static void conn_set_nonblocking(HttpConn* c, int on) {
+    on = on ? 1 : 0;
+    if (c->nonblocking == on) return;
+    if (!c->fl_known) {
+        int flags = fcntl(c->fd, F_GETFL, 0);
+        if (flags < 0) return;
+        c->fl_flags = flags & ~O_NONBLOCK;
+        c->fl_known = 1;
+    }
+    if (fcntl(c->fd, F_SETFL, on ? (c->fl_flags | O_NONBLOCK) : c->fl_flags) == 0)
+        c->nonblocking = on;
+}
+#endif
+
 static int conn_recv(HttpConn* c, void* buf, int len) {
     if (c->pure_tls) {
         return pt_server_recv(c->pure_tls, buf, len);
     }
+#ifndef _WIN32
+    conn_set_nonblocking(c, 0);   /* a TLS write may have left it on */
+#endif
 #ifdef AETHER_HAS_OPENSSL
     if (c->ssl) {
         int n = SSL_read(c->ssl, buf, len);
@@ -515,32 +552,105 @@ static int conn_recv(HttpConn* c, void* buf, int len) {
     return (int)recv(c->fd, buf, len, 0);
 }
 
+#ifndef _WIN32
+static int64_t conn_now_ms(void);
+
+/* Wait for `c`'s socket to take more bytes (`events` POLLOUT), or for a TLS
+ * write that needs a read to finish (POLLIN), for no longer than the send
+ * timeout: 1 when it may go on, 0 when the time ran out, -1 on an error.
+ *
+ * This is what bounds a send on POSIX, not SO_SNDTIMEO (#3257). With the
+ * option alone, a blocking send to a client that read nothing for three
+ * seconds, under a one second timeout, never failed on Linux: all 96 MB of a
+ * test's responses arrived once it read again. A blocking send wakes for any
+ * room that frees, and the option times each send(2) afresh. poll(2) reports
+ * a socket writable only once a good part of its buffer is free, so a wait
+ * here ends when the client has taken next to nothing for that long: the
+ * proxy event loop's bound, and nginx's send_timeout. conn_wait_io_ms waits
+ * `ms` instead, 0 for no bound. */
+static int conn_wait_io_ms(HttpConn* c, short events, int ms) {
+    int64_t due = ms > 0 ? conn_now_ms() + ms : 0;
+    for (;;) {
+        int wait = -1;
+        if (due) {
+            int64_t left = due - conn_now_ms();
+            if (left <= 0) return 0;
+            wait = (int)left;
+        }
+        struct pollfd pfd = { c->fd, events, 0 };
+        int r = poll(&pfd, 1, wait);
+        if (r > 0) return 1;      /* an error or a hangup: the retry reports it */
+        if (r == 0) return 0;
+        if (errno != EINTR) return -1;
+    }
+}
+
+static int conn_wait_io(HttpConn* c, short events) {
+    return conn_wait_io_ms(c, events, c->applied_send_timeout_ms);
+}
+#endif
+
 /* Every one of `len` bytes, or -1: a plain send(2) can take fewer than asked
  * (a signal cuts it short), and every caller here sends a whole response,
- * frame or event (#3108). */
+ * frame or event (#3108). A send that waits for the client waits no longer
+ * than the send timeout without progress, then fails (#3257): on POSIX in
+ * conn_wait_io, on Windows by SO_SNDTIMEO, which bounds each blocking send
+ * there (conn_apply_send_timeout). */
 static int conn_send(HttpConn* c, const void* buf, int len) {
     if (c->pure_tls) {
         return pt_server_send(c->pure_tls, buf, len);
     }
 #ifdef AETHER_HAS_OPENSSL
     if (c->ssl) {
+#ifdef _WIN32
         int n = SSL_write(c->ssl, buf, len);
         if (n <= 0) return -1;
         return n;
+#else
+        /* Non-blocking for the write, so a client that stops reading is
+         * waited on in conn_wait_io, as a plain one is. A record cut short
+         * goes again with the same arguments, which is what OpenSSL asks.
+         * No read runs meanwhile: OpenSSL lets one thread at a time use a
+         * session. Left so for the writes that follow, until conn_recv
+         * (#3285): every read of a TLS connection goes through it, and none
+         * is handed on as a bare descriptor (http_response_accept_tunnel
+         * refuses TLS). */
+        conn_set_nonblocking(c, 1);
+        int n;
+        for (;;) {
+            ERR_clear_error();
+            n = SSL_write(c->ssl, buf, len);
+            if (n > 0) break;
+            int e = SSL_get_error(c->ssl, n);
+            short want = e == SSL_ERROR_WANT_WRITE ? POLLOUT
+                       : e == SSL_ERROR_WANT_READ  ? POLLIN : 0;
+            if (!want || conn_wait_io(c, want) != 1) { n = -1; break; }
+        }
+        return n;
+#endif
     }
 #endif
     const char* p = (const char*)buf;
     int sent = 0;
     while (sent < len) {
+#ifdef _WIN32
         int n = (int)send(c->fd, p + sent, (size_t)(len - sent), AE_SEND_NOSIGNAL);
         if (n > 0) {
             sent += n;
             continue;
         }
-#ifdef _WIN32
         if (n < 0 && WSAGetLastError() == WSAEINTR) continue;
 #else
+        int n = (int)send(c->fd, p + sent, (size_t)(len - sent),
+                          AE_SEND_NOSIGNAL | MSG_DONTWAIT);
+        if (n > 0) {
+            sent += n;
+            continue;
+        }
         if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) &&
+            conn_wait_io(c, POLLOUT) == 1)
+            continue;
 #endif
         return -1;
     }
@@ -611,9 +721,15 @@ static void conn_uncork_for_body(HttpConn* c) {
  * call by checking conn->ssl == NULL. */
 static long long conn_sendfile_drain(HttpConn* c, int in_fd, long long size) {
     if (!c || c->fd < 0 || in_fd < 0 || size < 0) return -1;
+    /* Non-blocking for the drain, and a client that stops reading waited on
+     * for no longer than the send timeout, as conn_send waits (#3257). A
+     * blocking sendfile was bounded by SO_SNDTIMEO, which a stalled client
+     * whose window grew a little at a time never let expire, and then by a
+     * five second poll whatever the server's timeout. */
 #if defined(__linux__)
     off_t off = 0;
     long long total = 0;
+    conn_set_nonblocking(c, 1);
     while (total < size) {
         size_t want = (size_t)(size - total);
         ssize_t n = sendfile(c->fd, in_fd, &off, want);
@@ -623,23 +739,21 @@ static long long conn_sendfile_drain(HttpConn* c, int in_fd, long long size) {
         }
         if (n < 0) {
             if (errno == EINTR) continue;
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                /* Edge case for non-blocking sockets — cooperate
-                 * with poll. The server's accepted sockets are
-                 * blocking by default so this branch is rare. */
-                struct pollfd pfd = { c->fd, POLLOUT, 0 };
-                if (poll(&pfd, 1, 5000) <= 0) return -1;
+            if ((errno == EAGAIN || errno == EWOULDBLOCK) &&
+                conn_wait_io(c, POLLOUT) == 1)
                 continue;
-            }
-            return -1;
+            total = -1;
+            break;
         }
         /* n == 0: EOF on input or kernel said zero. Either way
          * we've sent all that's coming. */
         break;
     }
+    conn_set_nonblocking(c, 0);
     return total;
 #elif defined(__APPLE__)
     long long total = 0;
+    conn_set_nonblocking(c, 1);
     while (total < size) {
         off_t len = (off_t)(size - total);
         int rc = sendfile(in_fd, c->fd, (off_t)total, &len, NULL, 0);
@@ -649,13 +763,13 @@ static long long conn_sendfile_drain(HttpConn* c, int in_fd, long long size) {
         if (len > 0) total += (long long)len;
         if (rc == 0) break;
         if (errno == EINTR) continue;
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            struct pollfd pfd = { c->fd, POLLOUT, 0 };
-            if (poll(&pfd, 1, 5000) <= 0) return -1;
+        if ((errno == EAGAIN || errno == EWOULDBLOCK) &&
+            conn_wait_io(c, POLLOUT) == 1)
             continue;
-        }
-        return -1;
+        total = -1;
+        break;
     }
+    conn_set_nonblocking(c, 0);
     return total;
 #else
     /* Windows / FreeBSD / unsupported. */
@@ -810,8 +924,11 @@ static int send_response_with_optional_sendfile(HttpConn* conn,
     if (!sent_via_sendfile) {
         char*  buf = NULL;
         size_t cap = 0, resp_len = 0;
-        if (response_serialize_wire(req, res, &buf, &cap, &resp_len))
-            conn_send(conn, buf, (int)resp_len);
+        /* A send that failed, the send timeout among the ways (#3257), left
+         * the response cut short: the connection cannot carry another. */
+        if (!response_serialize_wire(req, res, &buf, &cap, &resp_len) ||
+            conn_send(conn, buf, (int)resp_len) < 0)
+            force_close = 1;
         free(buf);
     }
 
@@ -866,6 +983,34 @@ static void conn_linger(int fd) {
     }
 }
 
+#ifdef AETHER_HAS_OPENSSL
+/* Send the session's close_notify and free it. Best effort: the result is
+ * not looked at, the descriptor closes next, and a half-closed peer is not
+ * the server's problem. A TLS write may have left the socket non-blocking
+ * (#3285): the close_notify then waits for room as a write does, for the
+ * send timeout (the linger bound when none is set), rather than being
+ * dropped when the send buffer is full, which a strict client reads as the
+ * response cut off. */
+static void conn_tls_close(HttpConn* c) {
+#ifndef _WIN32
+    int ms = c->applied_send_timeout_ms > 0 ? c->applied_send_timeout_ms
+                                            : HTTP_LINGER_MAX_MS;
+    for (;;) {
+        ERR_clear_error();
+        int r = SSL_shutdown(c->ssl);
+        if (r >= 0 || !c->nonblocking ||
+            SSL_get_error(c->ssl, r) != SSL_ERROR_WANT_WRITE ||
+            conn_wait_io_ms(c, POLLOUT, ms) != 1)
+            break;
+    }
+#else
+    SSL_shutdown(c->ssl);
+#endif
+    SSL_free(c->ssl);
+    c->ssl = NULL;
+}
+#endif
+
 static void conn_close(HttpConn* c) {
     if (c->pure_tls) {
         pt_server_close(c->pure_tls);
@@ -875,14 +1020,7 @@ static void conn_close(HttpConn* c) {
         c->fd = -1;
     }
 #ifdef AETHER_HAS_OPENSSL
-    if (c->ssl) {
-        /* Best-effort graceful shutdown — ignore the result; we're
-         * about to close the fd anyway and a half-closed peer is
-         * not a server-side problem. */
-        SSL_shutdown(c->ssl);
-        SSL_free(c->ssl);
-        c->ssl = NULL;
-    }
+    if (c->ssl) conn_tls_close(c);
 #endif
     if (c->fd >= 0) {
         if (c->linger_on_close) conn_linger(c->fd);
@@ -921,6 +1059,23 @@ static void conn_buf_compact(HttpConn* c) {
     }
     c->write_pos = unread;
     c->read_pos = 0;
+}
+
+/* Give back a read buffer grown past HTTP_RX_KEEP_MAX for one request (a
+ * chunked body is decoded in it, up to HTTP_MAX_CHUNKED_BODY), once that
+ * request is done: back to its first size when what is left in it (the next
+ * request, pipelined) fits. Kept, it pinned the largest body for as long as
+ * the connection stayed open, parked included, where a pooled client
+ * connection keeps at most HTTP_RX_KEEP_MAX (#3262). */
+static void conn_buf_trim(HttpConn* c) {
+    if (!c->buf || c->buf_cap <= (int)HTTP_RX_KEEP_MAX) return;
+    conn_buf_compact(c);
+    if (c->write_pos + 1 > HTTP_CONN_BUF_CAP) return;
+    char* nb = (char*)aether_caps_realloc(c->buf, (size_t)c->buf_cap,
+                                          (size_t)HTTP_CONN_BUF_CAP);
+    if (!nb) return;
+    c->buf = nb;
+    c->buf_cap = HTTP_CONN_BUF_CAP;
 }
 
 /* Grow the read buffer to at least the given capacity. */
@@ -1119,6 +1274,7 @@ HttpServer* http_server_create(int port) {
     server->ready_check = NULL;
     server->ready_check_user_data = NULL;
     atomic_init(&server->inflight_connections, 0);
+    atomic_init(&server->loop_plan_gen, 0);
     pthread_mutex_init(&server->live_lock, NULL);
     server->live_fds = NULL;
     server->live_count = 0;
@@ -1472,6 +1628,8 @@ const char* http_server_set_access_log_raw(HttpServer* server,
  * overflowed after 35.8 minutes of summed request time (minutes of traffic
  * on a busy server) and a count after 2^31 requests (#3096). */
 typedef struct MetricsRoute {
+    /* The labels as the scrape writes them (metrics_escape): the method cut
+     * to 63 bytes and the path to 255, escaped, valid UTF-8 (#3282). */
     char* method;
     char* path_pattern;
     _Atomic int64_t total_requests;
@@ -1486,12 +1644,28 @@ typedef struct MetricsRoute {
     _Atomic int64_t bucket_le_500ms;
     _Atomic int64_t bucket_le_2s;
     _Atomic int64_t bucket_le_10s;
-    struct MetricsRoute* next;
+    struct MetricsRoute* next;    /* every series, for the scrape */
+    struct MetricsRoute* chain;   /* the series in the same hash bucket */
+    unsigned hash;
 } MetricsRoute;
+
+/* The series a server keeps at most, and the hash buckets they are found by.
+ * The method and path are the client's to choose, one series per pair: kept
+ * without a bound, a client sending fresh paths grew them for as long as it
+ * liked, each in every scrape, and the lookup walked all of them under one
+ * lock on every request (#3265). Past the bound a request counts in one
+ * series labelled "(other)", which is found in the table as any series is:
+ * a client may send that method and path itself, and that request counts
+ * in it too rather than in a second series with the same labels (#3279). */
+#define METRICS_MAX_SERIES 1024
+#define METRICS_BUCKETS    1024   /* a power of two */
 
 typedef struct {
     pthread_mutex_t lock;
     MetricsRoute* head;
+    MetricsRoute* buckets[METRICS_BUCKETS];
+    int           series;          /* in buckets, "(other)" not counted */
+    MetricsRoute* other;
     /* The server this scrape belongs to, for the gauges that read live state
      * rather than accumulated counters. */
     HttpServer* server;
@@ -1511,43 +1685,95 @@ static void metrics_release(void* p) {
     free(st);
 }
 
+/* FNV-1a over the method, a separator no method holds, and the path. */
+static unsigned metrics_hash(const char* method, const char* pattern) {
+    unsigned h = 2166136261u;
+    for (const char* p = method; *p; p++) h = (h ^ (unsigned char)*p) * 16777619u;
+    h = (h ^ 0xffu) * 16777619u;
+    for (const char* p = pattern; *p; p++) h = (h ^ (unsigned char)*p) * 16777619u;
+    return h;
+}
+
+/* A new series at the head of the scrape list, NULL when the allocator
+ * refuses. Called with the lock held. */
+static MetricsRoute* metrics_route_new(MetricsState* st, const char* method,
+                                       const char* pattern, unsigned hash) {
+    MetricsRoute* r = (MetricsRoute*)calloc(1, sizeof(MetricsRoute));
+    if (!r) return NULL;
+    r->method = strdup(method);
+    r->path_pattern = strdup(pattern);
+    if (!r->method || !r->path_pattern) {
+        free(r->method);
+        free(r->path_pattern);
+        free(r);
+        return NULL;
+    }
+    r->hash = hash;
+    r->next = st->head;
+    st->head = r;
+    return r;
+}
+
+/* The series for a method and path, found by hash, or made and put in the
+ * table when `make` says so (*made then 1); NULL when there is none, or the
+ * allocator refused one. Called with the lock held. */
+static MetricsRoute* metrics_route_find(MetricsState* st, const char* method,
+                                        const char* pattern, int make, int* made) {
+    unsigned h = metrics_hash(method, pattern);
+    MetricsRoute** slot = &st->buckets[h & (METRICS_BUCKETS - 1)];
+    *made = 0;
+    for (MetricsRoute* r = *slot; r; r = r->chain) {
+        if (r->hash == h && strcmp(r->method, method) == 0 &&
+            strcmp(r->path_pattern, pattern) == 0) return r;
+    }
+    if (!make) return NULL;
+    MetricsRoute* r = metrics_route_new(st, method, pattern, h);
+    if (!r) return NULL;
+    r->chain = *slot;
+    *slot = r;
+    *made = 1;
+    return r;
+}
+
+/* The series for a method and path, made when there is room, else the
+ * "(other)" one (#3265), made one past the bound, unless a client already
+ * sent those labels itself, which is then the same series (#3279). Called
+ * with the lock held. */
 static MetricsRoute* metrics_route_for(MetricsState* st,
                                        const char* method,
                                        const char* pattern) {
-    MetricsRoute* r = st->head;
-    while (r) {
-        if (strcmp(r->method, method) == 0 &&
-            strcmp(r->path_pattern, pattern) == 0) return r;
-        r = r->next;
-    }
-    return NULL;
+    int made = 0;
+    MetricsRoute* r = metrics_route_find(st, method, pattern,
+                                         st->series < METRICS_MAX_SERIES, &made);
+    if (made) st->series++;
+    if (r || st->series < METRICS_MAX_SERIES) return r;
+    if (!st->other) st->other = metrics_route_find(st, "(other)", "(other)", 1, &made);
+    return st->other;
 }
+
+static void metrics_escape(char* dst, size_t cap, const char* src);
 
 static void metrics_hook(HttpRequest* req, HttpServerResponse* res,
                          int64_t duration_us, void* user_data) {
     MetricsState* st = (MetricsState*)user_data;
     if (!st || !req || !res) return;
 
-    /* Look up by exact method+path. Production deployments would
-     * usually want path-pattern bucketing (e.g. /users/:id collapses
-     * across IDs), but the existing route table doesn't expose the
-     * matched pattern back to the dispatch path. v1 buckets by
-     * literal request path; the user can collapse via labels in a
-     * follow-up. */
-    const char* method = req->method ? req->method : "-";
-    const char* pattern = req->path ? req->path : "-";
+    /* Look up by method and path as the scrape writes them: escaped,
+     * cut to 63 and 255 bytes, valid UTF-8 (#3282). Production
+     * deployments would usually want path-pattern bucketing (e.g.
+     * /users/:id collapses across IDs), but the existing route table
+     * doesn't expose the matched pattern back to the dispatch path.
+     * v1 buckets by literal request path; the user can collapse via
+     * labels in a follow-up. Bounded at METRICS_MAX_SERIES series,
+     * found by hash (#3265). */
+    char method[64], pattern[256];
+    metrics_escape(method, sizeof(method), req->method ? req->method : "-");
+    metrics_escape(pattern, sizeof(pattern), req->path ? req->path : "-");
 
     pthread_mutex_lock(&st->lock);
     MetricsRoute* r = metrics_route_for(st, method, pattern);
-    if (!r) {
-        r = (MetricsRoute*)calloc(1, sizeof(MetricsRoute));
-        if (!r) { pthread_mutex_unlock(&st->lock); return; }
-        r->method = strdup(method);
-        r->path_pattern = strdup(pattern);
-        r->next = st->head;
-        st->head = r;
-    }
     pthread_mutex_unlock(&st->lock);
+    if (!r) return;
 
     atomic_fetch_add(&r->total_requests, 1);
     if (res->status_code >= 500) atomic_fetch_add(&r->total_errors, 1);
@@ -1571,23 +1797,76 @@ static void metrics_hook(HttpRequest* req, HttpServerResponse* res,
     if (duration_us <= 10000000)atomic_fetch_add(&r->bucket_le_10s,    1);
 }
 
-/* Escape a pattern for use as a Prometheus label value. */
+/* How many bytes of `s` make one well-formed UTF-8 character: 1 for ASCII,
+ * 2 to 4 for a valid sequence, 0 when the bytes there are not one (a stray
+ * continuation byte, an overlong form, a surrogate, past U+10FFFF, cut
+ * short). */
+static int metrics_utf8_len(const unsigned char* s) {
+    unsigned char c = s[0];
+    if (c < 0x80) return 1;
+    int len;
+    unsigned char lo = 0x80, hi = 0xBF;
+    if (c >= 0xC2 && c <= 0xDF)      len = 2;
+    else if (c == 0xE0)              { len = 3; lo = 0xA0; }
+    else if (c == 0xED)              { len = 3; hi = 0x9F; }
+    else if (c >= 0xE1 && c <= 0xEF) len = 3;
+    else if (c == 0xF0)              { len = 4; lo = 0x90; }
+    else if (c == 0xF4)              { len = 4; hi = 0x8F; }
+    else if (c >= 0xF1 && c <= 0xF3) len = 4;
+    else return 0;
+    if (s[1] < lo || s[1] > hi) return 0;
+    for (int i = 2; i < len; i++)
+        if (s[i] < 0x80 || s[i] > 0xBF) return 0;
+    return len;
+}
+
+/* A request's method or path as a Prometheus label value, in a buffer of
+ * `cap` bytes: `"`, `\` and a newline escaped, a byte that is not part of
+ * well-formed UTF-8 written as `?`, and cut short only between characters.
+ * A series is keyed on this, not on what the client sent: two paths that
+ * agree on the bytes kept are one series, and the scrape never lists two
+ * with the same labels, nor a label a Prometheus server refuses (#3282). */
 static void metrics_escape(char* dst, size_t cap, const char* src) {
+    const unsigned char* s = (const unsigned char*)src;
     size_t n = 0;
-    for (; *src && n + 2 < cap; src++) {
-        if (*src == '"' || *src == '\\') {
-            if (n + 2 >= cap) break;
-            dst[n++] = '\\';
-            dst[n++] = *src;
-        } else if (*src == '\n') {
-            if (n + 2 >= cap) break;
-            dst[n++] = '\\';
-            dst[n++] = 'n';
-        } else {
-            dst[n++] = *src;
-        }
+    while (*s) {
+        int len = metrics_utf8_len(s);
+        const char* put = (const char*)s;
+        int put_len = len;
+        if (*s == '"' || *s == '\\') { put = *s == '"' ? "\\\"" : "\\\\"; put_len = 2; }
+        else if (*s == '\n')         { put = "\\n"; put_len = 2; }
+        else if (len == 0)           { put = "?"; put_len = 1; len = 1; }
+        if (n + (size_t)put_len + 1 > cap) break;
+        memcpy(dst + n, put, (size_t)put_len);
+        n += (size_t)put_len;
+        s += len;
     }
     dst[n] = '\0';
+}
+
+/* printf onto the scrape, growing it as it goes. The scrape was a fixed 64 KB
+ * and the series that did not fit were dropped without a word, about fifty
+ * of them in (#3264). Cap-aware (#343): grown with the caps allocator, so a
+ * plugin host's memory budget bounds it, *cap tracking the exact size for
+ * the matching free. Returns 0, or -1 when the allocator refuses. */
+static int metrics_put(char** buf, size_t* cap, size_t* off, const char* fmt, ...) {
+    for (;;) {
+        va_list ap;
+        va_start(ap, fmt);
+        int wrote = vsnprintf(*buf + *off, *cap - *off, fmt, ap);
+        va_end(ap);
+        if (wrote < 0) return -1;
+        if ((size_t)wrote < *cap - *off) {
+            *off += (size_t)wrote;
+            return 0;
+        }
+        size_t want = *cap * 2;
+        while (want <= *off + (size_t)wrote) want *= 2;
+        char* grown = (char*)aether_caps_realloc(*buf, *cap, want);
+        if (!grown) return -1;
+        *buf = grown;
+        *cap = want;
+    }
 }
 
 /* Handler for the configured /metrics endpoint. Walks the
@@ -1601,12 +1880,9 @@ static void metrics_handler(HttpRequest* req, HttpServerResponse* res, void* use
         return;
     }
 
-    /* Build into a heap buffer; size grows with route count. 64KB
-     * suffices for hundreds of routes. Cap-aware (#343): the buffer
-     * is allocated and freed entirely within this handler, so the
-     * exact byte count (`cap`) is in scope at the matching free
-     * below — route it through the caps allocator so a plugin host's
-     * memory budget bounds the /metrics scrape allocation. */
+    /* Built into a heap buffer that grows with the series (metrics_put).
+     * Cap-aware (#343): allocated and freed entirely within this handler,
+     * so the exact byte count (`cap`) is in scope at the matching free. */
     size_t cap = 64 * 1024;
     char* buf = (char*)aether_caps_malloc(cap);
     if (!buf) {
@@ -1615,26 +1891,35 @@ static void metrics_handler(HttpRequest* req, HttpServerResponse* res, void* use
         return;
     }
     size_t off = 0;
-    off += snprintf(buf + off, cap - off,
+    buf[0] = '\0';
+    int ok = metrics_put(&buf, &cap, &off,
         "# TYPE aether_http_requests_total counter\n"
         "# TYPE aether_http_errors_total counter\n"
         "# TYPE aether_http_4xx_total counter\n"
         "# TYPE aether_http_request_duration_seconds histogram\n"
-        "# TYPE aether_http_parked_connections gauge\n");
+        "# TYPE aether_http_parked_connections gauge\n") == 0;
 
     /* Idle keep-alive connections held by the poller rather than by a worker
      * (#1663). Worth exporting because it is the number that used to be
      * capped at the worker count: a deployment can see how far past that line
      * it is running. */
-    off += snprintf(buf + off, cap - off,
+    ok = ok && metrics_put(&buf, &cap, &off,
         "aether_http_parked_connections %d\n",
-        st->server ? http_park_count((HttpParkLot*)st->server->park_lot) : 0);
+        st->server ? http_park_count((HttpParkLot*)st->server->park_lot) : 0) == 0;
 
+    /* The list as it stands, then the formatting without the lock, which
+     * every request's hook takes, the proxy event loop's drivers' among them:
+     * held for the whole scrape, up to a thousand series of it, it stalled
+     * them all for as long as that took (#3280). Safe unlocked: a series is
+     * only ever put at the head, its links never change once it is in, its
+     * counters are atomics, and none is freed while the server runs. */
     pthread_mutex_lock(&st->lock);
-    for (MetricsRoute* r = st->head; r; r = r->next) {
-        char m[64], p[256];
-        metrics_escape(m, sizeof(m), r->method);
-        metrics_escape(p, sizeof(p), r->path_pattern);
+    MetricsRoute* listed = st->head;
+    pthread_mutex_unlock(&st->lock);
+    for (MetricsRoute* r = listed; r && ok; r = r->next) {
+        /* Kept as written (metrics_hook escaped them). */
+        const char* m = r->method;
+        const char* p = r->path_pattern;
         long long total = atomic_load(&r->total_requests);
         long long errs  = atomic_load(&r->total_errors);
         long long c4xx  = atomic_load(&r->total_4xx);
@@ -1645,7 +1930,7 @@ static void metrics_handler(HttpRequest* req, HttpServerResponse* res, void* use
         long long b500  = atomic_load(&r->bucket_le_500ms);
         long long b2    = atomic_load(&r->bucket_le_2s);
         long long b10   = atomic_load(&r->bucket_le_10s);
-        int wrote = snprintf(buf + off, cap - off,
+        ok = metrics_put(&buf, &cap, &off,
             "aether_http_requests_total{method=\"%s\",path=\"%s\"} %lld\n"
             "aether_http_errors_total{method=\"%s\",path=\"%s\"} %lld\n"
             "aether_http_4xx_total{method=\"%s\",path=\"%s\"} %lld\n"
@@ -1664,12 +1949,16 @@ static void metrics_handler(HttpRequest* req, HttpServerResponse* res, void* use
             m, p, b5, m, p, b25, m, p, b100, m, p, b500,
             m, p, b2, m, p, b10, m, p, total,
             m, p, (double)sum / 1e6,
-            m, p, total);
-        if (wrote < 0 || (size_t)wrote >= cap - off) break;
-        off += (size_t)wrote;
+            m, p, total) == 0;
     }
-    pthread_mutex_unlock(&st->lock);
 
+    if (!ok) {
+        /* A partial scrape reads as counters that went backwards. */
+        http_response_set_status(res, 500);
+        http_response_set_body(res, "metrics: oom");
+        aether_caps_free(buf, cap);
+        return;
+    }
     http_response_set_status(res, 200);
     http_response_set_header(res, "Content-Type", "text/plain; version=0.0.4");
     http_response_set_body(res, buf);
@@ -1691,6 +1980,8 @@ const char* http_server_set_metrics_raw(HttpServer* server,
     return "";
 }
 
+static void loop_plan_changed(HttpServer* server);
+
 const char* http_server_set_tls_raw(HttpServer* server,
                                     const char* cert_path,
                                     const char* key_path) {
@@ -1707,6 +1998,7 @@ const char* http_server_set_tls_raw(HttpServer* server,
     if (env_pure && (strcmp(env_pure, "1") == 0 || strcasecmp(env_pure, "true") == 0)) {
         server->is_pure_tls = 1;
         server->tls_enabled = 1;
+        loop_plan_changed(server);   /* #3269 */
         return "";
     }
 
@@ -1750,10 +2042,12 @@ const char* http_server_set_tls_raw(HttpServer* server,
     }
     server->tls_ctx = ctx;
     server->tls_enabled = 1;
+    loop_plan_changed(server);   /* #3269 */
     return "";
 #else
     server->is_pure_tls = 1;
     server->tls_enabled = 1;
+    loop_plan_changed(server);
     return "";
 #endif
 }
@@ -3069,6 +3363,7 @@ static void server_add_middleware(HttpServer* server, HttpMiddleware middleware,
         while (tail->next) tail = tail->next;
         tail->next = node;
     }
+    loop_plan_changed(server);   /* #3269 */
 }
 
 /* Response-transformer chain node. Hidden in .c — header only
@@ -3118,29 +3413,53 @@ static HttpMiddlewareNode* server_proxy_node(HttpServer* server) {
  * are the route handler's and do not touch a proxied response on either
  * path. Middleware after the proxy sees only what the proxy passes on,
  * which the loop gives the worker path (http_server_adopt_request). */
-int http_server_evloop_serves(HttpServer* server) {
-    if (!server) return 0;
+/* What the plan is made of, walked: the chain to the first mount and every
+ * hook, and the TLS setup. */
+static void loop_plan_make(HttpServer* server, HttpLoopPlan* plan) {
     HttpMiddlewareNode* proxy = server_proxy_node(server);
-    if (!proxy) return 0;
+    plan->proxy_opts = proxy ? proxy->user_data : NULL;
+    plan->before_proxy = proxy && proxy != server->middleware_chain;
+    plan->chain_ok = proxy != NULL;
     /* The loop carries a client's TLS through OpenSSL only. A server on the
      * pure-Aether stack (AETHER_PURE_TLS=1, or a build without OpenSSL) has
      * no OpenSSL context: the loop closed every connection it took for one,
      * and a build without OpenSSL read the TLS bytes as HTTP (#3256). */
     if (server->tls_enabled) {
 #ifdef AETHER_HAS_OPENSSL
-        if (server->is_pure_tls || !server->tls_ctx) return 0;
+        if (server->is_pure_tls || !server->tls_ctx) plan->chain_ok = 0;
 #else
-        return 0;
+        plan->chain_ok = 0;
 #endif
     }
-    /* The loop dials plain HTTP only; a mount with an https upstream is the
-     * worker path's, whose client speaks TLS (#3231). */
-    if (!aether_proxy_upstreams_all_plain((const AetherProxyOpts*)proxy->user_data)) return 0;
-    for (HttpMiddlewareNode* n = server->middleware_chain; n != proxy; n = n->next)
-        if (!n->loop_safe) return 0;
+    for (HttpMiddlewareNode* n = server->middleware_chain; proxy && n != proxy; n = n->next)
+        if (!n->loop_safe) plan->chain_ok = 0;
     for (struct HttpRequestHookNode* h = server->request_hook_chain; h; h = h->next)
-        if (!h->loop_safe) return 0;
-    return 1;
+        if (!h->loop_safe) plan->chain_ok = 0;
+}
+
+int http_server_loop_plan(HttpServer* server, HttpLoopPlan* plan) {
+    if (!server || !plan) return 0;
+    int gen = atomic_load_explicit(&server->loop_plan_gen, memory_order_acquire) + 1;
+    if (plan->gen != gen) {
+        loop_plan_make(server, plan);
+        plan->gen = gen;
+    }
+    /* The loop dials plain HTTP only; a mount with an https upstream is the
+     * worker path's, whose client speaks TLS (#3231). An upstream can be
+     * added while the server runs, so this one is read each time: an atomic
+     * count, not a walk. */
+    return plan->chain_ok &&
+           aether_proxy_upstreams_all_plain((const AetherProxyOpts*)plan->proxy_opts);
+}
+
+int http_server_evloop_serves(HttpServer* server) {
+    HttpLoopPlan plan = {0};
+    return http_server_loop_plan(server, &plan);
+}
+
+/* Something the loop's plan is made of changed (#3269). */
+static void loop_plan_changed(HttpServer* server) {
+    atomic_fetch_add_explicit(&server->loop_plan_gen, 1, memory_order_release);
 }
 
 int http_server_has_before_proxy(HttpServer* server) {
@@ -3164,6 +3483,14 @@ int http_server_run_before_proxy(HttpServer* server, HttpRequest* req,
  * responses are the same either way, by design (#3214). */
 int http_server_evloop_connections(HttpServer* server) {
     return server ? http_evloop_taken((HttpEvLoop*)server->evloop) : 0;
+}
+
+int64_t http_server_evloop_wakeups(HttpServer* server) {
+    return server ? http_evloop_wakeups((HttpEvLoop*)server->evloop) : 0;
+}
+
+int http_server_evloop_active(HttpServer* server) {
+    return server ? http_evloop_active((HttpEvLoop*)server->evloop) : 0;
 }
 
 /* SSE route node (#260 Tier 2). */
@@ -4305,11 +4632,7 @@ void http_ws_client_free(HttpWsConn* ws) {
         /* wss:// handles own their SSL as well as the socket. Shut it down
          * before closing the fd so the peer gets a close_notify rather than
          * a truncated connection; the CTX is process-wide and stays. */
-        if (ws->conn->ssl) {
-            SSL_shutdown(ws->conn->ssl);
-            SSL_free(ws->conn->ssl);
-            ws->conn->ssl = NULL;
-        }
+        if (ws->conn->ssl) conn_tls_close(ws->conn);
 #endif
         if (ws->conn->fd >= 0) close(ws->conn->fd);
         free(ws->conn);
@@ -4372,6 +4695,7 @@ static void server_add_request_hook(HttpServer* server, HttpRequestHook hook,
         while (tail->next) tail = tail->next;
         tail->next = node;
     }
+    loop_plan_changed(server);   /* #3269 */
 }
 
 void http_server_use_request_hook(HttpServer* server,
@@ -4652,6 +4976,7 @@ static int finish_response(HttpServer* server, HttpConn* conn,
     // Cleanup
     http_request_free(req);
     http_server_response_free(res);
+    if (will_keep_alive) conn_buf_trim(conn);
     return will_keep_alive;
 }
 
@@ -4755,19 +5080,36 @@ static int response_settle_keep_alive(HttpServer* server, HttpRequest* req,
  * copying path's response gets in the same place: last, after every other
  * header. */
 int http_server_keep_alive_lines(HttpServer* server, HttpRequest* req, int status,
-                                 int requests_served, char* out, size_t cap) {
+                                 int requests_served, char* out, size_t cap,
+                                 size_t* out_len) {
+    *out_len = 0;
     if (!server || !req || !out || cap == 0) return 0;
     int max_requests = server->keep_alive_max;
     int keep = keep_alive_decision(server, req, status, requests_served, max_requests, 0);
+    /* The two lines nearly every response gets are copied, not formatted: a
+     * snprintf on every response for a constant (#3269). Only a cap on the
+     * requests per connection has numbers to write. */
+    static const char close_line[] = "Connection: close\r\n";
+    static const char keep_line[]  = "Connection: keep-alive\r\n";
+    const char* line = NULL;
+    size_t n = 0;
     if (!keep) {
-        snprintf(out, cap, "Connection: close\r\n");
+        line = close_line;
+        n = sizeof(close_line) - 1;
     } else if (max_requests > 0) {
         char ka[64];
         keep_alive_value(server, requests_served, max_requests, ka, sizeof(ka));
-        snprintf(out, cap, "Connection: keep-alive\r\nKeep-Alive: %s\r\n", ka);
+        int w = snprintf(out, cap, "Connection: keep-alive\r\nKeep-Alive: %s\r\n", ka);
+        *out_len = w < 0 ? 0 : ((size_t)w < cap ? (size_t)w : cap - 1);
+        return keep;
     } else {
-        snprintf(out, cap, "Connection: keep-alive\r\n");
+        line = keep_line;
+        n = sizeof(keep_line) - 1;
     }
+    if (n >= cap) n = cap - 1;
+    memcpy(out, line, n);
+    out[n] = '\0';
+    *out_len = n;
     return keep;
 }
 
@@ -4948,52 +5290,6 @@ void http_request_copy_conn_meta(HttpRequest* req, HttpConn* conn) {
     req->is_tls = (conn->ssl != NULL || conn->pure_tls != NULL) ? 1 : 0;
 }
 
-/* Is every header line in this block one this server will read the same way
- * as whoever sent it?
- *
- * Two shapes are rejected rather than interpreted, because interpreting them
- * is where recipients disagree and a disagreement about a framing header is
- * request smuggling:
- *
- *   "Content-Length : 5"  whitespace between the name and the colon. RFC 9112
- *                         5.1 requires a server to reject it. Ignoring it,
- *                         which is what an exact-match scan does, means this
- *                         server sees no body where a laxer front end sees one.
- *
- *   "X-Fold: a\r\n b"      an obs-fold continuation. RFC 9112 5.2 deprecated it
- *                         and requires a server that does not support it to
- *                         reject the message rather than guess at where the
- *                         value ends.
- */
-static int conn_headers_well_formed(const char* block, const char* end) {
-    int count = 0;
-    for (const char* line = block; line && line < end; ) {
-        const char* eol = (const char*)memchr(line, '\n', (size_t)(end - line));
-        const char* line_end = eol ? eol : end;
-        size_t line_len = (size_t)(line_end - line);
-        if (line_len && line[line_len - 1] == '\r') line_len--;
-
-        if (line_len >= HTTP_MAX_HEADER_LINE) return -1;    /* too long to hold */
-        if (line_len > 0 && ++count > HTTP_MAX_HEADERS) return -1;
-        if (line_len > 0) {
-            if (line[0] == ' ' || line[0] == '\t') return 0;   /* obs-fold */
-            const char* colon = (const char*)memchr(line, ':', line_len);
-            if (!colon) return 0;                              /* no field name */
-            if (colon > line && (colon[-1] == ' ' || colon[-1] == '\t')) return 0;
-            size_t name_len = (size_t)(colon - line);
-            if (name_len == 0) return 0;
-            char name[128];
-            if (name_len >= sizeof(name)) return 0;
-            memcpy(name, line, name_len);
-            name[name_len] = '\0';
-            if (!http_header_name_ok(name)) return 0;
-        }
-        if (!eol) break;
-        line = eol + 1;
-    }
-    return 1;
-}
-
 /* Content-Length is a plain count of digits. Anything else, a sign, a spelled
  * number, a value that will not fit, has no length in it, and RFC 9112 6.3
  * calls that unrecoverable rather than something to guess at. */
@@ -5009,6 +5305,27 @@ static int conn_parse_content_length(const char* text, long* out) {
     return 0;
 }
 
+/* `line` (`line_len` bytes, no line ending) names header `name`
+ * (`name_len` bytes, compared without case) and its value, with the
+ * whitespace around it trimmed, goes into `out` (`cap` bytes, cut short to
+ * fit): http_find_header_span's reading of a line, which the head check
+ * makes itself as it walks the lines. */
+static int head_line_value(const char* line, size_t line_len,
+                           const char* name, size_t name_len,
+                           char* out, size_t cap) {
+    if (line_len <= name_len || line[name_len] != ':' ||
+        strncasecmp(line, name, name_len) != 0) return 0;
+    const char* v = line + name_len + 1;
+    const char* v_end = line + line_len;
+    while (v < v_end && (*v == ' ' || *v == '\t')) v++;
+    while (v_end > v && (v_end[-1] == ' ' || v_end[-1] == '\t')) v_end--;
+    size_t n = (size_t)(v_end - v);
+    if (n > cap - 1) n = cap - 1;
+    memcpy(out, v, n);
+    out[n] = '\0';
+    return 1;
+}
+
 /* What the worker path checks in a request head before it trusts the head's
  * framing, in one place, which the proxy event loop asks too (#3236): the
  * loop read Content-Length alone and forwarded heads this path refuses, a
@@ -5016,7 +5333,24 @@ static int conn_parse_content_length(const char* text, long* out) {
  * where this server sees none. `head` is the request line's first byte and
  * `hdr_end` the blank line's "\r\n\r\n". HTTP_HEAD_OK fills *content_length
  * (0 when there is none) and *chunked; anything else is the status the
- * request is refused with. */
+ * request is refused with.
+ *
+ * Each header line is read once, for its shape and for the two framing
+ * headers at the same time: three walks over the head before, on every
+ * request on both paths (#3269). Two shapes are rejected rather than
+ * interpreted, because interpreting them is where recipients disagree and a
+ * disagreement about a framing header is request smuggling:
+ *
+ *   "Content-Length : 5"  whitespace between the name and the colon. RFC 9112
+ *                         5.1 requires a server to reject it. Ignoring it,
+ *                         which is what an exact-match scan does, means this
+ *                         server sees no body where a laxer front end sees one.
+ *
+ *   "X-Fold: a\r\n b"      an obs-fold continuation. RFC 9112 5.2 deprecated it
+ *                         and requires a server that does not support it to
+ *                         reject the message rather than guess at where the
+ *                         value ends.
+ */
 int http_request_head_check(const char* head, const char* hdr_end,
                             long* content_length, int* chunked) {
     *content_length = 0;
@@ -5031,17 +5365,54 @@ int http_request_head_check(const char* head, const char* hdr_end,
     const char* rl_end = (const char*)memchr(head, '\n', (size_t)(hdr_end - head));
     size_t rl_len = rl_end ? (size_t)(rl_end - head) : (size_t)(hdr_end - head);
     if (rl_len >= HTTP_MAX_REQUEST_LINE) return HTTP_HEAD_URI_TOO_LONG;
-    /* Headers first: a line this server would read differently from the peer
-     * that sent it is refused before its framing is trusted. */
-    if (rl_end) {
-        int hdr_ok = conn_headers_well_formed(rl_end + 1, hdr_end);
-        if (hdr_ok < 0) return HTTP_HEAD_TOO_LARGE;
-        if (!hdr_ok)    return HTTP_HEAD_BAD_FRAMING;
+
+    /* As large as a line's `value`: a copy cut short could read a longer
+     * duplicate Content-Length as the same one. */
+    char cl_value[256] = "";
+    char te_value[256] = "";
+    int cl_count = 0, cl_differing = 0, te_count = 0, count = 0;
+    for (const char* line = rl_end ? rl_end + 1 : hdr_end; line < hdr_end; ) {
+        const char* eol = (const char*)memchr(line, '\n', (size_t)(hdr_end - line));
+        const char* line_end = eol ? eol : hdr_end;
+        size_t line_len = (size_t)(line_end - line);
+        if (line_len && line[line_len - 1] == '\r') line_len--;
+
+        /* Headers first: a line this server would read differently from the
+         * peer that sent it is refused before its framing is trusted. */
+        if (line_len >= HTTP_MAX_HEADER_LINE) return HTTP_HEAD_TOO_LARGE;
+        if (line_len > 0 && ++count > HTTP_MAX_HEADERS) return HTTP_HEAD_TOO_LARGE;
+        if (line_len > 0) {
+            if (line[0] == ' ' || line[0] == '\t') return HTTP_HEAD_BAD_FRAMING;  /* obs-fold */
+            const char* colon = (const char*)memchr(line, ':', line_len);
+            if (!colon) return HTTP_HEAD_BAD_FRAMING;                 /* no field name */
+            if (colon > line && (colon[-1] == ' ' || colon[-1] == '\t'))
+                return HTTP_HEAD_BAD_FRAMING;
+            size_t name_len = (size_t)(colon - line);
+            if (name_len == 0) return HTTP_HEAD_BAD_FRAMING;
+            char name[128];
+            if (name_len >= sizeof(name)) return HTTP_HEAD_BAD_FRAMING;
+            memcpy(name, line, name_len);
+            name[name_len] = '\0';
+            if (!http_header_name_ok(name)) return HTTP_HEAD_BAD_FRAMING;
+
+            char value[256];
+            if (head_line_value(line, line_len, "Content-Length", 14, value, sizeof value)) {
+                /* The first value, and whether a later one disagrees, as
+                 * http_find_header_in_block reported them. */
+                if (cl_count++ == 0) {
+                    snprintf(cl_value, sizeof cl_value, "%s", value);
+                } else if (strcmp(cl_value, value) != 0) {
+                    cl_differing = 1;
+                }
+            } else if (head_line_value(line, line_len, "Transfer-Encoding", 17,
+                                       value, sizeof value)) {
+                if (te_count++ == 0) snprintf(te_value, sizeof te_value, "%s", value);
+            }
+        }
+        if (!eol) break;
+        line = eol + 1;
     }
-    char cl_value[64];
-    int cl_differing = 0;
-    int cl_count = http_find_header_in_block(head, hdr_end, "Content-Length",
-                                             cl_value, sizeof(cl_value), &cl_differing);
+
     if (cl_count > 0) {
         /* Two lengths that disagree leave no single answer about where this
          * message ends, and a value that is not a count of bytes leaves none
@@ -5062,9 +5433,6 @@ int http_request_head_check(const char* head, const char* hdr_end,
      * A message carrying both is refused rather than resolved, because the
      * two lengths are exactly what a smuggling pair is built from and no
      * legitimate sender emits both. */
-    char te_value[128];
-    int te_count = http_find_header_in_block(head, hdr_end, "Transfer-Encoding",
-                                             te_value, sizeof(te_value), NULL);
     if (te_count > 0) {
         *chunked = http_strcasestr(te_value, "chunked") != NULL;
         /* Both lengths present, or a coding this server cannot decode: refuse
@@ -6006,6 +6374,29 @@ static void conn_apply_recv_timeout(HttpServer* server, HttpConn* c) {
                              ? server->keep_alive_idle_ms : 30000);
 }
 
+/* The send timeout, the same idle timeout: a send that makes no progress for
+ * that long fails and the connection closes. Without one a client that
+ * stopped reading blocked its worker in send() for as long as it kept the
+ * connection open, one worker per such client (#3257). conn_send waits on it
+ * itself on POSIX (conn_wait_io); SO_SNDTIMEO is the bound on Windows, and
+ * for the pure-Aether TLS server's writes, which std.tcp waits on by it. */
+static void conn_apply_send_timeout(HttpServer* server, HttpConn* c) {
+    int ms = server->keep_alive_idle_ms > 0 ? server->keep_alive_idle_ms : 30000;
+    if (c->applied_send_timeout_ms == ms) return;
+    c->applied_send_timeout_ms = ms;
+#ifdef _WIN32
+    DWORD snd_timeout = (DWORD)ms;
+    setsockopt(c->fd, SOL_SOCKET, SO_SNDTIMEO,
+               (const char*)&snd_timeout, sizeof(snd_timeout));
+#else
+    struct timeval snd_tv = {
+        .tv_sec  = ms / 1000,
+        .tv_usec = (ms % 1000) * 1000
+    };
+    setsockopt(c->fd, SOL_SOCKET, SO_SNDTIMEO, &snd_tv, sizeof(snd_tv));
+#endif
+}
+
 /* Is the next request already here, or about to be?
  *
  * Bytes in the connection's own buffer (a pipelined request, or an over-read
@@ -6082,6 +6473,7 @@ static void conn_serve(HttpServer* server, HttpConn* conn) {
      * a syscall per request, and measured at 8 concurrent clients that cost
      * 9% against simply blocking. */
     conn_apply_recv_timeout(server, conn);
+    conn_apply_send_timeout(server, conn);
 
 #ifdef AETHER_HAS_NGHTTP2
     if (conn->is_h2) {

@@ -88,6 +88,10 @@ will not block), `0` on timeout, `-1` on a null handle: check the stop flag
 between polls. `set_nodelay(sock, true)` turns on `TCP_NODELAY` for
 request/response lines (the runtime's headers already declare `setsockopt`
 with the platform's signature, so it cannot be declared from Aether).
+`set_read_buffer(sock, bytes)` sets the socket's receive buffer
+(`SO_RCVBUF`), which also stops the kernel growing it by itself while data
+arrives, read or not: a client that has to stop taking bytes when it stops
+reading, a test of a server's send timeout for one, sets it small.
 
 ```aether,fragment
 srv, err = tcp.listen_on("127.0.0.1", 0)
@@ -105,4 +109,4 @@ while !stopping {
 
 `connect`, `listen`, `listen_on`, `accept`, `read`, `read_n`, `read_into`,
 `write`, `write_n`, `write_slice`, `write_all`, `poll`, `poll2`, `server_poll`, `server_port`, `set_nodelay`,
-`fd`, `server_fd`, `tcp_close`, `tcp_server_close`.
+`set_read_buffer`, `fd`, `server_fd`, `tcp_close`, `tcp_server_close`.

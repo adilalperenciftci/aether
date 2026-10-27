@@ -62,7 +62,8 @@ fd0_open() -> int {
 }
 
 // One request on a connection of its own; the status line's code, "none"
-// when nothing came back.
+// when nothing came back within 30 seconds: a resolver can take several to
+// say a name does not exist, the first time it is asked.
 status_of(port: int) -> string {
     sock, cerr = tcp.connect("127.0.0.1", port)
     if cerr != "" {
@@ -71,12 +72,12 @@ status_of(port: int) -> string {
     tcp.write(sock, "GET /p HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
     wire = ""
     tries = 0
-    while tries < 100 {
+    while tries < 300 {
         ready, _perr = tcp.poll(sock, 100)
         if ready {
             chunk, rerr = tcp.read(sock, 4096)
             if rerr != "" || string.length(chunk) == 0 {
-                tries = 100
+                tries = 300
             } else {
                 wire = string.concat(wire, chunk)
             }

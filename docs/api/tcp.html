@@ -27,6 +27,7 @@
     <li><a href="#server_port_raw">server_port_raw</a></li>
     <li><a href="#server_poll_raw">server_poll_raw</a></li>
     <li><a href="#set_nodelay_raw">set_nodelay_raw</a></li>
+    <li><a href="#set_read_buffer_raw">set_read_buffer_raw</a></li>
     <li><a href="#fd_raw">fd_raw</a></li>
     <li><a href="#server_fd_raw">server_fd_raw</a></li>
     <li><a href="#poll_raw">poll_raw</a></li>
@@ -49,6 +50,7 @@
     <li><a href="#server_port">server_port</a></li>
     <li><a href="#server_poll">server_poll</a></li>
     <li><a href="#set_nodelay">set_nodelay</a></li>
+    <li><a href="#set_read_buffer">set_read_buffer</a></li>
     <li><a href="#poll">poll</a></li>
     <li><a href="#poll2">poll2</a></li>
   </ul>
@@ -214,6 +216,11 @@
       <pre class="usage"><code>set_nodelay_raw(sock, on) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">sock: ptr, on: int</span></p>
     </div>
+    <div class="function" id="set_read_buffer_raw" data-name="set_read_buffer_raw">
+      <h3 class="function-name">set_read_buffer_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>set_read_buffer_raw(sock, bytes) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, bytes: int</span></p>
+    </div>
     <div class="function" id="fd_raw" data-name="fd_raw">
       <h3 class="function-name">fd_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>fd_raw(sock) <span class="arrow">-&gt;</span> int</code></pre>
@@ -339,6 +346,12 @@
       <pre class="usage"><code>set_nodelay(sock, on) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">sock: ptr, on: bool</span></p>
       <p class="doc">TCP_NODELAY: send each write at once instead of waiting to coalesce it (Nagle). Request/response lines want it on. Returns &quot;&quot; on success or an error; `setsockopt` cannot be declared from Aether because the runtime's headers already declare it with the platform's signature.</p>
+    </div>
+    <div class="function" id="set_read_buffer" data-name="set_read_buffer">
+      <h3 class="function-name">set_read_buffer <span class="kind">fn</span></h3>
+      <pre class="usage"><code>set_read_buffer(sock, bytes) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, bytes: int</span></p>
+      <p class="doc">SO_RCVBUF: how many bytes the kernel holds for this socket before the reader takes them. Setting it also stops the kernel growing the buffer by itself while data arrives, which Linux, macOS and Windows do whether the program reads or not. A client that must stop taking bytes when it stops reading (a test of a server's send timeout, say) sets it small. Returns &quot;&quot; on success or an error.</p>
     </div>
     <div class="function" id="poll" data-name="poll">
       <h3 class="function-name">poll <span class="kind">fn</span></h3>

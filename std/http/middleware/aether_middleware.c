@@ -406,20 +406,63 @@ int aether_middleware_session_auth(HttpRequest* req, HttpServerResponse* res, vo
 // Token-bucket rate limiter (per-client-IP)
 // -----------------------------------------------------------------
 typedef struct RateBucket {
-    char* key;          /* X-Forwarded-For value or fallback */
+    char* key;          /* the client's address, or "anonymous" */
     double tokens;      /* current bucket level */
     int64_t last_refill; /* monotonic ms */
-    struct RateBucket* next;
+    struct RateBucket* next;                 /* hash chain */
+    struct RateBucket* lru_prev;             /* most recently seen first */
+    struct RateBucket* lru_next;
+    unsigned int slot;
 } RateBucket;
 
-#define RATE_TABLE_SIZE 256
+/* The clients a limiter holds a bucket for at most, and the chains they are
+ * found by. Addresses are the clients' to have (one IPv6 client holds more
+ * than any table), so the table is bounded: at the bound the client seen
+ * least recently gives up its bucket, as nginx's limit_req zone does when it
+ * is full. Kept without a bound, a client cycling addresses grew the table
+ * for good, under the lock every request takes (#3266). */
+#define RATE_TABLE_SIZE 4096
+#define RATE_MAX_KEYS   16384
 
 struct AetherRateLimitOpts {
     int max_requests;
     int window_ms;
     pthread_mutex_t lock;
     RateBucket* table[RATE_TABLE_SIZE];
+    RateBucket* lru_head;    /* seen most recently */
+    RateBucket* lru_tail;    /* seen least recently, the next to go */
+    int         keys;
 };
+
+static void rate_lru_unlink(AetherRateLimitOpts* o, RateBucket* b) {
+    if (b->lru_prev) b->lru_prev->lru_next = b->lru_next;
+    else             o->lru_head = b->lru_next;
+    if (b->lru_next) b->lru_next->lru_prev = b->lru_prev;
+    else             o->lru_tail = b->lru_prev;
+    b->lru_prev = b->lru_next = NULL;
+}
+
+static void rate_lru_push(AetherRateLimitOpts* o, RateBucket* b) {
+    b->lru_prev = NULL;
+    b->lru_next = o->lru_head;
+    if (o->lru_head) o->lru_head->lru_prev = b;
+    o->lru_head = b;
+    if (!o->lru_tail) o->lru_tail = b;
+}
+
+/* Drop the bucket of the client seen least recently. Called with the lock
+ * held, when the table is at RATE_MAX_KEYS. */
+static void rate_evict_oldest(AetherRateLimitOpts* o) {
+    RateBucket* b = o->lru_tail;
+    if (!b) return;
+    rate_lru_unlink(o, b);
+    RateBucket** at = &o->table[b->slot];
+    while (*at && *at != b) at = &(*at)->next;
+    if (*at) *at = b->next;
+    free(b->key);
+    free(b);
+    o->keys--;
+}
 
 /* In 64 bits. In a `long`, 32 bits on Windows, the product overflowed after
  * 24.8 days of uptime (time since boot there), undefined behaviour that only
@@ -445,6 +488,14 @@ AetherRateLimitOpts* aether_rate_limit_opts_new(int max_requests, int window_ms)
     o->window_ms = window_ms;
     pthread_mutex_init(&o->lock, NULL);
     return o;
+}
+
+int aether_rate_limit_key_count(AetherRateLimitOpts* o) {
+    if (!o) return 0;
+    pthread_mutex_lock(&o->lock);
+    int n = o->keys;
+    pthread_mutex_unlock(&o->lock);
+    return n;
 }
 
 void aether_rate_limit_opts_free(AetherRateLimitOpts* o) {
@@ -486,12 +537,15 @@ int aether_middleware_rate_limit(HttpRequest* req, HttpServerResponse* res, void
 
     pthread_mutex_lock(&o->lock);
     RateBucket* bucket = o->table[slot];
-    RateBucket* prev = NULL;
-    while (bucket && strcmp(bucket->key, keybuf) != 0) {
-        prev = bucket;
-        bucket = bucket->next;
-    }
-    if (!bucket) {
+    while (bucket && strcmp(bucket->key, keybuf) != 0) bucket = bucket->next;
+    if (bucket) {
+        /* Seen now: the last to give up its bucket (#3266). */
+        if (o->lru_head != bucket) {
+            rate_lru_unlink(o, bucket);
+            rate_lru_push(o, bucket);
+        }
+    } else {
+        if (o->keys >= RATE_MAX_KEYS) rate_evict_oldest(o);
         bucket = (RateBucket*)calloc(1, sizeof(RateBucket));
         if (!bucket) {
             pthread_mutex_unlock(&o->lock);
@@ -507,8 +561,11 @@ int aether_middleware_rate_limit(HttpRequest* req, HttpServerResponse* res, void
         }
         bucket->tokens = (double)o->max_requests;
         bucket->last_refill = now;
-        if (prev) prev->next = bucket;
-        else o->table[slot] = bucket;
+        bucket->slot = slot;
+        bucket->next = o->table[slot];
+        o->table[slot] = bucket;
+        rate_lru_push(o, bucket);
+        o->keys++;
     }
 
     /* Continuous refill: rate = max_requests / window_ms tokens per ms. */
