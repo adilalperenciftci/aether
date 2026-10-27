@@ -3753,8 +3753,14 @@ already is answered at once, with the reason it ended with.
 handler that is waiting in an ask when its actor is killed gets
 `"the asking actor was killed"` from it at once.
 
+`actors.link(ref)` ties two actors both ways: when either ends, the other
+ends too, with the same reason, unless the reason is `"normal"`. An actor
+that calls `actors.trap_exits(true)` gets a `Down` for a linked actor's death
+instead, and lives on. `actors.unlink(ref)` takes the tie away.
+
 On wasi a panic ends the whole program (the target has no way to unwind), so
-`actors.monitor` is refused when compiling for it.
+`actors.monitor`, `actors.link` and `actors.trap_exits` are refused when
+compiling for it.
 
 ---
 

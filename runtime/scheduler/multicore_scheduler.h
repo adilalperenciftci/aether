@@ -499,6 +499,9 @@ int aether_down_accept(ActorBase* self, Message* msg);
 #endif
 int     aether_actor_monitor(void* ref) AETHER_NEEDS_PANIC_BARRIER;
 void    aether_actor_demonitor(int id);
+void    aether_actor_link(void* ref) AETHER_NEEDS_PANIC_BARRIER;
+void    aether_actor_unlink(void* ref);
+void    aether_actor_trap_exits(int on) AETHER_NEEDS_PANIC_BARRIER;
 void    aether_actor_stop(void);
 void    aether_actor_kill(void* ref);
 int64_t aether_actor_dead_sends(void);

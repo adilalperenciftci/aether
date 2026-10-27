@@ -239,9 +239,13 @@ So a `Down` never comes while the actor's handler still runs, and it comes after
 
 `Down` is the runtime's message: the compiler declares it for every program that names it, with the reserved id 254 (`AETHER_MSG_DOWN`), and checks its struct against the runtime's `AetherDownMsg`, since the runtime writes the payload; a program's own `message Down` is refused. Its `reason` is a counted string the message owns. An actor with no `Down` arm drops a `Down` as any message it has no arm for.
 
-Each actor's watchers live in its `death_watch` list (`runtime/actors/aether_supervision.c`), made on first use: who monitors it and whom it monitors. A death marks the list finished under its lock and takes its entries; a monitor that comes after finds it finished and is answered at once. No two lists are locked together.
+Each actor's watchers live in its `death_watch` list (`runtime/actors/aether_supervision.c`), made on first use: who monitors it, whom it monitors, and whom it is linked to. A death marks the list finished under its lock and takes its entries; a monitor that comes after finds it finished and is answered at once. No two lists are locked together.
 
-On wasi a panic ends the program, since the target has no setjmp to unwind with, so a death a monitor would watch cannot be caught there: `actors.monitor` (and `std.supervise`, built on it) is refused at compile time on that target, through an `unavailable` attribute on the runtime's declaration.
+### Links
+
+`actors.link(ref)`, from a handler, ties the two actors both ways (a `LINK` entry in each list). When either ends, the other takes the death as its watchers are told: an actor that traps exits (`actors.trap_exits(true)`, the `AETHER_EXIT_TRAP` bit) gets a `Down` with the reason (monitor id 0, which `demonitor` never drops), and one that does not ends too, by `KILLED`, with the same reason, unless the reason is `"normal"`, which ends nothing. Its own watchers and links then take its death in turn, so a failure climbs a tree of links until an actor that traps exits. `actors.unlink(ref)` removes the entries both ways; a death already taken stays taken. Linking to an actor that has ended already takes its death at once.
+
+On wasi a panic ends the program, since the target has no setjmp to unwind with, so a death a monitor would watch cannot be caught there: `actors.monitor`, `actors.link` and `actors.trap_exits` (and `std.supervise`, built on them) are refused at compile time on that target, through an `unavailable` attribute on the runtime's declaration.
 
 ## Actor Timeouts
 

@@ -60,7 +60,8 @@
 exports(
     register, whereis, unregister, is_registered, registry_size,
     registry_clear,
-    monitor, demonitor, kill, stop, dead_sends
+    monitor, demonitor, kill, stop, dead_sends,
+    link, unlink, trap_exits
 )
 
 // ---- Raw externs ----
@@ -80,6 +81,9 @@ extern aether_actor_demonitor(id: int)
 extern aether_actor_kill(ref: actor_ref)
 extern aether_actor_stop()
 extern aether_actor_dead_sends() -> long
+extern aether_actor_link(ref: actor_ref)
+extern aether_actor_unlink(ref: actor_ref)
+extern aether_actor_trap_exits(on: int)
 
 // ---- Aether-side wrappers ----
 
@@ -158,4 +162,29 @@ stop() {
 // its death or sent to it after, each released and counted once.
 dead_sends() -> long {
     return aether_actor_dead_sends()
+}
+
+// From a handler: this actor and `ref` are linked, both ways. When either
+// ends, the other ends too, with the same reason (a panic's message, or
+// "killed"), unless that reason is "normal", which ends nothing; one that
+// traps exits gets a Down instead and lives on. Linked to an actor that has
+// ended already, this actor takes its death at once.
+link(ref: actor_ref) {
+    aether_actor_link(ref)
+}
+
+// From a handler: the link with `ref` goes, both ways. A death already
+// taken by it stays taken.
+unlink(ref: actor_ref) {
+    aether_actor_unlink(ref)
+}
+
+// From a handler: a linked actor's death reaches this actor as a Down (its
+// id 0, never dropped by demonitor) instead of ending it, while `on`.
+trap_exits(on: bool) {
+    if on {
+        aether_actor_trap_exits(1)
+    } else {
+        aether_actor_trap_exits(0)
+    }
 }

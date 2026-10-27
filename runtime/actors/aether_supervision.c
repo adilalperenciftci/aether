@@ -1,5 +1,5 @@
-// Death notices (#2974): monitors and the Down message, shared by the
-// multicore and the cooperative scheduler.
+// Death notices (#2974): monitors, links and the Down message, shared by
+// the multicore and the cooperative scheduler.
 //
 // Every actor that is watched, or watches, has a watch list
 // (`ActorBase.death_watch`, made on first use): who monitors it (WATCHER, with the
@@ -7,9 +7,11 @@
 // linked to (LINK). Its death is told once, by aether_watch_notify, which a
 // scheduler calls when it finalizes the death on the actor's own thread, or
 // a release from the releasing thread: the list is marked finished under its
-// lock and its entries taken, each WATCHER is sent a Down, and the actor lets
-// go of the actors it monitors. A monitor set after that finds the list
-// finished and is answered at once, with the reason the death left.
+// lock and its entries taken, each WATCHER is sent a Down, the actor lets go
+// of the actors it monitors, and each actor linked to it takes the death: a
+// Down if it traps exits, else the same end, unless the reason is "normal".
+// A monitor or a link set after that finds the list finished and is answered
+// at once, with the reason the death left.
 //
 // Locks: one watch list at a time, never two. A monitor adds its own
 // MONITORS entry first, then its WATCHER entry in the target's list; a
@@ -130,6 +132,18 @@ static void send_down(ActorBase* to, ActorBase* dead, const char* reason, int id
     scheduler_send_remote(to, m, aether_core_id_get());
 }
 
+/* `dead` ended with `reason`, and `to` was linked to it: `to` gets a Down
+ * when it traps exits, else it ends with the same reason, "killed" by it,
+ * unless that reason is "normal", which ends nothing. */
+static void link_effect(ActorBase* to, ActorBase* dead, const char* reason) {
+    const char* r = reason ? reason : "normal";
+    if (atomic_load_explicit(&to->exit_flags, memory_order_acquire) & AETHER_EXIT_TRAP) {
+        send_down(to, dead, r, 0);
+    } else if (strcmp(r, "normal") != 0) {
+        scheduler_actor_end(to, r, AETHER_ACTOR_KILLED);
+    }
+}
+
 void aether_actor_claim_reason(ActorBase* a, const char* reason) {
     if (atomic_load_explicit(&a->death_reason, memory_order_acquire)) return;
     char* copy = strdup(reason ? reason : "normal");
@@ -175,6 +189,11 @@ void aether_watch_notify(ActorBase* a, const char* reason) {
         case WATCH_MONITORS:
             // It watches no more: its target's death tells it nothing.
             watch_remove_from(e[i].other, WATCH_WATCHER, e[i].id, NULL);
+            break;
+        case WATCH_LINK:
+            // The link goes, both ways, and the other side takes the death.
+            watch_remove_from(e[i].other, WATCH_LINK, 0, a);
+            link_effect(e[i].other, a, reason);
             break;
         default:
             break;
@@ -287,4 +306,60 @@ void aether_actor_kill(void* ref) {
 
 int64_t aether_actor_dead_sends(void) {
     return (int64_t)scheduler_dead_sends();
+}
+
+void aether_actor_link(void* ref) {
+    ActorBase* self = current_self("actors.link()");
+    ActorBase* other = (ActorBase*)ref;
+    if (!other) aether_panic("actors.link() of a null actor reference");
+    if (other == self) return;
+    AetherWatch* mine = watch_of(self);
+    if (!mine) aether_panic("actors.link(): out of memory");
+    watch_lock(mine);
+    int ok = watch_add(mine, WATCH_LINK, 0, other);
+    watch_unlock(mine);
+    if (!ok) aether_panic("actors.link(): out of memory");
+
+    // Ended already: the link takes the death now, as it would have then.
+    const char* ended_with = NULL;
+    if (atomic_load_explicit(&other->dead, memory_order_acquire) & AETHER_ACTOR_RELEASED) {
+        ended_with = "normal";
+    } else {
+        AetherWatch* theirs = watch_of(other);
+        if (!theirs) {
+            watch_remove_from(self, WATCH_LINK, 0, other);
+            aether_panic("actors.link(): out of memory");
+        }
+        watch_lock(theirs);
+        if (theirs->finished) {
+            ended_with = atomic_load_explicit(&other->death_reason, memory_order_acquire);
+            if (!ended_with) ended_with = "normal";
+        } else {
+            ok = watch_add(theirs, WATCH_LINK, 0, self);
+        }
+        watch_unlock(theirs);
+        if (!ok) {
+            watch_remove_from(self, WATCH_LINK, 0, other);
+            aether_panic("actors.link(): out of memory");
+        }
+    }
+    if (ended_with) {
+        watch_remove_from(self, WATCH_LINK, 0, other);
+        link_effect(self, other, ended_with);
+    }
+}
+
+void aether_actor_unlink(void* ref) {
+    ActorBase* self = current_self("actors.unlink()");
+    ActorBase* other = (ActorBase*)ref;
+    if (!other || other == self) return;
+    watch_remove_from(self, WATCH_LINK, 0, other);
+    if (!(atomic_load_explicit(&other->dead, memory_order_acquire) & AETHER_ACTOR_RELEASED))
+        watch_remove_from(other, WATCH_LINK, 0, self);
+}
+
+void aether_actor_trap_exits(int on) {
+    ActorBase* self = current_self("actors.trap_exits()");
+    if (on) atomic_fetch_or_explicit(&self->exit_flags, AETHER_EXIT_TRAP, memory_order_acq_rel);
+    else atomic_fetch_and_explicit(&self->exit_flags, ~AETHER_EXIT_TRAP, memory_order_acq_rel);
 }

@@ -92,10 +92,17 @@ main() {
 job ended: normal
 ```
 
-On wasi a panic ends the program, so `monitor` is refused when compiling for
-it. See docs/actor-concurrency.md, "The end of an actor".
+`actors.link(ref)` ties two actors both ways: when either ends, the other
+ends too, with the same reason, unless it is `"normal"`; an actor that called
+`actors.trap_exits(true)` gets a `Down` instead and lives on.
+`actors.unlink(ref)` takes the tie away.
+
+On wasi a panic ends the program, so `monitor`, `link` and `trap_exits` are
+refused when compiling for it. See docs/actor-concurrency.md, "The end of an
+actor".
 
 ## Exports
 
 `register`, `whereis`, `unregister`, `is_registered`, `registry_size`,
-`registry_clear`, `monitor`, `demonitor`, `kill`, `stop`, `dead_sends`.
+`registry_clear`, `monitor`, `demonitor`, `kill`, `stop`, `dead_sends`, `link`,
+`unlink`, `trap_exits`.
