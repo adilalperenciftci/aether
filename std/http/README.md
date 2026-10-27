@@ -155,21 +155,31 @@ file with no bundle at all, then `/etc/ssl/certs`. If nothing loads, the
 handshake fails closed.
 
 **What it validates.** The server's certificate must name the host
-(subjectAltName only: DNS names with a whole-label leading wildcard, IP
-addresses), and there must be a path from it through the certificates the
-server sent to one of those anchors (`tls13_cert.validate_chain`, RFC 5280
-section 6 as the Web PKI profiles it) on which every signature verifies,
-every certificate is inside its validity period, every issuer below the
-anchor is a version 3 CA (basicConstraints cA) allowed to sign certificates
-(keyUsage keyCertSign when keyUsage is present) within its pathLenConstraint,
-the leaf and every issuer that lists extendedKeyUsage allow serverAuth, the
-DNS and IP name constraints of every issuer hold, and no certificate has a
-critical extension the client does not process. Every candidate path is
-tried, so an extra or cross-signed certificate in the server's list does not
+(subjectAltName only: DNS names, with a whole-label leading wildcard over at
+least two labels, and IP addresses), and there must be a path from it
+through the certificates the server sent to one of those anchors
+(`tls13_cert.validate_chain`, RFC 5280 section 6 as the Web PKI profiles it)
+on which every signature verifies (RSA PKCS#1 v1.5 with SHA-256, SHA-384 or
+SHA-512; ECDSA on P-256, P-384 or P-521; Ed25519), every key is one of those
+(RSA of at least 2048 bits, named curves only), every certificate is inside
+its validity period, every issuer below the anchor is a version 3 CA
+(basicConstraints cA) allowed to sign certificates (keyUsage keyCertSign
+when keyUsage is present) within its pathLenConstraint, the leaf and every
+issuer that lists extendedKeyUsage allow serverAuth (a leaf without
+extendedKeyUsage is valid for any purpose, as RFC 5280 says and as OpenSSL
+and Go's crypto/x509 read it: the backend a program runs on must not change
+which chains it accepts), every issuer's name
+constraints hold (DNS names, IP addresses, mailboxes, URI hosts, directory
+names; a wildcard is refused under an excluded name it could match), and no
+certificate has a critical extension the client does not process or one
+RFC 5280 forbids where it appears. Every candidate path is tried, within a
+bound, so an extra or cross-signed certificate in the server's list does not
 hide a good one. Before #3303 only the names and the signatures were
 checked, and a certificate a CA issued to any site could sign one for any
-other. A stapled OCSP response saying revoked fails the handshake; there is
-no CRL or online revocation check.
+other. The rules are measured against the x509-limbo and bettertls corpora
+in CI; `tests/conformance/x509_limbo/expected.txt` lists the cases that
+differ and why, each one the OpenSSL backend accepts too. A stapled OCSP response saying revoked fails the handshake;
+there is no CRL or online revocation check.
 
 **Scope and errors.** The pure client speaks TLS 1.3 only. A server that does
 not is refused with an error that says so (`server does not support TLS 1.3`),
@@ -177,14 +187,13 @@ not a hang. Handshake failures carry the real cause (an untrusted chain, a
 certificate not valid for the requested host, no trust store) prefixed with
 `TLS handshake failed (pure-Aether TLS 1.3):`.
 
-**Performance.** A pure handshake against a real CDN (a P-256 leaf over
-secp384r1 intermediates) completes in about 1.3 seconds, and a full cross-built
-HTTPS request in under a second. That is slower than OpenSSL but well inside any
-server's handshake deadline. An earlier version of this note measured 12-22
-seconds and warned that the default request timeout could expire mid-handshake;
-that cost was `std.bignum`'s bit-serial division inside every P-256 and P-384
-field reduction, and it is gone: the division is Knuth's Algorithm D (#2595),
-and a P-256 signature check takes about 15 ms. No timeout adjustment is needed.
+**Performance.** A whole pure-client GET of a real site (github.com,
+www.cloudflare.com, www.bing.com: DNS, trust store, handshake with full path
+validation, response) takes 0.4 to 0.5 seconds on a desktop, network
+included. A P-256 signature check takes about 0.5 ms (`std.cryptography.ecc`,
+#2600); earlier versions of this note measured 12 to 22 seconds, then 1.3,
+when every field operation went through `std.bignum`. No timeout adjustment is
+needed.
 
 See also `std.http.server.lb` for load balancing, `std.tcp` for raw sockets,
 and `docs/http-server.md` for routing, middleware, TLS and the HTTP/2 path.

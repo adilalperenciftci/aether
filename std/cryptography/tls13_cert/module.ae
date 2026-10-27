@@ -20,11 +20,13 @@
 //      (algorithm OID + public-key bits) out of the TBS. That SPKI is what the
 //      CertificateVerify check needs (the leaf's public key).
 //
-// EXPLICITLY OUT OF SCOPE for this brick (later increments): chain building
-// against a trust store, hostname / SAN matching, validity-period and Basic-
-// Constraints / EKU policy. (OCSP-staple revocation status IS parsed — see
-// parse_ocsp_status.) This is the crypto core, not the
-// full RFC 5280 policy engine.
+// Also here: path validation (validate_chain: RFC 5280 section 6 as the Web
+// PKI profiles it, see the comment above PURPOSE_SERVER), hostname / SAN
+// matching (check_hostname), validity periods, the trust store loaders, and
+// the OCSP-staple revocation status (parse_ocsp_status). Not here: CRLs,
+// certificate policies, and the issuance-profile rules (CA/Browser Forum,
+// RFC 5280's "conforming CAs MUST") that do not change what a path
+// authorises; tests/conformance/x509_limbo/expected.txt lists each.
 //
 // Import with:  import std.cryptography.tls13_cert
 //
@@ -420,10 +422,10 @@ verify_cert_verify_rsa_pss(spki_key: byte[], transcript_hash: byte[], sig: byte[
 // a long way from the edit that caused it. One constant, exported, so the
 // count lives next to the definition it has to track.
 //
-// Sized with headroom rather than exactly: 11 ptr (8) + 7 int (4) padded is
-// 144, and the slack absorbs the next field or two without another silent
-// overflow. A few spare bytes per certificate is the right trade against
-// corrupting the heap.
+// Sized with headroom rather than exactly: 14 ptr and 16 int fields come to
+// 208 bytes with x86-64 alignment, and the slack absorbs the next field or
+// two without another silent overflow. A few spare bytes per certificate is
+// the right trade against corrupting the heap.
 const LEAFCERT_SIZE = 256
 
 struct LeafCert {
@@ -453,8 +455,13 @@ struct LeafCert {
     path_len: int // basicConstraints pathLenConstraint (when EXT_PATHLEN)
     key_usage: int // KeyUsage, bit i of the BIT STRING as (1 << i) (when has_key_usage)
     eku_bits: int // EKU_* purposes listed (when EXT_EKU)
+    san_forms: int // bit (1 << form) for each GeneralName form in the SAN (form = tag & 0x1F)
+    nc_forms: int // bit (1 << form) for each form a name-constraint subtree names
+    key_kind: int // KEY_* of the subject public key, KEY_NONE when unsupported or weak
+    key_bits: int // the RSA modulus length in bits (KEY_RSA)
     nc_permitted: ptr // std.list of permitted name-constraint subtrees (tag byte, then value), or null
     nc_excluded: ptr // std.list of excluded subtrees, or null
+    san_other: ptr // std.list of rfc822Name, URI and directoryName SANs (tag byte, then value), or null
 }
 
 // Parse a DER Certificate into `out`. Returns "" on success or an error.
@@ -493,6 +500,11 @@ parse_certificate(der: byte[], out: *LeafCert) -> string {
     out.eku_bits = 0
     out.nc_permitted = null
     out.nc_excluded = null
+    out.san_other = null
+    out.san_forms = 0
+    out.nc_forms = 0
+    out.key_kind = KEY_NONE
+    out.key_bits = 0
 
     view = bytes.new(len)
     if len > 0 { bytes.set(view, len - 1, 0) }
@@ -571,6 +583,7 @@ fn parse_tbs_fields(tbsr: ptr, out: *LeafCert) -> string {
         if vi != null { bytes.free(vi) }
         asn1.reader_free(vr0)
     }
+    if string.equals(verr, "") == 1 && vtag == 0x02 { serial_check(v, out) }
     bytes.free(v)
     // Every read below used to drop its error, so a truncated or malformed
     // certificate parsed "successfully" into a LeafCert whose fields came
@@ -589,6 +602,7 @@ fn parse_tbs_fields(tbsr: ptr, out: *LeafCert) -> string {
     if vtag == 0xA0 {
         sn, snerr = asn1.read_tlv(tbsr)
         if string.equals(snerr, "") != 1 { return snerr }
+        serial_check(sn, out)
         bytes.free(sn)
     }
 
@@ -625,9 +639,14 @@ fn parse_tbs_fields(tbsr: ptr, out: *LeafCert) -> string {
     if string.equals(spkierr, "") != 1 { bytes.free(spki_content); return spkierr }
     sr = asn1.reader_new(spki_content)
     algo_body, algo_full, ae = asn1.read_sequence(sr)
+    kind = KEY_NONE
     if string.equals(ae, "") == 1 {
         oid, oerr = asn1.read_oid(algo_body)
-        if string.equals(oerr, "") == 1 { out.spki_algo_oid = oid_to_bytes(oid); string.release(oid) }
+        if string.equals(oerr, "") == 1 {
+            out.spki_algo_oid = oid_to_bytes(oid)
+            kind = spki_kind(oid, algo_body)
+            string.release(oid)
+        }
         asn1.reader_free(algo_body)
         bytes.free(algo_full)
     }
@@ -635,6 +654,9 @@ fn parse_tbs_fields(tbsr: ptr, out: *LeafCert) -> string {
     if string.equals(berr, "") == 1 {
         out.spki_key = bitkey
         out.spki_key_len = bytes.length(bitkey)
+        kk, kb = spki_key_check(kind, bitkey, out.spki_key_len)
+        out.key_kind = kk
+        out.key_bits = kb
     }
     asn1.reader_free(sr)
     bytes.free(spki_content)
@@ -654,7 +676,36 @@ fn parse_tbs_fields(tbsr: ptr, out: *LeafCert) -> string {
         bytes.free(ext_content)
     }
 
+    usage_check(out)
+
     return ""
+}
+
+// A serialNumber of more than 20 octets (RFC 5280 4.1.2.2; 21 when the
+// first is the 0x00 that keeps it positive), or an empty one, marks the
+// certificate EXT_MALFORMED. Zero and negative serials are let through: the
+// same section asks users to handle those gracefully.
+fn serial_check(sn: ptr, out: *LeafCert) {
+    n = bytes.length(sn)
+    if n == 0 || n > 21 || (n == 21 && (bytes.get(sn, 0) & 0xFF) != 0) {
+        out.ext_bits = out.ext_bits | EXT_MALFORMED
+    }
+}
+
+// RFC 5280 rules across fields, each marking EXT_MALFORMED when broken:
+// nameConstraints only in a CA certificate (4.2.1.10), keyCertSign only
+// with basicConstraints cA (4.2.1.3), and a subjectAltName marked critical
+// when the subject is empty (4.2.1.6).
+fn usage_check(out: *LeafCert) {
+    is_ca = 0
+    if out.is_ca == 1 { is_ca = 1 }
+    if (out.ext_bits & EXT_NC) != 0 && is_ca == 0 { out.ext_bits = out.ext_bits | EXT_MALFORMED }
+    if out.has_key_usage == 1 && out.key_cert_sign == 1 && is_ca == 0 {
+        out.ext_bits = out.ext_bits | EXT_MALFORMED
+    }
+    if out.subject_len <= 2 && (out.ext_bits & EXT_SAN) != 0 && (out.ext_bits & EXT_SAN_CRITICAL) == 0 {
+        out.ext_bits = out.ext_bits | EXT_MALFORMED
+    }
 }
 
 // Read a TLV and return its FULL DER (tag+len+content) as fresh bytes.
@@ -690,6 +741,98 @@ struct CertReaderView {
     last_tag: int
 }
 
+// ---- subject public keys ----
+//
+// The keys a path may carry: what the signature checks and the client's
+// CertificateVerify can use, at a strength worth trusting. Anything else
+// (DSA, P-192 or any other curve, explicit curve parameters, RSA under 2048
+// bits) is KEY_NONE, and validate_chain refuses a path with such a
+// certificate anywhere in it. Explicit curve parameters are the
+// CVE-2020-0601 shape: a key whose meaning depends on parameters the
+// certificate itself supplies.
+const KEY_NONE = 0
+const KEY_RSA = 1
+const KEY_P256 = 2
+const KEY_P384 = 3
+const KEY_P521 = 4
+const KEY_ED25519 = 5
+
+const RSA_MIN_BITS = 2048
+const RSA_MAX_BITS = 16384
+
+// The KEY_* an SPKI AlgorithmIdentifier names (`params` reads what follows
+// the OID), before the key itself is looked at.
+fn spki_kind(oid: string, params: ptr) -> int {
+    if string.equals(oid, "1.2.840.113549.1.1.1") == 1 { return KEY_RSA }
+    if string.equals(oid, "1.3.101.112") == 1 {
+        if asn1.reader_eof(params) == 1 { return KEY_ED25519 }
+        return KEY_NONE
+    }
+    if string.equals(oid, "1.2.840.10045.2.1") != 1 { return KEY_NONE }
+    // ECParameters ::= CHOICE { namedCurve OID, ... }: only a named curve.
+    curve, cerr = asn1.read_oid(params)
+    if string.equals(cerr, "") != 1 { return KEY_NONE }
+    k = KEY_NONE
+    if string.equals(curve, "1.2.840.10045.3.1.7") == 1 { k = KEY_P256 }
+    if string.equals(curve, "1.3.132.0.34") == 1 { k = KEY_P384 }
+    if string.equals(curve, "1.3.132.0.35") == 1 { k = KEY_P521 }
+    string.release(curve)
+    return k
+}
+
+// (KEY_*, RSA bits) for the subjectPublicKey `key` of an SPKI of `kind`:
+// an EC key must be an uncompressed point of its curve's size, Ed25519 32
+// bytes, and RSA an RSAPublicKey of RSA_MIN_BITS..RSA_MAX_BITS, a whole
+// number of bytes (CABF 6.1.5), with an odd exponent above 1.
+fn spki_key_check(kind: int, key: ptr, klen: int) -> (int, int) {
+    if key == null || klen < 1 { return KEY_NONE, 0 }
+    if kind == KEY_RSA {
+        bits = spki_rsa_bits(key, klen)
+        if bits >= RSA_MIN_BITS && bits <= RSA_MAX_BITS && bits % 8 == 0 { return KEY_RSA, bits }
+        return KEY_NONE, bits
+    }
+    if kind == KEY_ED25519 {
+        if klen == 32 { return KEY_ED25519, 0 }
+        return KEY_NONE, 0
+    }
+    want = 0
+    if kind == KEY_P256 { want = 65 }
+    if kind == KEY_P384 { want = 97 }
+    if kind == KEY_P521 { want = 133 }
+    if want == 0 || klen != want || (bytes.get(key, 0) & 0xFF) != 0x04 { return KEY_NONE, 0 }
+    return kind, 0
+}
+
+// The modulus length in bits of a DER RSAPublicKey ::= SEQUENCE { modulus
+// INTEGER, publicExponent INTEGER }, or 0 when it is not one (or the
+// exponent is even, 1, or negative).
+fn spki_rsa_bits(key: ptr, klen: int) -> int {
+    tag, co, cl, nx = der_tlv(key, 0, klen)
+    if tag != 0x30 || nx != klen { return 0 }
+    end = co + cl
+    nt, nco, ncl, nnx = der_tlv(key, co, end)
+    if nt != 0x02 || ncl < 1 || (bytes.get(key, nco) & 0x80) != 0 { return 0 }
+    p = nco
+    n = ncl
+    while n > 0 && (bytes.get(key, p) & 0xFF) == 0 {
+        p = p + 1
+        n = n - 1
+    }
+    if n == 0 { return 0 }
+    top = bytes.get(key, p) & 0xFF
+    b = 0
+    while top > 0 {
+        b = b + 1
+        top = top >> 1
+    }
+    et, eco, ecl, enx = der_tlv(key, nnx, end)
+    if et != 0x02 || ecl < 1 || enx != end || (bytes.get(key, eco) & 0x80) != 0 { return 0 }
+    last = bytes.get(key, eco + ecl - 1) & 0xFF
+    if (last & 1) == 0 { return 0 }
+    if ecl == 1 && last == 1 { return 0 }
+    return (n - 1) * 8 + b
+}
+
 // ---- extensions (RFC 5280 4.2) ----
 //
 // What path validation needs from each certificate: basicConstraints,
@@ -703,9 +846,10 @@ const EXT_EKU = 16 // extKeyUsage present
 const EXT_NC = 32 // nameConstraints present
 const EXT_UNKNOWN_CRITICAL = 64 // a critical extension this code does not process
 const EXT_DUPLICATE = 128 // an extension OID appears twice
-const EXT_MALFORMED = 256 // an extension this code processes did not parse
+const EXT_MALFORMED = 256 // an extension or field did not parse, or breaks an RFC 5280 rule on its use
 const EXT_SAN = 512 // subjectAltName present
 const EXT_SAN_EMPTY = 1024 // subjectAltName with no names
+const EXT_SAN_CRITICAL = 2048 // subjectAltName marked critical
 
 const EKU_SERVER = 1 // id-kp-serverAuth
 const EKU_CLIENT = 2 // id-kp-clientAuth
@@ -788,6 +932,7 @@ fn bytes_list_has(l: ptr, b: ptr) -> int {
 fn parse_one_extension(oid: string, critical: int, value: @keep ptr, out: *LeafCert) {
     if string.equals(oid, "2.5.29.17") == 1 {
         out.ext_bits = out.ext_bits | EXT_SAN
+        if critical == 1 { out.ext_bits = out.ext_bits | EXT_SAN_CRITICAL }
         n_any = decode_san_dnsnames(value, out)
         if n_any == 0 { out.ext_bits = out.ext_bits | EXT_SAN_EMPTY }
         return
@@ -811,13 +956,55 @@ fn parse_one_extension(oid: string, critical: int, value: @keep ptr, out: *LeafC
         parse_name_constraints(value, out)
         return
     }
-    // Recognised and not acted on: subject/authority key identifiers, CRL
-    // distribution points, authority information access, certificate
-    // policies, SCTs. Anything else that is critical cannot be honoured.
-    if string.equals(oid, "2.5.29.14") == 1 || string.equals(oid, "2.5.29.35") == 1 { return }
-    if string.equals(oid, "2.5.29.31") == 1 || string.equals(oid, "1.3.6.1.5.5.7.1.1") == 1 { return }
+    // Recognised and not acted on: the subject and authority key
+    // identifiers and authority information access, which RFC 5280 4.2.1.1,
+    // 4.2.1.2 and 4.2.2.1 say MUST be non-critical (a critical one is
+    // refused as misused); CRL distribution points, certificate policies
+    // and SCTs. Policy constraints MUST be critical (4.2.1.11), and a
+    // critical one asks for policy processing this code does not do, so
+    // either way it is refused. Anything else that is critical cannot be
+    // honoured.
+    if string.equals(oid, "2.5.29.14") == 1 || string.equals(oid, "2.5.29.35") == 1 {
+        if critical == 1 { out.ext_bits = out.ext_bits | EXT_MALFORMED }
+        return
+    }
+    if string.equals(oid, "1.3.6.1.5.5.7.1.1") == 1 {
+        if critical == 1 { out.ext_bits = out.ext_bits | EXT_MALFORMED }
+        if aia_ok(value) == 0 { out.ext_bits = out.ext_bits | EXT_MALFORMED }
+        return
+    }
+    if string.equals(oid, "2.5.29.36") == 1 {
+        if critical == 1 {
+            out.ext_bits = out.ext_bits | EXT_UNKNOWN_CRITICAL
+        } else {
+            out.ext_bits = out.ext_bits | EXT_MALFORMED
+        }
+        return
+    }
+    if string.equals(oid, "2.5.29.31") == 1 { return }
     if string.equals(oid, "2.5.29.32") == 1 || string.equals(oid, "1.3.6.1.4.1.11129.2.4.2") == 1 { return }
     if critical == 1 { out.ext_bits = out.ext_bits | EXT_UNKNOWN_CRITICAL }
+}
+
+// AuthorityInfoAccessSyntax ::= SEQUENCE SIZE (1..MAX) OF AccessDescription
+// AccessDescription ::= SEQUENCE { accessMethod OID, accessLocation GeneralName }
+// 1 when the extnValue `value` is one.
+fn aia_ok(value: @keep ptr) -> int {
+    vl = bytes.length(value)
+    tag, co, cl, nx = der_tlv(value, 0, vl)
+    if tag != 0x30 || nx != vl || cl == 0 { return 0 }
+    p = co
+    end = co + cl
+    while p < end {
+        dt, dco, dcl, dnx = der_tlv(value, p, end)
+        if dt != 0x30 { return 0 }
+        ot, _oco, _ocl, onx = der_tlv(value, dco, dco + dcl)
+        if ot != 0x06 { return 0 }
+        lt, _lco, _lcl, lnx = der_tlv(value, onx, dco + dcl)
+        if lt < 0 || lnx != dco + dcl { return 0 }
+        p = dnx
+    }
+    return 1
 }
 
 // ExtKeyUsageSyntax ::= SEQUENCE SIZE (1..MAX) OF KeyPurposeId
@@ -858,9 +1045,13 @@ fn parse_ext_key_usage(value: @keep ptr, out: *LeafCert) {
 
 // NameConstraints ::= SEQUENCE { permittedSubtrees [0] GeneralSubtrees OPTIONAL,
 //                                excludedSubtrees  [1] GeneralSubtrees OPTIONAL }
+// GeneralSubtrees ::= SEQUENCE SIZE (1..MAX) OF GeneralSubtree
 // GeneralSubtree ::= SEQUENCE { base GeneralName, minimum [0] DEFAULT 0,
 //                               maximum [1] OPTIONAL }
-// Each base is kept as its tag byte followed by its content.
+// Each base is kept as its tag byte followed by its content, and its form
+// goes to nc_forms. EXT_MALFORMED: neither list, an empty list, a minimum or
+// maximum (RFC 5280 4.2.1.10: MUST be absent), or a base that is not a
+// well-formed constraint of its form (constraint_ok).
 fn parse_name_constraints(value: @keep ptr, out: *LeafCert) {
     r = asn1.reader_new(value)
     body, berr = asn1.read_tlv(r)
@@ -871,6 +1062,7 @@ fn parse_name_constraints(value: @keep ptr, out: *LeafCert) {
         if body != null { bytes.free(body) }
         return
     }
+    lists = 0
     br = asn1.reader_new(body)
     while asn1.reader_eof(br) != 1 {
         trees, terr = asn1.read_tlv(br)
@@ -880,6 +1072,7 @@ fn parse_name_constraints(value: @keep ptr, out: *LeafCert) {
             break
         }
         if ttag == 0xA0 || ttag == 0xA1 {
+            lists = lists + 1
             dest = list_new()
             tr = asn1.reader_new(trees)
             while asn1.reader_eof(tr) != 1 {
@@ -900,8 +1093,8 @@ fn parse_name_constraints(value: @keep ptr, out: *LeafCert) {
                     if bl > 0 { bytes.copy_from_bytes(e, 1, base, 0, bl) }
                     list.add(dest, e)
                     bytes.free(base)
-                    // minimum other than 0, or any maximum, is not used by the
-                    // Web PKI (RFC 5280 4.2.1.10 says MUST be absent).
+                    out.nc_forms = out.nc_forms | (1 << (btag2 & 0x1F))
+                    if constraint_ok(e) == 0 { out.ext_bits = out.ext_bits | EXT_MALFORMED }
                     if asn1.reader_eof(sr) != 1 { out.ext_bits = out.ext_bits | EXT_MALFORMED }
                 } else {
                     out.ext_bits = out.ext_bits | EXT_MALFORMED
@@ -910,6 +1103,7 @@ fn parse_name_constraints(value: @keep ptr, out: *LeafCert) {
                 bytes.free(sub)
             }
             asn1.reader_free(tr)
+            if list_size(dest) == 0 { out.ext_bits = out.ext_bits | EXT_MALFORMED }
             if ttag == 0xA0 {
                 free_bytes_list(out.nc_permitted)
                 out.nc_permitted = dest
@@ -922,8 +1116,104 @@ fn parse_name_constraints(value: @keep ptr, out: *LeafCert) {
         }
         bytes.free(trees)
     }
+    if lists == 0 { out.ext_bits = out.ext_bits | EXT_MALFORMED }
     asn1.reader_free(br)
     bytes.free(body)
+}
+
+// Is the subtree base `e` (tag byte, then content) a well-formed constraint?
+// dNSName: empty (every name) or a DNS name, no leading period (RFC 5280
+// 4.2.1.10 allows one for URIs and mailboxes only); iPAddress: an address
+// and a mask of the same family; rfc822Name: a mailbox, a host, or a host
+// with a leading period; URI: a host, or one with a leading period;
+// directoryName: a Name. The other forms are not processed, and are not
+// judged here (names_allowed refuses a name of such a form below them).
+fn constraint_ok(e: ptr) -> int {
+    tag = bytes.get(e, 0) & 0xFF
+    n = bytes.length(e) - 1
+    if tag == 0x82 {
+        if n == 0 { return 1 }
+        return dns_name_ok(e, 1, n, 0)
+    }
+    if tag == 0x87 {
+        if n == 8 || n == 32 { return 1 }
+        return 0
+    }
+    if tag == 0x81 {
+        at = byte_index(e, 1, n, 64)
+        if at >= 0 { return mailbox_ok(e, 1, n) }
+        if n > 0 && (bytes.get(e, 1) & 0xFF) == 46 { return dns_name_ok(e, 2, n - 1, 0) }
+        return dns_name_ok(e, 1, n, 0)
+    }
+    if tag == 0x86 {
+        if n > 0 && (bytes.get(e, 1) & 0xFF) == 46 { return dns_name_ok(e, 2, n - 1, 0) }
+        return dns_name_ok(e, 1, n, 0)
+    }
+    if tag == 0xA4 {
+        if n >= 2 && (bytes.get(e, 1) & 0xFF) == 0x30 { return 1 }
+        return 0
+    }
+    return 1
+}
+
+// The first offset in b[off, off + n) holding byte `ch`, or -1.
+fn byte_index(b: ptr, off: int, n: int, ch: int) -> int {
+    i = 0
+    while i < n {
+        if (bytes.get(b, off + i) & 0xFF) == ch { return off + i }
+        i = i + 1
+    }
+    return -1
+}
+
+// Is b[off, off + n) a DNS name: dot-separated labels of 1 to 63 letters,
+// digits, hyphens and underscores, 253 bytes at most, no empty label (so
+// no leading, trailing or doubled dot)? With `wild`, a leftmost "*." is
+// allowed before such a name. Underscores are accepted as Go and OpenSSL
+// accept them (RFC 5280 asks for the preferred name syntax, which has
+// none).
+fn dns_name_ok(b: ptr, off: int, n: int, wild: int) -> int {
+    p = off
+    m = n
+    if wild == 1 && m >= 2 && (bytes.get(b, p) & 0xFF) == 42 && (bytes.get(b, p + 1) & 0xFF) == 46 {
+        p = p + 2
+        m = m - 2
+    }
+    if m < 1 || m > 253 { return 0 }
+    label = 0
+    i = 0
+    while i < m {
+        c = bytes.get(b, p + i) & 0xFF
+        if c == 46 {
+            if label == 0 { return 0 }
+            label = 0
+        } else {
+            if dns_char_ok(c) == 0 { return 0 }
+            label = label + 1
+            if label > 63 { return 0 }
+        }
+        i = i + 1
+    }
+    if label == 0 { return 0 }
+    return 1
+}
+
+// 1 for a letter, digit, hyphen or underscore.
+fn dns_char_ok(c: int) -> int {
+    if c >= 97 && c <= 122 { return 1 }
+    if c >= 65 && c <= 90 { return 1 }
+    if c >= 48 && c <= 57 { return 1 }
+    if c == 45 || c == 95 { return 1 }
+    return 0
+}
+
+// Is b[off, off + n) a mailbox "local@host": exactly one "@", a non-empty
+// local part, and a DNS name after it?
+fn mailbox_ok(b: ptr, off: int, n: int) -> int {
+    at = byte_index(b, off, n, 64)
+    if at <= off { return 0 }
+    if byte_index(b, at + 1, off + n - at - 1, 64) >= 0 { return 0 }
+    return dns_name_ok(b, at + 1, off + n - at - 1, 0)
 }
 
 // Read an Extension's extnValue OCTET STRING content, after the optional
@@ -1036,35 +1326,47 @@ fn decode_key_usage(octet_content: @keep ptr, out: *LeafCert) {
 }
 
 // The SAN extnValue OCTET STRING wraps GeneralNames ::= SEQUENCE OF GeneralName.
-// dNSName is [2] IMPLICIT IA5String (context tag 0x82). Add each to dns_names,
-// (and each iPAddress to ip_addrs), and return how many GeneralNames there were,
-// rejecting any with an embedded NUL.
+// Each dNSName ([2] IMPLICIT IA5String) goes to dns_names, each iPAddress
+// ([7], 4 or 16 bytes) to ip_addrs, each rfc822Name ([1]), URI ([6]) and
+// directoryName ([4]) to san_other as its tag byte then its content, and
+// every form seen to san_forms. A dNSName with a NUL in it or an iPAddress
+// of any other length marks the certificate EXT_MALFORMED. Returns how many
+// GeneralNames there were.
 fn decode_san_dnsnames(octet_content: @keep ptr, out: *LeafCert) -> int {
     or = asn1.reader_new(octet_content)
     gn_content, gerr = asn1.read_tlv(or) // the GeneralNames SEQUENCE content
+    gtag = asn1.last_tag(or)
+    trailing = asn1.reader_eof(or) != 1
     asn1.reader_free(or)
-    if string.equals(gerr, "") != 1 { return 0 }
+    if string.equals(gerr, "") != 1 || gtag != 0x30 || trailing {
+        out.ext_bits = out.ext_bits | EXT_MALFORMED
+        if gn_content != null { bytes.free(gn_content) }
+        return 0
+    }
     int count = 0
     gr = asn1.reader_new(gn_content)
     while asn1.reader_eof(gr) != 1 {
         name_content, nerr = asn1.read_tlv(gr)
-        if string.equals(nerr, "") != 1 { break }
+        if string.equals(nerr, "") != 1 {
+            out.ext_bits = out.ext_bits | EXT_MALFORMED
+            break
+        }
         tag = asn1.last_tag(gr)
         count = count + 1
+        out.san_forms = out.san_forms | (1 << (tag & 0x1F))
+        nlen = bytes.length(name_content)
         if tag == 0x87 {
-            // iPAddress [7] IMPLICIT OCTET STRING -- 4 bytes for IPv4, 16 for
-            // IPv6, raw network order (RFC 5280 s4.2.1.6). Any other length is
-            // malformed; skip it rather than match against it.
-            alen = bytes.length(name_content)
-            if alen == 4 || alen == 16 {
-                ip = bytes.new(alen)
-                bytes.copy_from_bytes(ip, 0, name_content, 0, alen)
+            // iPAddress [7] IMPLICIT OCTET STRING: 4 bytes for IPv4, 16 for
+            // IPv6, raw network order (RFC 5280 s4.2.1.6).
+            if nlen == 4 || nlen == 16 {
+                ip = bytes.new(nlen)
+                bytes.copy_from_bytes(ip, 0, name_content, 0, nlen)
                 list.add(out.ip_addrs, ip)
+            } else {
+                out.ext_bits = out.ext_bits | EXT_MALFORMED
             }
-        }
-        if tag == 0x82 {
+        } else if tag == 0x82 {
             // dNSName IA5String content
-            nlen = bytes.length(name_content)
             has_nul = 0
             i = 0
             while i < nlen {
@@ -1076,7 +1378,16 @@ fn decode_san_dnsnames(octet_content: @keep ptr, out: *LeafCert) -> int {
                 if nlen > 0 { bytes.set(nm, nlen - 1, 0) }
                 bytes.copy_from_bytes(nm, 0, name_content, 0, nlen)
                 list.add(out.dns_names, nm)
+            } else {
+                out.ext_bits = out.ext_bits | EXT_MALFORMED
             }
+        } else if tag == 0x81 || tag == 0x86 || tag == 0xA4 {
+            if out.san_other == null { out.san_other = list_new() }
+            e = bytes.new(nlen + 1)
+            bytes.set(e, nlen, 0)
+            bytes.set(e, 0, tag)
+            if nlen > 0 { bytes.copy_from_bytes(e, 1, name_content, 0, nlen) }
+            list.add(out.san_other, e)
         }
         bytes.free(name_content)
     }
@@ -1157,8 +1468,10 @@ free_leaf(c: *LeafCert) {
     }
     free_bytes_list(c.nc_permitted)
     free_bytes_list(c.nc_excluded)
+    free_bytes_list(c.san_other)
     c.nc_permitted = null
     c.nc_excluded = null
+    c.san_other = null
 }
 
 // Free a std.list of std.bytes buffers (null-safe).
@@ -1301,6 +1614,10 @@ fn dnsname_matches(pat: ptr, plen: int, host: string, hlen: int) -> int {
         j = j + 1
     }
     if hdot <= 0 { return 0 } // no dot, or empty first label -> no match
+    // At least two labels after the wildcard: "*.com" would cover a whole
+    // top-level domain (x509-limbo's public-suffix-wildcard-san). Without a
+    // public suffix list, "*.co.uk" is not caught.
+    if byte_index(pat, 2, plen - 2, 46) < 0 { return 0 }
     // The pattern tail is pat[1..plen) == ".rest"; host tail is host[hdot..hlen).
     tail_len = plen - 1
     if tail_len != (hlen - hdot) { return 0 }
@@ -2150,7 +2467,7 @@ chain_verify(leaf: *LeafCert, anchors: ptr) -> string {
 // verified, never asking whether an issuer was a CA: a certificate a CA
 // issued to any web site could sign one for any other host (#3303).
 chain_verify_path(leaf: *LeafCert, intermediates: ptr, anchors: ptr) -> string {
-    return validate_chain(leaf, intermediates, anchors, "", PURPOSE_SERVER, 0)
+    return validate_chain(leaf, intermediates, anchors, "", PURPOSE_SERVER, -1)
 }
 
 const MAX_CHAIN_DEPTH = 8
@@ -2161,21 +2478,44 @@ const MAX_CHAIN_DEPTH = 8
 // or why no path is acceptable. It searches every path from the leaf
 // through the intermediates (each used at most once) to a trust anchor,
 // backtracking when a candidate fails, and accepts the first where:
-//   - every signature verifies and every issuer DN matches its child's;
+//   - every signature verifies and every issuer DN matches its child's
+//     (RSA PKCS#1 v1.5 with SHA-256, SHA-384 or SHA-512; ECDSA on P-256,
+//     P-384 or P-521 with SHA-256, SHA-384 or SHA-512; Ed25519);
 //   - every certificate is within its validity period at `at` (a
 //     "YYYYMMDDHHMMSS" key, "" for now);
-//   - every issuer is a v3 CA (basicConstraints cA), may sign certificates
-//     (keyUsage keyCertSign, when keyUsage is present), and its
-//     pathLenConstraint covers the CAs below it;
+//   - every certificate's public key is a KEY_* one: RSA of 2048 bits or
+//     more, a named P-256, P-384 or P-521 point, or Ed25519;
+//   - every issuer below the anchor is a v3 CA (basicConstraints cA), may
+//     sign certificates (keyUsage keyCertSign, when keyUsage is present),
+//     and its pathLenConstraint covers the CAs below it; the anchor is
+//     trusted as given, but one whose basicConstraints says it is not a CA,
+//     or whose keyUsage lacks keyCertSign, issues nothing;
 //   - no certificate has an unknown critical, repeated or malformed
-//     extension;
-//   - the leaf, and every issuer that restricts it, allows `purpose`
-//     (PURPOSE_SERVER: id-kp-serverAuth, PURPOSE_CLIENT: id-kp-clientAuth)
-//     in extendedKeyUsage;
-//   - every name constraint (DNS and IP subtrees) of an issuer permits, and
-//     does not exclude, the SAN names of the certificates below it.
-// max_depth bounds the number of intermediates (0: MAX_CHAIN_DEPTH).
-// The hostname is checked separately (check_hostname). #1298 (x509-limbo).
+//     extension, an extension used where RFC 5280 forbids it (a critical
+//     key identifier or authority information access, policy constraints,
+//     name constraints or keyCertSign without cA, a non-critical
+//     subjectAltName beside an empty subject), or a serial number over 20
+//     octets; no CA has an empty subject;
+//   - the leaf, and every issuer that lists extendedKeyUsage, allows
+//     `purpose` (PURPOSE_SERVER: id-kp-serverAuth, PURPOSE_CLIENT:
+//     id-kp-clientAuth); anyExtendedKeyUsage alone does not (RFC 5280
+//     4.2.1.12 lets an application that needs a purpose refuse it);
+//   - every issuer's name constraints (the anchor's too) permit, and do not
+//     exclude, the names of every certificate below it that is the leaf or
+//     not self-issued: dNSName (a wildcard SAN is excluded when any name it
+//     could match is), iPAddress, rfc822Name, the host of a URI, and
+//     directoryName (the subject and directoryName SANs, as a byte-exact
+//     prefix of RDNs). A SAN that is malformed for a constrained form, and
+//     a SAN of a form this code does not process (otherName, x400Address,
+//     ediPartyName, registeredID) below a constraint of that form, are
+//     refused;
+//   - there are at most max_depth intermediates that are not self-issued
+//     (a negative max_depth means MAX_CHAIN_DEPTH).
+// The search spends at most CHAIN_SIG_BUDGET signature checks and
+// CHAIN_NC_BUDGET name comparisons, so a crafted set of certificates cannot
+// make it unbounded. The hostname is checked separately (check_hostname).
+// #3303, #1298 (x509-limbo; tests/conformance/x509_limbo/expected.txt says
+// which of its cases this does not agree with, and why).
 
 const PURPOSE_SERVER = 1
 const PURPOSE_CLIENT = 2
@@ -2192,11 +2532,21 @@ const CHAIN_PURPOSE = 9
 const CHAIN_NAME_CONSTRAINT = 10
 const CHAIN_NOT_V3 = 11
 const CHAIN_BUDGET = 12
+const CHAIN_BAD_KEY = 13
 
 // Signature checks one path search may spend: a set of cross-signed
 // intermediates can otherwise make the search exponential (x509-limbo's
 // pathological cases). The same bound as rustls-webpki.
 const CHAIN_SIG_BUDGET = 100
+
+// Name-constraint comparisons one path search may spend: 2048 subtrees
+// against 2048 names is four million (x509-limbo's nc-dos cases). The same
+// bound as Go's crypto/x509 and rustls-webpki.
+const CHAIN_NC_BUDGET = 250000
+
+// The GeneralName forms a constraint can name that this code does not
+// match: otherName [0], x400Address [3], ediPartyName [5], registeredID [8].
+const NC_UNPROCESSED = 297
 
 struct ChainCtx {
     intermediates: ptr // std.list of *LeafCert, or null
@@ -2206,6 +2556,7 @@ struct ChainCtx {
     max_depth: int
     err: int // the most specific CHAIN_* failure seen
     budget: int // signature verifications left (path building is bounded)
+    nc_budget: int // name-constraint comparisons left
 }
 
 fn chain_error(code: int) -> string {
@@ -2215,11 +2566,12 @@ fn chain_error(code: int) -> string {
     if code == CHAIN_PATH_LEN { return "a CA's path length constraint is exceeded" }
     if code == CHAIN_VALIDITY { return "a certificate in the chain has expired or is not yet valid" }
     if code == CHAIN_CRITICAL { return "a certificate in the chain has an unknown critical extension" }
-    if code == CHAIN_BAD_EXT { return "a certificate in the chain has a malformed or repeated extension" }
+    if code == CHAIN_BAD_EXT { return "a certificate in the chain has a malformed, repeated or misused extension or field" }
     if code == CHAIN_PURPOSE { return "a certificate in the chain is not valid for this purpose (extendedKeyUsage)" }
     if code == CHAIN_NAME_CONSTRAINT { return "a name in the chain violates a CA's name constraints" }
     if code == CHAIN_NOT_V3 { return "an issuing certificate is not version 3" }
-    if code == CHAIN_BUDGET { return "too many candidate paths: path building gave up" }
+    if code == CHAIN_BUDGET { return "too many candidate paths or name comparisons: path building gave up" }
+    if code == CHAIN_BAD_KEY { return "a certificate in the chain has an unsupported or weak public key" }
     return "certificate does not chain to a trusted anchor"
 }
 
@@ -2241,6 +2593,7 @@ fn cert_time_ok(c: *LeafCert, at: string) -> int {
 fn ext_code(c: *LeafCert) -> int {
     if (c.ext_bits & EXT_UNKNOWN_CRITICAL) != 0 { return CHAIN_CRITICAL }
     if (c.ext_bits & (EXT_DUPLICATE | EXT_MALFORMED | EXT_SAN_EMPTY)) != 0 { return CHAIN_BAD_EXT }
+    if c.key_kind == KEY_NONE { return CHAIN_BAD_KEY }
     return 0
 }
 
@@ -2256,6 +2609,8 @@ fn issuer_code(ca: *LeafCert, at: string, purpose: int, is_anchor: int) -> int {
     e = ext_code(ca)
     if e != 0 { return e }
     if is_anchor == 0 && ca.version != 2 { return CHAIN_NOT_V3 }
+    // A CA names itself: RFC 5280 4.1.2.6, its subject MUST NOT be empty.
+    if ca.subject == null || ca.subject_len <= 2 { return CHAIN_BAD_EXT }
     if is_anchor == 0 && ca.is_ca == 0 { return CHAIN_NOT_CA }
     if is_anchor == 1 && (ca.ext_bits & EXT_BC) != 0 && ca.is_ca == 0 { return CHAIN_NOT_CA }
     if ca.has_key_usage == 1 && ca.key_cert_sign == 0 { return CHAIN_NO_CERT_SIGN }
@@ -2284,24 +2639,45 @@ fn lc(c: int) -> int {
     return c
 }
 
-// RFC 5280 4.2.1.10 for dNSName: "example.com" matches it and every name
-// under it, ".example.com" only the names under it, "" everything.
-fn dns_constraint_match(name: ptr, cons: ptr, coff: int) -> int {
-    nl = bytes.length(name)
-    cl = bytes.length(cons) - coff
+// Is the domain name[noff, noff + nl) inside the constraint
+// cons[coff, coff + cl) (RFC 5280 4.2.1.10)? A constraint with a leading
+// period holds only the names under it; one without holds itself and, when
+// `under` is 1 (dNSName), every name under it too; an empty one holds
+// everything. Case-insensitive.
+fn domain_within(name: ptr, noff: int, nl: int, cons: ptr, coff: int, cl: int, under: int) -> int {
     if cl <= 0 { return 1 }
     if nl < cl { return 0 }
-    dot = 0
-    if (bytes.get(cons, coff) & 0xFF) == 46 { dot = 1 }
-    if dot == 1 && nl == cl { return 0 }
-    if dot == 0 && nl > cl {
-        if (bytes.get(name, nl - cl - 1) & 0xFF) != 46 { return 0 }
+    if (bytes.get(cons, coff) & 0xFF) == 46 {
+        if nl == cl { return 0 }
+    } else if nl > cl {
+        if under == 0 { return 0 }
+        if (bytes.get(name, noff + nl - cl - 1) & 0xFF) != 46 { return 0 }
     }
     k = 0
     while k < cl {
-        if lc(bytes.get(name, nl - cl + k) & 0xFF) != lc(bytes.get(cons, coff + k) & 0xFF) { return 0 }
+        if lc(bytes.get(name, noff + nl - cl + k) & 0xFF) != lc(bytes.get(cons, coff + k) & 0xFF) { return 0 }
         k = k + 1
     }
+    return 1
+}
+
+// Could the wildcard dNSName "*.X" at name[off] match a name inside the
+// excluded subtree cons[coff..]? Beyond X being inside it (domain_within),
+// that is when the subtree is "L.X" for a single label L: "*.example.com"
+// matches bar.example.com, so an excluded bar.example.com excludes it
+// (CVE-2025-61727).
+fn wildcard_may_match(name: ptr, off: int, cons: ptr, coff: int) -> int {
+    nl = bytes.length(name) - off
+    if nl < 3 || (bytes.get(name, off) & 0xFF) != 42 || (bytes.get(name, off + 1) & 0xFF) != 46 { return 0 }
+    xl = nl - 1 // ".X"
+    cl = bytes.length(cons) - coff
+    if cl <= xl { return 0 }
+    k = 0
+    while k < xl {
+        if lc(bytes.get(cons, coff + cl - xl + k) & 0xFF) != lc(bytes.get(name, off + 1 + k) & 0xFF) { return 0 }
+        k = k + 1
+    }
+    if byte_index(cons, coff, cl - xl, 46) >= 0 { return 0 }
     return 1
 }
 
@@ -2319,10 +2695,120 @@ fn ip_constraint_match(ip: ptr, cons: ptr, coff: int) -> int {
     return 1
 }
 
-// The subtrees of name type `tag` (0x82 DNS, 0x87 IP) in `trees` against
-// `name`: 0 when there are none of that type, 1 when there are and none
-// matches, 2 when one matches.
-fn subtrees_match(trees: ptr, tag: int, name: ptr) -> int {
+// rfc822Name constraint against the mailbox at name[off]: a constraint
+// with an "@" is that mailbox exactly (the local part byte for byte, every
+// character literal, the host case-insensitively); one without names the
+// host (or, with a leading period, the hosts under it) of every mailbox.
+fn email_constraint_match(name: ptr, off: int, cons: ptr, coff: int) -> int {
+    nl = bytes.length(name) - off
+    cl = bytes.length(cons) - coff
+    at = byte_index(name, off, nl, 64)
+    if byte_index(cons, coff, cl, 64) >= 0 {
+        if nl != cl { return 0 }
+        k = 0
+        while k < nl {
+            a = bytes.get(name, off + k) & 0xFF
+            b = bytes.get(cons, coff + k) & 0xFF
+            if off + k > at {
+                a = lc(a)
+                b = lc(b)
+            }
+            if a != b { return 0 }
+            k = k + 1
+        }
+        return 1
+    }
+    return domain_within(name, at + 1, off + nl - at - 1, cons, coff, cl, 0)
+}
+
+// The host of the URI at name[off, off + n) as fresh bytes, or null when
+// it has none that is a DNS name: no "scheme://" authority, or an IP
+// literal (RFC 5280 4.2.1.10: the certificate MUST then be refused).
+fn uri_host(name: ptr, off: int, n: int) -> ptr {
+    end = off + n
+    colon = byte_index(name, off, n, 58)
+    if colon <= off || colon + 2 >= end { return null }
+    if (bytes.get(name, colon + 1) & 0xFF) != 47 || (bytes.get(name, colon + 2) & 0xFF) != 47 { return null }
+    a = colon + 3
+    ae = a
+    stop = 0
+    while ae < end && stop == 0 {
+        c = bytes.get(name, ae) & 0xFF
+        if c == 47 || c == 63 || c == 35 {
+            stop = 1
+        } else {
+            if c == 64 { a = ae + 1 } // userinfo ends at the last "@"
+            ae = ae + 1
+        }
+    }
+    if a >= ae || (bytes.get(name, a) & 0xFF) == 91 { return null }
+    pc = byte_index(name, a, ae - a, 58)
+    if pc >= 0 { ae = pc }
+    hl = ae - a
+    if dns_name_ok(name, a, hl, 0) == 0 { return null }
+    numeric = 1
+    k = 0
+    while k < hl {
+        c = bytes.get(name, a + k) & 0xFF
+        if c != 46 && (c < 48 || c > 57) { numeric = 0 }
+        k = k + 1
+    }
+    if numeric == 1 { return null }
+    h = bytes.new(hl)
+    bytes.copy_from_bytes(h, 0, name, a, hl)
+    return h
+}
+
+// Does the Name (a DER SEQUENCE OF RDN) at name[noff] begin with the RDNs
+// of the Name at cons[coff], each byte for byte? RFC 5280's comparison
+// rules are looser (case and space folding), so an excluded subtree written
+// in another string encoding is not matched: the CAs that use directoryName
+// constraints use them to permit, where a mismatch refuses.
+fn dirname_within(name: ptr, noff: int, cons: ptr, coff: int) -> int {
+    nt, nco, ncl, _nnx = der_tlv(name, noff, bytes.length(name))
+    ct, cco, ccl, _cnx = der_tlv(cons, coff, bytes.length(cons))
+    if nt != 0x30 || ct != 0x30 { return 0 }
+    np = nco
+    nend = nco + ncl
+    cp = cco
+    cend = cco + ccl
+    while cp < cend {
+        if np >= nend { return 0 }
+        t1, _o1, _l1, x1 = der_tlv(cons, cp, cend)
+        t2, _o2, _l2, x2 = der_tlv(name, np, nend)
+        if t1 < 0 || t2 < 0 || x1 - cp != x2 - np { return 0 }
+        k = 0
+        while k < x1 - cp {
+            if bytes.get(cons, cp + k) != bytes.get(name, np + k) { return 0 }
+            k = k + 1
+        }
+        cp = x1
+        np = x2
+    }
+    return 1
+}
+
+// One name against one subtree base `cons` (tag byte, then content) of
+// the same form; `excl` when the subtree is excluded. For a URI the name is
+// its host.
+fn constraint_match(tag: int, name: ptr, off: int, cons: ptr, excl: int) -> int {
+    if tag == 0x82 {
+        nl = bytes.length(name) - off
+        if domain_within(name, off, nl, cons, 1, bytes.length(cons) - 1, 1) == 1 { return 1 }
+        if excl == 1 { return wildcard_may_match(name, off, cons, 1) }
+        return 0
+    }
+    if tag == 0x87 { return ip_constraint_match(name, cons, 1) }
+    if tag == 0x81 { return email_constraint_match(name, off, cons, 1) }
+    if tag == 0x86 { return domain_within(name, 0, bytes.length(name), cons, 1, bytes.length(cons) - 1, 0) }
+    if tag == 0xA4 { return dirname_within(name, off, cons, 1) }
+    return 0
+}
+
+// The subtrees of form `tag` in `trees` against one name: 0 when there are
+// none of that form, 1 when there are and none matches, 2 when one does, 3
+// when the comparison budget ran out.
+fn subtrees_match(cx: *ChainCtx, trees: ptr, tag: int, name: ptr, off: int, excl: int) -> int {
     if trees == null { return 0 }
     res = 0
     n = list_size(trees)
@@ -2331,34 +2817,75 @@ fn subtrees_match(trees: ptr, tag: int, name: ptr) -> int {
         t = list.at(trees, i) as ptr
         if t != null && bytes.length(t) >= 1 && (bytes.get(t, 0) & 0xFF) == tag {
             if res == 0 { res = 1 }
-            if tag == 0x82 && dns_constraint_match(name, t, 1) == 1 { return 2 }
-            if tag == 0x87 && ip_constraint_match(name, t, 1) == 1 { return 2 }
+            if cx.nc_budget <= 0 {
+                cx.err = CHAIN_BUDGET
+                return 3
+            }
+            cx.nc_budget = cx.nc_budget - 1
+            if constraint_match(tag, name, off, t, excl) == 1 { return 2 }
         }
         i = i + 1
     }
     return res
 }
 
-// 1 if the names of `c` (SAN dNSNames and iPAddresses) satisfy `ca`'s
-// name constraints.
-fn names_allowed(ca: *LeafCert, c: *LeafCert) -> int {
-    if (ca.ext_bits & EXT_NC) == 0 { return 1 }
-    if names_allowed_list(ca, c.dns_names, 0x82) == 0 { return 0 }
-    if names_allowed_list(ca, c.ip_addrs, 0x87) == 0 { return 0 }
-    return 1
+// 1 if one name of form `tag` at name[off] satisfies `ca`'s constraints of
+// that form (or there are none). A name the form's matcher cannot read is
+// outside every subtree, so it is refused when the form is constrained.
+fn name_allowed(cx: *ChainCtx, ca: *LeafCert, tag: int, name: ptr, off: int) -> int {
+    if (ca.nc_forms & (1 << (tag & 0x1F))) == 0 { return 1 }
+    n = bytes.length(name) - off
+    if tag == 0x82 && dns_name_ok(name, off, n, 1) == 0 { return 0 }
+    if tag == 0x81 && mailbox_ok(name, off, n) == 0 { return 0 }
+    subject = name
+    soff = off
+    if tag == 0x86 {
+        subject = uri_host(name, off, n)
+        if subject == null { return 0 }
+        soff = 0
+    }
+    ok = 1
+    r = subtrees_match(cx, ca.nc_excluded, tag, subject, soff, 1)
+    if r == 2 || r == 3 { ok = 0 }
+    if ok == 1 {
+        r = subtrees_match(cx, ca.nc_permitted, tag, subject, soff, 0)
+        if r == 1 || r == 3 { ok = 0 }
+    }
+    if tag == 0x86 { bytes.free(subject) }
+    return ok
 }
 
-fn names_allowed_list(ca: *LeafCert, names: ptr, tag: int) -> int {
+// Every name in the std.list `names` (form `tag`, or each entry's own tag
+// byte when `tagged`).
+fn names_allowed_list(cx: *ChainCtx, ca: *LeafCert, names: ptr, tag: int, tagged: int) -> int {
     if names == null { return 1 }
     n = list_size(names)
     i = 0
     while i < n {
         nm = list.at(names, i) as ptr
         if nm != null {
-            if subtrees_match(ca.nc_excluded, tag, nm) == 2 { return 0 }
-            if subtrees_match(ca.nc_permitted, tag, nm) == 1 { return 0 }
+            if tagged == 1 {
+                if name_allowed(cx, ca, bytes.get(nm, 0) & 0xFF, nm, 1) == 0 { return 0 }
+            } else if name_allowed(cx, ca, tag, nm, 0) == 0 {
+                return 0
+            }
         }
         i = i + 1
+    }
+    return 1
+}
+
+// 1 if the names of `c` satisfy `ca`'s name constraints: its SANs of every
+// form, and its subject against directoryName subtrees.
+fn names_allowed(cx: *ChainCtx, ca: *LeafCert, c: *LeafCert) -> int {
+    if (ca.ext_bits & EXT_NC) == 0 { return 1 }
+    if (c.san_forms & ca.nc_forms & NC_UNPROCESSED) != 0 { return 0 }
+    if names_allowed_list(cx, ca, c.dns_names, 0x82, 0) == 0 { return 0 }
+    if names_allowed_list(cx, ca, c.ip_addrs, 0x87, 0) == 0 { return 0 }
+    if names_allowed_list(cx, ca, c.san_other, 0, 1) == 0 { return 0 }
+    // An empty subject (SEQUENCE {}, two bytes) names nothing.
+    if c.subject != null && c.subject_len > 2 {
+        if name_allowed(cx, ca, 0xA4, c.subject, 0) == 0 { return 0 }
     }
     return 1
 }
@@ -2384,7 +2911,7 @@ fn path_code(cx: *ChainCtx) -> int {
             while k < j {
                 c = list.at(cx.path, k) as *LeafCert
                 if k == 0 || is_self_issued(c) == 0 {
-                    if names_allowed(ca, c) == 0 { return CHAIN_NAME_CONSTRAINT }
+                    if names_allowed(cx, ca, c) == 0 { return CHAIN_NAME_CONSTRAINT }
                 }
                 k = k + 1
             }
@@ -2408,7 +2935,8 @@ fn in_path(cx: *ChainCtx, c: ptr) -> int {
     return 0
 }
 
-// Extend the path above `cert`; 1 when an acceptable path is found.
+// Extend the path above `cert`, which has `depth` intermediates that are
+// not self-issued below it; 1 when an acceptable path is found.
 fn chain_dfs(cx: *ChainCtx, cert: *LeafCert, at: string, depth: int) -> int {
     na = list_size(cx.anchors)
     i = 0
@@ -2427,23 +2955,27 @@ fn chain_dfs(cx: *ChainCtx, cert: *LeafCert, at: string, depth: int) -> int {
         i = i + 1
     }
     if cx.intermediates == null { return 0 }
-    if depth >= cx.max_depth {
-        chain_note(cx, CHAIN_TOO_LONG)
-        return 0
-    }
     ni = list_size(cx.intermediates)
     j = 0
     while j < ni {
         m = list.at(cx.intermediates, j) as *LeafCert
-        if m != null && in_path(cx, m as ptr) == 0 && issued_by(cx, cert, m) == 1 {
-            code = issuer_code(m, at, cx.purpose, 0)
-            if code == 0 {
-                list.add(cx.path, m)
-                found = chain_dfs(cx, m, at, depth + 1)
-                path_pop(cx)
-                if found == 1 { return 1 }
-            } else {
-                chain_note(cx, code)
+        if m != null && in_path(cx, m as ptr) == 0 {
+            d = depth
+            if is_self_issued(m) == 0 { d = depth + 1 }
+            if d > cx.max_depth {
+                if dn_equal(bytes.view(cert.issuer)[0..cert.issuer_len], bytes.view(m.subject)[0..m.subject_len]) == 1 {
+                    chain_note(cx, CHAIN_TOO_LONG)
+                }
+            } else if issued_by(cx, cert, m) == 1 {
+                code = issuer_code(m, at, cx.purpose, 0)
+                if code == 0 {
+                    list.add(cx.path, m)
+                    found = chain_dfs(cx, m, at, d)
+                    path_pop(cx)
+                    if found == 1 { return 1 }
+                } else {
+                    chain_note(cx, code)
+                }
             }
         }
         j = j + 1
@@ -2454,9 +2986,9 @@ fn chain_dfs(cx: *ChainCtx, cert: *LeafCert, at: string, depth: int) -> int {
 // "" when there is a valid path from `leaf` through `intermediates` (a
 // std.list of *LeafCert, or null) to one of `anchors` at `at` (a
 // "YYYYMMDDHHMMSS" key, "" for now) for `purpose` (PURPOSE_SERVER or
-// PURPOSE_CLIENT), with at most `max_depth` intermediates (0 for
-// MAX_CHAIN_DEPTH); else why not. The rules are in the comment above
-// PURPOSE_SERVER.
+// PURPOSE_CLIENT), with at most `max_depth` intermediates that are not
+// self-issued (negative: MAX_CHAIN_DEPTH); else why not. The rules are in
+// the comment above PURPOSE_SERVER.
 validate_chain(leaf: *LeafCert, intermediates: ptr, anchors: ptr, at: string, purpose: int, max_depth: int) -> string {
     if anchors == null || list_size(anchors) == 0 { return "no trust anchors" }
     at_key = at
@@ -2466,8 +2998,8 @@ validate_chain(leaf: *LeafCert, intermediates: ptr, anchors: ptr, at: string, pu
     if purpose_ok(leaf, purpose) == 0 { return chain_error(CHAIN_PURPOSE) }
     if cert_time_ok(leaf, at_key) == 0 { return chain_error(CHAIN_VALIDITY) }
     md = max_depth
-    if md <= 0 { md = MAX_CHAIN_DEPTH }
-    cx = ChainCtx { intermediates: intermediates, anchors: anchors, path: list_new(), purpose: purpose, max_depth: md, err: CHAIN_NO_PATH, budget: CHAIN_SIG_BUDGET }
+    if md < 0 { md = MAX_CHAIN_DEPTH }
+    cx = ChainCtx { intermediates: intermediates, anchors: anchors, path: list_new(), purpose: purpose, max_depth: md, err: CHAIN_NO_PATH, budget: CHAIN_SIG_BUDGET, nc_budget: CHAIN_NC_BUDGET }
     list.add(cx.path, leaf)
     found = chain_dfs(&cx, leaf, at_key, 0)
     list_free(cx.path)
@@ -2659,7 +3191,8 @@ init_leaf(l: *LeafCert) {
     l.has_key_usage = 0
     l.key_cert_sign = 0
     l.version = 0; l.ext_bits = 0; l.path_len = 0; l.key_usage = 0; l.eku_bits = 0
-    l.nc_permitted = null; l.nc_excluded = null
+    l.nc_permitted = null; l.nc_excluded = null; l.san_other = null
+    l.san_forms = 0; l.nc_forms = 0; l.key_kind = KEY_NONE; l.key_bits = 0
 }
 
 // Free a trust-anchor list built by trust_store_load: each *LeafCert's buffers,

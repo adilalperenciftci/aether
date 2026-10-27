@@ -1,0 +1,102 @@
+# x509-limbo cases std.cryptography.tls13_cert does not run (SKIP) or does
+# not agree with (FAIL), one per line: <id> SKIP|FAIL <reason>.
+# limbo.ae fails the run on any other disagreement, and on a FAIL line whose
+# case has come to agree. Every case not listed runs and agrees, the
+# bettertls namespace included (9572 of 9572).
+#
+# The FAIL lines are choices, not missing work: the validator enforces what
+# changes which names and keys a path authorises, refuses certificates that
+# are malformed or that use an extension where RFC 5280 forbids it, and does
+# not enforce issuance-profile rules (the CA/Browser Forum's, RFC 5280's
+# "conforming CAs MUST") that change nothing a path authorises. Every case
+# with a FAIL line is one std.http's OpenSSL backend accepts too (checked
+# with `openssl verify` 3.6.4 set up as that backend verifies a server:
+# purpose sslserver, the host or IP, no partial chains), because the
+# backend a program runs on must not change which chains it accepts.
+
+# Revocation: no CRLs. The pure TLS client checks a stapled OCSP response
+# only (std/http/README.md), so CRL cases do not run.
+crl::certificate-not-on-crl SKIP no CRL support (stapled OCSP only)
+crl::certificate-serial-on-crl-different-issuer SKIP no CRL support (stapled OCSP only)
+crl::crlnumber-critical SKIP no CRL support (stapled OCSP only)
+crl::crlnumber-missing SKIP no CRL support (stapled OCSP only)
+crl::issuer-missing-crlsign SKIP no CRL support (stapled OCSP only)
+crl::issuer-no-keyusage-extension SKIP no CRL support (stapled OCSP only)
+crl::issuer-valid-crlsign-and-keycertsign SKIP no CRL support (stapled OCSP only)
+crl::revoked-certificate-with-crl SKIP no CRL support (stapled OCSP only)
+crl::structure::crl-duplicate-revoked-serial SKIP no CRL support (stapled OCSP only)
+crl::structure::crl-empty SKIP no CRL support (stapled OCSP only)
+crl::structure::crl-invalid-signature SKIP no CRL support (stapled OCSP only)
+crl::structure::crl-unknown-critical-extension SKIP no CRL support (stapled OCSP only)
+crl::structure::crl-unknown-noncritical-extension SKIP no CRL support (stapled OCSP only)
+crl::structure::crl-very-large SKIP no CRL support (stapled OCSP only)
+crl::structure::crl-wrong-signing-key SKIP no CRL support (stapled OCSP only)
+crl::structure::entry-unknown-critical-extension SKIP no CRL support (stapled OCSP only)
+crl::structure::entry-unknown-noncritical-extension SKIP no CRL support (stapled OCSP only)
+
+# ML-DSA certificates (RFC 9881): the standard library has no ML-DSA.
+rfc9881::ml-dsa-44 SKIP no ML-DSA signatures (no std.cryptography ML-DSA module)
+rfc9881::ml-dsa-44-bad-signature SKIP no ML-DSA signatures (no std.cryptography ML-DSA module)
+rfc9881::ml-dsa-44-key-agreement SKIP no ML-DSA signatures (no std.cryptography ML-DSA module)
+rfc9881::ml-dsa-44-key-encipherment SKIP no ML-DSA signatures (no std.cryptography ML-DSA module)
+rfc9881::ml-dsa-65 SKIP no ML-DSA signatures (no std.cryptography ML-DSA module)
+rfc9881::ml-dsa-87 SKIP no ML-DSA signatures (no std.cryptography ML-DSA module)
+
+# Known bugs, filed: OpenSSL refuses these and the pure backend accepts them.
+webpki::ca-as-leaf FAIL accepted: a leaf without keyUsage digitalSignature is taken for TLS (#3309)
+rfc5280::aki::cross-signed-root-missing-aki FAIL accepted: a trusted certificate that is not self-signed ends a path (#3310)
+webpki::aki::root-with-aki-all-fields FAIL accepted: a trusted certificate that is not self-signed ends a path (#3310)
+webpki::aki::root-with-aki-authoritycertissuer FAIL accepted: a trusted certificate that is not self-signed ends a path (#3310)
+webpki::aki::root-with-aki-authoritycertserialnumber FAIL accepted: a trusted certificate that is not self-signed ends a path (#3310)
+webpki::aki::root-with-aki-ski-mismatch FAIL accepted: a trusted certificate that is not self-signed ends a path (#3310)
+
+# Key identifiers: their presence is not required (they help path building,
+# which here tries every candidate instead; many deployed roots and
+# intermediates lack them). OpenSSL does not require them either.
+rfc5280::aki::intermediate-missing-aki FAIL accepted: authorityKeyIdentifier is not required, as in OpenSSL
+rfc5280::aki::leaf-missing-aki FAIL accepted: authorityKeyIdentifier is not required, as in OpenSSL
+rfc5280::ski::intermediate-missing-ski FAIL accepted: subjectKeyIdentifier is not required, as in OpenSSL
+rfc5280::ski::root-missing-ski FAIL accepted: subjectKeyIdentifier is not required, as in OpenSSL
+webpki::aki::root-with-aki-missing-keyidentifier FAIL accepted: a root's AKI without keyIdentifier still names the root itself, as OpenSSL reads it
+
+# Trust anchors are trusted as configured (RFC 5280 6.1.1 takes the trust
+# anchor information as given); one that says it is not a CA issues nothing.
+rfc5280::root-non-critical-basic-constraints FAIL accepted: a trust anchor's basicConstraints need not be critical, as in OpenSSL
+webpki::eku::root-has-eku FAIL accepted: a trust anchor's extendedKeyUsage is honoured as a restriction, not refused, as in OpenSSL
+
+# A CA certificate as the end entity, when its keyUsage allows signing: a
+# self-signed certificate made by `openssl req -x509` with the default
+# configuration carries cA TRUE, and pinning one is a supported use.
+webpki::ee-basicconstraints-ca FAIL accepted: a certificate with basicConstraints cA TRUE may be the end entity, as in OpenSSL
+
+# The subject common name is never used to match the host (subjectAltName
+# only, RFC 6125), so what it holds changes nothing; OpenSSL also ignores
+# it when there is a subjectAltName.
+webpki::cn::case-mismatch FAIL accepted: the subject CN is not used for names, as in OpenSSL
+webpki::cn::ipv4-hex-mismatch FAIL accepted: the subject CN is not used for names, as in OpenSSL
+webpki::cn::ipv4-leading-zeros-mismatch FAIL accepted: the subject CN is not used for names, as in OpenSSL
+webpki::cn::ipv6-non-rfc5952-mismatch FAIL accepted: the subject CN is not used for names, as in OpenSSL
+webpki::cn::ipv6-uncompressed-mismatch FAIL accepted: the subject CN is not used for names, as in OpenSSL
+webpki::cn::ipv6-uppercase-mismatch FAIL accepted: the subject CN is not used for names, as in OpenSSL
+webpki::cn::not-in-san FAIL accepted: the subject CN is not used for names, as in OpenSSL
+webpki::cn::punycode-not-in-san FAIL accepted: the subject CN is not used for names, as in OpenSSL
+webpki::cn::utf8-vs-punycode-mismatch FAIL accepted: the subject CN is not used for names, as in OpenSSL
+
+# extendedKeyUsage on the end entity: absent means any purpose (RFC 5280
+# 4.2.1.12), which is what OpenSSL and Go's crypto/x509 do; a critical one,
+# or one that also lists anyExtendedKeyUsage, is read for the purpose it
+# names (CABF forbids both; RFC 5280 does not).
+webpki::eku::ee-without-eku FAIL accepted: no extendedKeyUsage means any purpose (RFC 5280), as in OpenSSL and Go
+webpki::eku::ee-critical-eku FAIL accepted: a critical extendedKeyUsage is processed, not refused, as in OpenSSL
+webpki::eku::ee-anyeku FAIL accepted: serverAuth is listed; anyExtendedKeyUsage beside it is not refused, as in OpenSSL
+
+# Names.
+rfc5280::nc::permitted-dns-match-noncritical FAIL accepted: a non-critical nameConstraints is honoured, not refused, as in OpenSSL (honouring it can only refuse names)
+rfc5280::san::underscore-dns FAIL accepted: an underscore is allowed in a dNSName, as in OpenSSL and Go (private names use it)
+webpki::san::san-critical-with-nonempty-subject FAIL accepted: a critical subjectAltName is allowed with a non-empty subject (RFC 5280 4.2.1.6), as in OpenSSL
+webpki::san::public-suffix-multi-label-wildcard-san FAIL accepted: no public suffix list, as in OpenSSL; "*.com" is refused, "*.co.uk" is not
+webpki::san::public-suffix-private-namespace-wildcard-san FAIL accepted: no public suffix list, as in OpenSSL; "*.com" is refused, "*.s3.amazonaws.com" is not
+
+# Serial numbers: RFC 5280 4.1.2.2 asks users to handle zero and negative
+# serial numbers gracefully (more than 20 octets is refused).
+rfc5280::serial::zero FAIL accepted: a zero serial number is handled as RFC 5280 4.1.2.2 asks, as in OpenSSL

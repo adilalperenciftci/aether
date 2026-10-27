@@ -8,10 +8,13 @@
 // the fix (the forged certificate was accepted) and is refused now. The rest
 // cover what validate_chain checks on the way: keyUsage keyCertSign,
 // pathLenConstraint, extendedKeyUsage for the purpose, name constraints, an
-// unknown critical extension, and validity at a chosen time.
+// unknown critical extension, and validity at a chosen time; then what the
+// x509-limbo corpus showed missing (#1298): weak and explicit-curve keys, a
+// wildcard under an excluded subtree, and the max_depth bound. The
+// signature algorithms it showed missing are crypto_tls13_sig_algs (#3307).
 //
-// The fixtures are an ECDSA P-256 PKI made once with openssl (`req -new`,
-// `x509 -req -extfile`, valid 2026-01-01 to 2126-01-01):
+// The fixtures are a PKI made once with openssl (`req -new`, `x509 -req
+// -extfile`, valid 2026-01-01 to 2126-01-01), ECDSA P-256 unless named:
 //   root        self-signed CA (basicConstraints cA, keyUsage keyCertSign)
 //   ica         CA under root;  leaf (good.example, serverAuth) under ica
 //   ee          an end entity of root (cA FALSE, ee.example)
@@ -32,6 +35,10 @@
 //               certificate signed again); dupleaf under it
 //   icabool     CA under root whose basicConstraints cA is the BOOLEAN 0x01;
 //               boolleaf under it
+//   weak        a 1024-bit RSA leaf under ica
+//   explicit    a P-256 leaf under ica whose key gives the curve explicitly
+//   icaex       CA under root excluding bar.example.com; wild (*.example.com)
+//               and wildok (*.other.com) under it
 
 import std.list
 import std.string
@@ -107,6 +114,26 @@ fn pem_crit() -> string {
     return "-----BEGIN CERTIFICATE-----\nMIIBmDCCAT2gAwIBAgIIU90IRfczU08wCgYIKoZIzj0EAwIwGTEXMBUGA1UEAwwO\nQ2hhaW4gVGVzdCBJQ0EwIBcNMjYwMTAxMDAwMDAwWhgPMjEyNjAxMDEwMDAwMDBa\nMBcxFTATBgNVBAMMDGNyaXQuZXhhbXBsZTBZMBMGByqGSM49AgEGCCqGSM49AwEH\nA0IABGMGAeJlRDNlyQ3EVYvnTq3AcH01Eyk+4ZmzoiVERAMcJ+DjdcXKjQotfOEN\n2zb+GMlz3niSHaFZ2IhtA0UZnB2jbzBtMBcGA1UdEQQQMA6CDGNyaXQuZXhhbXBs\nZTASBgkrBgEEAYOyAwEBAf8EAgUAMB0GA1UdDgQWBBRqbvVWkol98Dk0yyD+C3JW\nh9NHWjAfBgNVHSMEGDAWgBQT72iLiQBn2qpZQVE63BiCGhOD9jAKBggqhkjOPQQD\nAgNJADBGAiEA1GTK77TkfqmFd9lBRRG8KfeCMSQp/7RF8Qk17inQqDsCIQDPJfwq\nMvkw83kJO4Eh6m7YRBhhHiyYOjedQA4BzxduOA==\n-----END CERTIFICATE-----\n"
 }
 
+fn pem_weak() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIByzCCAXGgAwIBAgIJAP0mboTG0UH3MAoGCCqGSM49BAMCMBkxFzAVBgNVBAMM\nDkNoYWluIFRlc3QgSUNBMCAXDTI2MDEwMTAwMDAwMFoYDzIxMjYwMTAxMDAwMDAw\nWjAXMRUwEwYDVQQDDAx3ZWFrLmV4YW1wbGUwgZ8wDQYJKoZIhvcNAQEBBQADgY0A\nMIGJAoGBANq0yiKc/H7BBo2iB6RsddnllzOA47N7uACzr+vjz1KBmsQ2iM36NIeB\nRScRJga/enopWcol10/6jUr3W0D6Q8XWB9HrOGRVRZNZ2Mnw2UahwpyNe03I3zmr\nDPY6jun9CHnuqlyjv0CJ+a4KNaJowGaHbNW58L9YiCOwhbtnzrIbAgMBAAGjWzBZ\nMBcGA1UdEQQQMA6CDHdlYWsuZXhhbXBsZTAdBgNVHQ4EFgQUNM5rEsSRCCI3pBsE\nwE8k+uETC6UwHwYDVR0jBBgwFoAUE+9oi4kAZ9qqWUFROtwYghoTg/YwCgYIKoZI\nzj0EAwIDSAAwRQIgf9gEjX5KNXixoQNipPSBYwobVjljuEvHq4/3+92t+qkCIQCB\nOiI6e9ik0WRHnBtjWTNDKbhA6VNmBbujgdtbBcQOCg==\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_explicit() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIICfzCCAiWgAwIBAgIIMYV5ulpXqzgwCgYIKoZIzj0EAwIwGTEXMBUGA1UEAwwO\nQ2hhaW4gVGVzdCBJQ0EwIBcNMjYwMTAxMDAwMDAwWhgPMjEyNjAxMDEwMDAwMDBa\nMBsxGTAXBgNVBAMMEGV4cGxpY2l0LmV4YW1wbGUwggFLMIIBAwYHKoZIzj0CATCB\n9wIBATAsBgcqhkjOPQEBAiEA/////wAAAAEAAAAAAAAAAAAAAAD/////////////\n//8wWwQg/////wAAAAEAAAAAAAAAAAAAAAD///////////////wEIFrGNdiqOpPn\ns+u9VXaYhrxlHQawzFOw9jvOPD4n0mBLAxUAxJ02CIbnBJNqZnjhE50mt4GffpAE\nQQRrF9Hy4SxCR/i85uVjpEDydwN9gS3rM6D0oTlF2JjClk/jQuL+Gn+bjufrSnwP\nnhYrzjNXazFezsu2QGg3v1H1AiEA/////wAAAAD//////////7zm+q2nF56E87nK\nwvxjJVECAQEDQgAEMqxpwdZNw+GRe3BpjDh1BIvQHsd3CN5z/8yY7TC6VtvgxKlv\nDJNEf8qrhe45zKsk8FiYkVHJeIX6dZ5WiNgCRqNfMF0wGwYDVR0RBBQwEoIQZXhw\nbGljaXQuZXhhbXBsZTAdBgNVHQ4EFgQUHHgxCcNB2CdTu7P6splEx7g8W2kwHwYD\nVR0jBBgwFoAUE+9oi4kAZ9qqWUFROtwYghoTg/YwCgYIKoZIzj0EAwIDSAAwRQIh\nAJ5X+i2Jf9pLAoXphIMLz2osHImbh+44ZG7v/EMfo/4/AiA0u6Txr48c/y9FDX+Y\norMfDIZTdh9TRvKCXHmclaK7dw==\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_icaex() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBwTCCAWegAwIBAgIIB9vW3Df6JvowCgYIKoZIzj0EAwIwGjEYMBYGA1UEAwwP\nQ2hhaW4gVGVzdCBSb290MCAXDTI2MDEwMTAwMDAwMFoYDzIxMjYwMTAxMDAwMDAw\nWjAnMSUwIwYDVQQDDBxDaGFpbiBUZXN0IElDQSBleGNsdWRpbmcgYmFyMFkwEwYH\nKoZIzj0CAQYIKoZIzj0DAQcDQgAEL31MUOMndDs3uoX4gJp7Ia8f9422/syEdpwB\nleUIV5q3dI2AZu6AOQehAKISCm70+9XqwFGbJQfJ74qrOTlbpKOBhzCBhDAPBgNV\nHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwICBDAhBgNVHR4BAf8EFzAVoRMwEYIP\nYmFyLmV4YW1wbGUuY29tMB0GA1UdDgQWBBRkaPJx//lT3TBL9rTuasQ79xQYRTAf\nBgNVHSMEGDAWgBSTExS7Fdf26uuPXD5rPfcbIRUjbTAKBggqhkjOPQQDAgNIADBF\nAiEAnN5iS3WNVNuRBGO+CmhHL5hZnMa0FE7tsjnsIW+CO94CIEXEfRS5nb5DTlG5\nLy26+O3ph7M0DVp63pu2nJh8P50J\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_wild() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBljCCAT2gAwIBAgIJAP3UL9Ox9hAqMAoGCCqGSM49BAMCMCcxJTAjBgNVBAMM\nHENoYWluIFRlc3QgSUNBIGV4Y2x1ZGluZyBiYXIwIBcNMjYwMTAxMDAwMDAwWhgP\nMjEyNjAxMDEwMDAwMDBaMBsxGTAXBgNVBAMMEHdpbGQuZXhhbXBsZS5jb20wWTAT\nBgcqhkjOPQIBBggqhkjOPQMBBwNCAATDNIUVf8/oY1zT3oKQOrt7d4MbPLA4mDWa\ndRz7HSCKXRamUU48Vatjxtb+AJgJ3WuYrbmO6YVLyKZrQIHwQR1Ro1wwWjAYBgNV\nHREEETAPgg0qLmV4YW1wbGUuY29tMB0GA1UdDgQWBBR22nR/KnenoAT3DO+ZGXoH\nUlnROzAfBgNVHSMEGDAWgBRkaPJx//lT3TBL9rTuasQ79xQYRTAKBggqhkjOPQQD\nAgNHADBEAiB2Vayf8IY8qqOI93nNs0AHCmc5D4VQCZKnQqVlvuh/TAIgKvQiTA19\nlQOtV2R/VVeYNZZScjTOrNr86Ajb6BHa9b0=\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_wildok() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBkjCCATigAwIBAgIIaa6GyEXMU2swCgYIKoZIzj0EAwIwJzElMCMGA1UEAwwc\nQ2hhaW4gVGVzdCBJQ0EgZXhjbHVkaW5nIGJhcjAgFw0yNjAxMDEwMDAwMDBaGA8y\nMTI2MDEwMTAwMDAwMFowGTEXMBUGA1UEAwwOd2lsZC5vdGhlci5jb20wWTATBgcq\nhkjOPQIBBggqhkjOPQMBBwNCAAQauX7Sk+KJqQnj2WqzgQx0Iogn+vaYqTtGjQ1k\n1y7xlonTz4K+BGWMrOKHmP+OQYJ1Acv+y/ip7i4N/V0hszF3o1owWDAWBgNVHREE\nDzANggsqLm90aGVyLmNvbTAdBgNVHQ4EFgQUXo47cVyU/MbGUlJSWWm00R8py8sw\nHwYDVR0jBBgwFoAUZGjycf/5U90wS/a07mrEO/cUGEUwCgYIKoZIzj0EAwIDSAAw\nRQIgKXwCfbhj+WCkymYBLJ+6k2YEkGtHNBWaBeMCXrnade0CIQDC2Vbe9Q3VLr5I\nXA67ui0z+HfSi6aoCXd2AH+9hht4DQ==\n-----END CERTIFICATE-----\n"
+}
+
 fn pem_icabadku() -> string {
     return "-----BEGIN CERTIFICATE-----\nMIIBnTCCAUKgAwIBAgIJAO5sOGJd9DW0MAoGCCqGSM49BAMCMBoxGDAWBgNVBAMM\nD0NoYWluIFRlc3QgUm9vdDAgFw0yNjAxMDEwMDAwMDBaGA8yMTI2MDEwMTAwMDAw\nMFowJjEkMCIGA1UEAwwbQ2hhaW4gVGVzdCBJQ0EgYmFkIGtleVVzYWdlMFkwEwYH\nKoZIzj0CAQYIKoZIzj0DAQcDQgAE+AT3F9m1t43Wl9KNC+yZsRppa8bDFl4kbaiG\nPsGxKk7l0lYq8gIUpwiyFW+NNS6VqczNLtuv9B4bwTJq1IeE96NjMGEwDwYDVR0T\nAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAQCAQYwHQYDVR0OBBYEFHxFROCF4R/hDlD3\nhc31z5wKhT7eMB8GA1UdIwQYMBaAFJMTFLsV1/bq649cPms99xshFSNtMAoGCCqG\nSM49BAMCA0kAMEYCIQCaWu+7dE/IqZF7nMyC1p94Ii6rWRmTVyp/NllSkM+V3gIh\nAMUI5Zc9uRt4FhKk4Yp+eKa/vEKhlA2ln7/mgL91HabB\n-----END CERTIFICATE-----\n"
 }
@@ -152,14 +179,29 @@ fn path_result(leaf_pem: string, inter_pem: string) -> string {
     return r
 }
 
-// validate_chain(leaf, intermediates, [root], at, purpose, 0).
+// validate_chain(leaf, intermediates, [root], at, purpose, -1).
 fn chain_result(leaf_pem: string, inter_pem: string, at: string, purpose: int) -> string {
     anchors = certs(pem_root())
     inters = certs(inter_pem)
     leaves = certs(leaf_pem)
     r = "the leaf fixture does not parse"
     if list_size(leaves) == 1 {
-        r = tls13_cert.validate_chain(list.at(leaves, 0) as *LeafCert, inters, anchors, at, purpose, 0)
+        r = tls13_cert.validate_chain(list.at(leaves, 0) as *LeafCert, inters, anchors, at, purpose, -1)
+    }
+    tls13_cert.free_anchors(anchors)
+    tls13_cert.free_anchors(inters)
+    tls13_cert.free_anchors(leaves)
+    return r
+}
+
+// validate_chain(leaf, intermediates, [root], now, PURPOSE_SERVER, max_depth).
+fn depth_result(leaf_pem: string, inter_pem: string, max_depth: int) -> string {
+    anchors = certs(pem_root())
+    inters = certs(inter_pem)
+    leaves = certs(leaf_pem)
+    r = "the leaf fixture does not parse"
+    if list_size(leaves) == 1 {
+        r = tls13_cert.validate_chain(list.at(leaves, 0) as *LeafCert, inters, anchors, "", tls13_cert.PURPOSE_SERVER, max_depth)
     }
     tls13_cert.free_anchors(anchors)
     tls13_cert.free_anchors(inters)
@@ -219,6 +261,14 @@ main() {
     fails = fails + check("an unknown critical extension", chain_result(pem_crit(), pem_ica(), at, server), 0)
     fails = fails + check("before notBefore", chain_result(pem_leaf(), pem_ica(), "20251231235959", server), 0)
     fails = fails + check("after notAfter", chain_result(pem_leaf(), pem_ica(), "21260101000001", server), 0)
+
+    // What x509-limbo showed missing.
+    fails = fails + check("a 1024-bit RSA key", chain_result(pem_weak(), pem_ica(), at, server), 0)
+    fails = fails + check("explicit curve parameters", chain_result(pem_explicit(), pem_ica(), at, server), 0)
+    fails = fails + check("*.example.com under excluded bar.example.com (CVE-2025-61727)", chain_result(pem_wild(), pem_icaex(), at, server), 0)
+    fails = fails + check("*.other.com under excluded bar.example.com", chain_result(pem_wildok(), pem_icaex(), at, server), 1)
+    fails = fails + check("max_depth 0 with one intermediate", depth_result(pem_leaf(), pem_ica(), 0), 0)
+    fails = fails + check("max_depth 1 with one intermediate", depth_result(pem_leaf(), pem_ica(), 1), 1)
 
     if fails > 0 {
         println("tls13_chain: ${fails} FAILURES")

@@ -611,7 +611,6 @@ fn fresh_p256_priv() -> ptr {
         if p256.private_key_valid(k) == 1 { return k }
         bytes.free(k)
     }
-    return null
 }
 
 fn cleanup_hello(pub: ptr, rnd: ptr, sid: ptr, ch: ptr) {
@@ -2324,7 +2323,7 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host:
                     // validity, basicConstraints / keyUsage / pathLen on the
                     // issuers, extendedKeyUsage, critical extensions and name
                     // constraints, searching every candidate path.
-                    cerr = tls13_cert.validate_chain(&leaf, intermediates, anchors, "", tls13_cert.PURPOSE_SERVER, 0)
+                    cerr = tls13_cert.validate_chain(&leaf, intermediates, anchors, "", tls13_cert.PURPOSE_SERVER, -1)
                     if string.equals(cerr, "") != 1 { err = cerr }
                     else {
                         // Revocation (RFC 6960): now that the chain is trusted,

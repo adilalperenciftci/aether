@@ -1385,10 +1385,17 @@ jobs:
   # undefined for Valgrind's memcheck; memcheck reports each conditional jump
   # and address computed from one, and any such report fails the job. The
   # other legs have no valgrind and run the probe as a known-answer test.
+  #
+  # The same job, on the same build, runs the conformance corpora of the pure
+  # TLS stack (#1298), each pinned to a commit and a checksum and fetched
+  # into a cache rather than kept in the repository: x509-limbo and the
+  # bettertls suite it imports, against tls13_cert's path validation. Each
+  # step reports on its own; tests/conformance/*/expected.txt lists every
+  # case that is skipped or does not agree, with the reason.
   ci-crypto-ct:
-    name: Crypto constant-time (Valgrind)
+    name: Crypto constant-time (Valgrind) and conformance corpora
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
     - uses: actions/checkout@v4
@@ -1401,6 +1408,35 @@ jobs:
 
     - name: Constant-time probe under memcheck
       run: CT_REQUIRE_VALGRIND=1 sh tests/integration/crypto_ct_valgrind/test_crypto_ct_valgrind.sh
+
+    # The corpora are fetched once from main's runs and read by every PR's
+    # (the key names the pins, so moving one fetches afresh); a miss only
+    # downloads them again.
+    - name: Restore the conformance corpora
+      id: conformance_cache
+      if: success() || failure()
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.cache/aether-conformance
+        key: conformance-${{ hashFiles('tests/conformance/*/run.sh') }}
+
+    - name: x509-limbo (C2SP/x509-limbo, pinned)
+      if: success() || failure()
+      run: sh tests/conformance/x509_limbo/run.sh limbo
+
+    - name: bettertls (through x509-limbo's import)
+      if: success() || failure()
+      run: sh tests/conformance/x509_limbo/run.sh bettertls
+
+    - name: Save the conformance corpora
+      if: >-
+        (success() || failure())
+        && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        && steps.conformance_cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ~/.cache/aether-conformance
+        key: conformance-${{ hashFiles('tests/conformance/*/run.sh') }}
 
   ci-wasm:
     name: WebAssembly (Emscripten)

@@ -283,6 +283,13 @@ main() {
         println("ok   *.example.com rejects a.b.example.com")
     } else { println("FAIL wildcard spanned two labels"); total_ok = 0 }
     tls13_cert.free_leaf(&hw)
+    // A wildcard over a top-level domain matches nothing (x509-limbo's
+    // public-suffix-wildcard-san, #1298).
+    htld = mk_leaf_san("*.com")
+    if string.equals(tls13_cert.check_hostname(&htld, "example.com"), "") != 1 {
+        println("ok   *.com matches nothing")
+    } else { println("FAIL *.com matched example.com"); total_ok = 0 }
+    tls13_cert.free_leaf(&htld)
     he = mk_leaf_san("api.example.com")
     if string.equals(tls13_cert.check_hostname(&he, "API.example.com"), "") == 1 {
         println("ok   exact match is case-insensitive")
@@ -359,13 +366,13 @@ main() {
     canchors = list_new(); _ = list.add(canchors, &croot)
     cinters = list_new(); _ = list.add(cinters, &cint)
     cempty = list_new()
-    if string.equals(tls13_cert.validate_chain(&cleaf, cinters, canchors, at3, tls13_cert.PURPOSE_SERVER, 0), "") == 1 {
+    if string.equals(tls13_cert.validate_chain(&cleaf, cinters, canchors, at3, tls13_cert.PURPOSE_SERVER, -1), "") == 1 {
         println("ok   leaf->intermediate->root path verified")
     } else { println("FAIL intermediate chain rejected"); total_ok = 0 }
-    if string.equals(tls13_cert.validate_chain(&cleaf, cempty, canchors, at3, tls13_cert.PURPOSE_SERVER, 0), "") != 1 {
+    if string.equals(tls13_cert.validate_chain(&cleaf, cempty, canchors, at3, tls13_cert.PURPOSE_SERVER, -1), "") != 1 {
         println("ok   leaf without intermediate rejected")
     } else { println("FAIL leaf-alone accepted"); total_ok = 0 }
-    if string.equals(tls13_cert.validate_chain(&cint, cempty, canchors, at3, tls13_cert.PURPOSE_SERVER, 0), "") == 1 {
+    if string.equals(tls13_cert.validate_chain(&cint, cempty, canchors, at3, tls13_cert.PURPOSE_SERVER, -1), "") == 1 {
         println("ok   intermediate chains directly to root")
     } else { println("FAIL intermediate->root rejected"); total_ok = 0 }
     if tls13_cert.leaf_is_ca(&cint) == 1 {
@@ -451,7 +458,7 @@ main() {
     tls13_cert.parse_certificate(bytes.view(p3_leaf), &p3l)
     p3anchors = list_new(); _ = list.add(p3anchors, &p3r)
     p3inters = list_new(); _ = list.add(p3inters, &p3i)
-    if string.equals(tls13_cert.validate_chain(&p3l, p3inters, p3anchors, at3, tls13_cert.PURPOSE_SERVER, 0), "") == 1 {
+    if string.equals(tls13_cert.validate_chain(&p3l, p3inters, p3anchors, at3, tls13_cert.PURPOSE_SERVER, -1), "") == 1 {
         println("ok   P-256 leaf <- P-384/SHA-384 intermediate <- P-384 root verified")
     } else { println("FAIL P-384 chain hop rejected"); total_ok = 0 }
     list_free(p3anchors); list_free(p3inters)
