@@ -1,0 +1,1373 @@
+// Copyright (c) 2026 Aether Developers.
+//
+// std.cryptography.ecc: the constant-time elliptic-curve engine under
+// std.cryptography.{p256, p384, p521, secp256k1, ed25519, ed448, x448}.
+//
+// Import with:  import std.cryptography.ecc
+//
+// Most programs use the per-curve modules, which keep their own API and call
+// in here. This module holds what they share:
+//
+// 1. Field arithmetic modulo an odd prime on a fixed number of 32-bit limbs
+//    (`Fe`, up to 576 bits), in Montgomery form, with no allocation. Every
+//    operation runs the same instructions and touches the same memory whatever
+//    the values: carries and conditional subtractions are masks, never
+//    branches; inversion is Fermat's a^(m-2) with the public exponent m-2.
+//    The limb count of a field is public (it is the modulus's).
+//
+// 2. Short-Weierstrass curves y^2 = x^3 + ax + b (a = -3 for the NIST
+//    curves, a = 0 for secp256k1) in homogeneous projective coordinates with
+//    the complete addition and doubling formulas of Renes, Costello and
+//    Batina (EUROCRYPT 2016, algorithms 4, 6, 7 and 9). The formulas have no
+//    exceptional case: the identity, P + P and P + (-P) all go through the
+//    same code, so no branch is needed on a point.
+//
+// 3. Scalar multiplication by a secret scalar: a fixed 4-bit window from the
+//    most significant end, every window doubles four times and adds one table
+//    entry, and the entry is selected by reading all 16 and keeping one with
+//    a mask. Verification (public inputs only) computes u1*G + u2*Q in one
+//    interleaved pass and may take shortcuts.
+//
+// 4. ECDSA with RFC 6979 deterministic nonces (HMAC-DRBG over SHA-2), and
+//    ECDH with full public-key validation (coordinates below p, point on the
+//    curve), for P-256, P-384, P-521 and secp256k1.
+//
+// The secret-dependent decisions that remain (a private key out of range, a
+// rejected RFC 6979 candidate, an r or s of zero, an ECDH result at
+// infinity) are public by the time they are taken and pass through
+// ct.declassify, which the constant-time harness
+// (tests/integration/crypto_ct_valgrind) checks.
+//
+// Per-curve API (curve is P256, P384, P521 or SECP256K1; buffers are
+// std.bytes handles of the curve's byte length L: 32, 48, 66, 32):
+//   scalar_mult_base(curve, k)               -> (x, y)   k*G, (null, null) at infinity
+//   scalar_mult(curve, k, px, py)            -> (x, y)   k*P, null on a bad P
+//   ecdh(curve, priv, pubx, puby)            -> x        null on a bad key or point
+//   ecdsa_sign(curve, priv, hash)            -> (r, s)   (null, null) on a bad key
+//   ecdsa_verify(curve, pubx, puby, hash, r, s) -> 1 valid, 0 not
+//   public_key_valid(curve, pubx, puby)      -> 1 if (x, y) is a point of the curve
+//   private_key_valid(curve, priv)           -> 1 if priv is in [1, n-1]
+
+import std.bytes
+import std.cryptography.ct
+import std.cryptography.hmac
+
+exports(
+    Fe, Field, NMAX,
+    P256, P384, P521, SECP256K1,
+    field_init, fe_zero, fe_copy, fe_one, fe_from_int,
+    fe_add, fe_sub, fe_neg, fe_mul, fe_sqr, fe_pow, fe_inv,
+    fe_cmov, fe_cswap, fe_is_zero, fe_eq, fe_lt, fe_cond_sub,
+    fe_to_mont, fe_from_mont,
+    fe_from_be, fe_to_be, fe_from_le, fe_to_le, fe_reduce_be, fe_reduce_le,
+    fe_from_hex, fe_shr,
+    scalar_mult_base, scalar_mult, ecdh, ecdsa_sign, ecdsa_verify,
+    public_key_valid, private_key_valid
+)
+
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+extern strlen(s: string) -> int
+
+// Limbs of an element: 18 x 32 = 576 bits, enough for P-521 (17 limbs).
+const NMAX = 18
+
+const P256 = 1
+const P384 = 2
+const P521 = 3
+const SECP256K1 = 4
+
+// A field element or integer: little-endian 32-bit limbs. Only the first
+// Field.n limbs are used by field operations; the rest stay zero.
+struct Fe {
+    v: uint32[NMAX]
+}
+
+// An odd modulus m and its Montgomery constants (R = 2^(32 n)).
+struct Field {
+    n: int // limbs of m
+    bits: int // bit length of m
+    m: Fe
+    m0inv: uint32 // -m^-1 mod 2^32
+    r2: Fe // R^2 mod m: to_mont(a) = a * R^2 / R
+    one: Fe // R mod m: 1 in Montgomery form
+    pm2: Fe // m - 2, the inversion exponent
+}
+
+// ---- integers on limbs ----
+
+fe_zero(a: *Fe) {
+    int i = 0
+    while i < NMAX {
+        a.v[i] = 0
+        i = i + 1
+    }
+}
+
+fe_copy(r: *Fe, a: *Fe) {
+    int i = 0
+    while i < NMAX {
+        r.v[i] = a.v[i]
+        i = i + 1
+    }
+}
+
+fn hexv(c: int) -> int {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    if c >= 65 && c <= 70 { return c - 55 }
+    return 0
+}
+
+// r = the big-endian hex constant h (a public value).
+fe_from_hex(r: *Fe, h: string) {
+    fe_zero(r)
+    int len = strlen(h)
+    int d = 0
+    while d < len {
+        int c = hexv(string_char_at_n(h, len, len - 1 - d))
+        int limb = d / 8
+        if limb < NMAX {
+            r.v[limb] = r.v[limb] | ((c as uint32) << ((d % 8) * 4))
+        }
+        d = d + 1
+    }
+}
+
+// r = the len-byte big-endian integer at buf[off..off+len] (len <= 72).
+fe_from_be(r: *Fe, buf: ptr, off: int, len: int) {
+    fe_zero(r)
+    int i = 0
+    while i < len {
+        int limb = i / 4
+        if limb < NMAX {
+            uint32 bv = (bytes.get(buf, off + len - 1 - i) & 255) as uint32
+            r.v[limb] = r.v[limb] | (bv << ((i % 4) * 8))
+        }
+        i = i + 1
+    }
+}
+
+// r = the len-byte little-endian integer at buf[off..off+len] (len <= 72).
+fe_from_le(r: *Fe, buf: ptr, off: int, len: int) {
+    fe_zero(r)
+    int i = 0
+    while i < len {
+        int limb = i / 4
+        if limb < NMAX {
+            uint32 bv = (bytes.get(buf, off + i) & 255) as uint32
+            r.v[limb] = r.v[limb] | (bv << ((i % 4) * 8))
+        }
+        i = i + 1
+    }
+}
+
+// Write the low len bytes of a, big-endian, to out[off..off+len].
+fe_to_be(a: *Fe, out: ptr, off: int, len: int) {
+    // Write the last byte first so the buffer's length covers the range.
+    int i = 0
+    while i < len {
+        int limb = i / 4
+        int bv = 0
+        if limb < NMAX {
+            bv = ((a.v[limb] >> ((i % 4) * 8)) & 255) as int
+        }
+        bytes.set(out, off + len - 1 - i, bv)
+        i = i + 1
+    }
+}
+
+// Write the low len bytes of a, little-endian, to out[off..off+len].
+fe_to_le(a: *Fe, out: ptr, off: int, len: int) {
+    int i = len - 1
+    while i >= 0 {
+        int limb = i / 4
+        int bv = 0
+        if limb < NMAX {
+            bv = ((a.v[limb] >> ((i % 4) * 8)) & 255) as int
+        }
+        bytes.set(out, off + i, bv)
+        i = i - 1
+    }
+}
+
+// a >>= s bits, 0 <= s < 32 (s public).
+fe_shr(a: *Fe, s: int) {
+    if s == 0 {
+        return
+    }
+    int i = 0
+    while i < NMAX - 1 {
+        a.v[i] = (a.v[i] >> s) | (a.v[i + 1] << (32 - s))
+        i = i + 1
+    }
+    a.v[NMAX - 1] = a.v[NMAX - 1] >> s
+}
+
+// ---- field set-up ----
+
+// F = the field of the odd prime given as big-endian hex.
+field_init(F: *Field, hex: string) {
+    fe_from_hex(&F.m, hex)
+    int n = NMAX
+    while n > 1 && F.m.v[n - 1] == 0 {
+        n = n - 1
+    }
+    F.n = n
+    uint32 top = F.m.v[n - 1]
+    int tb = 0
+    while top != 0 {
+        tb = tb + 1
+        top = top >> 1
+    }
+    F.bits = 32 * (n - 1) + tb
+    // -m^-1 mod 2^32 by Newton's iteration (each step doubles the bits).
+    uint32 m0 = F.m.v[0]
+    uint32 x = m0
+    int it = 0
+    while it < 5 {
+        x = x * (2 - m0 * x)
+        it = it + 1
+    }
+    F.m0inv = 0 - x
+    // R mod m and R^2 mod m by doubling 1, 32n and 64n times.
+    fe_zero(&F.one)
+    F.one.v[0] = 1
+    int k = 0
+    while k < 32 * n {
+        fe_add(F, &F.one, &F.one, &F.one)
+        k = k + 1
+    }
+    fe_copy(&F.r2, &F.one)
+    k = 0
+    while k < 32 * n {
+        fe_add(F, &F.r2, &F.r2, &F.r2)
+        k = k + 1
+    }
+    // m - 2
+    fe_copy(&F.pm2, &F.m)
+    uint64 bw = 2
+    int i = 0
+    while i < n {
+        uint64 d = (F.pm2.v[i] as uint64) - bw
+        F.pm2.v[i] = d as uint32
+        bw = d >> 63
+        i = i + 1
+    }
+}
+
+// ---- field operations (constant time; operands < m, results < m) ----
+
+// r = a + b mod m. r may alias a or b.
+fe_add(F: *Field, r: *Fe, a: *Fe, b: *Fe) {
+    uint32[NMAX] t
+    int n = F.n
+    uint64 c = 0
+    int i = 0
+    while i < n {
+        uint64 s = (a.v[i] as uint64) + (b.v[i] as uint64) + c
+        t[i] = s as uint32
+        c = s >> 32
+        i = i + 1
+    }
+    uint64 bw = 0
+    i = 0
+    while i < n {
+        uint64 d = (t[i] as uint64) - (F.m.v[i] as uint64) - bw
+        r.v[i] = d as uint32
+        bw = d >> 63
+        i = i + 1
+    }
+    // Keep the sum when it did not carry and is below m (the subtraction
+    // borrowed); otherwise keep the difference.
+    uint32 mask = 0 - (((1 - c) & bw) as uint32)
+    i = 0
+    while i < n {
+        r.v[i] = r.v[i] ^ (mask & (r.v[i] ^ t[i]))
+        i = i + 1
+    }
+}
+
+// r = a - b mod m. r may alias a or b.
+fe_sub(F: *Field, r: *Fe, a: *Fe, b: *Fe) {
+    uint32[NMAX] t
+    int n = F.n
+    uint64 bw = 0
+    int i = 0
+    while i < n {
+        uint64 d = (a.v[i] as uint64) - (b.v[i] as uint64) - bw
+        t[i] = d as uint32
+        bw = d >> 63
+        i = i + 1
+    }
+    uint32 mask = 0 - (bw as uint32)
+    uint64 c = 0
+    i = 0
+    while i < n {
+        uint64 s = (t[i] as uint64) + ((F.m.v[i] & mask) as uint64) + c
+        r.v[i] = s as uint32
+        c = s >> 32
+        i = i + 1
+    }
+}
+
+// r = -a mod m.
+fe_neg(F: *Field, r: *Fe, a: *Fe) {
+    z = Fe {}
+    fe_zero(&z)
+    fe_sub(F, r, &z, a)
+}
+
+// r = a * b / R mod m (Montgomery product, CIOS). r may alias a or b.
+fe_mul(F: *Field, r: *Fe, a: *Fe, b: *Fe) {
+    uint32[NMAX + 2] t
+    int n = F.n
+    int i = 0
+    while i < n + 2 {
+        t[i] = 0
+        i = i + 1
+    }
+    uint32 m0inv = F.m0inv
+    i = 0
+    while i < n {
+        uint64 bi = b.v[i] as uint64
+        uint64 c = 0
+        int j = 0
+        while j < n {
+            uint64 s = (t[j] as uint64) + (a.v[j] as uint64) * bi + c
+            t[j] = s as uint32
+            c = s >> 32
+            j = j + 1
+        }
+        uint64 s2 = (t[n] as uint64) + c
+        t[n] = s2 as uint32
+        t[n + 1] = (s2 >> 32) as uint32
+        uint64 mm = ((t[0] * m0inv) as uint32) as uint64
+        uint64 s3 = (t[0] as uint64) + mm * (F.m.v[0] as uint64)
+        c = s3 >> 32
+        j = 1
+        while j < n {
+            uint64 s4 = (t[j] as uint64) + mm * (F.m.v[j] as uint64) + c
+            t[j - 1] = s4 as uint32
+            c = s4 >> 32
+            j = j + 1
+        }
+        uint64 s5 = (t[n] as uint64) + c
+        t[n - 1] = s5 as uint32
+        t[n] = t[n + 1] + ((s5 >> 32) as uint32)
+        i = i + 1
+    }
+    // t < 2m: subtract m unless t < m.
+    uint64 bw = 0
+    i = 0
+    while i < n {
+        uint64 d = (t[i] as uint64) - (F.m.v[i] as uint64) - bw
+        r.v[i] = d as uint32
+        bw = d >> 63
+        i = i + 1
+    }
+    uint32 keep = (bw as uint32) & ((((t[n] as uint64) - 1) >> 63) as uint32)
+    uint32 mask = 0 - keep
+    i = 0
+    while i < n {
+        r.v[i] = r.v[i] ^ (mask & (r.v[i] ^ t[i]))
+        i = i + 1
+    }
+}
+
+fe_sqr(F: *Field, r: *Fe, a: *Fe) {
+    fe_mul(F, r, a, a)
+}
+
+// r = a^e (Montgomery form in and out) for a PUBLIC exponent e of ebits bits:
+// the square-and-multiply sequence depends on e only.
+fe_pow(F: *Field, r: *Fe, a: *Fe, e: *Fe, ebits: int) {
+    base = Fe {}
+    fe_copy(&base, a)
+    acc = Fe {}
+    fe_copy(&acc, &F.one)
+    int i = ebits - 1
+    while i >= 0 {
+        fe_mul(F, &acc, &acc, &acc)
+        if ((e.v[i / 32] >> (i % 32)) & 1) == 1 {
+            fe_mul(F, &acc, &acc, &base)
+        }
+        i = i - 1
+    }
+    fe_copy(r, &acc)
+}
+
+// r = 1/a (Montgomery form), 0 when a is 0.
+fe_inv(F: *Field, r: *Fe, a: *Fe) {
+    fe_pow(F, r, a, &F.pm2, F.bits)
+}
+
+// r = 1 (Montgomery form).
+fe_one(F: *Field, r: *Fe) {
+    fe_copy(r, &F.one)
+}
+
+// r = v (Montgomery form), 0 <= v < m.
+fe_from_int(F: *Field, r: *Fe, v: int) {
+    t = Fe {}
+    fe_zero(&t)
+    t.v[0] = v as uint32
+    fe_mul(F, r, &t, &F.r2)
+}
+
+// r = a * R mod m (into Montgomery form), a < m.
+fe_to_mont(F: *Field, r: *Fe, a: *Fe) {
+    fe_mul(F, r, a, &F.r2)
+}
+
+// r = a / R mod m (out of Montgomery form).
+fe_from_mont(F: *Field, r: *Fe, a: *Fe) {
+    t = Fe {}
+    fe_zero(&t)
+    t.v[0] = 1
+    fe_mul(F, r, a, &t)
+}
+
+// r = a when mask is all ones, unchanged when mask is 0.
+fe_cmov(F: *Field, r: *Fe, a: *Fe, mask: uint32) {
+    int i = 0
+    while i < F.n {
+        r.v[i] = r.v[i] ^ (mask & (r.v[i] ^ a.v[i]))
+        i = i + 1
+    }
+}
+
+// Swap a and b when bit is 1, nothing when 0.
+fe_cswap(F: *Field, a: *Fe, b: *Fe, bit: int) {
+    uint32 mask = 0 - ((bit & 1) as uint32)
+    int i = 0
+    while i < F.n {
+        uint32 d = mask & (a.v[i] ^ b.v[i])
+        a.v[i] = a.v[i] ^ d
+        b.v[i] = b.v[i] ^ d
+        i = i + 1
+    }
+}
+
+// 1 if a is zero, else 0.
+fe_is_zero(F: *Field, a: *Fe) -> int {
+    uint32 acc = 0
+    int i = 0
+    while i < F.n {
+        acc = acc | a.v[i]
+        i = i + 1
+    }
+    return ((((acc | (0 - acc)) >> 31) ^ 1) & 1) as int
+}
+
+// 1 if a == b, else 0.
+fe_eq(F: *Field, a: *Fe, b: *Fe) -> int {
+    uint32 acc = 0
+    int i = 0
+    while i < F.n {
+        acc = acc | (a.v[i] ^ b.v[i])
+        i = i + 1
+    }
+    return ((((acc | (0 - acc)) >> 31) ^ 1) & 1) as int
+}
+
+// 1 if a < b as integers on the field's limbs, else 0.
+fe_lt(F: *Field, a: *Fe, b: *Fe) -> int {
+    uint64 bw = 0
+    int i = 0
+    while i < F.n {
+        uint64 d = (a.v[i] as uint64) - (b.v[i] as uint64) - bw
+        bw = d >> 63
+        i = i + 1
+    }
+    return bw as int
+}
+
+// a = a - m if a >= m (a < 2m, a on n limbs).
+fe_cond_sub(F: *Field, a: *Fe) {
+    uint32[NMAX] t
+    uint64 bw = 0
+    int i = 0
+    while i < F.n {
+        uint64 d = (a.v[i] as uint64) - (F.m.v[i] as uint64) - bw
+        t[i] = d as uint32
+        bw = d >> 63
+        i = i + 1
+    }
+    // bw == 1: a < m, keep a.
+    uint32 mask = 0 - ((1 - bw) as uint32)
+    i = 0
+    while i < F.n {
+        a.v[i] = a.v[i] ^ (mask & (a.v[i] ^ t[i]))
+        i = i + 1
+    }
+}
+
+// a = 2a + bit mod m (a < m in normal form, bit 0 or 1).
+fn fe_dbl_bit(F: *Field, a: *Fe, bit: uint32) {
+    uint32[NMAX] t
+    int n = F.n
+    uint32 cin = bit
+    int i = 0
+    while i < n {
+        uint32 w = a.v[i]
+        t[i] = (w << 1) | cin
+        cin = w >> 31
+        i = i + 1
+    }
+    uint64 bw = 0
+    i = 0
+    while i < n {
+        uint64 d = (t[i] as uint64) - (F.m.v[i] as uint64) - bw
+        a.v[i] = d as uint32
+        bw = d >> 63
+        i = i + 1
+    }
+    uint32 mask = 0 - (((1 - cin) as uint32) & (bw as uint32))
+    i = 0
+    while i < n {
+        a.v[i] = a.v[i] ^ (mask & (a.v[i] ^ t[i]))
+        i = i + 1
+    }
+}
+
+// r = (the len-byte big-endian integer at buf[off..]) mod m, in normal form,
+// for any len: one modular doubling per input bit, constant time.
+fe_reduce_be(F: *Field, r: *Fe, buf: ptr, off: int, len: int) {
+    fe_zero(r)
+    int i = 0
+    while i < len {
+        uint32 bv = (bytes.get(buf, off + i) & 255) as uint32
+        int j = 7
+        while j >= 0 {
+            fe_dbl_bit(F, r, (bv >> j) & 1)
+            j = j - 1
+        }
+        i = i + 1
+    }
+}
+
+// r = (the len-byte little-endian integer at buf[off..]) mod m, normal form.
+fe_reduce_le(F: *Field, r: *Fe, buf: ptr, off: int, len: int) {
+    fe_zero(r)
+    int i = len - 1
+    while i >= 0 {
+        uint32 bv = (bytes.get(buf, off + i) & 255) as uint32
+        int j = 7
+        while j >= 0 {
+            fe_dbl_bit(F, r, (bv >> j) & 1)
+            j = j - 1
+        }
+        i = i - 1
+    }
+}
+
+// ---- curves ----
+
+struct Curve {
+    p: Field // coordinates
+    q: Field // scalars: the group order n
+    nbytes: int // octets of a coordinate and of a scalar
+    a_m3: int // 1: a = -3, 0: a = 0
+    b: Fe // b, Montgomery form
+    b3: Fe // 3b, Montgomery form
+    gx: Fe // generator, Montgomery form
+    gy: Fe
+    hlen: int // digest length of the RFC 6979 hash used for other lengths
+}
+
+// A point in homogeneous projective coordinates (X:Y:Z), x = X/Z, y = Y/Z;
+// the identity is (0:1:0).
+struct Pt {
+    x: Fe
+    y: Fe
+    z: Fe
+}
+
+fn set_mont_hex(F: *Field, r: *Fe, h: string) {
+    t = Fe {}
+    fe_from_hex(&t, h)
+    fe_to_mont(F, r, &t)
+}
+
+// Fill c for a curve id; 0 for an unknown id.
+fn curve_init(c: *Curve, id: int) -> int {
+    if id == P256 {
+        field_init(&c.p, "ffffffff00000001000000000000000000000000ffffffffffffffffffffffff")
+        field_init(&c.q, "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551")
+        c.a_m3 = 1
+        set_mont_hex(&c.p, &c.b, "5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b")
+        set_mont_hex(&c.p, &c.gx, "6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296")
+        set_mont_hex(&c.p, &c.gy, "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5")
+        c.hlen = 32
+    } else if id == P384 {
+        field_init(&c.p, "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000ffffffff")
+        field_init(&c.q, "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52973")
+        c.a_m3 = 1
+        set_mont_hex(&c.p, &c.b, "b3312fa7e23ee7e4988e056be3f82d19181d9c6efe8141120314088f5013875ac656398d8a2ed19d2a85c8edd3ec2aef")
+        set_mont_hex(&c.p, &c.gx, "aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a385502f25dbf55296c3a545e3872760ab7")
+        set_mont_hex(&c.p, &c.gy, "3617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f0b8c00a60b1ce1d7e819d7a431d7c90ea0e5f")
+        c.hlen = 48
+    } else if id == P521 {
+        field_init(&c.p, "01ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+        field_init(&c.q, "01fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffa51868783bf2f966b7fcc0148f709a5d03bb5c9b8899c47aebb6fb71e91386409")
+        c.a_m3 = 1
+        set_mont_hex(&c.p, &c.b, "0051953eb9618e1c9a1f929a21a0b68540eea2da725b99b315f3b8b489918ef109e156193951ec7e937b1652c0bd3bb1bf073573df883d2c34f1ef451fd46b503f00")
+        set_mont_hex(&c.p, &c.gx, "00c6858e06b70404e9cd9e3ecb662395b4429c648139053fb521f828af606b4d3dbaa14b5e77efe75928fe1dc127a2ffa8de3348b3c1856a429bf97e7e31c2e5bd66")
+        set_mont_hex(&c.p, &c.gy, "011839296a789a3bc0045c8a5fb42c7d1bd998f54449579b446817afbd17273e662c97ee72995ef42640c550b9013fad0761353c7086a272c24088be94769fd16650")
+        c.hlen = 64
+    } else if id == SECP256K1 {
+        field_init(&c.p, "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f")
+        field_init(&c.q, "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141")
+        c.a_m3 = 0
+        fe_from_int(&c.p, &c.b, 7)
+        set_mont_hex(&c.p, &c.gx, "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+        set_mont_hex(&c.p, &c.gy, "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8")
+        c.hlen = 32
+    } else {
+        return 0
+    }
+    fe_add(&c.p, &c.b3, &c.b, &c.b)
+    fe_add(&c.p, &c.b3, &c.b3, &c.b)
+    c.nbytes = (c.p.bits + 7) / 8
+    return 1
+}
+
+fn pt_identity(c: *Curve, r: *Pt) {
+    fe_zero(&r.x)
+    fe_copy(&r.y, &c.p.one)
+    fe_zero(&r.z)
+}
+
+fn pt_copy(r: *Pt, a: *Pt) {
+    fe_copy(&r.x, &a.x)
+    fe_copy(&r.y, &a.y)
+    fe_copy(&r.z, &a.z)
+}
+
+fn pt_cmov(c: *Curve, r: *Pt, a: *Pt, mask: uint32) {
+    fe_cmov(&c.p, &r.x, &a.x, mask)
+    fe_cmov(&c.p, &r.y, &a.y, mask)
+    fe_cmov(&c.p, &r.z, &a.z, mask)
+}
+
+// r = p + q, complete for a = -3 (RCB algorithm 4). r may alias p or q.
+fn pt_add_m3(c: *Curve, r: *Pt, p: *Pt, q: *Pt) {
+    F = &c.p
+    xx = Fe {}
+    yy = Fe {}
+    zz = Fe {}
+    xy = Fe {}
+    yz = Fe {}
+    xz = Fe {}
+    t = Fe {}
+    u = Fe {}
+    fe_mul(F, &xx, &p.x, &q.x)
+    fe_mul(F, &yy, &p.y, &q.y)
+    fe_mul(F, &zz, &p.z, &q.z)
+    // xy = (X1 + Y1)(X2 + Y2) - (xx + yy)
+    fe_add(F, &t, &p.x, &p.y)
+    fe_add(F, &u, &q.x, &q.y)
+    fe_mul(F, &xy, &t, &u)
+    fe_add(F, &t, &xx, &yy)
+    fe_sub(F, &xy, &xy, &t)
+    // yz = (Y1 + Z1)(Y2 + Z2) - (yy + zz)
+    fe_add(F, &t, &p.y, &p.z)
+    fe_add(F, &u, &q.y, &q.z)
+    fe_mul(F, &yz, &t, &u)
+    fe_add(F, &t, &yy, &zz)
+    fe_sub(F, &yz, &yz, &t)
+    // xz = (X1 + Z1)(X2 + Z2) - (xx + zz)
+    fe_add(F, &t, &p.x, &p.z)
+    fe_add(F, &u, &q.x, &q.z)
+    fe_mul(F, &xz, &t, &u)
+    fe_add(F, &t, &xx, &zz)
+    fe_sub(F, &xz, &xz, &t)
+    // bzz3 = 3(xz - b zz); yym = yy - bzz3; yyp = yy + bzz3
+    bzz3 = Fe {}
+    fe_mul(F, &t, &c.b, &zz)
+    fe_sub(F, &t, &xz, &t)
+    fe_add(F, &bzz3, &t, &t)
+    fe_add(F, &bzz3, &bzz3, &t)
+    yym = Fe {}
+    yyp = Fe {}
+    fe_sub(F, &yym, &yy, &bzz3)
+    fe_add(F, &yyp, &yy, &bzz3)
+    // zz3 = 3 zz; bxz3 = 3(b xz - zz3 - xx); xx3 = 3 xx - zz3
+    zz3 = Fe {}
+    fe_add(F, &zz3, &zz, &zz)
+    fe_add(F, &zz3, &zz3, &zz)
+    bxz3 = Fe {}
+    fe_mul(F, &t, &c.b, &xz)
+    fe_sub(F, &t, &t, &zz3)
+    fe_sub(F, &t, &t, &xx)
+    fe_add(F, &bxz3, &t, &t)
+    fe_add(F, &bxz3, &bxz3, &t)
+    xx3 = Fe {}
+    fe_add(F, &xx3, &xx, &xx)
+    fe_add(F, &xx3, &xx3, &xx)
+    fe_sub(F, &xx3, &xx3, &zz3)
+    // X3 = yyp xy - yz bxz3; Y3 = yyp yym + xx3 bxz3; Z3 = yym yz + xy xx3
+    x3 = Fe {}
+    y3 = Fe {}
+    z3 = Fe {}
+    fe_mul(F, &x3, &yyp, &xy)
+    fe_mul(F, &t, &yz, &bxz3)
+    fe_sub(F, &x3, &x3, &t)
+    fe_mul(F, &y3, &yyp, &yym)
+    fe_mul(F, &t, &xx3, &bxz3)
+    fe_add(F, &y3, &y3, &t)
+    fe_mul(F, &z3, &yym, &yz)
+    fe_mul(F, &t, &xy, &xx3)
+    fe_add(F, &z3, &z3, &t)
+    fe_copy(&r.x, &x3)
+    fe_copy(&r.y, &y3)
+    fe_copy(&r.z, &z3)
+}
+
+// r = 2p for a = -3 (RCB algorithm 6). r may alias p.
+fn pt_dbl_m3(c: *Curve, r: *Pt, p: *Pt) {
+    F = &c.p
+    t0 = Fe {}
+    t1 = Fe {}
+    t2 = Fe {}
+    t3 = Fe {}
+    x3 = Fe {}
+    y3 = Fe {}
+    z3 = Fe {}
+    fe_sqr(F, &t0, &p.x)
+    fe_sqr(F, &t1, &p.y)
+    fe_sqr(F, &t2, &p.z)
+    fe_mul(F, &t3, &p.x, &p.y)
+    fe_add(F, &t3, &t3, &t3)
+    fe_mul(F, &z3, &p.x, &p.z)
+    fe_add(F, &z3, &z3, &z3)
+    fe_mul(F, &y3, &c.b, &t2)
+    fe_sub(F, &y3, &y3, &z3)
+    fe_add(F, &x3, &y3, &y3)
+    fe_add(F, &y3, &x3, &y3)
+    fe_sub(F, &x3, &t1, &y3)
+    fe_add(F, &y3, &t1, &y3)
+    fe_mul(F, &y3, &x3, &y3)
+    fe_mul(F, &x3, &x3, &t3)
+    fe_add(F, &t3, &t2, &t2)
+    fe_add(F, &t2, &t2, &t3)
+    fe_mul(F, &z3, &c.b, &z3)
+    fe_sub(F, &z3, &z3, &t2)
+    fe_sub(F, &z3, &z3, &t0)
+    fe_add(F, &t3, &z3, &z3)
+    fe_add(F, &z3, &z3, &t3)
+    fe_add(F, &t3, &t0, &t0)
+    fe_add(F, &t0, &t3, &t0)
+    fe_sub(F, &t0, &t0, &t2)
+    fe_mul(F, &t0, &t0, &z3)
+    fe_add(F, &y3, &y3, &t0)
+    fe_mul(F, &t0, &p.y, &p.z)
+    fe_add(F, &t0, &t0, &t0)
+    fe_mul(F, &z3, &t0, &z3)
+    fe_sub(F, &x3, &x3, &z3)
+    fe_mul(F, &z3, &t0, &t1)
+    fe_add(F, &z3, &z3, &z3)
+    fe_add(F, &z3, &z3, &z3)
+    fe_copy(&r.x, &x3)
+    fe_copy(&r.y, &y3)
+    fe_copy(&r.z, &z3)
+}
+
+// r = p + q, complete for a = 0 (RCB algorithm 7). r may alias p or q.
+fn pt_add_a0(c: *Curve, r: *Pt, p: *Pt, q: *Pt) {
+    F = &c.p
+    t0 = Fe {}
+    t1 = Fe {}
+    t2 = Fe {}
+    t3 = Fe {}
+    t4 = Fe {}
+    x3 = Fe {}
+    y3 = Fe {}
+    z3 = Fe {}
+    fe_mul(F, &t0, &p.x, &q.x)
+    fe_mul(F, &t1, &p.y, &q.y)
+    fe_mul(F, &t2, &p.z, &q.z)
+    fe_add(F, &t3, &p.x, &p.y)
+    fe_add(F, &t4, &q.x, &q.y)
+    fe_mul(F, &t3, &t3, &t4)
+    fe_add(F, &t4, &t0, &t1)
+    fe_sub(F, &t3, &t3, &t4)
+    fe_add(F, &t4, &p.y, &p.z)
+    fe_add(F, &x3, &q.y, &q.z)
+    fe_mul(F, &t4, &t4, &x3)
+    fe_add(F, &x3, &t1, &t2)
+    fe_sub(F, &t4, &t4, &x3)
+    fe_add(F, &x3, &p.x, &p.z)
+    fe_add(F, &y3, &q.x, &q.z)
+    fe_mul(F, &x3, &x3, &y3)
+    fe_add(F, &y3, &t0, &t2)
+    fe_sub(F, &y3, &x3, &y3)
+    fe_add(F, &x3, &t0, &t0)
+    fe_add(F, &t0, &x3, &t0)
+    fe_mul(F, &t2, &c.b3, &t2)
+    fe_add(F, &z3, &t1, &t2)
+    fe_sub(F, &t1, &t1, &t2)
+    fe_mul(F, &y3, &c.b3, &y3)
+    fe_mul(F, &x3, &t4, &y3)
+    fe_mul(F, &t2, &t3, &t1)
+    fe_sub(F, &x3, &t2, &x3)
+    fe_mul(F, &y3, &y3, &t0)
+    fe_mul(F, &t1, &t1, &z3)
+    fe_add(F, &y3, &t1, &y3)
+    fe_mul(F, &t0, &t0, &t3)
+    fe_mul(F, &z3, &z3, &t4)
+    fe_add(F, &z3, &z3, &t0)
+    fe_copy(&r.x, &x3)
+    fe_copy(&r.y, &y3)
+    fe_copy(&r.z, &z3)
+}
+
+// r = 2p for a = 0 (RCB algorithm 9). r may alias p.
+fn pt_dbl_a0(c: *Curve, r: *Pt, p: *Pt) {
+    F = &c.p
+    t0 = Fe {}
+    t1 = Fe {}
+    t2 = Fe {}
+    x3 = Fe {}
+    y3 = Fe {}
+    z3 = Fe {}
+    fe_sqr(F, &t0, &p.y)
+    fe_add(F, &z3, &t0, &t0)
+    fe_add(F, &z3, &z3, &z3)
+    fe_add(F, &z3, &z3, &z3)
+    fe_mul(F, &t1, &p.y, &p.z)
+    fe_sqr(F, &t2, &p.z)
+    fe_mul(F, &t2, &c.b3, &t2)
+    fe_mul(F, &x3, &t2, &z3)
+    fe_add(F, &y3, &t0, &t2)
+    fe_mul(F, &z3, &t1, &z3)
+    fe_add(F, &t1, &t2, &t2)
+    fe_add(F, &t2, &t1, &t2)
+    fe_sub(F, &t0, &t0, &t2)
+    fe_mul(F, &y3, &t0, &y3)
+    fe_add(F, &y3, &x3, &y3)
+    fe_mul(F, &t1, &p.x, &p.y)
+    fe_mul(F, &x3, &t0, &t1)
+    fe_add(F, &x3, &x3, &x3)
+    fe_copy(&r.x, &x3)
+    fe_copy(&r.y, &y3)
+    fe_copy(&r.z, &z3)
+}
+
+fn pt_add(c: *Curve, r: *Pt, p: *Pt, q: *Pt) {
+    if c.a_m3 == 1 {
+        pt_add_m3(c, r, p, q)
+    } else {
+        pt_add_a0(c, r, p, q)
+    }
+}
+
+fn pt_dbl(c: *Curve, r: *Pt, p: *Pt) {
+    if c.a_m3 == 1 {
+        pt_dbl_m3(c, r, p)
+    } else {
+        pt_dbl_a0(c, r, p)
+    }
+}
+
+// Fill t[0..16] with 0*p .. 15*p.
+fn pt_table(c: *Curve, t: Pt[], p: *Pt) {
+    pt_identity(c, &t[0])
+    pt_copy(&t[1], p)
+    int i = 2
+    while i < 16 {
+        if (i & 1) == 0 {
+            pt_dbl(c, &t[i], &t[i / 2])
+        } else {
+            pt_add(c, &t[i], &t[i - 1], p)
+        }
+        i = i + 1
+    }
+}
+
+// r = k * p, k the klen-byte big-endian scalar at kb[0..klen]: constant
+// time in k. Every 4-bit digit costs four doublings, a read of all 16 table
+// entries and one complete addition, whatever its value.
+fn pt_mul_ct(c: *Curve, r: *Pt, p: *Pt, kb: ptr, klen: int) {
+    Pt[16] tbl
+    pt_table(c, tbl, p)
+    acc = Pt {}
+    pt_identity(c, &acc)
+    sel = Pt {}
+    int bi = 0
+    while bi < klen {
+        int kv = bytes.get(kb, bi) & 255
+        int half = 0
+        while half < 2 {
+            int digit = (kv >> (4 - 4 * half)) & 15
+            pt_dbl(c, &acc, &acc)
+            pt_dbl(c, &acc, &acc)
+            pt_dbl(c, &acc, &acc)
+            pt_dbl(c, &acc, &acc)
+            pt_copy(&sel, &tbl[0])
+            int j = 1
+            while j < 16 {
+                uint32 mask = 0 - (ct.eq(j, digit) as uint32)
+                pt_cmov(c, &sel, &tbl[j], mask)
+                j = j + 1
+            }
+            pt_add(c, &acc, &acc, &sel)
+            half = half + 1
+        }
+        bi = bi + 1
+    }
+    pt_copy(r, &acc)
+}
+
+// r = u1 * p1 + u2 * p2 for PUBLIC scalars (big-endian, klen bytes each):
+// one interleaved pass, skipping zero digits. Not constant time.
+fn pt_mul2_vt(c: *Curve, r: *Pt, u1: ptr, p1: *Pt, u2: ptr, p2: *Pt, klen: int) {
+    Pt[16] t1
+    Pt[16] t2
+    pt_table(c, t1, p1)
+    pt_table(c, t2, p2)
+    acc = Pt {}
+    pt_identity(c, &acc)
+    int started = 0
+    int bi = 0
+    while bi < klen {
+        int a = bytes.get(u1, bi) & 255
+        int b = bytes.get(u2, bi) & 255
+        int half = 0
+        while half < 2 {
+            int sh = 4 - 4 * half
+            int d1 = (a >> sh) & 15
+            int d2 = (b >> sh) & 15
+            if started == 1 {
+                pt_dbl(c, &acc, &acc)
+                pt_dbl(c, &acc, &acc)
+                pt_dbl(c, &acc, &acc)
+                pt_dbl(c, &acc, &acc)
+            }
+            if d1 != 0 {
+                pt_add(c, &acc, &acc, &t1[d1])
+                started = 1
+            }
+            if d2 != 0 {
+                pt_add(c, &acc, &acc, &t2[d2])
+                started = 1
+            }
+            half = half + 1
+        }
+        bi = bi + 1
+    }
+    pt_copy(r, &acc)
+}
+
+// Affine coordinates of p in Montgomery form; returns 1, or 0 for the
+// identity (x and y are then 0). Constant time.
+fn pt_affine(c: *Curve, x: *Fe, y: *Fe, p: *Pt) -> int {
+    F = &c.p
+    zi = Fe {}
+    fe_inv(F, &zi, &p.z)
+    fe_mul(F, x, &p.x, &zi)
+    fe_mul(F, y, &p.y, &zi)
+    return 1 - fe_is_zero(F, &p.z)
+}
+
+// 1 if the affine (x, y) (Montgomery form) satisfies y^2 = x^3 + ax + b.
+fn on_curve(c: *Curve, x: *Fe, y: *Fe) -> int {
+    F = &c.p
+    lhs = Fe {}
+    rhs = Fe {}
+    t = Fe {}
+    fe_sqr(F, &lhs, y)
+    fe_sqr(F, &rhs, x)
+    fe_mul(F, &rhs, &rhs, x)
+    if c.a_m3 == 1 {
+        fe_add(F, &t, x, x)
+        fe_add(F, &t, &t, x)
+        fe_sub(F, &rhs, &rhs, &t)
+    }
+    fe_add(F, &rhs, &rhs, &c.b)
+    return fe_eq(F, &lhs, &rhs)
+}
+
+// Decode and validate a public point (two L-byte big-endian coordinates):
+// each coordinate below p and the point on the curve. 1 on success.
+fn decode_point(c: *Curve, r: *Pt, xb: ptr, yb: ptr) -> int {
+    if xb == null || yb == null {
+        return 0
+    }
+    int nb = c.nbytes
+    if bytes.length(xb) != nb || bytes.length(yb) != nb {
+        return 0
+    }
+    F = &c.p
+    x = Fe {}
+    y = Fe {}
+    fe_from_be(&x, xb, 0, nb)
+    fe_from_be(&y, yb, 0, nb)
+    if fe_lt(F, &x, &F.m) == 0 || fe_lt(F, &y, &F.m) == 0 {
+        return 0
+    }
+    fe_to_mont(F, &r.x, &x)
+    fe_to_mont(F, &r.y, &y)
+    fe_copy(&r.z, &F.one)
+    return on_curve(c, &r.x, &r.y)
+}
+
+fn base_point(c: *Curve, r: *Pt) {
+    fe_copy(&r.x, &c.gx)
+    fe_copy(&r.y, &c.gy)
+    fe_copy(&r.z, &c.p.one)
+}
+
+// A fresh L-byte big-endian buffer holding the Montgomery-form a.
+fn out_coord(c: *Curve, a: *Fe) -> ptr {
+    t = Fe {}
+    fe_from_mont(&c.p, &t, a)
+    out = bytes.new(c.nbytes)
+    fe_to_be(&t, out, 0, c.nbytes)
+    return out
+}
+
+fn wipe_free(b: ptr) {
+    if b == null {
+        return
+    }
+    int n = bytes.length(b)
+    int i = 0
+    while i < n {
+        bytes.set(b, i, 0)
+        i = i + 1
+    }
+    bytes.free(b)
+}
+
+// The leftmost qlen bits of the blen-byte string buf as an integer (the
+// bits2int of RFC 6979 section 2.3.2 and FIPS 186-5); qlen, blen public.
+fn bits2int(c: *Curve, r: *Fe, buf: ptr, blen: int) {
+    int qlen = c.q.bits
+    if blen * 8 <= qlen {
+        fe_from_be(r, buf, 0, blen)
+        return
+    }
+    int drop = blen * 8 - qlen
+    fe_from_be(r, buf, 0, blen - drop / 8)
+    fe_shr(r, drop % 8)
+}
+
+// ---- public API ----
+
+scalar_mult_base(curve: int, k: ptr) -> (ptr, ptr) {
+    c = Curve {}
+    if curve_init(&c, curve) == 0 || k == null || bytes.length(k) != c.nbytes {
+        return null, null
+    }
+    g = Pt {}
+    base_point(&c, &g)
+    q = Pt {}
+    pt_mul_ct(&c, &q, &g, k, c.nbytes)
+    x = Fe {}
+    y = Fe {}
+    if ct.declassify(pt_affine(&c, &x, &y, &q)) == 0 {
+        return null, null
+    }
+    return out_coord(&c, &x), out_coord(&c, &y)
+}
+
+scalar_mult(curve: int, k: ptr, px: ptr, py: ptr) -> (ptr, ptr) {
+    c = Curve {}
+    if curve_init(&c, curve) == 0 || k == null || bytes.length(k) != c.nbytes {
+        return null, null
+    }
+    p = Pt {}
+    if decode_point(&c, &p, px, py) == 0 {
+        return null, null
+    }
+    q = Pt {}
+    pt_mul_ct(&c, &q, &p, k, c.nbytes)
+    x = Fe {}
+    y = Fe {}
+    if ct.declassify(pt_affine(&c, &x, &y, &q)) == 0 {
+        return null, null
+    }
+    return out_coord(&c, &x), out_coord(&c, &y)
+}
+
+// 1 if 0 < d < n for the L-byte big-endian private scalar at priv.
+fn priv_valid(c: *Curve, d: *Fe) -> int {
+    return (1 - fe_is_zero(&c.q, d)) & fe_lt(&c.q, d, &c.q.m)
+}
+
+public_key_valid(curve: int, pubx: ptr, puby: ptr) -> int {
+    c = Curve {}
+    if curve_init(&c, curve) == 0 {
+        return 0
+    }
+    p = Pt {}
+    return decode_point(&c, &p, pubx, puby)
+}
+
+// 1 if priv is an L-byte big-endian scalar in [1, n-1], the range a private
+// key must be in. Constant time in the key; the answer itself is public.
+private_key_valid(curve: int, priv: ptr) -> int {
+    c = Curve {}
+    if curve_init(&c, curve) == 0 || priv == null || bytes.length(priv) != c.nbytes {
+        return 0
+    }
+    d = Fe {}
+    fe_from_be(&d, priv, 0, c.nbytes)
+    return ct.declassify(priv_valid(&c, &d))
+}
+
+ecdh(curve: int, priv: ptr, pubx: ptr, puby: ptr) -> ptr {
+    c = Curve {}
+    if curve_init(&c, curve) == 0 || priv == null || bytes.length(priv) != c.nbytes {
+        return null
+    }
+    p = Pt {}
+    if decode_point(&c, &p, pubx, puby) == 0 {
+        return null
+    }
+    d = Fe {}
+    fe_from_be(&d, priv, 0, c.nbytes)
+    if ct.declassify(priv_valid(&c, &d)) == 0 {
+        return null
+    }
+    q = Pt {}
+    pt_mul_ct(&c, &q, &p, priv, c.nbytes)
+    x = Fe {}
+    y = Fe {}
+    if ct.declassify(pt_affine(&c, &x, &y, &q)) == 0 {
+        return null
+    }
+    return out_coord(&c, &x)
+}
+
+// The SHA-2 function RFC 6979's HMAC-DRBG runs on: the one whose digest
+// length is the message hash's (so the RFC's vectors for each hash hold), or
+// the curve's own for any other length.
+fn drbg_hash(hlen: int, dflt: int) -> string {
+    int l = hlen
+    if l != 28 && l != 32 && l != 48 && l != 64 {
+        l = dflt
+    }
+    if l == 28 { return "sha224" }
+    if l == 48 { return "sha384" }
+    if l == 64 { return "sha512" }
+    return "sha256"
+}
+
+fn drbg_hash_len(algo: string) -> int {
+    if algo == "sha224" { return 28 }
+    if algo == "sha384" { return 48 }
+    if algo == "sha512" { return 64 }
+    return 32
+}
+
+// K = HMAC_K(V || sep || x || h), V = HMAC_K(V), where x and h may be null
+// (left out). Frees the old K and V; returns the new pair.
+fn drbg_step(algo: string, k: ptr, v: ptr, sep: int, x: ptr, h: ptr) -> (ptr, ptr) {
+    int hl = bytes.length(v)
+    int xl = 0
+    if x != null {
+        xl = bytes.length(x)
+    }
+    int hhl = 0
+    if h != null {
+        hhl = bytes.length(h)
+    }
+    msg = bytes.new(hl + 1 + xl + hhl)
+    bytes.copy_from_bytes(msg, 0, v, 0, hl)
+    bytes.set(msg, hl, sep)
+    if xl > 0 {
+        bytes.copy_from_bytes(msg, hl + 1, x, 0, xl)
+    }
+    if hhl > 0 {
+        bytes.copy_from_bytes(msg, hl + 1 + xl, h, 0, hhl)
+    }
+    nk = hmac.hmac_bytes(algo, bytes.view(k), bytes.view(msg))
+    wipe_free(msg)
+    wipe_free(k)
+    nv = hmac.hmac_bytes(algo, bytes.view(nk), bytes.view(v))
+    wipe_free(v)
+    return nk, nv
+}
+
+// ECDSA signature of the message digest `hash` (any length; its leftmost
+// qlen bits are used) under the L-byte private key `priv`, with the nonce of
+// RFC 6979. Constant time in the key and the nonce.
+ecdsa_sign(curve: int, priv: ptr, hash: ptr) -> (ptr, ptr) {
+    c = Curve {}
+    if curve_init(&c, curve) == 0 || priv == null || hash == null {
+        return null, null
+    }
+    int nb = c.nbytes
+    int hlen = bytes.length(hash)
+    if bytes.length(priv) != nb || hlen < 1 {
+        return null, null
+    }
+    Q = &c.q
+    d = Fe {}
+    fe_from_be(&d, priv, 0, nb)
+    if ct.declassify(priv_valid(&c, &d)) == 0 {
+        return null, null
+    }
+    // e = bits2int(hash) mod n; bits2int(hash) < 2^qlen < 2n.
+    e = Fe {}
+    bits2int(&c, &e, hash, hlen)
+    fe_cond_sub(Q, &e)
+
+    // RFC 6979 section 3.2: V = 0x01.., K = 0x00..; two seeding rounds over
+    // int2octets(d) || bits2octets(hash).
+    algo = drbg_hash(hlen, c.hlen)
+    int hl = drbg_hash_len(algo)
+    xo = bytes.new(nb)
+    fe_to_be(&d, xo, 0, nb)
+    ho = bytes.new(nb)
+    fe_to_be(&e, ho, 0, nb)
+    kk = bytes.new(hl)
+    vv = bytes.new(hl)
+    int i = 0
+    while i < hl {
+        bytes.set(kk, i, 0)
+        bytes.set(vv, i, 1)
+        i = i + 1
+    }
+    kk, vv = drbg_step(algo, kk, vv, 0, xo, ho)
+    kk, vv = drbg_step(algo, kk, vv, 1, xo, ho)
+
+    // Montgomery forms of d and e for s = k^-1 (e + r d) mod n.
+    dm = Fe {}
+    em = Fe {}
+    fe_to_mont(Q, &dm, &d)
+    fe_to_mont(Q, &em, &e)
+
+    int tlen = ((c.q.bits + 8 * hl - 1) / (8 * hl)) * hl
+    rb = bytes.new(nb)
+    sb = bytes.new(nb)
+    kb = bytes.new(nb)
+    g = Pt {}
+    base_point(&c, &g)
+    int done = 0
+    while done == 0 {
+        // T = V' || V'' || ... until qlen bits; k = bits2int(T).
+        tt = bytes.new(tlen)
+        int off = 0
+        while off < tlen {
+            nv = hmac.hmac_bytes(algo, bytes.view(kk), bytes.view(vv))
+            wipe_free(vv)
+            vv = nv
+            bytes.copy_from_bytes(tt, off, vv, 0, hl)
+            off = off + hl
+        }
+        k = Fe {}
+        bits2int(&c, &k, tt, tlen)
+        wipe_free(tt)
+        if ct.declassify(priv_valid(&c, &k)) == 1 {
+            fe_to_be(&k, kb, 0, nb)
+            // r = x(k G) mod n; x < p < 2n.
+            rp = Pt {}
+            pt_mul_ct(&c, &rp, &g, kb, nb)
+            x = Fe {}
+            y = Fe {}
+            pt_affine(&c, &x, &y, &rp)
+            r = Fe {}
+            fe_from_mont(&c.p, &r, &x)
+            fe_cond_sub(Q, &r)
+            // s = k^-1 (e + r d) mod n
+            km = Fe {}
+            fe_to_mont(Q, &km, &k)
+            fe_inv(Q, &km, &km)
+            rm = Fe {}
+            fe_to_mont(Q, &rm, &r)
+            t = Fe {}
+            fe_mul(Q, &t, &rm, &dm)
+            fe_add(Q, &t, &t, &em)
+            fe_mul(Q, &t, &t, &km)
+            s = Fe {}
+            fe_from_mont(Q, &s, &t)
+            int ok = (1 - fe_is_zero(Q, &r)) & (1 - fe_is_zero(Q, &s))
+            if ct.declassify(ok) == 1 {
+                fe_to_be(&r, rb, 0, nb)
+                fe_to_be(&s, sb, 0, nb)
+                done = 1
+            }
+            fe_zero(&k)
+            fe_zero(&km)
+        }
+        if done == 0 {
+            // RFC 6979 3.2 step h.3: K = HMAC_K(V || 0x00), V = HMAC_K(V).
+            kk, vv = drbg_step(algo, kk, vv, 0, null, null)
+        }
+    }
+    fe_zero(&d)
+    fe_zero(&dm)
+    wipe_free(xo)
+    wipe_free(ho)
+    wipe_free(kk)
+    wipe_free(vv)
+    wipe_free(kb)
+    return rb, sb
+}
+
+ecdsa_verify(curve: int, pubx: ptr, puby: ptr, hash: ptr, r: ptr, s: ptr) -> int {
+    c = Curve {}
+    if curve_init(&c, curve) == 0 || hash == null || r == null || s == null {
+        return 0
+    }
+    int nb = c.nbytes
+    if bytes.length(r) != nb || bytes.length(s) != nb {
+        return 0
+    }
+    int hlen = bytes.length(hash)
+    if hlen < 1 {
+        return 0
+    }
+    pub = Pt {}
+    if decode_point(&c, &pub, pubx, puby) == 0 {
+        return 0
+    }
+    Q = &c.q
+    rn = Fe {}
+    sn = Fe {}
+    fe_from_be(&rn, r, 0, nb)
+    fe_from_be(&sn, s, 0, nb)
+    if fe_is_zero(Q, &rn) == 1 || fe_is_zero(Q, &sn) == 1 {
+        return 0
+    }
+    if fe_lt(Q, &rn, &Q.m) == 0 || fe_lt(Q, &sn, &Q.m) == 0 {
+        return 0
+    }
+    e = Fe {}
+    bits2int(&c, &e, hash, hlen)
+    fe_cond_sub(Q, &e)
+    // w = s^-1; u1 = e w; u2 = r w (mod n)
+    w = Fe {}
+    fe_to_mont(Q, &w, &sn)
+    fe_inv(Q, &w, &w)
+    t = Fe {}
+    u = Fe {}
+    fe_to_mont(Q, &t, &e)
+    fe_mul(Q, &t, &t, &w)
+    fe_from_mont(Q, &u, &t)
+    u1 = bytes.new(nb)
+    fe_to_be(&u, u1, 0, nb)
+    fe_to_mont(Q, &t, &rn)
+    fe_mul(Q, &t, &t, &w)
+    fe_from_mont(Q, &u, &t)
+    u2 = bytes.new(nb)
+    fe_to_be(&u, u2, 0, nb)
+    g = Pt {}
+    base_point(&c, &g)
+    rp = Pt {}
+    pt_mul2_vt(&c, &rp, u1, &g, u2, &pub, nb)
+    bytes.free(u1)
+    bytes.free(u2)
+    x = Fe {}
+    y = Fe {}
+    if pt_affine(&c, &x, &y, &rp) == 0 {
+        return 0
+    }
+    v = Fe {}
+    fe_from_mont(&c.p, &v, &x)
+    fe_cond_sub(Q, &v)
+    return fe_eq(Q, &v, &rn)
+}

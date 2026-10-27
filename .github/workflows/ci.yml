@@ -1380,6 +1380,28 @@ jobs:
           sh "tests/integration/$t/test_$t.sh"
         done
 
+  # std.cryptography's secret-key operations must not branch on, or index
+  # memory with, a secret (#2600, #1298). The probe marks every secret input
+  # undefined for Valgrind's memcheck; memcheck reports each conditional jump
+  # and address computed from one, and any such report fails the job. The
+  # other legs have no valgrind and run the probe as a known-answer test.
+  ci-crypto-ct:
+    name: Crypto constant-time (Valgrind)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install toolchain
+      run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc valgrind
+
+    - name: Build the toolchain
+      run: make -j"$(nproc)" compiler ae stdlib
+
+    - name: Constant-time probe under memcheck
+      run: CT_REQUIRE_VALGRIND=1 sh tests/integration/crypto_ct_valgrind/test_crypto_ct_valgrind.sh
+
   ci-wasm:
     name: WebAssembly (Emscripten)
     runs-on: ubuntu-22.04

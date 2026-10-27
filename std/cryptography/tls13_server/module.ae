@@ -218,10 +218,12 @@ fn send_plaintext_alert(sock: ptr, level: int, desc: int) {
 
 // Fresh randomness, or null. Returning null on failure is deliberate and the
 // callers MUST check: every use here is security-critical -- the server
-// random, the ECDSA-P256 signing nonce, and the X25519 private key. Silently
-// handing back a zero-filled buffer when the CSPRNG fails would make the
-// nonce predictable, and a predictable ECDSA nonce discloses the private key
-// outright (RFC 6979 s1). Failing the handshake is the only safe answer.
+// random and the X25519 private key. Silently handing back a zero-filled
+// buffer when the CSPRNG fails would make the key predictable, and with it
+// every session's secrets. Failing the handshake is the only safe answer.
+// (The ECDSA signing nonce used to come from here too; it is RFC 6979's now,
+// derived inside p256.ecdsa_sign, because a predictable or repeated nonce
+// discloses the private key outright.)
 fn rand_into(n: int) -> ptr {
     s, sn, err = cryptography.random_bytes(n)
     if string.equals(err, "") != 1 { return null }
@@ -456,19 +458,18 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
 
     // c. CertificateVerify
     th_cert = transcript_hash_algo(tr, hash_algo)
-    knonce = rand_into(32)
-    if knonce == null {
-        // Signing with a predictable nonce would disclose the private key;
-        // there is no safe fallback, so the handshake ends here.
+    // The signing nonce is RFC 6979's, derived from the key and the digest
+    // inside p256.ecdsa_sign: no randomness to fail, none to leak the key.
+    sig = tls13_cert.sign_server_cert_verify_ecdsa_p256(priv_key, bytes.view(th_cert)[0..hash_len])
+    if sig == null {
         bytes.free(th_cert)
-        return null, "no randomness available for the signing nonce"
+        return null, "the server's private key is not a P-256 scalar in [1, n-1]"
     }
-    sig = tls13_cert.sign_server_cert_verify_ecdsa_p256(priv_key, bytes.view(th_cert)[0..hash_len], knonce)
     cv_msg = tls13_hs.certificate_verify_msg(0x0403, bytes.view(sig))
     cv_rec = tls13_record.seal_record(srv_hs_ctx, tls13_record.CONTENT_HANDSHAKE, bytes.view(cv_msg))
     send_record_raw(sock, cv_rec)
     tls13_client.transcript_add(tr, bytes.view(cv_msg))
-    bytes.free(th_cert); bytes.free(knonce); bytes.free(sig); bytes.free(cv_msg); bytes.free(cv_rec)
+    bytes.free(th_cert); bytes.free(sig); bytes.free(cv_msg); bytes.free(cv_rec)
 
     // d. Server Finished
     th_cv = transcript_hash_algo(tr, hash_algo)

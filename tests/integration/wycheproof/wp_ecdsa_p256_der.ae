@@ -9,9 +9,8 @@
 // p256.ecdsa_verify.
 //   "valid"   -> parse+verify MUST succeed (1).
 //   "invalid" -> parse MUST error or verify MUST return 0.
-// Stride sampling as in the P1363 driver (default 10; WYCHEPROOF_FULL=1
-// or WYCHEPROOF_STRIDE=N override) — parse-reject cases are cheap, but
-// every accepted signature costs two bignum scalar mults.
+// Every vector runs by default (a verify is about half a millisecond now,
+// #2600); WYCHEPROOF_STRIDE=N samples every Nth case instead.
 
 import std.cryptography.tls13_cert
 import std.cryptography.p256
@@ -72,7 +71,7 @@ fn sha256_of(b: ptr, n: int) -> ptr {
 }
 
 main() {
-    stride = 10
+    stride = 1
     wf = os.getenv("WYCHEPROOF_FULL")
     if wf == "1" { stride = 1 }
     sv = os.getenv("WYCHEPROOF_STRIDE")

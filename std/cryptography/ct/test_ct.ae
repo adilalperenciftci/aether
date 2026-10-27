@@ -1,0 +1,47 @@
+// std.cryptography.ct: the masked comparisons and selection, and declassify
+// (the identity without a hook).
+
+import std.bytes
+import std.cryptography.ct
+
+extern exit(code: int)
+
+fn ck(cond: bool, msg: string) -> int {
+    if cond {
+        println("ok   ${msg}")
+        return 0
+    }
+    println("FAIL ${msg}")
+    return 1
+}
+
+main() {
+    fails = 0
+    fails = fails + ck(ct.eq(7, 7) == 1 && ct.eq(7, 8) == 0 && ct.eq(0, 0) == 1, "eq")
+    fails = fails + ck(ct.eq(-1, 2147483647) == 0 && ct.eq(-5, -5) == 1, "eq on negative values")
+    fails = fails + ck(ct.lt(3, 4) == 1 && ct.lt(4, 3) == 0 && ct.lt(5, 5) == 0, "lt")
+    fails = fails + ck(ct.lt(0, 2147483647) == 1 && ct.lt(2147483647, 0) == 0, "lt at the ends of the range")
+    fails = fails + ck(ct.select(1, 10, 20) == 10 && ct.select(0, 10, 20) == 20, "select")
+    a = bytes.new(4)
+    b = bytes.new(4)
+    i = 0
+    while i < 4 {
+        bytes.set(a, i, i * 50)
+        bytes.set(b, i, i * 50)
+        i = i + 1
+    }
+    fails = fails + ck(ct.bytes_eq(a, b, 4) == 1, "bytes_eq equal")
+    fails = fails + ck(ct.bytes_eq_slice(bytes.view(a), bytes.view(b)) == 1, "bytes_eq_slice equal")
+    bytes.set(b, 3, 151)
+    fails = fails + ck(ct.bytes_eq(a, b, 4) == 0 && ct.bytes_eq(a, b, 3) == 1, "bytes_eq differs in the last byte only")
+    fails = fails + ck(ct.bytes_eq_slice(bytes.view(a), bytes.view(b)) == 0, "bytes_eq_slice differs")
+    fails = fails + ck(ct.bytes_eq_slice(bytes.view(a)[0..3], bytes.view(b)) == 0, "bytes_eq_slice of other lengths")
+    fails = fails + ck(ct.declassify(42) == 42, "declassify is the identity without a hook")
+    bytes.free(a)
+    bytes.free(b)
+    if fails > 0 {
+        println("${fails} FAILED")
+        exit(1)
+    }
+    println("ALL PASS")
+}

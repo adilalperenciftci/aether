@@ -1,0 +1,152 @@
+// Constant-time probe: every secret input below is marked undefined for
+// Valgrind's memcheck before the operation runs (ct_shim.c), and every
+// output is marked defined again before it is compared. Run under
+// valgrind by test_crypto_ct_valgrind.sh, memcheck reports any branch or
+// memory index that depends on a secret; run without it, the probe is a
+// known-answer test of the same operations.
+
+import std.bytes
+import std.string
+import std.cryptography.ct
+import std.cryptography.p256
+import std.cryptography.sha2
+
+extern ct_shim_available() -> int
+extern ct_shim_secret(p: ptr, n: int)
+extern ct_shim_public(p: ptr, n: int)
+extern ct_shim_declassify_hook() -> ptr
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+extern exit(code: int)
+
+fn hv(c: int) -> int {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    if c >= 65 && c <= 70 { return c - 55 }
+    return 0
+}
+
+fn hb(h: string) -> ptr {
+    n = string.length(h)
+    b = bytes.new(n / 2)
+    i = 0
+    while i < n {
+        bytes.set(b, i / 2, hv(string_char_at_n(h, n, i)) * 16 + hv(string_char_at_n(h, n, i + 1)))
+        i = i + 2
+    }
+    return b
+}
+
+fn bh(b: ptr) -> string {
+    if b == null {
+        return "(null)"
+    }
+    d = "0123456789abcdef"
+    o = ""
+    n = bytes.length(b)
+    i = 0
+    while i < n {
+        v = bytes.get(b, i)
+        o = string.concat(o, string.concat(string.substring(d, (v / 16) & 15, ((v / 16) & 15) + 1), string.substring(d, v & 15, (v & 15) + 1)))
+        i = i + 1
+    }
+    return o
+}
+
+fn ascii(s: string) -> ptr {
+    n = string.length(s)
+    b = bytes.new(n)
+    i = 0
+    while i < n {
+        bytes.set(b, i, string_char_at_n(s, n, i))
+        i = i + 1
+    }
+    return b
+}
+
+fn digest(algo: string, m: ptr) -> ptr {
+    ctx, _e = sha2.new(algo)
+    sha2.update(ctx, bytes.view(m))
+    return sha2.final_bytes(ctx)
+}
+
+fn sha256(m: ptr) -> ptr {
+    return digest("sha256", m)
+}
+
+// Mark a std.bytes buffer's contents secret / public.
+fn secret(b: ptr) {
+    ct_shim_secret(bytes.data(b), bytes.length(b))
+}
+
+fn public(b: ptr) {
+    if b != null {
+        ct_shim_public(bytes.data(b), bytes.length(b))
+    }
+}
+
+// Compare an output (made public first) with the expected hex; 1 on a miss.
+fn check(label: string, got: ptr, want: string) -> int {
+    public(got)
+    g = bh(got)
+    if g == string.to_lower(want) {
+        println("ok   ${label}")
+        return 0
+    }
+    println("FAIL ${label}")
+    println("  got:  ${g}")
+    println("  want: ${string.to_lower(want)}")
+    return 1
+}
+
+// ---- P-256 ----
+
+fn p256_cases() -> int {
+    fails = 0
+    // RFC 6979 A.2.5, SHA-256, message "sample": the key and nonce secret.
+    d = hb("C9AFA9D845BA75166B5C215767B1D6934E50C3DB36E89B127B8A622B120F6721")
+    secret(d)
+    m = ascii("sample")
+    h = sha256(m)
+    r, s = p256.ecdsa_sign(d, h)
+    fails = fails + check("p256 ecdsa_sign r", r, "EFD48B2AACB6A8FD1140DD9CD45E81D69D2C877B56AAF991C34D0EA84EAF3716")
+    fails = fails + check("p256 ecdsa_sign s", s, "F7CB1C942D657C41D436C7A1B6E29F65F3E900DBB9AFF4064DC4AB2F843ACDA8")
+    // Public key from the secret scalar.
+    px, py = p256.scalar_mult_base(d)
+    fails = fails + check("p256 scalar_mult_base x", px, "60FED4BA255A9D31C961EB74C6356D68C049B8923B61FA6CE669622E60F29FB6")
+    fails = fails + check("p256 scalar_mult_base y", py, "7903FE1008B8BC99A41AE9E95628BC64F2F1B20C2D7E9F5177A3C294D4462299")
+    // NIST CAVP ECDH vector: the private scalar secret.
+    priv = hb("7d7dc5f71eb29ddaf80d6214632eeae03d9058af1fb6d22ed80badb62bc1a534")
+    secret(priv)
+    qx = hb("700c48f77f56584c5cc632ca65640db91b6bacce3a4df6b42ce7cc838833d287")
+    qy = hb("db71e509e3fd9b060ddb20ba5c51dcc5948d46fbf640dfe0441782cab85fa4ac")
+    z = p256.ecdh(priv, qx, qy)
+    fails = fails + check("p256 ecdh", z, "46fc62106420ff012e54a434fbdd2d25ccc5852060561e68040dd7778997bd7b")
+    bytes.free(d)
+    bytes.free(m)
+    bytes.free(h)
+    bytes.free(r)
+    bytes.free(s)
+    bytes.free(px)
+    bytes.free(py)
+    bytes.free(priv)
+    bytes.free(qx)
+    bytes.free(qy)
+    bytes.free(z)
+    return fails
+}
+
+main() {
+    ct.set_declassify_hook(ct_shim_declassify_hook() as DeclassifyHook)
+    if ct_shim_available() == 1 {
+        println("ct_probe: under valgrind, secrets marked undefined")
+    } else {
+        println("ct_probe: no valgrind, known-answer run only")
+    }
+    fails = 0
+    fails = fails + p256_cases()
+    if fails > 0 {
+        println("${fails} FAILED")
+        exit(1)
+    }
+    println("ALL PASS")
+}

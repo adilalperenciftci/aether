@@ -194,8 +194,7 @@ main() {
     c3, c3len = tls13_cert.cert_verify_content(bytes.view(th)[0..32])
     digest = sha256b(c3, c3len)
     bytes.free(c3)
-    knonce = from_hex("7a1a7e52797fc8caaa435d2a4dace39158504bf204fbe19f14dbb427faee50ae")
-    r32, s32 = p256.ecdsa_sign(priv, digest, knonce)
+    r32, s32 = p256.ecdsa_sign(priv, digest)
     dsig, dlen = der_ecdsa_sig(r32, s32)
     if tls13_cert.verify_cert_verify(tls13_cert.SCHEME_ECDSA_P256_SHA256, px, py, bytes.view(th)[0..32], bytes.view(dsig)[0..dlen]) == 1 {
         println("ok   ecdsa-p256 CertificateVerify accepts valid sig")
@@ -213,7 +212,7 @@ main() {
     // --- mTLS: CLIENT CertificateVerify sign round-trip (RFC 8446 §4.4.3) ---
     // Sign the client content with the client key, then verify the DER sig is a
     // valid ECDSA-P256 signature over SHA-256(client content).
-    ccv_sig = tls13_cert.sign_client_cert_verify_ecdsa_p256(priv, bytes.view(th)[0..32], knonce)
+    ccv_sig = tls13_cert.sign_client_cert_verify_ecdsa_p256(priv, bytes.view(th)[0..32])
     ccv_content, ccv_clen = tls13_cert.client_cert_verify_content(bytes.view(th)[0..32])
     ccv_digest = sha256b(ccv_content, ccv_clen)
     // The client content differs from the server content (context string), so a
@@ -228,11 +227,24 @@ main() {
     } else { println("FAIL client sig verified under server context"); total_ok = 0 }
     bytes.free(ccv_sig); bytes.free(ccv_content); bytes.free(ccv_digest)
     bytes.free(crr); bytes.free(css)
+
+    // --- SERVER CertificateVerify sign (the pure server's path): the DER
+    // signature verifies as a server CertificateVerify, and a key outside
+    // [1, n-1] signs nothing.
+    scv_sig = tls13_cert.sign_server_cert_verify_ecdsa_p256(priv, bytes.view(th)[0..32])
+    if tls13_cert.verify_cert_verify(tls13_cert.SCHEME_ECDSA_P256_SHA256, px, py, bytes.view(th)[0..32], bytes.view(scv_sig)) == 1 {
+        println("ok   server CertificateVerify signs + verifies")
+    } else { println("FAIL server CertificateVerify sig"); total_ok = 0 }
+    bytes.free(scv_sig)
+    zkey = from_hex("0000000000000000000000000000000000000000000000000000000000000000")
+    if tls13_cert.sign_server_cert_verify_ecdsa_p256(zkey, bytes.view(th)[0..32]) == null {
+        println("ok   server CertificateVerify refuses a zero key")
+    } else { println("FAIL server CertificateVerify signed with a zero key"); total_ok = 0 }
+    bytes.free(zkey)
     bytes.free(priv)
     bytes.free(px)
     bytes.free(py)
     bytes.free(digest)
-    bytes.free(knonce)
     bytes.free(r32)
     bytes.free(s32)
     bytes.free(dsig)

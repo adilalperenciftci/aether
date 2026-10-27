@@ -132,10 +132,56 @@ Where you must write something new:
 ## Nonces, IVs and counters
 
 - A nonce is **per message**, never reused with the same key. For ECDSA that is
-  a hard requirement (nonce reuse across two signatures recovers the key); for
-  AEAD, reuse breaks confidentiality and authenticity both.
+  a hard requirement (nonce reuse across two signatures recovers the key, and
+  so does a nonce whose top bits are predictable); for AEAD, reuse breaks
+  confidentiality and authenticity both.
+- **Do not take a signing nonce from the caller.** `ecdsa_sign` in
+  `std.cryptography.p256` derives its nonce by RFC 6979 (HMAC-DRBG over the
+  private key and the digest), so the same digest signed twice gives the same
+  signature and no failing or biased random source can leak the key. It used
+  to take the nonce as a parameter, and the TLS server and the mTLS client
+  each had to draw one; an API that makes every caller get this right is an
+  API that will be called wrong.
 - Do not derive a nonce from something the peer controls.
 - Where a counter is the nonce, the overflow case is a failure, not a wrap.
+
+## Constant time, checked by a tool
+
+Code that handles a secret must not branch on it, index memory with it, or
+loop a number of times that depends on it: each of those makes the running
+time or the cache footprint a function of the secret, and both are
+measurable, across a network for the slow cases. A variable-time bignum
+behind ECDSA signing leaks the nonce a few bits per signature; a few hundred
+signatures then give the key.
+
+Write it with masks:
+
+```aether,fragment
+// WRONG -- a branch on a secret bit
+if bit == 1 { acc = add(acc, p) }
+
+// RIGHT -- always compute, keep the result with a mask
+mask = 0 - bit                       // all ones or zero
+r = r ^ (mask & (r ^ candidate))     // r = candidate when bit is 1
+```
+
+and select from a table by reading every entry, never `table[secret]`.
+`std.cryptography.ct` has `eq`, `lt`, `select` and `bytes_eq`, and
+`std.cryptography.ecc` is the constant-time field and curve engine to build
+on.
+
+Reading the code is not enough to know it is constant time: the C compiler can
+turn a mask back into a branch. The check is mechanical.
+`tests/integration/crypto_ct_valgrind` runs each secret-key operation with its
+secret inputs marked undefined for Valgrind's memcheck, which then reports
+every conditional jump and every memory address computed from them; the CI job
+`Crypto constant-time (Valgrind)` fails on any such report. Shown main's
+bignum P-256 before the rewrite, it reported 68 secret-dependent branches.
+
+A value the protocol reveals anyway (an ECDSA signature's retry decision, an
+AEAD tag verdict, whether a key is in range) may decide a branch, and the
+code says so with `ct.declassify(v)`, which the test hooks. Anything else
+that memcheck reports is a leak to fix, not to declassify.
 
 ## Review checklist
 
@@ -144,6 +190,9 @@ For any diff touching crypto, TLS or authentication:
 - [ ] Every randomness call checks both the error **and** the length
 - [ ] No security-relevant default on a failure path (no zeros, no reuse)
 - [ ] MAC/tag/token comparisons are constant-time
+- [ ] No branch, loop bound or memory index depends on a secret, and the
+      operation is in `tests/integration/crypto_ct_valgrind`
+- [ ] No signing API takes a nonce from its caller
 - [ ] Every verification failure returns an error naming the check
 - [ ] Failure paths free what they allocated
 - [ ] No `println` in library code

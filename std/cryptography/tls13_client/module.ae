@@ -588,15 +588,30 @@ fn send_plaintext_handshake(sock: ptr, msg: byte[]) -> string {
     return ""
 }
 
-// Fill a std.bytes buffer of length n with CSPRNG bytes.
+// A std.bytes buffer of n CSPRNG bytes, or null when the CSPRNG fails or
+// returns short. The callers MUST check: these bytes become the ephemeral
+// key-share scalars and the client random, and handing back zeros instead
+// would make every session's keys predictable.
 fn rand_into(n: int) -> ptr {
-    s, _sn, err = cryptography.random_bytes(n)
+    s, sn, err = cryptography.random_bytes(n)
+    if string.equals(err, "") != 1 { return null }
+    if sn < n { return null }
     b = bytes.new(n)
     if n > 0 { bytes.set(b, n - 1, 0) }
-    if string.equals(err, "") == 1 {
-        bytes.copy_from_string(b, 0, s, n)
-    }
+    bytes.copy_from_string(b, 0, s, n)
     return b
+}
+
+// A fresh secp256r1 private scalar in [1, n-1] (32 random bytes fall outside
+// it with probability about 2^-32: draw again), or null without randomness.
+fn fresh_p256_priv() -> ptr {
+    while true {
+        k = rand_into(32)
+        if k == null { return null }
+        if p256.private_key_valid(k) == 1 { return k }
+        bytes.free(k)
+    }
+    return null
 }
 
 fn cleanup_hello(pub: ptr, rnd: ptr, sid: ptr, ch: ptr) {
@@ -689,6 +704,10 @@ fn connect_ex(host: string, port: int, x25519_priv: ptr, client_cert: ptr, clien
 //               set_cafile), or "" for the normal resolution.
 fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, client_cert_len: int, client_key: ptr, adopt_sock: @keep ptr, insecure: int, cafile: string) -> (ptr, string) {
     sock = adopt_sock
+    if client_cert != null && client_key != null && p256.private_key_valid(client_key) == 0 {
+        if sock != null { tcp.close(sock) }
+        return null, "the client key is not a P-256 private key (32 bytes, in [1, n-1])"
+    }
     if sock == null {
         sock, dial_err = tcp.connect(host, port)
         if string.equals(dial_err, "") != 1 { return null, dial_err }
@@ -699,12 +718,22 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
     // X25519MLKEM768 first (the hybrid post-quantum group, RFC 10024), then
     // x25519 and secp256r1. The hybrid share reuses the caller's x25519
     // scalar, as Chrome and Go do, so one X25519 public covers both entries.
+    p256_priv = fresh_p256_priv()
+    rnd = rand_into(32)
+    sid = rand_into(32)
+    if p256_priv == null || rnd == null || sid == null {
+        if p256_priv != null { bytes.free(p256_priv) }
+        if rnd != null { bytes.free(rnd) }
+        if sid != null { bytes.free(sid) }
+        tcp.close(sock)
+        return null, "no randomness available for the handshake"
+    }
     ek, dk, kerr = mlkem.mlkem768_keygen()
     if kerr != "" {
+        bytes.free(p256_priv); bytes.free(rnd); bytes.free(sid)
         tcp.close(sock)
         return null, kerr
     }
-    p256_priv = rand_into(32)
     x_pub, x_pub_len = keyshare_for_group(tls13_hs.GROUP_X25519, x25519_priv)
     p_pub, p_pub_len = keyshare_for_group(tls13_hs.GROUP_SECP256R1, p256_priv)
 
@@ -716,8 +745,6 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
     bytes.copy_from_bytes(hybrid, ek_len, x_pub, 0, 32)
     bytes.free(ek) // dk carries what decapsulation needs
 
-    rnd = rand_into(32)
-    sid = rand_into(32)
     ch = tls13_hs.client_hello_full(rnd, bytes.view(sid)[0..32], tls13_hs.GROUP_X25519MLKEM768, bytes.view(hybrid)[0..ek_len + 32], tls13_hs.GROUP_X25519, bytes.view(x_pub)[0..x_pub_len], tls13_hs.GROUP_SECP256R1, bytes.view(p_pub)[0..p_pub_len], host)
     bytes.free(p_pub); bytes.free(hybrid) // copied into the CH
     pub = x_pub // cleanup_hello frees this
@@ -853,6 +880,7 @@ conn_group(conn: ptr) -> int {
 // X25519MLKEM768 itself (#2483): connect() with a fresh x25519 scalar.
 connect_pq(host: string, port: int) -> (ptr, string) {
     priv = rand_into(32)
+    if priv == null { return null, "no randomness available for the key share" }
     conn, err = connect(host, port, priv)
     bytes.free(priv)
     return conn, err
@@ -980,14 +1008,15 @@ fn run_handshake_tail(sock: @keep ptr, rio: @keep ptr, tr: ptr, host: string, sh
                         transcript_add(tr, bytes.view(ccert))
                         // CertificateVerify: sign the transcript-through-client-
                         // Certificate. ECDSA-P256 only in this cut.
+                        // The nonce is RFC 6979's; client_key was checked to
+                        // be a P-256 scalar before dialling, so this signs.
                         th_ccv = transcript_hash_algo(tr, hash_algo)
-                        knonce = rand_into(32)
-                        cvsig = tls13_cert.sign_client_cert_verify_ecdsa_p256(client_key, bytes.view(th_ccv)[0..hash_len], knonce)
+                        cvsig = tls13_cert.sign_client_cert_verify_ecdsa_p256(client_key, bytes.view(th_ccv)[0..hash_len])
                         ccv = build_cert_verify_msg(0x0403, bytes.view(cvsig))
                         ccv_rec = tls13_record.seal_record(cli_hs_ctx, tls13_record.CONTENT_HANDSHAKE, bytes.view(ccv))
                         cli_send_view(sock, bytes.view(ccv_rec))
                         transcript_add(tr, bytes.view(ccv))
-                        bytes.free(th_ccv); bytes.free(knonce); bytes.free(cvsig)
+                        bytes.free(th_ccv); bytes.free(cvsig)
                         bytes.free(ccert); bytes.free(ccert_rec); bytes.free(ccv); bytes.free(ccv_rec)
                     } else {
                         ccert = build_empty_certificate()
@@ -1635,6 +1664,12 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
     pub = x25519.base_point(x25519_priv)
     rnd = rand_into(32)
     sid = rand_into(32)
+    if rnd == null || sid == null {
+        if rnd != null { bytes.free(rnd) }
+        if sid != null { bytes.free(sid) }
+        bytes.free(pub); bytes.free(psk); tcp.close(sock)
+        return null, "no randomness available for the handshake"
+    }
 
     // Build the PSK ClientHello with a zero binder placeholder (+ early_data ext
     // when sending 0-RTT).

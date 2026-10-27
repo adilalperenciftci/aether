@@ -12,9 +12,9 @@
 // Wrong-length signatures are rejected up front (the API takes fixed
 // 32-byte r and s buffers — inexpressible, refused by construction).
 //
-// ECDSA verify routes through variable-time std.bignum (slow); stride
-// sampling as in wp_x448.ae: default 10, WYCHEPROOF_FULL=1 for all,
-// WYCHEPROOF_STRIDE=N to tune.
+// Every vector runs by default (std.cryptography.p256 verifies in about
+// half a millisecond at -O2, a few at the -O0 of `ae run`, #2600);
+// WYCHEPROOF_STRIDE=N samples every Nth case instead.
 
 import std.cryptography.p256
 import std.cryptography.sha2
@@ -83,7 +83,7 @@ fn slice32(b: ptr, off: int) -> ptr {
 }
 
 main() {
-    stride = 10
+    stride = 1
     wf = os.getenv("WYCHEPROOF_FULL")
     if wf == "1" { stride = 1 }
     sv = os.getenv("WYCHEPROOF_STRIDE")
