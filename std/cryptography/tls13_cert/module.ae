@@ -422,11 +422,11 @@ verify_cert_verify_rsa_pss(spki_key: byte[], transcript_hash: byte[], sig: byte[
 // a long way from the edit that caused it. One constant, exported, so the
 // count lives next to the definition it has to track.
 //
-// Sized with headroom rather than exactly: 14 ptr and 16 int fields come to
-// 208 bytes with x86-64 alignment, and the slack absorbs the next field or
+// Sized with headroom rather than exactly: 19 ptr and 16 int fields come to
+// 248 bytes with x86-64 alignment, and the slack absorbs the next field or
 // two without another silent overflow. A few spare bytes per certificate is
 // the right trade against corrupting the heap.
-const LEAFCERT_SIZE = 256
+const LEAFCERT_SIZE = 320
 
 struct LeafCert {
     tbs: ptr // full tbsCertificate DER (tag+len+content)
@@ -462,6 +462,11 @@ struct LeafCert {
     nc_permitted: ptr // std.list of permitted name-constraint subtrees (tag byte, then value), or null
     nc_excluded: ptr // std.list of excluded subtrees, or null
     san_other: ptr // std.list of rfc822Name, URI and directoryName SANs (tag byte, then value), or null
+    serial: ptr // serialNumber content bytes, or null
+    ski: ptr // subjectKeyIdentifier, or null
+    aki_keyid: ptr // authorityKeyIdentifier keyIdentifier, or null
+    aki_issuer: ptr // the first authorityCertIssuer directoryName (a Name), or null
+    aki_serial: ptr // authorityCertSerialNumber content bytes, or null
 }
 
 // Parse a DER Certificate into `out`. Returns "" on success or an error.
@@ -505,6 +510,11 @@ parse_certificate(der: byte[], out: *LeafCert) -> string {
     out.nc_forms = 0
     out.key_kind = KEY_NONE
     out.key_bits = 0
+    out.serial = null
+    out.ski = null
+    out.aki_keyid = null
+    out.aki_issuer = null
+    out.aki_serial = null
 
     view = bytes.new(len)
     if len > 0 { bytes.set(view, len - 1, 0) }
@@ -677,15 +687,18 @@ fn parse_tbs_fields(tbsr: ptr, out: *LeafCert) -> string {
     }
 
     usage_check(out)
+    self_signed_check(out)
 
     return ""
 }
 
-// A serialNumber of more than 20 octets (RFC 5280 4.1.2.2; 21 when the
-// first is the 0x00 that keeps it positive), or an empty one, marks the
-// certificate EXT_MALFORMED. Zero and negative serials are let through: the
-// same section asks users to handle those gracefully.
+// The serialNumber, kept in out.serial. One of more than 20 octets (RFC
+// 5280 4.1.2.2; 21 when the first is the 0x00 that keeps it positive), or
+// an empty one, marks the certificate EXT_MALFORMED. Zero and negative
+// serials are let through: the same section asks users to handle those
+// gracefully.
 fn serial_check(sn: ptr, out: *LeafCert) {
+    if out.serial == null { out.serial = copy_range(sn, 0, bytes.length(sn)) }
     n = bytes.length(sn)
     if n == 0 || n > 21 || (n == 21 && (bytes.get(sn, 0) & 0xFF) != 0) {
         out.ext_bits = out.ext_bits | EXT_MALFORMED
@@ -850,6 +863,7 @@ const EXT_MALFORMED = 256 // an extension or field did not parse, or breaks an R
 const EXT_SAN = 512 // subjectAltName present
 const EXT_SAN_EMPTY = 1024 // subjectAltName with no names
 const EXT_SAN_CRITICAL = 2048 // subjectAltName marked critical
+const EXT_SELF_SIGNED = 4096 // not an extension: OpenSSL's self-signed (self_signed_check)
 
 const EKU_SERVER = 1 // id-kp-serverAuth
 const EKU_CLIENT = 2 // id-kp-clientAuth
@@ -964,8 +978,14 @@ fn parse_one_extension(oid: string, critical: int, value: @keep ptr, out: *LeafC
     // critical one asks for policy processing this code does not do, so
     // either way it is refused. Anything else that is critical cannot be
     // honoured.
-    if string.equals(oid, "2.5.29.14") == 1 || string.equals(oid, "2.5.29.35") == 1 {
+    if string.equals(oid, "2.5.29.14") == 1 {
         if critical == 1 { out.ext_bits = out.ext_bits | EXT_MALFORMED }
+        parse_ski(value, out)
+        return
+    }
+    if string.equals(oid, "2.5.29.35") == 1 {
+        if critical == 1 { out.ext_bits = out.ext_bits | EXT_MALFORMED }
+        parse_aki(value, out)
         return
     }
     if string.equals(oid, "1.3.6.1.5.5.7.1.1") == 1 {
@@ -1003,6 +1023,114 @@ fn aia_ok(value: @keep ptr) -> int {
         lt, _lco, _lcl, lnx = der_tlv(value, onx, dco + dcl)
         if lt < 0 || lnx != dco + dcl { return 0 }
         p = dnx
+    }
+    return 1
+}
+
+// subjectKeyIdentifier ::= OCTET STRING: kept in out.ski.
+fn parse_ski(value: @keep ptr, out: *LeafCert) {
+    vl = bytes.length(value)
+    tag, co, cl, nx = der_tlv(value, 0, vl)
+    if tag != 0x04 || nx != vl {
+        out.ext_bits = out.ext_bits | EXT_MALFORMED
+        return
+    }
+    if out.ski == null { out.ski = copy_range(value, co, cl) }
+}
+
+// AuthorityKeyIdentifier ::= SEQUENCE { keyIdentifier [0] OCTET STRING
+//   OPTIONAL, authorityCertIssuer [1] GeneralNames OPTIONAL,
+//   authorityCertSerialNumber [2] INTEGER OPTIONAL }: the key identifier,
+// the first directoryName of the issuer names (a Name; OpenSSL also takes
+// the first), and the serial go to out.aki_keyid, aki_issuer, aki_serial.
+fn parse_aki(value: @keep ptr, out: *LeafCert) {
+    vl = bytes.length(value)
+    tag, co, cl, nx = der_tlv(value, 0, vl)
+    if tag != 0x30 || nx != vl {
+        out.ext_bits = out.ext_bits | EXT_MALFORMED
+        return
+    }
+    p = co
+    end = co + cl
+    while p < end {
+        ft, fco, fcl, fnx = der_tlv(value, p, end)
+        if ft == 0x80 && out.aki_keyid == null {
+            out.aki_keyid = copy_range(value, fco, fcl)
+        } else if ft == 0x82 && out.aki_serial == null {
+            out.aki_serial = copy_range(value, fco, fcl)
+        } else if ft == 0xA1 {
+            q = fco
+            while q < fco + fcl {
+                gt, gco, gcl, gnx = der_tlv(value, q, fco + fcl)
+                if gt < 0 {
+                    out.ext_bits = out.ext_bits | EXT_MALFORMED
+                    q = fco + fcl
+                } else {
+                    if gt == 0xA4 && out.aki_issuer == null { out.aki_issuer = copy_range(value, gco, gcl) }
+                    q = gnx
+                }
+            }
+        } else {
+            out.ext_bits = out.ext_bits | EXT_MALFORMED
+            return
+        }
+        p = fnx
+    }
+}
+
+// Fresh bytes holding b[off, off + n).
+fn copy_range(b: ptr, off: int, n: int) -> ptr {
+    c = bytes.new(n)
+    if n > 0 { bytes.copy_from_bytes(c, 0, b, off, n) }
+    return c
+}
+
+// 1 when the buffers hold the same bytes.
+fn bytes_same(a: ptr, b: ptr) -> int {
+    n = bytes.length(a)
+    if bytes.length(b) != n { return 0 }
+    i = 0
+    while i < n {
+        if bytes.get(a, i) != bytes.get(b, i) { return 0 }
+        i = i + 1
+    }
+    return 1
+}
+
+// bytes.free on a buffer that may be null.
+fn free_opt(b: ptr) {
+    if b != null { bytes.free(b) }
+}
+
+// OpenSSL's "self-signed" (ossl_x509v3_cache_extensions): the issuer is the
+// subject, the AKI, if present, names the certificate itself (its key
+// identifier against the SKI when both are there, its directoryName against
+// the issuer, its serial against the serial: X509_check_akid), and the
+// signature algorithm is one for the certificate's own kind of key. Only
+// such a certificate ends a path as a trust anchor (#3310), on the pure
+// backend as on OpenSSL's. Names are compared byte for byte, where OpenSSL
+// compares them canonically.
+fn self_signed_check(out: *LeafCert) {
+    if out.issuer == null || out.subject == null { return }
+    if dn_equal(bytes.view(out.issuer)[0..out.issuer_len], bytes.view(out.subject)[0..out.subject_len]) != 1 { return }
+    if out.aki_keyid != null && out.ski != null && bytes_same(out.aki_keyid, out.ski) == 0 { return }
+    if out.aki_serial != null && (out.serial == null || bytes_same(out.aki_serial, out.serial) == 0) { return }
+    if out.aki_issuer != null && bytes_same(out.aki_issuer, out.issuer) == 0 { return }
+    if oid_has_prefix(out.sig_alg_oid, "1.2.840.113549.1.1.") == 1 && oid_is(out.spki_algo_oid, "1.2.840.113549.1.1.1") != 1 { return }
+    if oid_has_prefix(out.sig_alg_oid, "1.2.840.10045.4.") == 1 && oid_is(out.spki_algo_oid, "1.2.840.10045.2.1") != 1 { return }
+    if oid_is(out.sig_alg_oid, "1.3.101.112") == 1 && oid_is(out.spki_algo_oid, "1.3.101.112") != 1 { return }
+    out.ext_bits = out.ext_bits | EXT_SELF_SIGNED
+}
+
+// 1 when the dotted-OID bytes `oid` begin with `prefix`.
+fn oid_has_prefix(oid: ptr, prefix: string) -> int {
+    if oid == null { return 0 }
+    pl = string.length(prefix)
+    if bytes.length(oid) < pl { return 0 }
+    i = 0
+    while i < pl {
+        if (bytes.get(oid, i) & 0xFF) != (string_char_at_n(prefix, pl, i) & 0xFF) { return 0 }
+        i = i + 1
     }
     return 1
 }
@@ -1472,6 +1600,16 @@ free_leaf(c: *LeafCert) {
     c.nc_permitted = null
     c.nc_excluded = null
     c.san_other = null
+    free_opt(c.serial)
+    free_opt(c.ski)
+    free_opt(c.aki_keyid)
+    free_opt(c.aki_issuer)
+    free_opt(c.aki_serial)
+    c.serial = null
+    c.ski = null
+    c.aki_keyid = null
+    c.aki_issuer = null
+    c.aki_serial = null
 }
 
 // Free a std.list of std.bytes buffers (null-safe).
@@ -2487,9 +2625,11 @@ const MAX_CHAIN_DEPTH = 8
 //     more, a named P-256, P-384 or P-521 point, or Ed25519;
 //   - every issuer below the anchor is a v3 CA (basicConstraints cA), may
 //     sign certificates (keyUsage keyCertSign, when keyUsage is present),
-//     and its pathLenConstraint covers the CAs below it; the anchor is
-//     trusted as given, but one whose basicConstraints says it is not a CA,
-//     or whose keyUsage lacks keyCertSign, issues nothing;
+//     and its pathLenConstraint covers the CAs below it; the anchor is a
+//     self-signed root (self_signed_check, OpenSSL's rule: a trusted
+//     intermediate ends no path, #3310, #3311), trusted as given, but one
+//     whose basicConstraints says it is not a CA, or whose keyUsage lacks
+//     keyCertSign, issues nothing;
 //   - no certificate has an unknown critical, repeated or malformed
 //     extension, an extension used where RFC 5280 forbids it (a critical
 //     key identifier or authority information access, policy constraints,
@@ -2538,6 +2678,7 @@ const CHAIN_NOT_V3 = 11
 const CHAIN_BUDGET = 12
 const CHAIN_BAD_KEY = 13
 const CHAIN_LEAF_KEY_USAGE = 14
+const CHAIN_ANCHOR_NOT_ROOT = 15
 
 // Signature checks one path search may spend: a set of cross-signed
 // intermediates can otherwise make the search exponential (x509-limbo's
@@ -2578,6 +2719,7 @@ fn chain_error(code: int) -> string {
     if code == CHAIN_BUDGET { return "too many candidate paths or name comparisons: path building gave up" }
     if code == CHAIN_BAD_KEY { return "a certificate in the chain has an unsupported or weak public key" }
     if code == CHAIN_LEAF_KEY_USAGE { return "the certificate's keyUsage does not allow signing (digitalSignature), which TLS needs" }
+    if code == CHAIN_ANCHOR_NOT_ROOT { return "a trusted certificate that is not a self-signed root cannot end a path (as on OpenSSL; #3311)" }
     return "certificate does not chain to a trusted anchor"
 }
 
@@ -2948,7 +3090,12 @@ fn chain_dfs(cx: *ChainCtx, cert: *LeafCert, at: string, depth: int) -> int {
     i = 0
     while i < na {
         a = list.at(cx.anchors, i) as *LeafCert
-        if a != null && issued_by(cx, cert, a) == 1 {
+        // Only a self-signed root ends a path (#3310).
+        if a != null && (a.ext_bits & EXT_SELF_SIGNED) == 0 {
+            if dn_equal(bytes.view(cert.issuer)[0..cert.issuer_len], bytes.view(a.subject)[0..a.subject_len]) == 1 {
+                chain_note(cx, CHAIN_ANCHOR_NOT_ROOT)
+            }
+        } else if a != null && issued_by(cx, cert, a) == 1 {
             code = issuer_code(a, at, cx.purpose, 1)
             if code == 0 {
                 list.add(cx.path, a)
@@ -3200,6 +3347,7 @@ init_leaf(l: *LeafCert) {
     l.version = 0; l.ext_bits = 0; l.path_len = 0; l.key_usage = 0; l.eku_bits = 0
     l.nc_permitted = null; l.nc_excluded = null; l.san_other = null
     l.san_forms = 0; l.nc_forms = 0; l.key_kind = KEY_NONE; l.key_bits = 0
+    l.serial = null; l.ski = null; l.aki_keyid = null; l.aki_issuer = null; l.aki_serial = null
 }
 
 // Free a trust-anchor list built by trust_store_load: each *LeafCert's buffers,

@@ -157,7 +157,9 @@ handshake fails closed.
 **What it validates.** The server's certificate must name the host
 (subjectAltName only: DNS names, with a whole-label leading wildcard over at
 least two labels, and IP addresses), and there must be a path from it
-through the certificates the server sent to one of those anchors
+through the certificates the server sent to one of those anchors, which
+must be a self-signed root, on this backend as on OpenSSL's (a trusted
+intermediate ends no path; pinning one is #3311)
 (`tls13_cert.validate_chain`, RFC 5280 section 6 as the Web PKI profiles it)
 on which every signature verifies (RSA PKCS#1 v1.5 with SHA-256, SHA-384 or
 SHA-512; ECDSA on P-256, P-384 or P-521; Ed25519), every key is one of those

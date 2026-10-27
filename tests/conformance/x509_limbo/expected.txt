@@ -42,19 +42,18 @@ rfc9881::ml-dsa-44-key-encipherment SKIP no ML-DSA signatures (no std.cryptograp
 rfc9881::ml-dsa-65 SKIP no ML-DSA signatures (no std.cryptography ML-DSA module)
 rfc9881::ml-dsa-87 SKIP no ML-DSA signatures (no std.cryptography ML-DSA module)
 
-# Known bugs, filed: OpenSSL refuses these and the pure backend accepts them.
-rfc5280::aki::cross-signed-root-missing-aki FAIL accepted: a trusted certificate that is not self-signed ends a path (#3310)
-webpki::aki::root-with-aki-all-fields FAIL accepted: a trusted certificate that is not self-signed ends a path (#3310)
-webpki::aki::root-with-aki-authoritycertissuer FAIL accepted: a trusted certificate that is not self-signed ends a path (#3310)
-webpki::aki::root-with-aki-authoritycertserialnumber FAIL accepted: a trusted certificate that is not self-signed ends a path (#3310)
-webpki::aki::root-with-aki-ski-mismatch FAIL accepted: a trusted certificate that is not self-signed ends a path (#3310)
-
 # A leaf whose keyUsage does not allow digitalSignature: TLS 1.3 signs the
 # CertificateVerify with the leaf's key, so RFC 8446 4.4.2.2 requires the
 # bit, and OpenSSL refuses such a leaf for TLS too (#3309). limbo's RFC 5280
 # view, with no TLS in it, accepts.
 pathlen::validation-ignores-pathlen-in-leaf FAIL refused: the leaf's keyUsage lacks digitalSignature, which TLS needs (RFC 8446 4.4.2.2), as OpenSSL refuses it
 rfc5280::ca-as-leaf FAIL refused: the leaf's keyUsage lacks digitalSignature, which TLS needs (RFC 8446 4.4.2.2), as OpenSSL refuses it
+
+# A trusted certificate that is not a self-signed root (an intermediate in
+# the trust store) ends no path, on this backend as on OpenSSL's without
+# partial chains (#3310); pinning an intermediate on both is #3311.
+cve::cve-2024-0567 FAIL refused: the only trusted certificate is not a self-signed root, as OpenSSL refuses it (#3310, #3311)
+rfc5280::root-and-intermediate-swapped FAIL refused: the only trusted certificate is not a self-signed root, as OpenSSL refuses it (#3310, #3311)
 
 # Key identifiers: their presence is not required (they help path building,
 # which here tries every candidate instead; many deployed roots and
