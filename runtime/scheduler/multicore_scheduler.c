@@ -29,6 +29,7 @@
 #include "../actors/aether_send_buffer.h"
 #include "../actors/aether_panic.h"
 #include "../actors/aether_actor_inbox.h"
+#include "../actors/aether_step_barrier.h"
 
 
 // Forward declaration to avoid header cycle with aether_send_message.h
@@ -175,143 +176,41 @@ static int actor_overflow_drain(ActorBase* actor) {
 }
 
 // --------------------------------------------------------------------------
-// aether_step_safe — call actor->step() inside a sigsetjmp barrier.
+// aether_step_safe: one step of `actor` inside the panic barrier, the one
+// both schedulers share (runtime/actors/aether_step_barrier.h, #2974), with
+// this scheduler's parts: its death finalize, its reply slot's failure, and
+// after a step the mailbox's refill from the overflow (#3241).
 //
 // If the handler calls aether_panic() or takes a caught signal, the barrier
-// unwinds: we mark the actor dead, fire the death hook, and return normally.
-// The scheduler loop keeps running; other actors are unaffected.
+// unwinds: the actor ends, its death is finalized, the death hook fires, and
+// the scheduler loop keeps running; other actors are unaffected. Dead actors
+// are skipped on entry: a second attempt to step a crashed actor is a no-op.
 //
-// Dead actors are skipped on entry: a second attempt to step a crashed
-// actor is a no-op.
-//
-// sigsetjmp(buf, 1) saves the signal mask so siglongjmp from a signal
-// handler (Phase 2) restores it. Overhead per call is a handful of
-// instructions plus one sigprocmask on systems where glibc implements it
-// as a syscall — measurable but small (~30ns on modern x86_64).
-//
-// We use a function rather than a macro so the 8 step() sites stay
-// readable; `inline` lets the compiler devirtualize where it can.
+// The step lock is NOT released by the barrier (#2163): all its call sites
+// take it before calling and clear it after, and four of them step in a
+// loop under one acquisition. Cleared on the panic path, as it once was, it
+// was handed away while the caller still believed it held it, the caller
+// cleared it again on its way out, and two threads were soon stepping one
+// actor (heap corruption, `free(): invalid pointer` in the #2083 test).
 // --------------------------------------------------------------------------
+static void step_fail_slot(void* slot, int why) {
+    reply_slot_fail((ActorReplySlot*)slot, why);
+}
+
+static void step_after(ActorBase* actor) {
+    /* The mailbox refilled from the overflow (#3241). An actor with a
+     * thread of its own takes every message through its inbox, which its
+     * thread empties. */
+    if (likely(!actor->auto_process)) {
+        ActorInbox* behind = atomic_load_explicit(&actor->inbox, memory_order_acquire);
+        if (unlikely(behind != NULL)) actor_overflow_refill(actor, behind);
+    }
+}
+
 static inline void aether_step_safe(ActorBase* actor) {
     if (!actor || !actor->step) return;
     if (atomic_load_explicit(&actor->dead, memory_order_acquire)) return;
-
-    /* The step context (the ask being handled, the actor stepping) is the
-     * thread's, and a step can run inside another: a send steps an idle
-     * actor of this core inline while the sender's handler is still
-     * running, its ask not yet answered. Each step starts with no ask in
-     * hand and gives the enclosing one its context back when it ends; the
-     * inner step used to leave its own in place, and the outer handler's
-     * reply then went nowhere. Neither variable changes between the
-     * sigsetjmp and a longjmp back to it, so both are intact on the panic
-     * path. */
-    void* outer_slot = g_current_reply_slot;
-    void* outer_actor = g_current_step_actor;
-    g_current_reply_slot = NULL;
-
-    AetherJmpFrame* f = aether_try_push();
-    if (AETHER_SIGSETJMP(f->buf, 1) == 0) {
-        g_aether_in_actor_step = 1;
-        g_aether_current_actor_id = actor->id;
-        AETHER_TRACE_EVENT(AE_TRACE_STEP_BEGIN, actor->id, -1, -1);
-        actor->step(actor);
-        AETHER_TRACE_EVENT(AE_TRACE_STEP_END, actor->id, -1, -1);
-        g_aether_in_actor_step = 0;
-        g_aether_current_actor_id = -1;
-        aether_try_pop();
-        /* A handler that took an ask and returned without replying: no
-         * reply can come, since a reply answers the ask its own step took.
-         * Its asker learns that now, not at its timeout, and the slot's
-         * reference goes with it. */
-        if (g_current_reply_slot) {
-            ActorReplySlot* held = (ActorReplySlot*)g_current_reply_slot;
-            g_current_reply_slot = NULL;
-            reply_slot_fail(held, AETHER_ASK_NO_REPLY);
-        }
-        /* Ended while the handler ran (#2974): its stop(), or a kill or a
-         * linked actor's death from elsewhere, takes effect now that the
-         * handler has returned, so no Down is sent while it runs. A release
-         * ends it by its own path. */
-        int ended = atomic_load_explicit(&actor->dead, memory_order_acquire);
-        if (unlikely(ended != 0)) {
-            if (!(ended & AETHER_ACTOR_RELEASED)) actor_finalize(actor);
-        } else if (likely(!actor->auto_process)) {
-            /* The mailbox refilled from the overflow (#3241). An actor with
-             * a thread of its own takes every message through its inbox,
-             * which its thread empties. */
-            ActorInbox* behind = atomic_load_explicit(&actor->inbox, memory_order_acquire);
-            if (unlikely(behind != NULL)) actor_overflow_refill(actor, behind);
-        }
-        g_current_reply_slot = outer_slot;
-        g_current_step_actor = outer_actor;
-        return;
-    }
-
-    // Unwound via panic or signal.
-    const char* reason = f->reason;
-    void (*reason_release)(const void*) = f->reason_release;
-    g_aether_in_actor_step = 0;
-    g_aether_current_actor_id = -1;
-    aether_try_pop();
-
-    // A bit, not a store: a release may be setting its own bit meanwhile.
-    // The reason is the panic's unless something ended the actor first.
-    aether_actor_claim_end(actor, aether_panic_reason_text(reason), AETHER_ACTOR_PANICKED);
-    atomic_store_explicit(&actor->active, 0, memory_order_release);
-
-    /* The message its handler was running on (#3142): the release that
-     * follows the handler did not run, so what the message owns and its
-     * payload go here, as a dropped message's do. */
-    if (actor->step_payload) {
-        Message held = {0};
-        held.type = actor->step_type;
-        held.payload_ptr = actor->step_payload;
-        actor->step_payload = NULL;
-        aether_message_drop(actor, &held);
-    }
-
-    /* The ask it was handling, if it had not replied (#3151): its asker
-     * learns now that no reply is coming, instead of at its timeout. */
-    if (g_current_reply_slot) {
-        ActorReplySlot* held = (ActorReplySlot*)g_current_reply_slot;
-        g_current_reply_slot = NULL;
-        reply_slot_fail(held, AETHER_ASK_DIED);
-    }
-
-    // Drain what waits for it and tell its watchers (#2974): see
-    // actor_finalize. Without the drain the dead actor's mailbox keeps
-    // mailbox.count > 0 forever, scheduler threads skip the actor (dead
-    // check), and sent > processed indefinitely, so scheduler_wait() would
-    // spin or time out.
-    actor_finalize(actor);
-
-    /* step_lock is NOT released here (#2163). This function does not
-     * acquire it -- all seven call sites take it before calling and clear
-     * it after -- so clearing it on the panic path handed the lock away
-     * while the caller still believed it held it:
-     *
-     *   1. this clears the flag;
-     *   2. another thread acquires it and starts stepping the same actor;
-     *   3. the caller clears it again on its way out, releasing a lock it
-     *      no longer owns;
-     *   4. a third thread enters, and two are now stepping one actor.
-     *
-     * Two threads in one actor's step is heap corruption -- it showed up
-     * as `free(): invalid pointer` in the #2083 regression test. Four of
-     * the call sites also step in a loop under a single acquisition, so
-     * the lock was being dropped mid-loop.
-     *
-     * The comment this replaces justified the clear as letting "the
-     * dead-actor check in future iterations proceed without contention".
-     * That check is the atomic_load(&actor->dead) at the top of this
-     * function, which returns before touching the lock at all, so it
-     * never needed the lock released to make progress. */
-    aether_fire_death_hook(actor->id, reason);
-    /* A heap-built panic message (aether_panic_owned) belongs to whoever
-     * caught it -- here, this barrier. The hook has seen it; release it. */
-    if (reason_release) reason_release(reason);
-    g_current_reply_slot = outer_slot;
-    g_current_step_actor = outer_actor;
+    aether_step_barrier(actor, actor_finalize, step_fail_slot, step_after);
 }
 
 void scheduler_step_actor(ActorBase* actor) {

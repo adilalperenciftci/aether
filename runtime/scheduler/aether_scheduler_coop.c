@@ -12,6 +12,7 @@
 #include "../aether_numa.h"
 #include "../actors/aether_send_message.h"
 #include "../actors/aether_actor_inbox.h"
+#include "../actors/aether_step_barrier.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -596,6 +597,12 @@ void scheduler_actor_thread_finalize(ActorBase* actor) {
     (void)actor;   // no actor has a thread of its own here
 }
 
+/* An ask the step leaves without a reply: its asker, polling, sees why. */
+static void coop_fail_slot(void* slot, int why) {
+    ActorReplySlot* s = (ActorReplySlot*)slot;
+    if (!s->reply_ready && !s->failed) s->failed = why;
+}
+
 int scheduler_actor_end(ActorBase* actor, const char* reason, int bit) {
     if (!actor || !aether_actor_claim_end(actor, reason, bit)) return 0;
     if (!atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire)) {
@@ -611,17 +618,11 @@ void scheduler_step_actor(ActorBase* actor) {
     // Taken by the outermost step of the actor on the stack (an ask's poll
     // can step it again inside its own), for scheduler_actor_end.
     int outer_step = atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire);
-    void* outer_slot = g_current_reply_slot;
-    void* outer_actor = g_current_step_actor;
-    g_current_reply_slot = NULL;
-    actor->step(actor);
-    ActorReplySlot* held = (ActorReplySlot*)g_current_reply_slot;
-    if (held && !held->reply_ready && !held->failed) held->failed = AETHER_ASK_NO_REPLY;
-    g_current_reply_slot = outer_slot;
-    g_current_step_actor = outer_actor;
-    // Ended while its handler ran: a stop(), or a kill (#2974).
-    int ended = atomic_load_explicit(&actor->dead, memory_order_relaxed);
-    if (ended && !(ended & AETHER_ACTOR_RELEASED)) coop_finalize(actor);
+    // Inside the panic barrier both schedulers share (#2974): a panic is a
+    // death, finalized here, with its Down, not the end of the program; a
+    // stop() or a kill that came while the handler ran is finalized after it.
+    // Where the target has no setjmp (wasi) a panic still ends the program.
+    aether_step_barrier(actor, coop_finalize, coop_fail_slot, NULL);
     if (!outer_step) atomic_flag_clear_explicit(&actor->step_lock, memory_order_release);
 }
 

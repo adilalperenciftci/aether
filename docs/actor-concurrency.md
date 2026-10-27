@@ -245,7 +245,7 @@ Each actor's watchers live in its `death_watch` list (`runtime/actors/aether_sup
 
 `actors.link(ref)`, from a handler, ties the two actors both ways (a `LINK` entry in each list). When either ends, the other takes the death as its watchers are told: an actor that traps exits (`actors.trap_exits(true)`, the `AETHER_EXIT_TRAP` bit) gets a `Down` with the reason (monitor id 0, which `demonitor` never drops), and one that does not ends too, by `KILLED`, with the same reason, unless the reason is `"normal"`, which ends nothing. Its own watchers and links then take its death in turn, so a failure climbs a tree of links until an actor that traps exits. `actors.unlink(ref)` removes the entries both ways; a death already taken stays taken. Linking to an actor that has ended already takes its death at once.
 
-On wasi a panic ends the program, since the target has no setjmp to unwind with, so a death a monitor would watch cannot be caught there: `actors.monitor`, `actors.link` and `actors.trap_exits` (and `std.supervise`, built on them) are refused at compile time on that target, through an `unavailable` attribute on the runtime's declaration.
+Both schedulers step inside one panic barrier (`runtime/actors/aether_step_barrier.h`), so on the cooperative one too (Emscripten, esp32) a panic is a death with a `Down`. On wasi a panic ends the program, since the target has no setjmp to unwind with, so a death a monitor would watch cannot be caught there: `actors.monitor`, `actors.link` and `actors.trap_exits` (and `std.supervise`, built on them) are refused at compile time on that target, through an `unavailable` attribute on the runtime's declaration.
 
 ## Actor Timeouts
 
@@ -348,6 +348,8 @@ Both levels are independent and can be used alone or together.
 ## Single-Core Runtime
 
 In single-core mode, actors run cooperatively. The scheduler processes actors in a loop, calling each actor's step function when its mailbox contains messages.
+
+Each step runs inside the same panic barrier the multi-core scheduler uses (`runtime/actors/aether_step_barrier.h`, #2974), so a panic in a handler ends that actor, not the program: its death is finalized on the spot (or when its handler returns, for a kill or a stop that came during it) and its watchers get a `Down`, as above. Where the target has no setjmp (wasi), a panic still ends the program, and watching a death is refused at compile time.
 
 ## Multi-Core Runtime
 
