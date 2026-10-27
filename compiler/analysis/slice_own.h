@@ -32,6 +32,14 @@
  * the row it replaces, and the outer slice's drop (or `free`) drops every
  * row.
  *
+ * A view of a local's buffer that may outlive the local (returned, stored,
+ * given to a parameter its function stores or returns, captured by a
+ * closure that escapes, bound in an outer scope, or held while the local is
+ * re-bound, moved, freed or grown) keeps the buffer: the local does not
+ * release it, as nothing did before ownership (the escape analysis in
+ * slice_own.c, with a summary per function of what it does with its slice
+ * parameters, to a fixed point over the calls).
+ *
  * Left to the program, as before: a slice local a closure captures, or
  * whose address is taken, or that a pattern or a destructure binds, and
  * the buffers held by fields, module-level `var`s, tuples and messages.

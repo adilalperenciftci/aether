@@ -14,7 +14,8 @@
   and a copy read out of a parameter, a field, an element or a `var` is
   marked a view, so nothing frees through it. A slice of slices owns its
   rows: a store into a row releases the one it replaces, and `free` of the
-  outer slice releases every row. A view of a buffer a local owns may not
-  leave the function (E0900). `free(xs)` and `defer free(xs)` still work
+  outer slice releases every row. A buffer a view of which may outlive its
+  local (returned, stored, kept by a callee, bound in an outer scope) is not
+  released, as before ownership. `free(xs)` and `defer free(xs)` still work
   and leave the place empty. Buffers held by fields, `var`s, tuples and
   messages, and slice locals a closure captures, are still freed by hand.

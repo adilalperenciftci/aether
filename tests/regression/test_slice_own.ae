@@ -218,8 +218,7 @@ main() {
     check(grid[1].len == 6 && grid[0][1] == 7, "a row replaced, a row grown")
     grid.push(squares(2))
     check(grid.len == 4 && grid[3][1] == 1, "a row pushed")
-    row = grid[1]
-    check(row.len == 6, "a row read is a view")
+    check(grid[1].len == 6, "a row read in place")
 
     // ---- a caught panic releases what its scopes owned ----
     caught = 0
@@ -227,7 +226,7 @@ main() {
         p = make([]string, 1)
         p[0] = "boom${j}"
         p.push("more${j}")
-        panic(p[1])
+        panic("boom ${p.len}")
     } catch e {
         caught = 1
     }

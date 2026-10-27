@@ -3,11 +3,11 @@
 # buffer moved out of it (bound to another name, freed, consumed by
 # `append`, given to a `@keep` parameter), on every path or some (E0903); a
 # parameter freed, appended to or pushed to, or given to a `@keep`
-# parameter, which would release or move the caller's buffer (E0901); a
-# view of a buffer a local owns leaving the function, which releases the
-# buffer (E0900); `push` on what is no place. And what it takes: a moved
-# name bound again, a loop that re-binds what it moves, a view taken with
-# `xs[..]` before a move, `@keep` parameters, `defer free`. And that the
+# parameter, which would release or move the caller's buffer (E0901);
+# `push` on what is no place. And what it takes: a moved name bound again,
+# a loop that re-binds what it moves, a view taken with `xs[..]` before a
+# move, `@keep` parameters, `defer free`, a view that leaves the function
+# (its buffer is then kept, as before ownership). And that the
 # heap stays flat over rounds that release what they make, where a leak of
 # one buffer a round is seen. What else it does at run time is
 # tests/regression/test_slice_own.ae's.
@@ -157,7 +157,9 @@ main() {
 }
 AE
 
-refused view_returned E0900 "returns a slice of its own storage (the buffer \`xs\` owns" 3:14 <<'AE'
+# A view of a buffer that leaves the function keeps the buffer: it is the
+# program's again, as before ownership, and is not released.
+accepted view_returned <<'AE'
 tail(n: int) -> int[] {
     xs = make([]int, n)
     return xs[1..]

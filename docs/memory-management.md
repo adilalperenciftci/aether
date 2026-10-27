@@ -269,6 +269,12 @@ counted. The buffer `make([]T, n)` hands out, and one `append(xs, v)` or
 - **A slice of slices owns its rows**: a store into `g[i]` releases the row
   it replaces, and releasing `g` (its scope exit, or `free(g)`) releases
   every row first.
+- **A view keeps the buffer it views.** When a view of a local's buffer may
+  outlive the local (returned, stored, given to a parameter its function
+  stores or returns, captured by a closure that escapes, bound in an outer
+  scope, or held while the local is bound again, moved, freed or grown), the
+  local does not release the buffer: it is the program's, as before
+  ownership, so code that kept such views stays valid.
 - **Left to the program**, as before: a buffer moved into a field, a
   module-level `var`, a tuple or a message is not released with what holds
   it, and is given back with `free(s.items)` (which empties the field);
