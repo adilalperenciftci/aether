@@ -9272,8 +9272,18 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         (t)->kind == TYPE_UINT8 || (t)->kind == TYPE_BYTE))
                     int arith_op = !is_assignment && expr->value &&
                         (strcmp(expr->value, "+") == 0 || strcmp(expr->value, "-") == 0);
-                    int lhs_void = arith_op && lhs_is_ptr && !ltype->element_type;
-                    int rhs_void = arith_op && rhs_is_ptr && !rtype->element_type;
+                    /* #3299: a slice decays to its element pointer
+                     * (AST_SLICE_TO_PTR emits a typed `T*`), so `s + n` is
+                     * element `n`, as for a `T[N]` array and as documented;
+                     * only a bare `ptr` counts bytes. */
+                    int lhs_void = arith_op && lhs_is_ptr && !ltype->element_type &&
+                                   expr->children[0]->type != AST_SLICE_TO_PTR;
+                    int rhs_void = arith_op && rhs_is_ptr && !rtype->element_type &&
+                                   expr->children[1]->type != AST_SLICE_TO_PTR;
+                    /* A difference of a bare `ptr` and a slice counts bytes
+                     * on both sides, as two bare pointers do. */
+                    if (lhs_void && rhs_is_ptr && !rhs_void && !rtype->element_type) rhs_void = 1;
+                    if (rhs_void && lhs_is_ptr && !lhs_void && !ltype->element_type) lhs_void = 1;
                     int void_arith = (lhs_void && (AE_IS_OFFSET(rtype) || rhs_void)) ||
                                      (rhs_void && AE_IS_OFFSET(ltype) &&
                                       strcmp(expr->value, "+") == 0);
