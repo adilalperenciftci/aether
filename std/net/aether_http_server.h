@@ -1037,10 +1037,12 @@ int http_server_evloop_serves(HttpServer* server);
 // request line's length, each header line's shape and count, Content-Length
 // and Transfer-Encoding. `head` is the request line's first byte, `hdr_end`
 // the blank line's "\r\n\r\n". HTTP_HEAD_OK fills *content_length (0 when
-// absent) and *chunked; anything else is the status the request is refused
-// with, which the worker path answers.
+// absent) and *chunked; anything else is a refusal, which the worker path
+// answers: 400 for a head that is not a request (HTTP_HEAD_MALFORMED, a NUL
+// byte, #3254) or whose framing is in doubt, 414, 431.
 enum {
     HTTP_HEAD_OK           = 0,
+    HTTP_HEAD_MALFORMED    = 1,
     HTTP_HEAD_BAD_FRAMING  = 400,
     HTTP_HEAD_URI_TOO_LONG = 414,
     HTTP_HEAD_TOO_LARGE    = 431

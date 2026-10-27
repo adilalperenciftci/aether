@@ -4949,6 +4949,10 @@ int http_request_head_check(const char* head, const char* hdr_end,
                             long* content_length, int* chunked) {
     *content_length = 0;
     *chunked = 0;
+    /* A NUL makes the head something other than a request (RFC 9110 5.5),
+     * and the parser, which scans it as a C string, would stop there and
+     * take the rest of the head for the body (#3254). */
+    if (memchr(head, '\0', (size_t)(hdr_end - head))) return HTTP_HEAD_MALFORMED;
     /* A request line longer than the parser's line buffer is answered rather
      * than dropped, and it is checked here so the parser's own bound is never
      * the thing a client reaches. */
@@ -5206,7 +5210,11 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
             /* NUL-terminate the unconsumed slice in place — we have
              * one byte of slack reserved at the end of the buffer. */
             conn->buf[conn->write_pos] = '\0';
-            hdr_end = strstr(conn->buf + conn->read_pos, "\r\n\r\n");
+            /* By length, not strstr: a NUL in the head stopped the search
+             * there, and the worker waited out the idle timeout for an end
+             * that had already arrived (#3254). The head check refuses it. */
+            hdr_end = (char*)http_find_header_end(conn->buf + conn->read_pos,
+                                                  (size_t)(conn->write_pos - conn->read_pos));
             if (hdr_end) break;
         }
         /* A head holds no more than the connection buffer's first size,
@@ -5253,6 +5261,7 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
     long content_length = 0;
     int te_chunked = 0;
     switch (http_request_head_check(head_start, hdr_end, &content_length, &te_chunked)) {
+    case HTTP_HEAD_MALFORMED:    conn_send_bad_request_line(conn);  return 0;
     case HTTP_HEAD_URI_TOO_LONG: conn_send_uri_too_long(conn);      return 0;
     case HTTP_HEAD_TOO_LARGE:    conn_send_headers_too_large(conn); return 0;
     case HTTP_HEAD_BAD_FRAMING:  conn_send_bad_framing(conn);       return 0;

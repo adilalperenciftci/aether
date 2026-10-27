@@ -12,6 +12,7 @@
 // one expected: the status, the body, and whether the server then closed.
 // Every server listens on 127.0.0.1 and a port the kernel picks.
 
+import std.bytes
 import std.http
 import std.http.proxy
 import std.string
@@ -96,11 +97,23 @@ head_value(head: string, name: string) -> string {
 // "closed" when the server closed the connection after it, "open" when it
 // had not a second later.
 probe(port: int, raw: string) -> string {
+    return probe_nul(port, raw, -1)
+}
+
+// `probe` with the byte at `nul_at` made NUL, which a string cannot carry;
+// -1 for none.
+probe_nul(port: int, raw: string, nul_at: int) -> string {
     sock, cerr = tcp.connect("127.0.0.1", port)
     if cerr != "" {
         return "connect failed"
     }
-    tcp.write(sock, raw)
+    data = bytes.new(string.length(raw))
+    bytes.copy_from_string(data, 0, raw, string.length(raw))
+    if nul_at >= 0 {
+        bytes.set(data, nul_at, 0)
+    }
+    tcp.write_all(sock, bytes.view(data))
+    bytes.free(data)
     wire = ""
     state = "open"
     answer = "(no answer)"
@@ -174,11 +187,16 @@ answers(port: int, raw: string) -> string {
 
 // The same request to both gateways, and the answer expected of both.
 both(label: string, ports: int[], raw: string, want: string) -> int {
+    return both_nul(label, ports, raw, -1, want)
+}
+
+// `both` with the byte at `nul_at` made NUL (`probe_nul`).
+both_nul(label: string, ports: int[], raw: string, nul_at: int, want: string) -> int {
     bad = 0
     names = ["event loop", "worker path"]
     g = 0
     while g < 2 {
-        got = probe(ports[g], raw)
+        got = probe_nul(ports[g], raw, nul_at)
         if got != want {
             println("  FAIL ${label} (${names[g]}): got '${got}', expected '${want}'")
             bad = bad + 1
@@ -269,6 +287,18 @@ main() {
     long_path = string.pad_end("/", 2100, 112)
     bad = bad + both("a request line over 2 KiB", ports,
         "GET ${long_path} HTTP/1.1\r\nHost: x\r\n\r\n", "414 request line is too long\r\n closed")
+
+    // #3254: a NUL byte in a head is refused on both paths. The worker path
+    // searched for the head's end with strstr, which stops at the NUL, and
+    // waited for an end that had already arrived; the loop's length-bounded
+    // search found it and forwarded the head.
+    malformed_nul = "400 malformed HTTP request closed"
+    with_nul = "GET /p HTTP/1.1\r\nHost: x\r\nX-A: a~b\r\n\r\n"
+    bad = bad + both_nul("a NUL byte in a header value", ports, with_nul,
+        string.index_of(with_nul, "~"), malformed_nul)
+    nul_path = "GET /p~q HTTP/1.1\r\nHost: x\r\n\r\n"
+    bad = bad + both_nul("a NUL byte in the request line", ports, nul_path,
+        string.index_of(nul_path, "~"), malformed_nul)
 
     // #3237: what a request may make the server hold. A head that has not
     // ended in 16 KiB is refused, 431 (#3252); a body declared larger than
