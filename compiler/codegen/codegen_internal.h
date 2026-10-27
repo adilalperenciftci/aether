@@ -651,6 +651,8 @@ const char* own_fn(CodeGenerator* gen, Type* t, const char* op);
 const char* own_cell_release_fn(const char* c_type);
 const char* own_place_lvalue(Type* t, const char* name);
 const char* own_unwind_fn(CodeGenerator* gen, Type* t);
+/* Slice ownership: the drop of one element of a slice of `et` (or "NULL"). */
+const char* own_slice_elem_drop_fn(CodeGenerator* gen, Type* et);
 void own_reset(void);
 
 /* #2298: emit the `@derive(schema)` field tables and their getters

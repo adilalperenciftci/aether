@@ -29,6 +29,14 @@ typedef struct {
     const char* mangled;
 } OwnType;
 
+/* Slice ownership: a slice type whose elements are slices that own
+ * something of their own (strings, or slices again) has its element drop
+ * generated, `_ae_sdrop_<M>(p)`, the drop of one element at `p`
+ * (own_slice_elem_drop_fn). */
+static Type** g_sdrop_types = NULL;
+static int g_sdrop_count = 0;
+static int g_sdrop_cap = 0;
+
 static OwnType* g_own_types = NULL;
 static int g_own_count = 0;
 static int g_own_cap = 0;
@@ -147,9 +155,19 @@ static void own_register(CodeGenerator* gen, Type* t) {
     g_own_count++;
 }
 
+static const char* own_slice_mangle(Type* t) {
+    if (type_is_slice(t)) return cg_internf("s_%s", own_slice_mangle(t->element_type));
+    return own_mangle(t);
+}
+
+static void own_register_sdrop(CodeGenerator* gen, Type* t);
+static void emit_slice_drops(CodeGenerator* gen);
+
 static void own_collect_type(CodeGenerator* gen, Type* t, int depth) {
     if (!t || depth > 16) return;
     own_register(gen, t);
+    if (type_is_slice(t) && t->element_type && type_is_slice(t->element_type))
+        own_register_sdrop(gen, t->element_type);
     if (t->kind == TYPE_TUPLE) {
         for (int i = 0; t->tuple_types && i < t->tuple_count; i++)
             own_collect_type(gen, t->tuple_types[i], depth + 1);
@@ -308,8 +326,11 @@ static void own_emit_body(CodeGenerator* gen, Type* t, OwnOp op) {
 }
 
 void emit_own_ops(CodeGenerator* gen) {
-    g_own_emitted = 1;
-    if (g_own_count == 0) return;
+    if (g_own_count == 0) {
+        emit_slice_drops(gen);
+        g_own_emitted = 1;
+        return;
+    }
     FILE* o = gen->output;
     /* A tuple or optional reached only inside a body would get its typedef
      * there, out of the scope these functions are written in. */
@@ -349,6 +370,8 @@ void emit_own_ops(CodeGenerator* gen) {
         fprintf(o, "    if (_aether_cell_last(h)) { _ae_drop_%s((%s)(void*)cell); free(h); }\n", ot->mangled, pt);
         fprintf(o, "}\n");
     }
+    emit_slice_drops(gen);
+    g_own_emitted = 1;
 }
 
 /* The cell release of the composite whose C type is spelled `c_type` (a
@@ -383,7 +406,67 @@ const char* own_fn(CodeGenerator* gen, Type* t, const char* op) {
     return cg_internf("_ae_%s_%s", op, own_find(gen, t)->mangled);
 }
 
+/* The drop of one element of a slice whose elements are of type `et`, as
+ * aether_slice_drop takes it: NULL when an element owns nothing, the
+ * element type's unwind drop when it is counted (a string, a closure, a
+ * struct or composite that holds one), and for a slice element the drop of
+ * that slice (its rows are owned by the slice that holds them). */
+const char* own_slice_elem_drop_fn(CodeGenerator* gen, Type* et) {
+    if (!et) return "NULL";
+    if (type_is_slice(et)) {
+        const char* inner = own_slice_elem_drop_fn(gen, et->element_type);
+        if (strcmp(inner, "NULL") == 0) return "aether_slice_drop_plain";
+        own_register_sdrop(gen, et);
+        return cg_internf("_ae_sdrop_%s", own_slice_mangle(et));
+    }
+    if (et->kind == TYPE_ARRAY) return "NULL";   /* a slice of arrays is not grown */
+    if (!own_type_owns(gen, et)) return "NULL";
+    return own_unwind_fn(gen, et);
+}
+
+static void own_register_sdrop(CodeGenerator* gen, Type* t) {
+    if (!t || !type_is_slice(t) || !t->element_type) return;
+    /* A slice of plain elements is dropped by aether_slice_drop_plain. */
+    if (strcmp(own_slice_elem_drop_fn(gen, t->element_type), "NULL") == 0) return;
+    const char* m = own_slice_mangle(t);
+    for (int i = 0; i < g_sdrop_count; i++)
+        if (strcmp(own_slice_mangle(g_sdrop_types[i]), m) == 0) return;
+    if (g_own_emitted) {
+        fprintf(stderr, "aetherc: internal error: the slice drop of %s was asked for after "
+                        "it was emitted\n", get_c_type(t));
+        exit(1);
+    }
+    if (g_sdrop_count == g_sdrop_cap) {
+        g_sdrop_cap = g_sdrop_cap ? g_sdrop_cap * 2 : 8;
+        g_sdrop_types = (Type**)aether_xrealloc(g_sdrop_types,
+                                                (size_t)g_sdrop_cap * sizeof(Type*));
+    }
+    g_sdrop_types[g_sdrop_count++] = clone_type(t);
+}
+
+/* The element drops own_slice_elem_drop_fn names, prototypes first. */
+static void emit_slice_drops(CodeGenerator* gen) {
+    FILE* o = gen->output;
+    if (g_sdrop_count == 0) return;
+    fprintf(o, "\n/* Slice ownership: the drop of a slice that is an element of another. */\n");
+    for (int i = 0; i < g_sdrop_count; i++)
+        fprintf(o, "static AETHER_MAYBE_UNUSED void _ae_sdrop_%s(const void* p);\n",
+                own_slice_mangle(g_sdrop_types[i]));
+    for (int i = 0; i < g_sdrop_count; i++) {
+        Type* t = g_sdrop_types[i];
+        fprintf(o, "static AETHER_MAYBE_UNUSED void _ae_sdrop_%s(const void* p) {\n",
+                own_slice_mangle(t));
+        fprintf(o, "    aether_slice_drop((AetherSlice*)(void*)p, sizeof(%s), %s);\n",
+                get_c_type(t->element_type), own_slice_elem_drop_fn(gen, t->element_type));
+        fprintf(o, "}\n");
+    }
+}
+
 void own_reset(void) {
+    for (int i = 0; i < g_sdrop_count; i++) free_type(g_sdrop_types[i]);
+    free(g_sdrop_types);
+    g_sdrop_types = NULL;
+    g_sdrop_count = g_sdrop_cap = 0;
     for (int i = 0; i < g_own_count; i++) free_type(g_own_types[i].type);
     free(g_own_types);
     g_own_types = NULL;

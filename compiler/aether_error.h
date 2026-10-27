@@ -31,6 +31,7 @@ typedef enum {
     AETHER_ERR_DANGLING_VIEW = 900,      // a slice of a function's own storage outlives the function (#2785)
     AETHER_ERR_FREES_BORROWED = 901,     // a function frees a `string` parameter it only borrows (#2924)
     AETHER_ERR_KEEPS_BORROWED = 902,     // a function keeps a `ptr` parameter not declared `@keep` (#2926)
+    AETHER_ERR_USE_AFTER_MOVE = 903,     // an owned slice used after it was moved, freed or appended to
     // Warnings (W-series)
     AETHER_WARN_UNUSED_VAR = 1001,
     AETHER_WARN_UNREACHABLE = 1002,

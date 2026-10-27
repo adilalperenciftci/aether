@@ -242,7 +242,7 @@ mul_mont(a: int, b: int) -> int {
 poly_new() -> int[] {
     return make([]int, N)
 }
-poly_free(p: int[]) {
+poly_free(p: @keep int[]) {
     free(p)
 }
 pg(p: int[], i: int) -> int {
@@ -256,7 +256,7 @@ ps(p: int[], i: int, v: int) {
 polyvec_new(k: int) -> int[] {
     return make([]int, N * k)
 }
-polyvec_free(p: int[]) {
+polyvec_free(p: @keep int[]) {
     free(p)
 }
 // Coefficient i of poly j in a flat polyvec.

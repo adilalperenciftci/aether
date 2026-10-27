@@ -11,6 +11,7 @@
 #include "actor_reply.h"
 #include "missing_return.h"
 #include "slice_escape.h"
+#include "slice_own.h"
 #include "quote.h"
 
 /* Defined with typecheck_program below; infer_type needs it far earlier. */
@@ -4557,6 +4558,9 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
             if (expr->value && strcmp(expr->value, "__slice_readonly") == 0 &&
                 expr->child_count == 1)
                 return infer_type(expr->children[0], table);   /* #3025 */
+            /* The slice-ownership intrinsics (slice_own.c) carry their type. */
+            if (expr->value && strncmp(expr->value, "__slice_", 8) == 0 && expr->node_type)
+                return clone_type(expr->node_type);
             if (expr->value && strcmp(expr->value, "make") == 0 &&
                 expr->node_type && expr->node_type->kind == TYPE_ARRAY)
                 return clone_type(expr->node_type);
@@ -6967,6 +6971,8 @@ int typecheck_program(ASTNode* program) {
      * marks its view of a string with: `v` itself, read-only (a store
      * through it panics). Its type is its argument's (infer_type). */
     add_symbol(global_table, "__slice_readonly", create_type(TYPE_UNKNOWN), 0, 1, 0);
+    /* `xs.push(v)`, a method of every slice (try_ufcs_rewrite). */
+    add_symbol(global_table, "__slice_push", create_type(TYPE_VOID), 0, 1, 0);
 
     // Output builtins
     Type* println_type = create_type(TYPE_VOID);
@@ -7805,6 +7811,8 @@ int typecheck_program(ASTNode* program) {
     if (error_count == 0) error_count += check_missing_returns(program);
     /* A slice of a function's own storage must not outlive it (#2785): asked
      * of the checked program, whose coercions into slices are explicit. */
+    /* Slice ownership: owned buffers freed at scope exit, moves checked. */
+    if (error_count == 0) error_count += check_slice_ownership(program);
     if (error_count == 0) error_count += check_slice_escapes(program);
 
     // #481: validate effect tags over the whole-program call graph.
@@ -18489,6 +18497,11 @@ static int try_ufcs_rewrite(ASTNode* call, SymbolTable* table) {
     Type* rtype = infer_type(recv, table);
 
     char* resolved = ufcs_resolve(method, rtype, table);  /* the name to put on the call */
+    /* `xs.push(v)`: grows the slice `xs` names in place, one element longer
+     * with `v` at its end (the slice method no function of the program's
+     * own claims). The checks are __slice_push's. */
+    if (!resolved && strcmp(method, "push") == 0 && type_is_slice(rtype))
+        resolved = strdup("__slice_push");
 
     if (rtype) free_type(rtype);
     free(method);
@@ -20105,6 +20118,70 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
         return 1;
     }
 
+    /* `xs.push(v)` (try_ufcs_rewrite names it __slice_push): the slice `xs`
+     * names, grown in place by one element with `v` at its end, as
+     * `xs = append(xs, v)` grows it. `xs` is a place (a local, a field, an
+     * element, a module-level `var`) the program owns a buffer in; a view
+     * is refused as `append` refuses it. A statement: it gives no value. */
+    if (call->value && strcmp(call->value, "__slice_push") == 0 && call->child_count == 2) {
+        ASTNode* xs = call->children[0];
+        typecheck_expression(xs, table);
+        typecheck_expression(call->children[1], table);
+        set_node_type(call, create_type(TYPE_VOID));
+        if (reject_view_owner_op(xs, call, "push to")) return 0;
+        ASTNode* root = xs;
+        while (root && (root->type == AST_MEMBER_ACCESS || root->type == AST_ARRAY_ACCESS) &&
+               root->child_count > 0)
+            root = root->children[0];
+        if (!root || root->type != AST_IDENTIFIER) {
+            type_error_hint("`push` grows a slice in place, so it is called on a place that "
+                            "holds one: a local, a field, an element or a module-level `var`",
+                            "bind the slice to a local first, or use `append(xs, v)`",
+                            call->line, call->column);
+            return 0;
+        }
+        Type* st = infer_type(xs, table);
+        if (!type_is_slice(st) || !st->element_type) {
+            if (st) free_type(st);
+            return 0;
+        }
+        if (type_is_sized_array(st->element_type)) {
+            char msg[300];
+            snprintf(msg, sizeof(msg), "`push` does not take a slice of arrays (%s) yet",
+                     type_spelled(st));
+            type_error_hint(msg, "wrap the array in a struct, and push those", call->line,
+                            call->column);
+            free_type(st);
+            return 0;
+        }
+        Type* vt = NULL;
+        if (st->element_type->kind == TYPE_FUNCTION && st->element_type->is_fnptr &&
+            fn_name_matches_signature(table, call->children[1], st->element_type)) {
+            set_node_type(call->children[1], clone_type(st->element_type));
+            vt = clone_type(st->element_type);
+        } else {
+            if (st->element_type->kind == TYPE_FUNCTION)
+                function_value_annotate(call->children[1], table);
+            vt = infer_type(call->children[1], table);
+        }
+        int fits = !vt || is_type_compatible(vt, st->element_type);
+        if (fits && vt &&
+            reject_closure_in_fnptr_slot(table, call->children[1], vt, st->element_type,
+                                         FNPTR_SLOT_ELEMENT,
+                                         root->value ? root->value : "push",
+                                         call->children[1]->line, call->children[1]->column))
+            fits = 0;
+        else if (!fits) {
+            char msg[300];
+            snprintf(msg, sizeof(msg), "xs.push(v): v is %s, but the elements of xs are %s",
+                     type_spelled(vt), type_spelled(st->element_type));
+            type_error(msg, call->children[1]->line, call->children[1]->column);
+        }
+        if (vt) free_type(vt);
+        free_type(st);
+        return fits;
+    }
+
     /* `append(xs, v)`: `xs`, a `T[]` the program owns (a `make` buffer, one
      * `append` gave, or the empty slice), one element longer, `v` at its end.
      * The buffer grows in place with its capacity doubling, so n appends cost
@@ -20457,6 +20534,8 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
     if ((!symbol || !symbol->is_function) && call->value &&
         strchr(call->value, '.')) {
         if (try_ufcs_rewrite(call, table)) {
+            if (call->value && strcmp(call->value, "__slice_push") == 0)
+                return typecheck_function_call(call, table);
             symbol = lookup_qualified_symbol(table, call->value);
         }
     }

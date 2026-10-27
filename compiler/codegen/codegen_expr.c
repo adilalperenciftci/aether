@@ -3358,6 +3358,7 @@ static int is_builtin_name(const char* name) {
         "print", "println", "make", "spawn", "exit", "sleep", "free",
         "getenv", "atoi", "clock_ns", "typeof", "is_type", "convert_type",
         "print_char", "wait_for_idle", "each", "map", "filter", "__slice_readonly", "append",
+        "__slice_take", "__slice_lend", "__slice_drop", "__slice_set", "__slice_push",
         NULL
     };
     for (int i = 0; builtins[i]; i++) {
@@ -7384,6 +7385,71 @@ static int is_literal_float_div_by_zero(const ASTNode* e) {
     return (lt && lt->kind == TYPE_FLOAT) || (rt && rt->kind == TYPE_FLOAT);
 }
 
+/* The slice-ownership intrinsics slice_own.c writes into the tree (see the
+ * runtime's aether_slice_take, _lend, _drop, _set and _grow1). Returns 0
+ * for a name that is none of them. */
+static int emit_slice_own_intrinsic(CodeGenerator* gen, ASTNode* expr) {
+    const char* f = expr->value;
+    FILE* o = gen->output;
+    ASTNode* a = expr->child_count > 0 ? expr->children[0] : NULL;
+    if (!a) return 0;
+    Type* st = type_is_slice(a->node_type) ? a->node_type : expr->node_type;
+    Type* et = st && type_is_slice(st) ? st->element_type : NULL;
+    if (strcmp(f, "__slice_take") == 0 && expr->child_count == 1) {
+        fprintf(o, "aether_slice_take((AetherSlice*)&(");
+        generate_expression(gen, a);
+        fprintf(o, "))");
+        return 1;
+    }
+    if (strcmp(f, "__slice_lend") == 0 && expr->child_count == 1) {
+        fprintf(o, "aether_slice_lend(");
+        generate_expression(gen, a);
+        fprintf(o, ")");
+        return 1;
+    }
+    if (!et) return 0;
+    const char* ect = get_c_type(et);
+    if (strcmp(f, "__slice_drop") == 0 && expr->child_count == 1) {
+        fprintf(o, "aether_slice_drop((AetherSlice*)&(");
+        generate_expression(gen, a);
+        fprintf(o, "), sizeof(%s), %s)", ect, own_slice_elem_drop_fn(gen, et));
+        return 1;
+    }
+    if (strcmp(f, "__slice_set") == 0 && expr->child_count == 2) {
+        fprintf(o, "aether_slice_set((AetherSlice*)&(");
+        generate_expression(gen, a);
+        fprintf(o, "), ");
+        generate_expression(gen, expr->children[1]);
+        fprintf(o, ", sizeof(%s), %s, ", ect, own_slice_elem_drop_fn(gen, et));
+        emit_slice_diag_file(gen, expr);
+        fprintf(o, ", %d)", expr->line);
+        return 1;
+    }
+    if (strcmp(f, "__slice_push") == 0 && expr->child_count == 2) {
+        /* `v` taken first (it may read the slice, whose storage the growth
+         * may move), then the place grown in place, then `v` stored into the
+         * new, zeroed last element, as append does. */
+        TempSeq s;
+        seq_open(gen, &s);
+        const char* v = seq_let(gen, &s, ect, "_ae_puv");
+        emit_value_take(gen, expr->children[1], et);
+        seq_next(gen, &s);
+        const char* p = seq_let(gen, &s, "AetherSlice*", "_ae_pup");
+        fprintf(o, "(AetherSlice*)&(");
+        generate_expression(gen, a);
+        fprintf(o, ")");
+        seq_next(gen, &s);
+        fprintf(o, "*%s = aether_slice_grow1(*%s, sizeof(%s), ", p, p, ect);
+        emit_slice_diag_file(gen, expr);
+        fprintf(o, ", %d)", expr->line);
+        seq_next(gen, &s);
+        fprintf(o, "((%s*)%s->ptr)[%s->len - 1] = %s", ect, p, p, v);
+        seq_close(gen, &s);
+        return 1;
+    }
+    return 0;
+}
+
 void generate_expression(CodeGenerator* gen, ASTNode* expr) {
     if (!expr) return;
 
@@ -8593,7 +8659,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             else if (strcmp(shape, "lo..") == 0) { lo = expr->children[1]; }
             else if (strcmp(shape, "..hi") == 0) { hi = expr->children[1]; }
             if (!lo && !hi) {
+                /* Slice ownership: `xs[..]` of a slice is a view of it,
+                 * never the owner itself, so nothing frees through it. */
+                int lend = type_is_slice(base->node_type);
+                if (lend) fprintf(gen->output, "aether_slice_lend(");
                 generate_expression_as_slice(gen, base);
+                if (lend) fprintf(gen->output, ")");
                 break;
             }
             fprintf(gen->output, hi ? "aether_slice_sub(" : "aether_slice_from(");
@@ -9598,7 +9669,15 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     break;
                 }
 
-                if (strcmp(func_name, "__slice_readonly") == 0 && expr->child_count == 1) {
+                /* Slice ownership (slice_own.c puts these in the tree):
+                 * take moves a slice out of a place and leaves it empty,
+                 * lend marks a copy of one some other place owns, drop
+                 * releases what an owning place holds, set is a store
+                 * into an owning place (what it held is dropped), push
+                 * grows the slice a place holds. */
+                if (strncmp(func_name, "__slice_", 8) == 0 && emit_slice_own_intrinsic(gen, expr)) {
+                }
+                else if (strcmp(func_name, "__slice_readonly") == 0 && expr->child_count == 1) {
                     /* #3025: the intrinsic std.string's bytes() marks its
                      * view with: the same slice, read-only. */
                     fprintf(gen->output, "aether_slice_readonly(");
@@ -9634,7 +9713,15 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     seq_next(gen, &s);
                     const char* g = seq_let(gen, &s, "AetherSlice", "_ae_apg");
                     fprintf(gen->output, "aether_slice_grow1(");
-                    generate_expression(gen, expr->children[0]);
+                    /* Slice ownership: the local that owned the buffer is
+                     * left empty, after `v` was read (slice_own.c). */
+                    if (annotation_has_marker(expr->annotation, "slice_consumes")) {
+                        fprintf(gen->output, "aether_slice_take((AetherSlice*)&(");
+                        generate_expression(gen, expr->children[0]);
+                        fprintf(gen->output, "))");
+                    } else {
+                        generate_expression(gen, expr->children[0]);
+                    }
                     fprintf(gen->output, ", sizeof(%s), ", ect);
                     emit_slice_diag_file(gen, expr);
                     fprintf(gen->output, ", %d)", expr->line);
@@ -10008,7 +10095,15 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     int elems_own = et && et->kind != TYPE_ARRAY && own_type_owns(gen, et) &&
                                     sl->type != AST_PTR_AS_ARRAY_CAST &&
                                     !expr_is_c_view_of_slice(gen, sl);
-                    if (elems_own) {
+                    /* A slice of slices owns its rows (slice ownership): each
+                     * row a buffer of its own is dropped with it. */
+                    int rows_own = et && type_is_slice(et) && sl->type != AST_PTR_AS_ARRAY_CAST;
+                    if (rows_own) {
+                        fprintf(gen->output, "aether_slice_free_elems(");
+                        generate_expression(gen, sl);
+                        fprintf(gen->output, ", sizeof(AetherSlice), %s, ",
+                                own_slice_elem_drop_fn(gen, et));
+                    } else if (elems_own) {
                         fprintf(gen->output, "aether_slice_free_elems(");
                         generate_expression(gen, sl);
                         fprintf(gen->output, ", sizeof(%s), %s, ", get_c_type(et),

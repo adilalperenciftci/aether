@@ -123,7 +123,7 @@ main() {
         while w < count {
             worker = list.get_raw(workers, w)
             worker ! MultiplyRows {
-                a: a, bt: bt, c: c, n: n,
+                a: a[..], bt: bt[..], c: c[..], n: n,
                 first: w * n / count, last: (w + 1) * n / count
             }
             w = w + 1

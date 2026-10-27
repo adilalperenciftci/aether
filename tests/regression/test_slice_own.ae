@@ -1,0 +1,237 @@
+// Slice ownership: a buffer `make([]T, n)` hands out, or `append` or
+// `xs.push(v)` grows, is released when the local that owns it goes out of
+// scope, on every way out: the end of its block, an early `return`, a
+// `break` or `continue`, a caught panic. Nothing here calls `free`, and the
+// leak gate (tests/run_macos_leaks.sh, valgrind on Linux) checks that every
+// buffer, and every string stored in one, is given back. Before, each of
+// these leaked unless the program freed it by hand, and `xs.push(v)` did not
+// exist.
+//
+// Also covered: a buffer moved out (returned, bound to another name, given
+// to a `@keep` parameter, stored in a field) is not released where it was;
+// a view (`xs[..]`, a sub-slice) and a parameter release nothing; `free`
+// and `defer free` still work beside the scope-exit drop (no double free);
+// an element of a slice of slices owns its row; a re-binding releases what
+// the local held before.
+
+import std.string
+
+extern exit(code: int)
+
+struct Bag {
+    items: int[]
+    name: string
+}
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+sum(xs: int[]) -> int {
+    t = 0
+    for x in xs {
+        t = t + x
+    }
+    return t
+}
+
+// Built with push and returned: the caller owns it.
+squares(n: int) -> int[] {
+    int[] xs = []
+    for i in 0..n {
+        xs.push(i * i)
+    }
+    return xs
+}
+
+words(n: int) -> string[] {
+    out = make([]string, 0)
+    for i in 0..n {
+        out.push("w${i}")
+    }
+    return out
+}
+
+// An early return from inside a loop: `xs` is released on the way out.
+first_over(n: int, limit: int) -> int {
+    xs = squares(n)
+    for x in xs {
+        if x > limit {
+            return x
+        }
+    }
+    return -1
+}
+
+// A `@keep` parameter takes the caller's buffer and owns it here.
+count_and_drop(xs: @keep int[]) -> int {
+    return xs.len
+}
+
+// A `@keep` parameter grown and handed back.
+grow(xs: @keep int[], n: int) -> int[] {
+    for i in 0..n {
+        xs.push(i)
+    }
+    return xs
+}
+
+// A view of a buffer lives no longer than the buffer: used here only.
+middle_sum(n: int) -> int {
+    xs = squares(n)
+    v = xs[1..n - 1]
+    return sum(v)
+}
+
+// The old spelling still works: `defer free(xs)` and the scope-exit drop
+// do not both release it.
+old_style(n: int) -> int {
+    xs = make([]int, n)
+    defer free(xs)
+    for i in 0..n {
+        xs[i] = i
+    }
+    return sum(xs)
+}
+
+// `free` early, then the name bound anew.
+refree(n: int) -> int {
+    xs = make([]string, n)
+    for i in 0..n {
+        xs[i] = "s${i}"
+    }
+    free(xs)
+    xs = words(2)
+    return xs.len
+}
+
+// A struct holds what it is given: the field is freed by the program.
+bag_of(n: int) -> Bag {
+    xs = squares(n)
+    return Bag { items: xs, name: "b${n}" }
+}
+
+rows(n: int) -> int[][] {
+    g = make([]int[], n)
+    for i in 0..n {
+        g[i] = squares(i + 1)
+    }
+    return g
+}
+
+main() {
+    // ---- scope exit releases a make buffer and its strings ----
+    a = make([]string, 3)
+    for i in 0..3 {
+        a[i] = "a${i}"
+    }
+    a.push("a3")
+    check(a.len == 4 && a[3] == "a3", "push onto a make buffer")
+
+    // ---- a returned buffer is the caller's ----
+    s = squares(5)
+    check(s.len == 5 && s[4] == 16 && sum(s) == 30, "returned buffer")
+    w = words(3)
+    check(w[2] == "w2", "returned buffer of strings")
+
+    // ---- early return, break, continue ----
+    check(first_over(10, 20) == 25, "early return in a loop")
+    check(first_over(3, 100) == -1, "the loop runs out")
+    total = 0
+    for i in 0..20 {
+        buf = make([]int, i + 1)
+        buf[i] = i
+        if i % 3 == 0 {
+            continue
+        }
+        if i == 13 {
+            break
+        }
+        buf.push(1)
+        total = total + buf[i] + buf[i + 1]
+    }
+    check(total == 1 + 2 + 4 + 5 + 7 + 8 + 10 + 11 + 8, "break and continue in a loop")
+    j = 0
+    while j < 5 {
+        names = make([]string, 0)
+        names.push("n${j}")
+        names.push("m${j}")
+        j = j + 1
+    }
+
+    // ---- a local codegen declares ahead of where it is bound ----
+    if j > 2 {
+        picked = squares(3)
+    } else {
+        picked = squares(4)
+    }
+    check(picked.len == 3, "a local every arm binds, read after the if")
+    k = 0
+    while k < 3 {
+        last = squares(k + 1)
+        last.push(k)
+        k = k + 1
+    }
+
+    // ---- moves ----
+    m = squares(4)
+    moved = m
+    check(moved.len == 4 && moved[3] == 9, "a slice bound to another name moves")
+    check(count_and_drop(moved) == 4, "a @keep parameter takes the buffer")
+    g = grow(squares(2), 3)
+    check(g.len == 5 && g[4] == 2, "a @keep parameter grown and handed back")
+    g2 = make([]int, 1)
+    g2 = grow(g2, 2)
+    check(g2.len == 3, "x = f(x) through a @keep parameter")
+
+    // ---- views and old-style frees ----
+    check(middle_sum(5) == 1 + 4 + 9, "a view of an owned buffer")
+    whole = s[..]
+    check(whole.len == 5 && s.len == 5, "an explicit borrow leaves the owner")
+    check(old_style(6) == 15, "defer free beside the scope-exit drop")
+    check(refree(4) == 2, "free early, then bind again")
+
+    // ---- re-binding releases what was held ----
+    r = make([]string, 2)
+    r[0] = "first${j}"
+    r = make([]string, 1)
+    r[0] = "second${j}"
+    r = words(4)
+    check(r.len == 4, "re-binding drops the old buffer")
+
+    // ---- a struct field holds what it is given; the program frees it ----
+    b = bag_of(3)
+    check(b.items.len == 3 && b.name == "b3", "a buffer moved into a struct")
+    seen = b.items
+    check(seen.len == 3, "a field read is a view")
+    free(b.items)
+    check(b.items.len == 0, "free empties the field")
+
+    // ---- a slice of slices owns its rows ----
+    grid = rows(3)
+    check(grid[2].len == 3 && grid[2][2] == 4, "rows")
+    grid[1] = squares(6)
+    grid[0].push(7)
+    check(grid[1].len == 6 && grid[0][1] == 7, "a row replaced, a row grown")
+    grid.push(squares(2))
+    check(grid.len == 4 && grid[3][1] == 1, "a row pushed")
+    row = grid[1]
+    check(row.len == 6, "a row read is a view")
+
+    // ---- a caught panic releases what its scopes owned ----
+    caught = 0
+    try {
+        p = make([]string, 1)
+        p[0] = "boom${j}"
+        p.push("more${j}")
+        panic(p[1])
+    } catch e {
+        caught = 1
+    }
+    check(caught == 1, "a caught panic")
+
+    println("OK")
+}

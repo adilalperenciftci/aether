@@ -7,9 +7,10 @@
 // wherever a type is: a return type, a parameter, a struct field, a typed
 // local, a function type. Before the fix none of this compiled.
 //
-// The outer slice owns its own buffer only: each row is a slice of storage
-// that has to live as long as the outer one does (here a `make` buffer of
-// its own), and is freed by whoever made it, rows first.
+// The outer slice owns its rows (slice ownership): a store into a row drops
+// the row it replaces, and `free` of the outer slice, or its scope exit,
+// releases every row. `free` of a row leaves it empty, so the outer one does
+// not release it again.
 
 struct Grid {
     rows: int[][]
@@ -38,7 +39,7 @@ total(g: int[][]) -> int {
     return t
 }
 
-free_grid(g: int[][]) {
+free_grid(g: @keep int[][]) {
     for i in 0..g.len {
         free(g[i])
     }
@@ -93,14 +94,12 @@ main() {
     // ---- a store through both indexes, and a row replaced ----
     g[1][0] = 5
     check(g[1][0] == 5, "a[i][j] = v")
-    old = g[0]
     g[0] = make([]int, 2)
     g[0][1] = 7
     check(g[0].len == 2 && g[0][1] == 7, "a[i] = a new row")
-    free(old)
 
     // ---- a struct field ----
-    grid = Grid { rows: g, name: "g" }
+    grid = Grid { rows: g[..], name: "g" }
     check(grid.rows.len == 3 && grid.rows[2][2] == 22, "an int[][] field")
     check(grid_total(grid) == total(g), "a struct holding one, passed by value")
 

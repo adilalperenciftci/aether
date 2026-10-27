@@ -99,7 +99,7 @@ main() {
 AE
 
 accepted owners <<'AE'
-grow(xs: int[], n: int) -> int[] {
+grow(xs: @keep int[], n: int) -> int[] {
     for i in 0..n {
         xs = append(xs, i)
     }

@@ -55,8 +55,9 @@ range_list(n: int) -> int[] {
     return xs
 }
 
-// A slice the caller owns, grown and handed back.
-push_squares(xs: int[], n: int) -> int[] {
+// A slice the caller gives up, grown and handed back (`@keep`: a parameter
+// that only borrows may not be grown).
+push_squares(xs: @keep int[], n: int) -> int[] {
     for i in 0..n {
         xs = append(xs, i * i)
     }
@@ -71,11 +72,11 @@ words(n: int) -> string[] {
     return out
 }
 
-grow_view(xs: int[]) -> int[] {
+grow_view(xs: @keep int[]) -> int[] {
     return append(xs, 1)
 }
 
-refused(what: string, xs: int[], want: string) {
+refused(what: string, xs: @keep int[], want: string) {
     try {
         ys = grow_view(xs)
         println("FAIL: ${what}: no panic (${ys.len})")

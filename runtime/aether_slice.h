@@ -303,6 +303,86 @@ static inline AetherSlice aether_slice_grow1(AetherSlice s, size_t elem_size,
     return s;
 }
 
+/* ---- Slice ownership (docs/memory-management.md, Slices) ----
+ *
+ * A `make` buffer, or one `append` or `push` grew, has one owner: a local
+ * (or a `@keep` parameter) that holds it, an element of a slice of slices,
+ * or a place the program frees by hand (a field, a module-level `var`).
+ * The owning local is dropped at every exit of its scope, unless the buffer
+ * was moved out of it first: a move reads the slice and leaves the place
+ * empty (aether_slice_take), so the drop that follows finds nothing. A copy
+ * read out of a place that does not own it (a parameter, a field, an
+ * element, a module-level `var`) is marked BORROWED (aether_slice_lend), so
+ * whatever holds the copy never frees it. */
+
+/* Does `s` own the buffer it views: one `make` handed out or `append`
+ * grew, not a view of one? */
+static inline int aether_slice_owned(AetherSlice s) {
+    return (s.flags & AETHER_SLICE_MADE) &&
+           !(s.flags & (AETHER_SLICE_READONLY | AETHER_SLICE_BORROWED)) &&
+           s.len != AETHER_SLICE_UNBOUNDED;
+}
+
+/* A move: the slice at `p`, and `p` left empty. */
+static inline AetherSlice aether_slice_take(AetherSlice* p) {
+    AetherSlice s = *p;
+    p->ptr = NULL;
+    p->len = 0;
+    p->flags = 0;
+    return s;
+}
+
+/* A copy of a slice some other place owns: a view of it, which never frees
+ * it. The empty slice stays itself, so a place given one may start a buffer
+ * of its own (`push`, `append`). */
+static inline AetherSlice aether_slice_lend(AetherSlice s) {
+    if (s.ptr != NULL || s.len != 0) s.flags |= AETHER_SLICE_BORROWED;
+    return s;
+}
+
+/* The drop of an owning place: the buffer it owns, if it owns one, is
+ * released, its elements first (`drop`, each element's own release, or
+ * NULL when they own nothing), and the place is left empty. A view, the
+ * empty slice and a moved-from place release nothing. */
+static inline void aether_slice_drop(AetherSlice* p, size_t elem_size,
+                                     void (*drop)(const void*)) {
+    AetherSlice s = aether_slice_take(p);
+    if (!aether_slice_owned(s)) return;
+    if (drop) {
+        for (uint64_t i = 0; i < s.len; i++) drop((const char*)s.ptr + i * elem_size);
+    }
+    free(s.ptr);
+}
+
+/* aether_slice_drop of a slice whose elements own nothing, at `p`: the
+ * element drop of a slice of slices of numbers, and an unwind drop. */
+static inline void aether_slice_drop_plain(const void* p) {
+    aether_slice_drop((AetherSlice*)(void*)p, 0, NULL);
+}
+
+/* A store into an owning place (`xs = v` for a local that owns, `rows[i] =
+ * v` for an element of a slice of slices): what the place owned is
+ * dropped, and `v` is what to store. `v` may not view the buffer the place
+ * owns (`xs = xs[1..]`, or a function handing back the slice it was lent):
+ * the store would free what `v` views, so that is a named panic. */
+static inline AetherSlice aether_slice_set(AetherSlice* p, AetherSlice v, size_t elem_size,
+                                           void (*drop)(const void*), const char* file,
+                                           int line) {
+    AetherSlice old = *p;
+    if (aether_slice_owned(old) && v.ptr != NULL) {
+        uint64_t cap = (old.flags & AETHER_SLICE_GROWN) ? aether_slice_grown_cap(old.len)
+                                                         : old.len;
+        const char* lo = (const char*)old.ptr;
+        const char* at = (const char*)v.ptr;
+        if (at >= lo && at < lo + cap * elem_size)
+            aether_slice_panicf("%s:%d: a slice re-bound to a view of the buffer it owned, "
+                                "which the store frees: copy the elements out first",
+                                file, line);
+    }
+    aether_slice_drop(p, elem_size, drop);
+    return v;
+}
+
 /* #3072: `free(s)`: the buffer `make([]T, n)` handed out, or a pointer the
  * program owns viewed from its start. A view owns nothing (R1, R2): `free`
  * of a read-only one (string.bytes) or of one of another slice's or an
