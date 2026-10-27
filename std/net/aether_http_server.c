@@ -1511,12 +1511,26 @@ typedef struct MetricsRoute {
     _Atomic int64_t bucket_le_500ms;
     _Atomic int64_t bucket_le_2s;
     _Atomic int64_t bucket_le_10s;
-    struct MetricsRoute* next;
+    struct MetricsRoute* next;    /* every series, for the scrape */
+    struct MetricsRoute* chain;   /* the series in the same hash bucket */
+    unsigned hash;
 } MetricsRoute;
+
+/* The series a server keeps at most, and the hash buckets they are found by.
+ * The method and path are the client's to choose, one series per pair: kept
+ * without a bound, a client sending fresh paths grew them for as long as it
+ * liked, each in every scrape, and the lookup walked all of them under one
+ * lock on every request (#3265). Past the bound a request counts in one
+ * series labelled "(other)", which no request path can be. */
+#define METRICS_MAX_SERIES 1024
+#define METRICS_BUCKETS    1024   /* a power of two */
 
 typedef struct {
     pthread_mutex_t lock;
     MetricsRoute* head;
+    MetricsRoute* buckets[METRICS_BUCKETS];
+    int           series;          /* in buckets, "(other)" not counted */
+    MetricsRoute* other;
     /* The server this scrape belongs to, for the gauges that read live state
      * rather than accumulated counters. */
     HttpServer* server;
@@ -1536,16 +1550,56 @@ static void metrics_release(void* p) {
     free(st);
 }
 
+/* FNV-1a over the method, a separator no method holds, and the path. */
+static unsigned metrics_hash(const char* method, const char* pattern) {
+    unsigned h = 2166136261u;
+    for (const char* p = method; *p; p++) h = (h ^ (unsigned char)*p) * 16777619u;
+    h = (h ^ 0xffu) * 16777619u;
+    for (const char* p = pattern; *p; p++) h = (h ^ (unsigned char)*p) * 16777619u;
+    return h;
+}
+
+/* A new series at the head of the scrape list, NULL when the allocator
+ * refuses. Called with the lock held. */
+static MetricsRoute* metrics_route_new(MetricsState* st, const char* method,
+                                       const char* pattern, unsigned hash) {
+    MetricsRoute* r = (MetricsRoute*)calloc(1, sizeof(MetricsRoute));
+    if (!r) return NULL;
+    r->method = strdup(method);
+    r->path_pattern = strdup(pattern);
+    if (!r->method || !r->path_pattern) {
+        free(r->method);
+        free(r->path_pattern);
+        free(r);
+        return NULL;
+    }
+    r->hash = hash;
+    r->next = st->head;
+    st->head = r;
+    return r;
+}
+
+/* The series for a method and path, made when there is room, else the
+ * "(other)" one (#3265). Called with the lock held. */
 static MetricsRoute* metrics_route_for(MetricsState* st,
                                        const char* method,
                                        const char* pattern) {
-    MetricsRoute* r = st->head;
-    while (r) {
-        if (strcmp(r->method, method) == 0 &&
+    unsigned h = metrics_hash(method, pattern);
+    MetricsRoute** slot = &st->buckets[h & (METRICS_BUCKETS - 1)];
+    for (MetricsRoute* r = *slot; r; r = r->chain) {
+        if (r->hash == h && strcmp(r->method, method) == 0 &&
             strcmp(r->path_pattern, pattern) == 0) return r;
-        r = r->next;
     }
-    return NULL;
+    if (st->series < METRICS_MAX_SERIES) {
+        MetricsRoute* r = metrics_route_new(st, method, pattern, h);
+        if (!r) return NULL;
+        r->chain = *slot;
+        *slot = r;
+        st->series++;
+        return r;
+    }
+    if (!st->other) st->other = metrics_route_new(st, "(other)", "(other)", 0);
+    return st->other;
 }
 
 static void metrics_hook(HttpRequest* req, HttpServerResponse* res,
@@ -1558,21 +1612,15 @@ static void metrics_hook(HttpRequest* req, HttpServerResponse* res,
      * across IDs), but the existing route table doesn't expose the
      * matched pattern back to the dispatch path. v1 buckets by
      * literal request path; the user can collapse via labels in a
-     * follow-up. */
+     * follow-up. Bounded at METRICS_MAX_SERIES series, found by hash
+     * (#3265). */
     const char* method = req->method ? req->method : "-";
     const char* pattern = req->path ? req->path : "-";
 
     pthread_mutex_lock(&st->lock);
     MetricsRoute* r = metrics_route_for(st, method, pattern);
-    if (!r) {
-        r = (MetricsRoute*)calloc(1, sizeof(MetricsRoute));
-        if (!r) { pthread_mutex_unlock(&st->lock); return; }
-        r->method = strdup(method);
-        r->path_pattern = strdup(pattern);
-        r->next = st->head;
-        st->head = r;
-    }
     pthread_mutex_unlock(&st->lock);
+    if (!r) return;
 
     atomic_fetch_add(&r->total_requests, 1);
     if (res->status_code >= 500) atomic_fetch_add(&r->total_errors, 1);
