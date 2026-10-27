@@ -1,5 +1,4 @@
-// std.tar - Streaming POSIX ustar TAR Archive Module. Reads pax and GNU
-// archives too (their metadata entries apply to the entry after them).
+// std.tar - Streaming TAR archives: writes POSIX ustar, reads ustar, pax and GNU
 // Import with: import std.tar
 
 import std.io
