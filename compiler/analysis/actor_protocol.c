@@ -1,0 +1,862 @@
+/* Actor protocols (#385). See actor_protocol.h.
+ *
+ * Each function body (a function, `main`, a receive arm, a closure) is walked
+ * once in order, keeping for every reference that follows a protocol the set
+ * of states it may be in at that point:
+ *
+ *   - `w = spawn(Writer())`, Writer implementing P: the reference starts in
+ *     P's first state.
+ *   - A parameter or a binding typed `actor_ref[Writer]` or
+ *     `actor_ref[FileWriter]`: its state is not known. A send through it is
+ *     checked only for being one of the protocol's messages (the type checker
+ *     does that); after the send it is in a state that message leads to.
+ *   - A send or ask `w ! M { }` is allowed when every state `w` may be in has
+ *     a transition on M; then `w` is in the states those transitions lead
+ *     to.
+ *   - Any other use of `w` (passed, copied, stored, captured by a closure or
+ *     a `defer`) lets the state change out of sight: from there `w` is
+ *     followed as a reference whose state is not known. Reading an actor's
+ *     state through `w.field` sends nothing.
+ *   - At a join (after an `if`, a `match`, a loop, a `try`) the states of
+ *     every path that reaches it are put together, so a message is allowed
+ *     only when every path allows it. A loop is walked until the states at
+ *     its head stop growing; the last walk reports.
+ *
+ * A path that leaves (`return`, `break`, `continue`, a panic, `exit`) adds
+ * nothing to the statement after it; `break` and `continue` add to their
+ * loop's exit and head.
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+
+#include "actor_protocol.h"
+#include "contract_eval.h"
+#include "missing_return.h"
+#include "../aether_error.h"
+
+#define PROTO_MAX_STATES 64
+#define PROTO_MAX_VARS 64
+#define PROTO_MAX_LOOP_PASSES 256
+
+typedef struct {
+    ASTNode* node;                       /* AST_PROTOCOL_DEFINITION */
+    const char* states[PROTO_MAX_STATES];
+    int state_count;
+} Proto;
+
+static Proto* g_protos = NULL;
+static int g_proto_count = 0;
+
+static ASTNode* unwrap_export(ASTNode* n) {
+    if (n && n->type == AST_EXPORT_STATEMENT && n->child_count > 0) return n->children[0];
+    return n;
+}
+
+static int state_index(Proto* p, const char* name) {
+    for (int i = 0; i < p->state_count; i++)
+        if (strcmp(p->states[i], name) == 0) return i;
+    return -1;
+}
+
+/* Adds `name` as a state of `p` (once); -1 when there are too many. */
+static int state_add(Proto* p, const char* name) {
+    int i = state_index(p, name);
+    if (i >= 0) return i;
+    if (p->state_count >= PROTO_MAX_STATES) return -1;
+    p->states[p->state_count] = name;
+    return p->state_count++;
+}
+
+static ASTNode* transition_from(ASTNode* t) {
+    return t->child_count > 0 ? t->children[0] : NULL;
+}
+
+static ASTNode* transition_to(ASTNode* t) {
+    return t->child_count > 1 ? t->children[1] : NULL;
+}
+
+void aether_protocols_collect(ASTNode* program) {
+    free(g_protos);
+    g_protos = NULL;
+    g_proto_count = 0;
+    if (!program) return;
+    int n = 0;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* d = unwrap_export(program->children[i]);
+        if (d && d->type == AST_PROTOCOL_DEFINITION && d->value) n++;
+    }
+    if (n == 0) return;
+    g_protos = calloc((size_t)n, sizeof(Proto));
+    if (!g_protos) return;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* d = unwrap_export(program->children[i]);
+        if (!d || d->type != AST_PROTOCOL_DEFINITION || !d->value) continue;
+        Proto* p = &g_protos[g_proto_count++];
+        p->node = d;
+        for (int k = 0; k < d->child_count; k++) {
+            ASTNode* t = d->children[k];
+            if (!t || t->type != AST_PROTOCOL_TRANSITION) continue;
+            ASTNode* from = transition_from(t);
+            ASTNode* to = transition_to(t);
+            if (from && from->value) state_add(p, from->value);
+            if (to && to->value) state_add(p, to->value);
+        }
+    }
+}
+
+static Proto* proto_named(const char* name) {
+    if (!name) return NULL;
+    for (int i = 0; i < g_proto_count; i++)
+        if (strcmp(g_protos[i].node->value, name) == 0) return &g_protos[i];
+    return NULL;
+}
+
+ASTNode* aether_protocol_lookup(const char* name) {
+    Proto* p = proto_named(name);
+    return p ? p->node : NULL;
+}
+
+int aether_protocol_has_message(ASTNode* proto, const char* msg) {
+    if (!proto || !msg) return 0;
+    for (int k = 0; k < proto->child_count; k++) {
+        ASTNode* t = proto->children[k];
+        if (t && t->type == AST_PROTOCOL_TRANSITION && t->value && strcmp(t->value, msg) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+const char* aether_actor_protocol_name(const ASTNode* actor) {
+    if (!actor || actor->type != AST_ACTOR_DEFINITION || !actor->annotation) return NULL;
+    if (strncmp(actor->annotation, "implements:", 11) != 0) return NULL;
+    return actor->annotation + 11;
+}
+
+/* ------------------------------------------------------------ reporting */
+
+typedef struct {
+    ASTNode* program;
+    int errors;
+} Ctx;
+
+static void report(Ctx* c, ASTNode* at, const char* message, const char* help) {
+    AetherError e = { at ? at->source_file : NULL, NULL, at ? at->line : 0, at ? at->column : 0,
+                      message, help, NULL, AETHER_ERR_ACTOR_ERROR };
+    aether_error_report(&e);
+    c->errors++;
+}
+
+/* ----------------------------------------------------- the declarations */
+
+static ASTNode* find_top(ASTNode* program, ASTNodeType type, const char* name) {
+    for (int i = 0; program && i < program->child_count; i++) {
+        ASTNode* d = unwrap_export(program->children[i]);
+        if (d && d->type == type && d->value && strcmp(d->value, name) == 0) return d;
+    }
+    return NULL;
+}
+
+static void check_protocol(Ctx* c, Proto* p) {
+    ASTNode* d = p->node;
+    if (!d->value) return;
+    char msg[512];
+    /* One protocol per name. */
+    if (proto_named(d->value) != p) {
+        snprintf(msg, sizeof msg, "protocol '%s' is declared twice", d->value);
+        report(c, d, msg, "rename one of them");
+        return;
+    }
+    /* `actor_ref[Name]` says which: an actor or a protocol, not both. */
+    if (find_top(c->program, AST_ACTOR_DEFINITION, d->value) ||
+        find_top(c->program, AST_MESSAGE_DEFINITION, d->value) ||
+        find_top(c->program, AST_STRUCT_DEFINITION, d->value)) {
+        snprintf(msg, sizeof msg, "protocol '%s' has the name of another declaration", d->value);
+        report(c, d, msg, "a protocol's name is a type name of its own: rename it");
+        return;
+    }
+    if (d->child_count == 0) {
+        snprintf(msg, sizeof msg, "protocol '%s' has no transitions", d->value);
+        report(c, d, msg, "write one `state -> Message -> state` line for each message it allows");
+        return;
+    }
+    for (int k = 0; k < d->child_count; k++) {
+        ASTNode* t = d->children[k];
+        if (!t || t->type != AST_PROTOCOL_TRANSITION || !t->value) continue;
+        ASTNode* from = transition_from(t);
+        ASTNode* to = transition_to(t);
+        if (!from || !to || state_index(p, from->value) < 0 || state_index(p, to->value) < 0) {
+            snprintf(msg, sizeof msg, "protocol '%s' has more than %d states", d->value,
+                     PROTO_MAX_STATES);
+            report(c, t, msg, "split it into protocols with fewer states");
+            return;
+        }
+        if (!find_top(c->program, AST_MESSAGE_DEFINITION, t->value)) {
+            snprintf(msg, sizeof msg, "protocol '%s' names '%s', which is not a declared message",
+                     d->value, t->value);
+            report(c, t, msg, "declare it with `message`, or correct the name");
+        }
+        /* One next state per state and message. */
+        for (int j = 0; j < k; j++) {
+            ASTNode* u = d->children[j];
+            if (!u || u->type != AST_PROTOCOL_TRANSITION || !u->value) continue;
+            ASTNode* ufrom = transition_from(u);
+            if (strcmp(u->value, t->value) == 0 && ufrom && strcmp(ufrom->value, from->value) == 0) {
+                snprintf(msg, sizeof msg,
+                         "protocol '%s' has a second transition for '%s' in state '%s'; the "
+                         "first is at line %d",
+                         d->value, t->value, from->value, u->line);
+                report(c, t, msg, "a message leads to one state from a given state: keep one line");
+                break;
+            }
+        }
+    }
+}
+
+/* Whether a receive arm of `actor` names `msg` (a `_` arm does not count:
+ * a protocol's messages are its actor's interface). */
+static int actor_names_message(ASTNode* actor, const char* msg) {
+    for (int i = 0; i < actor->child_count; i++) {
+        ASTNode* rs = actor->children[i];
+        if (!rs || rs->type != AST_RECEIVE_STATEMENT) continue;
+        for (int j = 0; j < rs->child_count; j++) {
+            ASTNode* arm = rs->children[j];
+            ASTNode* pattern = NULL;
+            if (arm && arm->type == AST_RECEIVE_ARM && arm->child_count >= 2)
+                pattern = arm->children[0];
+            else if (arm && arm->type == AST_BLOCK)
+                for (int k = 0; k < arm->child_count && !pattern; k++)
+                    if (arm->children[k] && arm->children[k]->type == AST_MESSAGE_PATTERN)
+                        pattern = arm->children[k];
+            if (pattern && pattern->type == AST_MESSAGE_PATTERN && pattern->value &&
+                strcmp(pattern->value, msg) == 0)
+                return 1;
+        }
+    }
+    return 0;
+}
+
+static void check_implements(Ctx* c, ASTNode* actor) {
+    const char* pname = aether_actor_protocol_name(actor);
+    if (!pname) return;
+    char msg[512];
+    Proto* p = proto_named(pname);
+    if (!p) {
+        snprintf(msg, sizeof msg, "actor '%s' implements '%s', which is not a declared protocol",
+                 actor->value, pname);
+        report(c, actor, msg, "declare it with `protocol`, or correct the name");
+        return;
+    }
+    for (int k = 0; k < p->node->child_count; k++) {
+        ASTNode* t = p->node->children[k];
+        if (!t || t->type != AST_PROTOCOL_TRANSITION || !t->value) continue;
+        int seen = 0;
+        for (int j = 0; j < k && !seen; j++) {
+            ASTNode* u = p->node->children[j];
+            seen = u && u->value && strcmp(u->value, t->value) == 0;
+        }
+        if (seen || actor_names_message(actor, t->value)) continue;
+        char help[256];
+        snprintf(msg, sizeof msg,
+                 "actor '%s' implements protocol '%s' but has no receive arm for '%s'",
+                 actor->value, pname, t->value);
+        snprintf(help, sizeof help, "add a `%s` arm: a `_` arm does not count for a protocol's messages",
+                 t->value);
+        report(c, actor, msg, help);
+    }
+}
+
+/* ------------------------------------------------------------ the states */
+
+typedef struct {
+    const char* name;
+    Proto* proto;
+    uint64_t mask;      /* the states it may be in; meaningful when !top */
+    int top;            /* its state is not known */
+} PVar;
+
+typedef struct {
+    PVar v[PROTO_MAX_VARS];
+    int n;
+    int dead;           /* no path reaches this point */
+} PState;
+
+static PVar* var_find(PState* s, const char* name) {
+    for (int i = 0; i < s->n; i++)
+        if (strcmp(s->v[i].name, name) == 0) return &s->v[i];
+    return NULL;
+}
+
+static void var_forget(PState* s, const char* name) {
+    for (int i = 0; i < s->n; i++) {
+        if (strcmp(s->v[i].name, name) == 0) {
+            s->v[i] = s->v[--s->n];
+            return;
+        }
+    }
+}
+
+static void var_set(PState* s, const char* name, Proto* p, uint64_t mask, int top) {
+    PVar* v = var_find(s, name);
+    if (!v) {
+        if (s->n >= PROTO_MAX_VARS) return;   /* past the limit, not followed */
+        v = &s->v[s->n++];
+        v->name = name;
+    }
+    v->proto = p;
+    v->mask = mask;
+    v->top = top;
+}
+
+/* The states of every path through `a` and `b`. */
+static void join(PState* a, const PState* b) {
+    if (b->dead) return;
+    if (a->dead) { *a = *b; return; }
+    for (int i = 0; i < b->n; i++) {
+        const PVar* bv = &b->v[i];
+        PVar* av = var_find(a, bv->name);
+        if (!av) {
+            var_set(a, bv->name, bv->proto, bv->mask, bv->top);
+        } else if (av->proto != bv->proto) {
+            var_forget(a, bv->name);
+        } else {
+            av->top = av->top || bv->top;
+            av->mask |= bv->mask;
+        }
+    }
+}
+
+static int same(const PState* a, const PState* b) {
+    if (a->dead != b->dead || a->n != b->n) return 0;
+    for (int i = 0; i < a->n; i++) {
+        PState* bm = (PState*)b;
+        PVar* bv = var_find(bm, a->v[i].name);
+        if (!bv || bv->proto != a->v[i].proto || bv->top != a->v[i].top ||
+            (!bv->top && bv->mask != a->v[i].mask))
+            return 0;
+    }
+    return 1;
+}
+
+/* ---------------------------------------------------------- the walk */
+
+typedef struct Loop {
+    const char* label;
+    int is_switch;
+    PState brk;
+    PState cont;
+    struct Loop* up;
+} Loop;
+
+typedef struct {
+    Ctx* c;
+    int report;         /* report errors on this walk (a loop's last one) */
+    Loop* loops;
+} Walk;
+
+static void walk(Walk* w, ASTNode* n, PState* s);
+static void check_body(Ctx* c, ASTNode* body, ASTNode* params_owner);
+
+/* The actor `spawn_X(...)` spawns, or NULL. */
+static ASTNode* spawned_actor(Ctx* c, ASTNode* init) {
+    if (!init || init->type != AST_FUNCTION_CALL || !init->value ||
+        strncmp(init->value, "spawn_", 6) != 0)
+        return NULL;
+    return find_top(c->program, AST_ACTOR_DEFINITION, init->value + 6);
+}
+
+/* The protocol a type `actor_ref[X]` follows: X's own when X is a
+ * protocol, the one X implements when X is an actor. */
+static Proto* type_protocol(Ctx* c, Type* t) {
+    if (!t || t->kind != TYPE_ACTOR_REF || !t->element_type ||
+        t->element_type->kind != TYPE_STRUCT || !t->element_type->struct_name)
+        return NULL;
+    const char* name = t->element_type->struct_name;
+    Proto* p = proto_named(name);
+    if (p) return p;
+    ASTNode* actor = find_top(c->program, AST_ACTOR_DEFINITION, name);
+    return actor ? proto_named(aether_actor_protocol_name(actor)) : NULL;
+}
+
+/* `name` now holds what `init` gives (declared type `t`). */
+static void bind(Walk* w, PState* s, const char* name, ASTNode* init, Type* t) {
+    if (!name) return;
+    ASTNode* actor = spawned_actor(w->c, init);
+    if (actor) {
+        Proto* p = proto_named(aether_actor_protocol_name(actor));
+        if (p) {
+            var_set(s, name, p, 1, 0);   /* the first transition's state is state 0 */
+            return;
+        }
+    }
+    Proto* p = type_protocol(w->c, t);
+    if (!p && init) p = type_protocol(w->c, init->node_type);
+    if (p) var_set(s, name, p, 0, 1);
+    else var_forget(s, name);
+}
+
+/* Every followed reference named in `n`: its state can now change out of
+ * sight. */
+static void escape_all(PState* s, ASTNode* n) {
+    if (!n) return;
+    if (n->type == AST_IDENTIFIER && n->value) {
+        PVar* v = var_find(s, n->value);
+        if (v) v->top = 1;
+    }
+    for (int i = 0; i < n->child_count; i++) escape_all(s, n->children[i]);
+}
+
+static void names_list(Proto* p, uint64_t mask, char* out, size_t cap) {
+    out[0] = '\0';
+    int first = 1;
+    for (int i = 0; i < p->state_count; i++) {
+        if (!(mask & ((uint64_t)1 << i))) continue;
+        size_t len = strlen(out);
+        snprintf(out + len, cap - len, "%s'%s'", first ? "" : " or ", p->states[i]);
+        first = 0;
+    }
+}
+
+/* What state `st` takes, for the help line. */
+static void allowed_in(Proto* p, int st, char* out, size_t cap) {
+    out[0] = '\0';
+    int any = 0;
+    for (int k = 0; k < p->node->child_count; k++) {
+        ASTNode* t = p->node->children[k];
+        ASTNode* from = t ? transition_from(t) : NULL;
+        if (!from || state_index(p, from->value) != st) continue;
+        size_t len = strlen(out);
+        snprintf(out + len, cap - len, "%s%s", any ? ", " : "", t->value);
+        any = 1;
+    }
+    if (!any) snprintf(out, cap, "no message");
+}
+
+/* A send or ask of `msg` through the followed reference `v`. */
+static void transition(Walk* w, PVar* v, ASTNode* message) {
+    Proto* p = v->proto;
+    const char* msg = message->value;
+    if (!aether_protocol_has_message(p->node, msg)) {
+        /* Through a reference typed `actor_ref[P]` the type checker has
+         * said so already; this is one to an actor that implements P. */
+        if (w->report) {
+            char msgbuf[400], help[400];
+            snprintf(msgbuf, sizeof msgbuf,
+                     "protocol '%s' has no message '%s', and '%s' follows it",
+                     p->node->value, msg, v->name);
+            snprintf(help, sizeof help,
+                     "add '%s' to the protocol, or send it through a bare `actor_ref` "
+                     "(a parameter typed so), which follows none",
+                     msg);
+            report(w->c, message, msgbuf, help);
+        }
+        v->top = 1;
+        return;
+    }
+    uint64_t to = 0, bad = 0, from_mask = v->top ? ~(uint64_t)0 : v->mask;
+    for (int st = 0; st < p->state_count; st++) {
+        if (!(from_mask & ((uint64_t)1 << st))) continue;
+        int found = 0;
+        for (int k = 0; k < p->node->child_count; k++) {
+            ASTNode* t = p->node->children[k];
+            ASTNode* from = t ? transition_from(t) : NULL;
+            ASTNode* dest = t ? transition_to(t) : NULL;
+            if (!from || !dest || !t->value || strcmp(t->value, msg) != 0) continue;
+            if (state_index(p, from->value) != st) continue;
+            to |= (uint64_t)1 << state_index(p, dest->value);
+            found = 1;
+        }
+        if (!found) bad |= (uint64_t)1 << st;
+    }
+    if (v->top) {
+        /* Not known before; a message the protocol has leads somewhere it
+         * says (one it does not have is the type checker's to report). */
+        if (to) { v->top = 0; v->mask = to; }
+        return;
+    }
+    if (bad && w->report) {
+        char states[256], msgbuf[600], help[600];
+        names_list(p, bad, states, sizeof states);
+        int several = 0;
+        for (int i = 0; i < p->state_count; i++)
+            if (v->mask & ((uint64_t)1 << i)) several++;
+        snprintf(msgbuf, sizeof msgbuf,
+                 "protocol '%s' does not allow '%s' here: '%s' %s in state %s",
+                 p->node->value, msg, v->name, several > 1 ? "may be" : "is", states);
+        help[0] = '\0';
+        for (int st = 0; st < p->state_count; st++) {
+            if (!(bad & ((uint64_t)1 << st))) continue;
+            char takes[256];
+            allowed_in(p, st, takes, sizeof takes);
+            size_t len = strlen(help);
+            snprintf(help + len, sizeof help - len, "%sin '%s' it takes %s", len ? "; " : "",
+                     p->states[st], takes);
+        }
+        report(w->c, message, msgbuf, help);
+    }
+    if (to) v->mask = to;
+    else v->top = 1;   /* every path was wrong: not followed on from here */
+}
+
+static Loop* loop_target(Walk* w, const char* label, int for_continue) {
+    for (Loop* l = w->loops; l; l = l->up) {
+        if (label) {
+            if (!l->is_switch && l->label && strcmp(l->label, label) == 0) return l;
+        } else if (!(for_continue && l->is_switch)) {
+            return l;
+        }
+    }
+    return NULL;
+}
+
+static int always_true(Walk* w, ASTNode* cond) {
+    if (!cond) return 1;
+    ContractEnv env;
+    memset(&env, 0, sizeof env);
+    env.program = w->c->program;
+    return contract_eval_predicate(cond, &env) == CONTRACT_TRUE;
+}
+
+/* A loop: `init` once, then `cond`, `body`, `step` while it runs. */
+static void loop(Walk* w, PState* s, ASTNode* node, ASTNode* init, ASTNode* cond,
+                 ASTNode* body, ASTNode* step) {
+    walk(w, init, s);
+    if (s->dead) return;
+    int report = w->report;
+    PState head = *s, out;
+    for (int pass = 0; ; pass++) {
+        int last = pass >= PROTO_MAX_LOOP_PASSES;
+        w->report = 0;
+        PState st = head;
+        walk(w, cond, &st);
+        Loop l;
+        memset(&l, 0, sizeof l);
+        l.label = node->value;
+        l.brk.dead = 1;
+        l.cont.dead = 1;
+        l.up = w->loops;
+        w->loops = &l;
+        walk(w, body, &st);
+        w->loops = l.up;
+        join(&st, &l.cont);
+        walk(w, step, &st);
+        PState next = head;
+        join(&next, &st);
+        if (same(&next, &head) || last) {
+            if (last) for (int i = 0; i < next.n; i++) next.v[i].top = 1;
+            head = next;
+            break;
+        }
+        head = next;
+    }
+    /* The walk that reports, from the states at the head. */
+    w->report = report;
+    PState st = head;
+    walk(w, cond, &st);
+    out = st;                                  /* the condition is false */
+    if (always_true(w, cond)) out.dead = 1;
+    Loop l;
+    memset(&l, 0, sizeof l);
+    l.label = node->value;
+    l.brk.dead = 1;
+    l.cont.dead = 1;
+    l.up = w->loops;
+    w->loops = &l;
+    walk(w, body, &st);
+    w->loops = l.up;
+    join(&st, &l.cont);
+    walk(w, step, &st);
+    join(&out, &l.brk);
+    *s = out;
+}
+
+static ASTNode* closure_body(ASTNode* closure) {
+    for (int i = closure->child_count - 1; i >= 0; i--)
+        if (closure->children[i] && closure->children[i]->type == AST_BLOCK)
+            return closure->children[i];
+    return NULL;
+}
+
+static void walk(Walk* w, ASTNode* n, PState* s) {
+    if (!n || s->dead) return;
+    switch (n->type) {
+        case AST_VARIABLE_DECLARATION: {
+            ASTNode* init = n->child_count > 0 ? n->children[0] : NULL;
+            walk(w, init, s);
+            if (!s->dead) bind(w, s, n->value, init, n->node_type);
+            return;
+        }
+        case AST_TUPLE_DESTRUCTURE:
+            for (int i = 0; i < n->child_count; i++) {
+                ASTNode* k = n->children[i];
+                if (k && k->type == AST_VARIABLE_DECLARATION) continue;
+                walk(w, k, s);
+            }
+            for (int i = 0; i < n->child_count; i++) {
+                ASTNode* k = n->children[i];
+                if (k && k->type == AST_VARIABLE_DECLARATION && k->value)
+                    bind(w, s, k->value, NULL, k->node_type);
+            }
+            return;
+        case AST_SEND_FIRE_FORGET:
+        case AST_SEND_ASK: {
+            ASTNode* target = n->child_count > 0 ? n->children[0] : NULL;
+            ASTNode* message = n->child_count > 1 ? n->children[1] : NULL;
+            walk(w, message, s);
+            if (s->dead) return;
+            PVar* v = (target && target->type == AST_IDENTIFIER && target->value)
+                          ? var_find(s, target->value) : NULL;
+            if (v && message && message->type == AST_MESSAGE_CONSTRUCTOR && message->value)
+                transition(w, v, message);
+            else
+                walk(w, target, s);
+            return;
+        }
+        case AST_IDENTIFIER:
+            if (n->value) {
+                PVar* v = var_find(s, n->value);
+                if (v) v->top = 1;
+            }
+            return;
+        case AST_MEMBER_ACCESS:
+            /* `w.field` reads the actor's state: nothing is sent. */
+            if (n->child_count > 0 && n->children[0] &&
+                n->children[0]->type == AST_IDENTIFIER) {
+                for (int i = 1; i < n->child_count; i++) walk(w, n->children[i], s);
+                return;
+            }
+            break;
+        case AST_IF_STATEMENT:
+        case AST_IF_EXPRESSION: {
+            ASTNode* cond = n->child_count > 0 ? n->children[0] : NULL;
+            walk(w, cond, s);
+            if (s->dead) return;
+            /* A condition decided at compile time leaves one branch, as the
+             * optimizer does (`if DEBUG { ... }`). */
+            ContractTri known = CONTRACT_UNKNOWN;
+            if (cond) {
+                ContractEnv env;
+                memset(&env, 0, sizeof env);
+                env.program = w->c->program;
+                known = contract_eval_predicate(cond, &env);
+            }
+            PState t = *s, e = *s;
+            if (known == CONTRACT_FALSE) t.dead = 1;
+            if (known == CONTRACT_TRUE) e.dead = 1;
+            walk(w, n->child_count > 1 ? n->children[1] : NULL, &t);
+            walk(w, n->child_count > 2 ? n->children[2] : NULL, &e);
+            *s = t;
+            join(s, &e);
+            return;
+        }
+        case AST_WHILE_LOOP:
+            loop(w, s, n, NULL, n->child_count > 0 ? n->children[0] : NULL,
+                 n->child_count > 1 ? n->children[1] : NULL, NULL);
+            return;
+        case AST_FOR_LOOP:
+            loop(w, s, n, n->child_count > 0 ? n->children[0] : NULL,
+                 n->child_count > 1 ? n->children[1] : NULL,
+                 n->child_count > 3 ? n->children[3] : NULL,
+                 n->child_count > 2 ? n->children[2] : NULL);
+            return;
+        case AST_MATCH_STATEMENT: {
+            walk(w, n->child_count > 0 ? n->children[0] : NULL, s);
+            if (s->dead) return;
+            PState out = *s;
+            if (ast_match_covers(n)) out.dead = 1;   /* some arm always runs */
+            for (int i = 1; i < n->child_count; i++) {
+                ASTNode* arm = n->children[i];
+                if (!arm || arm->type != AST_MATCH_ARM) continue;
+                PState a = *s;
+                for (int k = 1; k < arm->child_count; k++) walk(w, arm->children[k], &a);
+                join(&out, &a);
+            }
+            *s = out;
+            return;
+        }
+        case AST_SWITCH_STATEMENT: {
+            walk(w, n->child_count > 0 ? n->children[0] : NULL, s);
+            if (s->dead) return;
+            PState out = *s;
+            Loop l;
+            memset(&l, 0, sizeof l);
+            l.is_switch = 1;
+            l.brk.dead = 1;
+            l.cont.dead = 1;
+            l.up = w->loops;
+            w->loops = &l;
+            for (int i = 1; i < n->child_count; i++) {
+                ASTNode* cs = n->children[i];
+                if (!cs || cs->type != AST_CASE_STATEMENT) continue;
+                int is_default = cs->value && strcmp(cs->value, "default") == 0;
+                if (is_default) out.dead = 1;
+                PState a = *s;
+                for (int k = is_default ? 0 : 1; k < cs->child_count; k++) walk(w, cs->children[k], &a);
+                join(&out, &a);
+            }
+            w->loops = l.up;
+            join(&out, &l.brk);
+            /* A `continue` inside a switch belongs to the loop around it. */
+            if (!l.cont.dead) {
+                Loop* t = loop_target(w, NULL, 1);
+                if (t) join(&t->cont, &l.cont);
+            }
+            *s = out;
+            return;
+        }
+        case AST_RETURN_STATEMENT:
+        case AST_PANIC_STATEMENT:
+            for (int i = 0; i < n->child_count; i++) walk(w, n->children[i], s);
+            s->dead = 1;
+            return;
+        case AST_BREAK_STATEMENT: {
+            Loop* t = loop_target(w, n->value, 0);
+            if (t) join(&t->brk, s);
+            s->dead = 1;
+            return;
+        }
+        case AST_CONTINUE_STATEMENT: {
+            Loop* t = loop_target(w, n->value, 1);
+            if (t) join(&t->cont, s);
+            s->dead = 1;
+            return;
+        }
+        case AST_FUNCTION_CALL:
+            for (int i = 0; i < n->child_count; i++) walk(w, n->children[i], s);
+            if (ast_call_never_returns(n)) s->dead = 1;
+            return;
+        case AST_CLOSURE:
+            if (ast_is_trailing_block(n)) {   /* runs inline, once */
+                walk(w, closure_body(n), s);
+                return;
+            }
+            /* A closure runs later: what it sends is out of sight here. Its
+             * body is a function of its own. */
+            escape_all(s, n);
+            if (w->report) check_body(w->c, closure_body(n), n);
+            return;
+        case AST_QUOTE:
+            return;
+        case AST_DEFER_STATEMENT:
+            /* Runs when the scope ends, after what follows here. */
+            escape_all(s, n);
+            return;
+        case AST_TRY_STATEMENT: {
+            ASTNode* body = n->child_count > 0 ? n->children[0] : NULL;
+            /* A panic can enter the catch from anywhere in the body. */
+            PState entry = *s;
+            escape_all(&entry, body);
+            walk(w, body, s);
+            for (int i = 1; i < n->child_count; i++) {
+                ASTNode* cc = n->children[i];
+                if (!cc || cc->type != AST_CATCH_CLAUSE) continue;
+                PState a = entry;
+                for (int k = 0; k < cc->child_count; k++) walk(w, cc->children[k], &a);
+                join(s, &a);
+            }
+            return;
+        }
+        case AST_OR_ELSE: {
+            walk(w, n->child_count > 0 ? n->children[0] : NULL, s);
+            if (s->dead) return;
+            PState h = *s;
+            for (int i = 1; i < n->child_count; i++) walk(w, n->children[i], &h);
+            join(s, &h);
+            return;
+        }
+        case AST_BINARY_EXPRESSION:
+            if (n->value && (strcmp(n->value, "&&") == 0 || strcmp(n->value, "||") == 0) &&
+                n->child_count == 2) {
+                walk(w, n->children[0], s);
+                if (s->dead) return;
+                PState r = *s;
+                walk(w, n->children[1], &r);
+                join(s, &r);
+                return;
+            }
+            break;
+        case AST_NULL_COALESCE: {
+            walk(w, n->child_count > 0 ? n->children[0] : NULL, s);
+            if (s->dead) return;
+            PState r = *s;
+            for (int i = 1; i < n->child_count; i++) walk(w, n->children[i], &r);
+            join(s, &r);
+            return;
+        }
+        default:
+            break;
+    }
+    for (int i = 0; i < n->child_count; i++) walk(w, n->children[i], s);
+}
+
+/* Walks one function body: its parameters typed `actor_ref[X]` with a
+ * protocol are followed from an unknown state. */
+static void check_body(Ctx* c, ASTNode* body, ASTNode* params_owner) {
+    if (!body) return;
+    PState s;
+    memset(&s, 0, sizeof s);
+    Walk w;
+    memset(&w, 0, sizeof w);
+    w.c = c;
+    w.report = 1;
+    for (int i = 0; params_owner && i < params_owner->child_count; i++) {
+        ASTNode* p = params_owner->children[i];
+        if (!p || p == body || !p->value) continue;
+        if (p->type != AST_PATTERN_VARIABLE && p->type != AST_CLOSURE_PARAM &&
+            p->type != AST_VARIABLE_DECLARATION)
+            continue;
+        Proto* proto = type_protocol(c, p->node_type);
+        if (proto) var_set(&s, p->value, proto, 0, 1);
+    }
+    walk(&w, body, &s);
+}
+
+static ASTNode* last_block(ASTNode* n) {
+    for (int i = n->child_count - 1; i >= 0; i--)
+        if (n->children[i] && n->children[i]->type == AST_BLOCK) return n->children[i];
+    return NULL;
+}
+
+int check_actor_protocols(ASTNode* program) {
+    if (!program) return 0;
+    Ctx c;
+    memset(&c, 0, sizeof c);
+    c.program = program;
+    for (int i = 0; i < g_proto_count; i++) check_protocol(&c, &g_protos[i]);
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* d = unwrap_export(program->children[i]);
+        if (d && d->type == AST_ACTOR_DEFINITION) check_implements(&c, d);
+    }
+    if (c.errors > 0 || g_proto_count == 0) return c.errors;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* d = unwrap_export(program->children[i]);
+        if (!d) continue;
+        switch (d->type) {
+            case AST_FUNCTION_DEFINITION:
+            case AST_BUILDER_FUNCTION:
+            case AST_FUNCTION_CLAUSE:
+                check_body(&c, last_block(d), d);
+                break;
+            case AST_MAIN_FUNCTION:
+                check_body(&c, d->child_count > 0 ? d->children[0] : NULL, NULL);
+                break;
+            case AST_ACTOR_DEFINITION:
+                for (int k = 0; k < d->child_count; k++) {
+                    ASTNode* rs = d->children[k];
+                    if (!rs || rs->type != AST_RECEIVE_STATEMENT) continue;
+                    for (int j = 0; j < rs->child_count; j++) {
+                        ASTNode* arm = rs->children[j];
+                        if (arm && (arm->type == AST_RECEIVE_ARM || arm->type == AST_TIMEOUT_ARM) &&
+                            arm->child_count >= 2)
+                            check_body(&c, arm->children[1], NULL);
+                    }
+                }
+                break;
+            default:
+                break;
+        }
+    }
+    return c.errors;
+}

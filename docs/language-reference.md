@@ -3565,6 +3565,71 @@ second can never run, and is an error. An actor without one drops a message
 no arm names, which is why a send of such a message, where the compiler
 knows the actor, is refused (see [Sending Messages](#sending-messages-fire-and-forget)).
 
+### Protocols
+
+A protocol says which messages a reference to an actor may be sent, and in
+which order (#385). Each line is a transition, `state -> Message -> state`:
+the message it allows in the first state, and the state it leads to. The
+first line's state is where a new reference starts; a state with no line
+out of it takes no message.
+
+```aether,fails
+message Open { path: string }
+message Write { data: string }
+message Close {}
+
+protocol FileWriter {
+    start -> Open -> writing
+    writing -> Write -> writing
+    writing -> Close -> done
+}
+
+actor Writer implements FileWriter {
+    receive {
+        Open(path) -> { /* ... */ }
+        Write(data) -> { /* ... */ }
+        Close() -> { /* ... */ }
+    }
+}
+
+main() {
+    w = spawn(Writer())
+    w ! Open { path: "out.txt" }
+    w ! Write { data: "hello" }
+    w ! Close {}
+    w ! Write { data: "late" }   // error: 'w' is in state 'done'
+}
+```
+
+The compiler follows each reference through the function that holds it,
+and a send or an ask the protocol does not allow in a state the reference
+may be in there is an error (E0600) naming the states and what each takes:
+
+- **Branches and loops.** After an `if`, a `match` or a `try`, a reference
+  may be in the state of any path that reaches the next statement, so a
+  message must be allowed in all of them: `if c { w ! Close {} }` followed
+  by `w ! Write {}` is refused. A loop is followed until its states settle,
+  so a `Close` inside a loop is refused on its second turn. A condition the
+  compiler can decide (`if DEBUG`, a `const`) takes only its branch.
+- **A reference whose state is not known.** A parameter typed
+  `actor_ref[FileWriter]`, or `actor_ref[Writer]` for an actor that
+  implements it, starts in no known state: a send through it must be one of
+  the protocol's messages, and leads to the state that message leads to.
+  `actor_ref[FileWriter]` takes a reference to any actor that implements
+  FileWriter, and is sent only FileWriter's messages.
+- **Out of sight.** Passing the reference to a function, copying it to
+  another variable, storing it, capturing it in a closure or naming it in a
+  `defer` lets its state change where the compiler does not follow: sends
+  through it after that are checked as through a parameter's. A function
+  that takes a bare `actor_ref` is the way to send a message outside the
+  protocol, and a message the protocol does not have is refused otherwise.
+
+A protocol's messages are declared ones, each state has at most one line
+per message, and an actor that `implements` a protocol has a receive arm for
+each of its messages (a `_` arm does not count). A protocol and its actors
+can come from an imported module, as messages do. `protocol` and
+`implements` are words only in these places: they stay usable as names.
+
 ---
 
 ## Operators
@@ -4784,7 +4849,7 @@ An error stops the build and prints its code, `error[E0301]: ...`, with the sour
 | `E0303` | A name the module does not export |
 | `E0304` | A name hidden in this scope by `hide` or `seal except` ([hide and seal](hide-and-seal.md)) |
 | `E0305` | A module exports two names that answer to one short name, `add` beside `aether_set_add` or `join` beside `string_join`: one name per operation ([module-system-design.md](module-system-design.md)) |
-| `E0600` | An actor rule, such as a closure in a handler writing the actor's state, a send of a message the target actor has no arm for, or a second `_` arm |
+| `E0600` | An actor rule, such as a closure in a handler writing the actor's state, a send of a message the target actor has no arm for, a second `_` arm, or a send its protocol does not allow |
 | `E0700` | Missing return: control can reach the end of a function whose result is not void ([Returning on every path](#returning-on-every-path-e0700)) |
 | `E0701` | A `select()` with no value for a platform (`linux:`, `windows:`, `macos:`) and no `other:` fallback ([named-args-and-select.md](named-args-and-select.md#missing-platform-is-a-compile-error)) |
 | `E0800` | A construct a quote cannot hold: a closure, `callback` or block inside one, `defer`, `try`, `panic`, an actor operation, `match`, string interpolation, `new`, an array literal ([quote.md](quote.md#what-a-quote-may-contain-and-the-errors)) |

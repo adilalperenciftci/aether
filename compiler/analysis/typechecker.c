@@ -11,6 +11,7 @@
 #include "actor_reply.h"
 #include "missing_return.h"
 #include "slice_escape.h"
+#include "actor_protocol.h"
 #include "quote.h"
 
 /* Defined with typecheck_program below; infer_type needs it far earlier. */
@@ -3256,6 +3257,18 @@ static int fn_modes_fit(const Type* from, const Type* to) {
     return 1;
 }
 
+/* The program's actor named `name`, or NULL. */
+static ASTNode* find_actor_definition(const char* name) {
+    ASTNode* program = g_typecheck_program;
+    for (int i = 0; program && name && i < program->child_count; i++) {
+        ASTNode* d = program->children[i];
+        if (d && d->type == AST_EXPORT_STATEMENT && d->child_count > 0) d = d->children[0];
+        if (d && d->type == AST_ACTOR_DEFINITION && d->value && strcmp(d->value, name) == 0)
+            return d;
+    }
+    return NULL;
+}
+
 int is_type_compatible(Type* from, Type* to) {
     if (!from || !to) return 0;
 
@@ -3466,6 +3479,16 @@ int is_type_compatible(Type* from, Type* to) {
     // Bare actor_ref (no type parameter) is compatible with any actor_ref
     if (from->kind == TYPE_ACTOR_REF && to->kind == TYPE_ACTOR_REF) {
         if (!from->element_type || !to->element_type) return 1;
+        /* #385: a reference to an actor passes where one following the
+         * protocol it implements is wanted. */
+        if (to->element_type->kind == TYPE_STRUCT && to->element_type->struct_name &&
+            from->element_type->kind == TYPE_STRUCT && from->element_type->struct_name &&
+            aether_protocol_lookup(to->element_type->struct_name)) {
+            if (strcmp(from->element_type->struct_name, to->element_type->struct_name) == 0) return 1;
+            ASTNode* actor = find_actor_definition(from->element_type->struct_name);
+            const char* implemented = actor ? aether_actor_protocol_name(actor) : NULL;
+            return implemented && strcmp(implemented, to->element_type->struct_name) == 0;
+        }
         return is_type_compatible(from->element_type, to->element_type);
     }
 
@@ -6742,6 +6765,7 @@ int typecheck_program(ASTNode* program) {
     g_tc_ptr_to_closure = 0;
     tc_clauses_reset();   /* #2647: a program's clause sets, indexed afresh */
     hoist_cache_reset();  /* #3083: the hoisting answers, gathered afresh */
+    aether_protocols_collect(program);   /* #385: actor_ref[P] and the sends through it */
 
     /* #2631: a module file checked on its own (it has an `exports(...)`
      * list, the test `program_is_module` below makes too) knows the
@@ -7698,6 +7722,9 @@ int typecheck_program(ASTNode* program) {
     /* A slice of a function's own storage must not outlive it (#2785): asked
      * of the checked program, whose coercions into slices are explicit. */
     if (error_count == 0) error_count += check_slice_escapes(program);
+    /* #385: sends through references that follow a protocol, in the order
+     * it allows, asked of the checked program. */
+    if (error_count == 0) error_count += check_actor_protocols(program);
 
     // #481: validate effect tags over the whole-program call graph.
     check_effect_tags(program);
@@ -8067,9 +8094,23 @@ static void reject_unhandled_send(ASTNode* target, ASTNode* message, SymbolTable
     if (!target || !message || message->type != AST_MESSAGE_CONSTRUCTOR || !message->value) return;
     Type* t = infer_type(target, table);
     ASTNode* actor = actor_ref_target_actor(t, table);
+    /* A reference typed `actor_ref[P]`, P a protocol, takes P's messages. */
+    ASTNode* proto = (!actor && t && t->kind == TYPE_ACTOR_REF && t->element_type &&
+                      t->element_type->kind == TYPE_STRUCT)
+                         ? aether_protocol_lookup(t->element_type->struct_name) : NULL;
     if (t) free_type(t);
-    if (!actor || actor_receives_message(actor, message->value)) return;
     char msg[400], hint[400];
+    if (proto) {
+        if (aether_protocol_has_message(proto, message->value)) return;
+        snprintf(msg, sizeof(msg), "protocol '%s' has no message '%s'", proto->value,
+                 message->value);
+        snprintf(hint, sizeof(hint),
+                 "a reference typed actor_ref[%s] is sent only the messages of its protocol",
+                 proto->value);
+        type_error_code_hint(msg, hint, message->line, message->column, AETHER_ERR_ACTOR_ERROR);
+        return;
+    }
+    if (!actor || actor_receives_message(actor, message->value)) return;
     snprintf(msg, sizeof(msg),
              "actor '%s' has no receive arm for '%s', so this message would be dropped",
              actor->value ? actor->value : "?", message->value);
@@ -12020,7 +12061,8 @@ static const char* type_unknown_name(Type* t, SymbolTable* table, int depth) {
     if (!t || depth > 32 || t->kind == TYPE_PTR) return NULL;
     if (t->kind == TYPE_STRUCT && t->struct_name && !strchr(t->struct_name, '.') &&
         !symbol_names_type(lookup_symbol(table, t->struct_name)) &&
-        !c_struct_def_node(t->struct_name))
+        !c_struct_def_node(t->struct_name) &&
+        !aether_protocol_lookup(t->struct_name))   /* `actor_ref[P]` (#385) */
         return t->struct_name;
     const char* u = type_unknown_name(t->element_type, table, depth + 1);
     for (int i = 0; !u && t->tuple_types && i < t->tuple_count; i++)

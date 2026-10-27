@@ -4736,6 +4736,14 @@ void module_merge_into_program(ASTNode* program) {
                 clone->is_imported = 1;
                 ss_scope_node(clone, mod);
                 insert_child_at(program, clone, insert_idx++);
+            } else if (decl->type == AST_PROTOCOL_DEFINITION && decl->value) {
+                // #385: a `protocol` enters under its bare name, as the
+                // messages it names do, so an imported actor that implements
+                // it and an `actor_ref[P]` written by the importer resolve.
+                if (definition_already_merged(program, decl, "protocol")) continue;
+                ASTNode* clone = clone_ast_node(decl);
+                clone->is_imported = 1;
+                insert_child_at(program, clone, insert_idx++);
             } else if (decl->type == AST_ACTOR_DEFINITION && decl->value) {
                 // #1006: `actor X { ... }` from an imported module enters the
                 // consumer's program AST under its bare name. `spawn(X())`

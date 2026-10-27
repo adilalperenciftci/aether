@@ -1,4 +1,5 @@
 #include "../analysis/quote.h"
+#include "../analysis/actor_protocol.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2738,6 +2739,9 @@ const char* get_c_type(Type* type) {
              * cases used cut a long name, and a fifth call overwrote a
              * result a caller still held. */
             if (type->element_type && type->element_type->kind == TYPE_STRUCT && type->element_type->struct_name) {
+                /* `actor_ref[P]`, P a protocol (#385): any actor that
+                 * implements P, so no one actor's type. */
+                if (aether_protocol_lookup(type->element_type->struct_name)) return "void*";
                 return cg_internf("%s*", type->element_type->struct_name);
             }
             return "void*";

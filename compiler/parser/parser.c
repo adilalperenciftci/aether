@@ -5219,6 +5219,38 @@ ASTNode* parse_panic_statement(Parser* parser) {
 
 // Actor V2 - Message Definition Parsing
 // Syntax: message MessageName { field1: type1, field2: type2 }
+/* #385: `protocol Name { from -> Message -> to ... }`, one transition per
+ * line (a comma may separate them too). `protocol` is a contextual word: the
+ * caller has seen `protocol <ident> {`. */
+static ASTNode* parse_protocol_definition(Parser* parser) {
+    Token* kw = peek_token(parser);
+    advance_token(parser);   // consume 'protocol'
+    Token* name = expect_token(parser, TOKEN_IDENTIFIER);
+    if (!name) return NULL;
+    if (!expect_token(parser, TOKEN_LEFT_BRACE)) return NULL;
+    ASTNode* proto = create_ast_node(AST_PROTOCOL_DEFINITION, name->value, kw->line, kw->column);
+    while (!match_token(parser, TOKEN_RIGHT_BRACE)) {
+        if (is_at_end(parser)) {
+            parser_error(parser, "Unexpected end of file in protocol definition: its `}` is missing");
+            return proto;
+        }
+        Token* from = expect_token(parser, TOKEN_IDENTIFIER);
+        if (!from) return proto;
+        if (!expect_token(parser, TOKEN_ARROW)) return proto;
+        Token* msg = expect_token(parser, TOKEN_IDENTIFIER);
+        if (!msg) return proto;
+        if (!expect_token(parser, TOKEN_ARROW)) return proto;
+        Token* to = expect_token(parser, TOKEN_IDENTIFIER);
+        if (!to) return proto;
+        ASTNode* t = create_ast_node(AST_PROTOCOL_TRANSITION, msg->value, from->line, from->column);
+        add_child(t, create_ast_node(AST_IDENTIFIER, from->value, from->line, from->column));
+        add_child(t, create_ast_node(AST_IDENTIFIER, to->value, to->line, to->column));
+        add_child(proto, t);
+        match_token(parser, TOKEN_COMMA);
+    }
+    return proto;
+}
+
 ASTNode* parse_message_definition(Parser* parser) {
     Token* message_token = peek_token(parser);
     advance_token(parser); // consume 'message'
@@ -5759,10 +5791,25 @@ ASTNode* parse_actor_definition(Parser* parser) {
     advance_token(parser); // actor
     Token* name = expect_token(parser, TOKEN_IDENTIFIER);
     if (!name) return NULL;
-    
+
+    /* #385: `actor Name implements Protocol {`, carried on the actor as
+     * its annotation `implements:Protocol`. `implements` is contextual. */
+    char* implements = NULL;
+    Token* impl = peek_token(parser);
+    if (impl && impl->type == TOKEN_IDENTIFIER && impl->value &&
+        strcmp(impl->value, "implements") == 0) {
+        advance_token(parser);
+        Token* proto = expect_token(parser, TOKEN_IDENTIFIER);
+        if (!proto) return NULL;
+        size_t n = strlen(proto->value) + sizeof("implements:");
+        implements = malloc(n);
+        if (implements) snprintf(implements, n, "implements:%s", proto->value);
+    }
+
     expect_token(parser, TOKEN_LEFT_BRACE);
-    
+
     ASTNode* actor = create_ast_node(AST_ACTOR_DEFINITION, name->value, name->line, name->column);
+    actor->annotation = implements;
     
     /* No cap on the body: each pass consumes a declaration or a token. It
      * stopped after 1000 with nothing said, and an actor left open at the
@@ -7807,6 +7854,16 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                 advance_token(parser);   // consume 'cfn'
                 return parse_cfn_type_def(parser);
             }
+        }
+
+        // #385: `protocol Name { ... }`. `protocol` is a contextual word:
+        // only the `protocol <ident> {` shape here is intercepted.
+        if (token->type == TOKEN_IDENTIFIER && token->value &&
+            strcmp(token->value, "protocol") == 0) {
+            Token* n1 = peek_ahead(parser, 1);
+            Token* n2 = peek_ahead(parser, 2);
+            if (n1 && n1->type == TOKEN_IDENTIFIER && n2 && n2->type == TOKEN_LEFT_BRACE)
+                return parse_protocol_definition(parser);
         }
 
         // #480: `type Name = distinct Base` — a zero-cost nominal type over

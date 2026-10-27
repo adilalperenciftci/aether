@@ -79,4 +79,32 @@ if "$tmp/docgen" "$tmp/std" "$tmp/api2" >"$tmp/run2.log" 2>&1; then
 fi
 grep -q "never closed" "$tmp/run2.log" || fail "the unclosed list's error does not say so"
 
+
+# #385: an exported message and protocol are documented as declared, the
+# protocol with its transitions.
+mkdir -p "$tmp/std2/door"
+cat > "$tmp/std2/door/module.ae" <<'AE'
+// std.door - A fixture with an actor protocol.
+
+exports(Unlock, Leave, DoorUse)
+
+// Opens the door.
+message Unlock { code: int }
+message Leave {}
+
+// The order a door is used in.
+protocol DoorUse {
+    locked -> Unlock -> open
+    open -> Leave -> locked
+}
+AE
+"$tmp/docgen" "$tmp/std2" "$tmp/api3" >"$tmp/run3.log" 2>&1 || { cat "$tmp/run3.log"; fail "docgen failed on a protocol"; }
+page3="$tmp/api3/door.html"
+grep -qF '<span class="kind">protocol</span>' "$page3" || fail "a protocol is not labelled as one"
+grep -qF 'locked -&gt; Unlock -&gt; open' "$page3" || fail "a protocol's transitions are not shown"
+grep -qF 'message Unlock {' "$page3" || fail "a message is not shown as declared"
+grep -qF 'code: int' "$page3" || fail "a message's fields are not shown"
+grep -qF 'message Leave {}' "$page3" || fail "an empty message is not shown"
+grep -q "The order a door is used in." "$page3" || fail "a protocol's doc comment is missing"
+
 echo "  [PASS] docgen"
