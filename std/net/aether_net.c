@@ -23,6 +23,7 @@ TcpServer* tcp_listen_on_raw(const char* a, int p) { (void)a; (void)p; return NU
 int tcp_server_port_raw(TcpServer* s) { (void)s; return -1; }
 int tcp_server_poll_raw(TcpServer* s, int t) { (void)s; (void)t; return -1; }
 int tcp_set_nodelay_raw(TcpSocket* s, int on) { (void)s; (void)on; return -1; }
+int tcp_set_read_buffer_raw(TcpSocket* s, int b) { (void)s; (void)b; return -1; }
 TcpSocket* tcp_accept_raw(TcpServer* s) { (void)s; return NULL; }
 int tcp_server_close(TcpServer* s) { (void)s; return 0; }
 int tcp_fd_raw(TcpSocket* s) { (void)s; return -1; }
@@ -688,6 +689,18 @@ int tcp_set_nodelay_raw(TcpSocket* sock, int on) {
     if (!sock || !sock->connected) return -1;
     int flag = on ? 1 : 0;
     if (setsockopt(sock->fd, IPPROTO_TCP, TCP_NODELAY, (const char*)&flag, sizeof(flag)) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+/* SO_RCVBUF: the socket's receive buffer, `bytes` as the kernel takes it
+ * (Linux doubles it for its bookkeeping). Setting it also stops the kernel
+ * growing the buffer by itself, as Linux, macOS and Windows otherwise do
+ * while data arrives, read or not. */
+int tcp_set_read_buffer_raw(TcpSocket* sock, int bytes) {
+    if (!sock || !sock->connected || bytes <= 0) return -1;
+    if (setsockopt(sock->fd, SOL_SOCKET, SO_RCVBUF, (const char*)&bytes, sizeof(bytes)) != 0) {
         return -1;
     }
     return 0;

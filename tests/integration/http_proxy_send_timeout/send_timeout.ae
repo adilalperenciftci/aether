@@ -87,6 +87,14 @@ late_reader(port: int, get: string) -> string {
     if cerr != "" {
         return "connect failed"
     }
+    // A client that stops reading has to stop taking bytes: left to grow
+    // its receive buffer by itself, the kernel went on taking them a little
+    // at a time through the stall (macOS, now and then), and the server was
+    // right not to give up on a client its sends still reached.
+    berr = tcp.set_read_buffer(sock, 16384)
+    if berr != "" {
+        return berr
+    }
     tcp.write(sock, "${get}${get}${get}")
     // The three seconds of not reading count from the server's first byte,
     // not from the request: a slow build (a sanitizer's) can take seconds to
