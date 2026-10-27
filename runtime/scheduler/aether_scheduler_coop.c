@@ -70,6 +70,7 @@ static void coop_free_actor(ActorBase* actor) {
         }
         free(ib);
     }
+    aether_watch_free(actor);   // its death notices (#2974)
     if (actor->spsc_queue) {
         free(actor->spsc_queue);
         actor->spsc_queue = NULL;
@@ -168,6 +169,8 @@ static int coop_send_to_dead_actor(ActorBase* actor, Message* msg) {
             fprintf(stderr, "aether: message type %d sent to actor %d after its release; "
                             "dropped (reported once)\n", msg->type, actor->id);
         }
+    } else if (actor) {
+        scheduler_count_dead_sends(1);   // panicked, killed or stopped (#2974)
     }
     return 1;
 }
@@ -366,6 +369,9 @@ int scheduler_register_actor(ActorBase* actor, int preferred_core) {
     actor->scheduler_owned = 0;
     actor->release_message = NULL;   // its messages are the caller's (#3142)
     actor->step_payload = NULL;
+    atomic_store_explicit(&actor->death_watch, NULL, memory_order_relaxed);   // #2974
+    atomic_store_explicit(&actor->death_reason, NULL, memory_order_relaxed);
+    atomic_store_explicit(&actor->exit_flags, 0, memory_order_relaxed);
     return register_actor(actor, preferred_core);
 }
 
@@ -425,7 +431,13 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
 void scheduler_release_actor(ActorBase* actor) {
     if (!actor) return;
 
-    atomic_store_explicit(&actor->dead, AETHER_ACTOR_RELEASED, memory_order_relaxed);
+    // Its watchers are told (#2974): a release is a normal end unless
+    // something ended it first, and one told already is told nothing more.
+    if (!(atomic_load_explicit(&actor->dead, memory_order_relaxed) & AETHER_ACTOR_RELEASED)) {
+        aether_actor_claim_reason(actor, "normal");
+        aether_watch_notify(actor, atomic_load_explicit(&actor->death_reason, memory_order_relaxed));
+    }
+    atomic_fetch_or_explicit(&actor->dead, AETHER_ACTOR_RELEASED, memory_order_relaxed);
 
     // Remove from scheduler's actor list, clearing the vacated slot as the
     // threaded scheduler does.
@@ -543,8 +555,62 @@ void scheduler_wait(void) {
  * polls until its reply comes, so a step runs inside the asking one, as on a
  * core's inline path: it starts with no ask in hand, fails one its handler
  * left unanswered, and gives the enclosing step its context back. */
+// ----------------------------------------------------------------------------
+// The end of an actor (#2974), as the threaded scheduler's notes describe it:
+// one thread, so its death is finalized where it is seen, unless the actor is
+// stepping (its step lock taken by the outermost step on the stack), when its
+// step's end finalizes it.
+// ----------------------------------------------------------------------------
+
+static uint64_t g_coop_dead_sends = 0;
+
+uint64_t scheduler_dead_sends(void) {
+    return g_coop_dead_sends;
+}
+
+void scheduler_count_dead_sends(int n) {
+    if (n > 0) g_coop_dead_sends += (uint64_t)n;
+}
+
+/* What waits for it is dropped (an ask in it fails as dead), and its
+ * watchers are told. Once. */
+static void coop_finalize(ActorBase* actor) {
+    int flags = atomic_load_explicit(&actor->exit_flags, memory_order_relaxed);
+    if (flags & AETHER_EXIT_FINALIZED) return;
+    atomic_store_explicit(&actor->exit_flags, flags | AETHER_EXIT_FINALIZED, memory_order_relaxed);
+    int drained = 0;
+    Message discard;
+    for (;;) {
+        coop_refill(actor);
+        if (!mailbox_receive(&actor->mailbox, &discard)) break;
+        aether_message_drop(actor, &discard);
+        if (discard._reply_slot) ((ActorReplySlot*)discard._reply_slot)->failed = AETHER_ASK_DEAD;
+        drained++;
+    }
+    scheduler_count_dead_sends(drained);
+    const char* reason = atomic_load_explicit(&actor->death_reason, memory_order_relaxed);
+    aether_watch_notify(actor, reason ? reason : "normal");
+}
+
+void scheduler_actor_thread_finalize(ActorBase* actor) {
+    (void)actor;   // no actor has a thread of its own here
+}
+
+int scheduler_actor_end(ActorBase* actor, const char* reason, int bit) {
+    if (!actor || !aether_actor_claim_end(actor, reason, bit)) return 0;
+    if (!atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire)) {
+        coop_finalize(actor);
+        atomic_flag_clear_explicit(&actor->step_lock, memory_order_release);
+    }
+    return 1;
+}
+
 void scheduler_step_actor(ActorBase* actor) {
     if (!actor || !actor->step) return;
+    if (atomic_load_explicit(&actor->dead, memory_order_relaxed)) return;
+    // Taken by the outermost step of the actor on the stack (an ask's poll
+    // can step it again inside its own), for scheduler_actor_end.
+    int outer_step = atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire);
     void* outer_slot = g_current_reply_slot;
     void* outer_actor = g_current_step_actor;
     g_current_reply_slot = NULL;
@@ -553,6 +619,10 @@ void scheduler_step_actor(ActorBase* actor) {
     if (held && !held->reply_ready && !held->failed) held->failed = AETHER_ASK_NO_REPLY;
     g_current_reply_slot = outer_slot;
     g_current_step_actor = outer_actor;
+    // Ended while its handler ran: a stop(), or a kill (#2974).
+    int ended = atomic_load_explicit(&actor->dead, memory_order_relaxed);
+    if (ended && !(ended & AETHER_ACTOR_RELEASED)) coop_finalize(actor);
+    if (!outer_step) atomic_flag_clear_explicit(&actor->step_lock, memory_order_release);
 }
 
 int aether_scheduler_poll(int max_per_actor) {
@@ -638,7 +708,10 @@ void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg
     coop_deliver(target, msg);
     g_pending_reply_slot = NULL;
 
-    // Process messages until reply is ready, or none can come
+    // Process messages until reply is ready, or none can come. An asker
+    // killed meanwhile still gets its answer here: the slot is on this stack
+    // and the message in the target's mailbox points to it, and one thread
+    // runs both, so the answer comes within these polls (#2974).
     int max_rounds = 100000;
     while (!slot.reply_ready && !slot.failed && max_rounds-- > 0) {
         aether_scheduler_poll(1);

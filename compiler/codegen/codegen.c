@@ -10520,6 +10520,18 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                     unindent(gen);
                     print_line(gen, "} %s;", child->value);
                     print_line(gen, "");
+                    /* The death notice the runtime writes (#2974): this
+                     * struct must be its AetherDownMsg. */
+                    if (child->annotation && strcmp(child->annotation, "system") == 0 &&
+                        strcmp(child->value, "Down") == 0) {
+                        print_line(gen, "#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L");
+                        print_line(gen, "_Static_assert(sizeof(Down) == sizeof(AetherDownMsg) &&");
+                        print_line(gen, "               offsetof(Down, ref) == offsetof(AetherDownMsg, ref) &&");
+                        print_line(gen, "               offsetof(Down, reason) == offsetof(AetherDownMsg, reason),");
+                        print_line(gen, "               \"Down must be the runtime's AetherDownMsg\");");
+                        print_line(gen, "#endif");
+                        print_line(gen, "");
+                    }
 
                     /* Per-message heap-string-field release function
                      * (#466). Walked by the receive-handler dispatch

@@ -6768,6 +6768,55 @@ static void typecheck_pending_callees(ASTNode* n, PendingResults* p, SymbolTable
     typecheck_pending_calls(n, p, global_table, 1);
 }
 
+/* #2974: the death notice. The runtime writes its payload, so the compiler
+ * owns its shape: `message Down { ref: actor_ref, reason: string }` is
+ * declared here, with the reserved id 254 (aether_message_registry.c), for a
+ * program that names it (an arm, a literal), and a program's own `message
+ * Down` is refused. A program that never names it drops a Down it is sent,
+ * as any type it has no arm for. */
+static int names_down_message(const ASTNode* n) {
+    if (!n) return 0;
+    if ((n->type == AST_MESSAGE_PATTERN || n->type == AST_MESSAGE_CONSTRUCTOR) &&
+        n->value && strcmp(n->value, "Down") == 0)
+        return 1;
+    for (int i = 0; i < n->child_count; i++)
+        if (names_down_message(n->children[i])) return 1;
+    return 0;
+}
+
+static void declare_down_message(ASTNode* program) {
+    int declared = 0;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (!c || c->type != AST_MESSAGE_DEFINITION || !c->value || strcmp(c->value, "Down") != 0)
+            continue;
+        if (c->annotation && strcmp(c->annotation, "system") == 0) {
+            declared = 1;   // a second check of the same program
+            continue;
+        }
+        type_error_hint("'Down' is the runtime's death notice, declared by the compiler as "
+                        "`message Down { ref: actor_ref, reason: string }`: a program cannot "
+                        "declare it",
+                        "rename this message; a `Down(ref, reason)` arm takes the runtime's",
+                        c->line, c->column);
+        return;
+    }
+    if (declared || !names_down_message(program)) return;
+    ASTNode* def = create_ast_node(AST_MESSAGE_DEFINITION, "Down", 0, 0);
+    def->annotation = strdup("system");
+    ASTNode* ref = create_ast_node(AST_MESSAGE_FIELD, "ref", 0, 0);
+    ref->node_type = create_type(TYPE_ACTOR_REF);
+    ASTNode* reason = create_ast_node(AST_MESSAGE_FIELD, "reason", 0, 0);
+    reason->node_type = create_type(TYPE_STRING);
+    add_child(def, ref);
+    add_child(def, reason);
+    // First, ahead of every use.
+    add_child(program, def);
+    memmove(&program->children[1], &program->children[0],
+            (size_t)(program->child_count - 1) * sizeof(ASTNode*));
+    program->children[0] = def;
+}
+
 int typecheck_program(ASTNode* program) {
     note_program_globals(program);
     if (!program || program->type != AST_PROGRAM) return 0;
@@ -6795,6 +6844,7 @@ int typecheck_program(ASTNode* program) {
     error_count = 0;
     warning_count = 0;
     namespace_count = 0;  // Reset imported namespaces
+    declare_down_message(program);   // #2974, counted with this check's errors
     user_explicit_namespace_count = 0;  // Reset user-explicit namespaces (issue #243)
     // (#878: per-module selective-import filter removed — nothing to reset)
 

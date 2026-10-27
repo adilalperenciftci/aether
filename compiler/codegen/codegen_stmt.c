@@ -9140,8 +9140,10 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         "_ask_st%d == AETHER_ASK_DEAD ? \"the actor is dead\" : "
                         "_ask_st%d == AETHER_ASK_DIED ? \"the actor died before it replied\" : "
                         "_ask_st%d == AETHER_ASK_NO_REPLY ? \"the handler returned without replying\" : "
+                        "_ask_st%d == AETHER_ASK_KILLED ? \"the asking actor was killed\" : "
                         "\"out of memory\" };\n",
-                        tuple_type_name, tmp_id, tmp_id, tmp_id, tmp_id, to, tmp_id, tmp_id, tmp_id);
+                        tuple_type_name, tmp_id, tmp_id, tmp_id, tmp_id, to, tmp_id, tmp_id, tmp_id,
+                        tmp_id);
             } else {
                 print_indent(gen);
                 fprintf(gen->output, "%s _tup%d = ", tuple_type_name, tmp_id);

@@ -195,6 +195,10 @@ void aether_panic_capture_stack(void);
 typedef void (*AetherDeathHook)(int actor_id, const char* reason);
 void aether_set_on_actor_death(AetherDeathHook fn);
 
+// The text of a caught panic's reason: a reason built at run time is an
+// AetherString, a literal its own text (#2340). "unknown" for NULL.
+const char* aether_panic_reason_text(const char* reason);
+
 // Called by the scheduler after catching a panic. Fires the on_actor_death
 // hook if one is set. Separated from the push/pop primitives so scheduler
 // code can decide its own ordering (e.g. mark actor dead first, then fire

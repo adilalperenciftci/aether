@@ -54,6 +54,19 @@ typedef struct {
 // message registry allocates user message IDs starting at 0 and never hands out 255.
 #define MSG_IO_READY 255
 
+/* The death notice (#2974): `message Down { ref: actor_ref, reason: string }`,
+ * declared by the compiler for every program that names it, with this
+ * reserved id. The runtime writes its payload, so the compiler checks its
+ * generated struct against this layout. `reason` is a counted string the
+ * message owns. A monitor's Down carries the monitor id in
+ * Message.payload_int (0 for a link's). */
+#define AETHER_MSG_DOWN 254
+typedef struct {
+    int _message_id;
+    void* ref;
+    const char* reason;
+} AetherDownMsg;
+
 // TLS pointer to the actor whose step() is currently running on this
 // thread. Set by generated *_step() functions at entry; read by the
 // reactor bridge (std/net/aether_actor_bridge.c) so await_io() can
@@ -157,9 +170,11 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
     /* Bits (#2517): AETHER_ACTOR_PANICKED once the actor's step() unwound \
      * via aether_panic() or a caught signal, AETHER_ACTOR_RELEASED once it \
      * was released, AETHER_ACTOR_THREAD_GONE once its own thread (an \
-     * auto_process actor's) has left its loop. Non-zero actors are skipped \
-     * by the scheduler and incoming messages are dropped. Bits are only \
-     * ever set. */ \
+     * auto_process actor's) has left its loop, AETHER_ACTOR_KILLED once a \
+     * kill or a linked actor's death ended it, AETHER_ACTOR_STOPPED once \
+     * it stopped itself (#2974). Non-zero actors are skipped by the \
+     * scheduler and incoming messages are dropped. Bits are only ever \
+     * set. */ \
     atomic_int dead; \
     /* Full allocation size passed to scheduler_spawn_actor. numa_free() unmaps \
      * exactly [ptr, ptr+size), so freeing a derived actor with \
@@ -202,16 +217,39 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
      * another core only while this is \
      * 0, with AETHER_INFLIGHT_MOVING set for the move, so no message is \
      * left behind on the core it leaves. */ \
-    atomic_int inflight;
+    atomic_int inflight; \
+    /* Its death notices (#2974): the actors that monitor it or are linked \
+     * to it, and the ones it monitors (runtime/actors/aether_supervision.c). \
+     * Made by the first monitor, link or death, freed with the actor. */ \
+    _Atomic(struct AetherWatch*) death_watch; \
+    /* Why it ended, a heap copy: "normal", "killed", the panic's reason or \
+     * a linked actor's. Set by whatever ended it first, before its death \
+     * bit; NULL while it lives. */ \
+    _Atomic(char*) death_reason; \
+    /* AETHER_EXIT_* bits (#2974). */ \
+    atomic_int exit_flags;
 
 typedef struct {
     AETHER_ACTOR_BASE_FIELDS
 } ActorBase;
 
+struct AetherWatch;  /* runtime/actors/aether_supervision.c */
+
 /* The bits of ActorBase.dead; a send checks only that it is non-zero. */
 #define AETHER_ACTOR_PANICKED 1
 #define AETHER_ACTOR_RELEASED 2
 #define AETHER_ACTOR_THREAD_GONE 4
+#define AETHER_ACTOR_KILLED 8
+#define AETHER_ACTOR_STOPPED 16
+/* The bits that end an actor: the first one set decides its reason. */
+#define AETHER_ACTOR_ENDED (AETHER_ACTOR_PANICKED | AETHER_ACTOR_RELEASED | \
+                            AETHER_ACTOR_KILLED | AETHER_ACTOR_STOPPED)
+
+/* ActorBase.exit_flags (#2974): linked deaths reach it as Down messages
+ * (trap_exits), and its death has been finalized (drained, its watchers
+ * told), which happens once. */
+#define AETHER_EXIT_TRAP      1
+#define AETHER_EXIT_FINALIZED 2
 
 /* ActorBase.inflight (#3090, #3093): set while the actor's core moves it to
  * another; the counts of messages in flight sit below it. */
@@ -313,9 +351,19 @@ typedef struct {
     // The innermost of those asks: the actor it waits on and its reply
     // slot, set and put back under actor_lock with `asking`. Another core's
     // relief moves that actor here, where the waiting thread steps it, and
-    // wakes the wait through the slot (#3197).
+    // wakes the wait through the slot (#3197). And the actor that asked,
+    // whose kill wakes the wait through the slot too (#2974).
     _Atomic(ActorBase*)      ask_target;
     _Atomic(ActorReplySlot*) ask_slot;
+    _Atomic(ActorBase*)      ask_asker;
+    // Actors of this core whose death is to be finalized here (#2974): a
+    // kill or a link's from another thread posts them, and the core's loop
+    // (or its relief) finalizes each once it is not stepping.
+    atomic_flag     control_lock;
+    atomic_int      control_pending;
+    ActorBase**     control;
+    int             control_count;
+    int             control_cap;
     // Where this core's next relief scan of its table starts (#3197).
     int             relief_cursor;
 
@@ -401,6 +449,60 @@ uint64_t scheduler_released_sends(void);
 // and reported once on stderr (#2912).
 uint64_t scheduler_stopped_sends(void);
 
+/* ------------------------------------------------------------------------
+ * Death notices (#2974): runtime/actors/aether_supervision.c and the
+ * schedulers' finalize. An actor ends once, by its first death bit: a
+ * panic, a kill (or a linked actor's death), a stop, a release. Its death
+ * is finalized on its own thread once it is not stepping (drained, its
+ * watchers sent Down), so no Down comes for an actor whose handler still
+ * runs.
+ * ------------------------------------------------------------------------ */
+
+/* Messages a panicked, killed or stopped actor did not handle: queued at its
+ * death or sent to it after. Each was released through aether_message_drop. */
+uint64_t scheduler_dead_sends(void);
+void scheduler_count_dead_sends(int n);
+
+/* Ends `actor` with `reason` by death bit `bit` (KILLED, STOPPED), unless it
+ * ended already; returns 1 when this call ended it. Its finalize runs on its
+ * own thread once its current step (if any) returns. From any thread. */
+int scheduler_actor_end(ActorBase* actor, const char* reason, int bit);
+
+/* Claims `actor`'s death for `reason` and sets `bit`: 1 when nothing ended
+ * it before, else 0 and nothing changes but the bit. */
+int aether_actor_claim_end(ActorBase* actor, const char* reason, int bit);
+/* Keeps `reason` as the actor's death reason unless one is kept already. */
+void aether_actor_claim_reason(ActorBase* actor, const char* reason);
+/* An ended actor's death, finalized on the thread that owns it (an actor
+ * thread's own, at its loop's end). */
+void scheduler_actor_thread_finalize(ActorBase* actor);
+/* Tells the actor's watchers of its death (once), and lets go of the
+ * actors it watches. Any thread. */
+void aether_watch_notify(ActorBase* actor, const char* reason);
+/* Frees the actor's watch list and death reason (its block is ending). */
+void aether_watch_free(ActorBase* actor);
+/* A Down for `self` from a monitor `self` has since dropped (demonitor) is
+ * not handled: 0 for it, 1 for every other. Called by the generated step
+ * before a Down arm. */
+int aether_down_accept(ActorBase* self, Message* msg);
+
+/* The std.actors surface, from a handler (the actor stepping on this
+ * thread is `self`). On wasi a panic ends the program (it has no setjmp),
+ * so a death a monitor would be told of cannot be caught there: a call to
+ * these is refused at compile time on that target. */
+#if defined(__wasi__) && defined(__clang__)
+#define AETHER_NEEDS_PANIC_BARRIER \
+    __attribute__((unavailable("watching a death needs the step's panic barrier, and on wasi " \
+                               "a panic ends the program (no setjmp)")))
+#else
+#define AETHER_NEEDS_PANIC_BARRIER
+#endif
+int     aether_actor_monitor(void* ref) AETHER_NEEDS_PANIC_BARRIER;
+void    aether_actor_demonitor(int id);
+void    aether_actor_stop(void);
+void    aether_actor_kill(void* ref);
+int64_t aether_actor_dead_sends(void);
+
 // #2527: a reference that knows which actor it was taken from. The block a
 // released actor leaves goes to the next spawn of its size, which gets an id
 // of its own; a send through a reference taken from the released actor is
@@ -477,6 +579,7 @@ void* scheduler_ask_message(ActorBase* target, void* msg_data, size_t msg_size, 
 #define AETHER_ASK_DIED       3   /* the actor died handling the ask, before it replied */
 #define AETHER_ASK_NO_MEMORY  4   /* the ask could not be made */
 #define AETHER_ASK_NO_REPLY   5   /* the handler returned without replying */
+#define AETHER_ASK_KILLED     6   /* the asking actor was killed while it waited (#2974) */
 void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg_size,
                                    int timeout_ms, int* status);
 

@@ -284,7 +284,8 @@ TEST_CATEGORY(send_buffer_flush_on_target_change, TEST_CATEGORY_RUNTIME) {
 
 // From a thread that is no core's (here the test's own): the flush sends
 // as the thread's single sends would, and a force flush leaves the buffer
-// empty with no target.
+// empty with no target. Coverage of that path only: the code before #3292
+// passed it too.
 TEST_CATEGORY(send_buffer_flush_from_foreign_thread, TEST_CATEGORY_RUNTIME) {
     scheduler_init(2);
     BufActor* t = buf_actor(0);

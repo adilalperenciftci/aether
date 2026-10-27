@@ -131,6 +131,11 @@ void* aether_actor_thread(void* arg) {
         }
     }
 
+    // Ended (a kill, a linked death; a panic's is finalized in its step):
+    // the death is finalized here, on the thread that owns the mailbox and
+    // takes the inbox, while it is still a reader (#2974, #3298).
+    scheduler_actor_thread_finalize(actor);
+
     // Done reading: a released actor this thread stepped can be reclaimed.
     scheduler_reader_offline();
     // And this actor, if it was released (or when it is, later).

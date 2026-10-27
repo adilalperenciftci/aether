@@ -1,0 +1,290 @@
+// Death notices (#2974): monitors and the Down message, shared by the
+// multicore and the cooperative scheduler.
+//
+// Every actor that is watched, or watches, has a watch list
+// (`ActorBase.death_watch`, made on first use): who monitors it (WATCHER, with the
+// monitor id), whom it monitors (MONITORS, the same id), and whom it is
+// linked to (LINK). Its death is told once, by aether_watch_notify, which a
+// scheduler calls when it finalizes the death on the actor's own thread, or
+// a release from the releasing thread: the list is marked finished under its
+// lock and its entries taken, each WATCHER is sent a Down, and the actor lets
+// go of the actors it monitors. A monitor set after that finds the list
+// finished and is answered at once, with the reason the death left.
+//
+// Locks: one watch list at a time, never two. A monitor adds its own
+// MONITORS entry first, then its WATCHER entry in the target's list; a
+// death or a demonitor that runs between the two finds one side and not the
+// other, and each side is checked again where it is used: a Down whose
+// MONITORS entry is gone is dropped by the watcher (aether_down_accept), and
+// a WATCHER entry whose watcher has let go is removed by that watcher.
+
+#include "../scheduler/multicore_scheduler.h"
+#include "../../std/string/aether_string.h"
+#include "aether_panic.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+enum { WATCH_WATCHER = 1, WATCH_MONITORS = 2, WATCH_LINK = 3 };
+
+typedef struct {
+    int kind;
+    int id;              // a monitor's id; 0 for a link
+    ActorBase* other;
+} AetherWatchEntry;
+
+typedef struct AetherWatch {
+    atomic_flag lock;
+    int finished;        // the death was told: no entry is added after
+    int count;
+    int cap;
+    AetherWatchEntry* e;
+} AetherWatch;
+
+static atomic_int g_next_monitor_id = 1;
+
+static void watch_lock(AetherWatch* w) {
+    while (atomic_flag_test_and_set_explicit(&w->lock, memory_order_acquire)) AETHER_CPU_PAUSE();
+}
+
+static void watch_unlock(AetherWatch* w) {
+    atomic_flag_clear_explicit(&w->lock, memory_order_release);
+}
+
+/* The actor's list, made by the first caller; NULL only out of memory. */
+static AetherWatch* watch_of(ActorBase* a) {
+    AetherWatch* w = atomic_load_explicit(&a->death_watch, memory_order_acquire);
+    if (w) return w;
+    AetherWatch* fresh = (AetherWatch*)calloc(1, sizeof(AetherWatch));
+    if (!fresh) return NULL;
+    atomic_flag_clear_explicit(&fresh->lock, memory_order_relaxed);
+    AetherWatch* expected = NULL;
+    if (atomic_compare_exchange_strong_explicit(&a->death_watch, &expected, fresh,
+                                                memory_order_acq_rel, memory_order_acquire)) {
+        return fresh;
+    }
+    free(fresh);
+    return expected;
+}
+
+/* Under the list's lock. 0 out of memory. */
+static int watch_add(AetherWatch* w, int kind, int id, ActorBase* other) {
+    if (w->count == w->cap) {
+        int cap = w->cap ? w->cap * 2 : 4;
+        AetherWatchEntry* grown = (AetherWatchEntry*)realloc(w->e, (size_t)cap * sizeof(AetherWatchEntry));
+        if (!grown) return 0;
+        w->e = grown;
+        w->cap = cap;
+    }
+    w->e[w->count].kind = kind;
+    w->e[w->count].id = id;
+    w->e[w->count].other = other;
+    w->count++;
+    return 1;
+}
+
+/* Under the list's lock: removes the first entry of `kind` with `id` (when
+ * `id` is not 0) or `other`; returns it, or kind 0 when there is none. */
+static AetherWatchEntry watch_remove(AetherWatch* w, int kind, int id, ActorBase* other) {
+    AetherWatchEntry found = { 0, 0, NULL };
+    for (int i = 0; i < w->count; i++) {
+        AetherWatchEntry* e = &w->e[i];
+        if (e->kind != kind) continue;
+        if (id ? e->id != id : e->other != other) continue;
+        found = *e;
+        w->e[i] = w->e[--w->count];
+        break;
+    }
+    return found;
+}
+
+/* Removes an entry from `a`'s list, if it has one. */
+static void watch_remove_from(ActorBase* a, int kind, int id, ActorBase* other) {
+    AetherWatch* w = atomic_load_explicit(&a->death_watch, memory_order_acquire);
+    if (!w) return;
+    watch_lock(w);
+    (void)watch_remove(w, kind, id, other);
+    watch_unlock(w);
+}
+
+/* A Down for `to`: `dead` ended with `reason`; `id` the monitor's, 0 for a
+ * link. The reason is a counted string the message owns. */
+static void send_down(ActorBase* to, ActorBase* dead, const char* reason, int id) {
+    AetherDownMsg* p = (AetherDownMsg*)malloc(sizeof(AetherDownMsg));
+    const char* text = reason ? reason : "normal";
+    const char* owned = p ? (const char*)string_new_with_length(text, strlen(text)) : NULL;
+    if (!p || !owned) {
+        free(p);
+        fprintf(stderr, "aether: out of memory for the Down of actor %d to actor %d; "
+                        "it is not sent\n", dead->id, to->id);
+        return;
+    }
+    p->_message_id = AETHER_MSG_DOWN;
+    p->ref = dead;
+    p->reason = owned;
+    Message m;
+    memset(&m, 0, sizeof m);
+    m.type = AETHER_MSG_DOWN;
+    m.payload_ptr = p;
+    m.payload_int = id;
+    scheduler_send_remote(to, m, aether_core_id_get());
+}
+
+void aether_actor_claim_reason(ActorBase* a, const char* reason) {
+    if (atomic_load_explicit(&a->death_reason, memory_order_acquire)) return;
+    char* copy = strdup(reason ? reason : "normal");
+    char* none = NULL;
+    if (copy && !atomic_compare_exchange_strong_explicit(&a->death_reason, &none, copy,
+                                                         memory_order_acq_rel,
+                                                         memory_order_acquire)) {
+        free(copy);
+    }
+}
+
+int aether_actor_claim_end(ActorBase* a, const char* reason, int bit) {
+    if (!(atomic_load_explicit(&a->dead, memory_order_acquire) & AETHER_ACTOR_ENDED))
+        aether_actor_claim_reason(a, reason);
+    int was = atomic_fetch_or_explicit(&a->dead, bit, memory_order_acq_rel);
+    return !(was & AETHER_ACTOR_ENDED);
+}
+
+void aether_watch_notify(ActorBase* a, const char* reason) {
+    AetherWatch* w = watch_of(a);
+    if (!w) {
+        fprintf(stderr, "aether: out of memory telling the death of actor %d\n", a->id);
+        return;
+    }
+    watch_lock(w);
+    if (w->finished) {
+        watch_unlock(w);
+        return;
+    }
+    w->finished = 1;
+    AetherWatchEntry* e = w->e;
+    int n = w->count;
+    w->e = NULL;
+    w->count = 0;
+    w->cap = 0;
+    watch_unlock(w);
+
+    for (int i = 0; i < n; i++) {
+        switch (e[i].kind) {
+        case WATCH_WATCHER:
+            send_down(e[i].other, a, reason, e[i].id);
+            break;
+        case WATCH_MONITORS:
+            // It watches no more: its target's death tells it nothing.
+            watch_remove_from(e[i].other, WATCH_WATCHER, e[i].id, NULL);
+            break;
+        default:
+            break;
+        }
+    }
+    free(e);
+}
+
+void aether_watch_free(ActorBase* a) {
+    AetherWatch* w = atomic_exchange_explicit(&a->death_watch, NULL, memory_order_acq_rel);
+    if (w) {
+        free(w->e);
+        free(w);
+    }
+    free(atomic_exchange_explicit(&a->death_reason, NULL, memory_order_acq_rel));
+}
+
+int aether_down_accept(ActorBase* self, Message* msg) {
+    int id = (int)msg->payload_int;
+    if (id == 0) return 1;   // a link's, or one a program sent
+    AetherWatch* w = atomic_load_explicit(&self->death_watch, memory_order_acquire);
+    if (!w) return 0;
+    watch_lock(w);
+    AetherWatchEntry found = watch_remove(w, WATCH_MONITORS, id, NULL);
+    watch_unlock(w);
+    return found.kind != 0;
+}
+
+static void free_reason(const void* p) {
+    free((void*)p);
+}
+
+/* The actor stepping on this thread, for the std.actors surface. */
+static ActorBase* current_self(const char* what) {
+    ActorBase* self = (ActorBase*)g_current_step_actor;
+    if (!self) {
+        char msg[160];
+        snprintf(msg, sizeof msg, "%s outside an actor's handler: it acts on the actor running it", what);
+        char* owned = strdup(msg);
+        if (owned) aether_panic_owned(owned, free_reason);
+        aether_panic(what);
+    }
+    return self;
+}
+
+int aether_actor_monitor(void* ref) {
+    ActorBase* self = current_self("actors.monitor()");
+    ActorBase* target = (ActorBase*)ref;
+    if (!target) aether_panic("actors.monitor() of a null actor reference");
+    int id = atomic_fetch_add_explicit(&g_next_monitor_id, 1, memory_order_relaxed);
+    if (id <= 0) {   // wrapped: ids stay positive (0 marks a link's Down)
+        atomic_store_explicit(&g_next_monitor_id, 2, memory_order_relaxed);
+        id = 1;
+    }
+    AetherWatch* mine = watch_of(self);
+    if (!mine) aether_panic("actors.monitor(): out of memory");
+    watch_lock(mine);
+    int ok = watch_add(mine, WATCH_MONITORS, id, target);
+    watch_unlock(mine);
+    if (!ok) aether_panic("actors.monitor(): out of memory");
+
+    // Released: told at its release; its block may already hold another
+    // actor's lists, so it is answered without touching them.
+    if (atomic_load_explicit(&target->dead, memory_order_acquire) & AETHER_ACTOR_RELEASED) {
+        send_down(self, target, "normal", id);
+        return id;
+    }
+    AetherWatch* theirs = watch_of(target);
+    if (!theirs) {
+        watch_remove_from(self, WATCH_MONITORS, id, NULL);
+        aether_panic("actors.monitor(): out of memory");
+    }
+
+    watch_lock(theirs);
+    if (theirs->finished) {
+        // Ended already: told now, with the reason its death left.
+        watch_unlock(theirs);
+        send_down(self, target, atomic_load_explicit(&target->death_reason, memory_order_acquire), id);
+        return id;
+    }
+    ok = watch_add(theirs, WATCH_WATCHER, id, self);
+    watch_unlock(theirs);
+    if (!ok) {
+        watch_remove_from(self, WATCH_MONITORS, id, NULL);
+        aether_panic("actors.monitor(): out of memory");
+    }
+    return id;
+}
+
+void aether_actor_demonitor(int id) {
+    ActorBase* self = current_self("actors.demonitor()");
+    if (id <= 0) return;
+    AetherWatch* mine = atomic_load_explicit(&self->death_watch, memory_order_acquire);
+    if (!mine) return;
+    watch_lock(mine);
+    AetherWatchEntry found = watch_remove(mine, WATCH_MONITORS, id, NULL);
+    watch_unlock(mine);
+    if (found.kind) watch_remove_from(found.other, WATCH_WATCHER, id, NULL);
+}
+
+void aether_actor_stop(void) {
+    ActorBase* self = current_self("actors.stop()");
+    // Finalized when this handler returns (the step barrier's check).
+    aether_actor_claim_end(self, "normal", AETHER_ACTOR_STOPPED);
+}
+
+void aether_actor_kill(void* ref) {
+    if (ref) scheduler_actor_end((ActorBase*)ref, "killed", AETHER_ACTOR_KILLED);
+}
+
+int64_t aether_actor_dead_sends(void) {
+    return (int64_t)scheduler_dead_sends();
+}

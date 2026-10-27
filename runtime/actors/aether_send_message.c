@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include "../utils/aether_thread.h"
+#include "../../std/string/aether_string.h"
 
 // Thread-local core ID for optimization
 extern AETHER_TLS int current_core_id;
@@ -98,8 +99,13 @@ void aether_free_message(void* msg_data) {
 
 void aether_message_drop(ActorBase* target, Message* msg) {
     if (msg->payload_ptr) {
-        if (target && target->release_message)
+        if (msg->type == AETHER_MSG_DOWN) {
+            // The runtime wrote it (#2974): its reason is the runtime's to
+            // release, whether or not the program declares Down.
+            string_release(((AetherDownMsg*)msg->payload_ptr)->reason);
+        } else if (target && target->release_message) {
             target->release_message(msg->type, msg->payload_ptr);
+        }
         aether_free_message(msg->payload_ptr);
         msg->payload_ptr = NULL;
     }

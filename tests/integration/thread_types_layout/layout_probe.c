@@ -33,6 +33,9 @@ int main(void) {
     AT(ActorBase, inbox);
     AT(ActorBase, thread_parked);
     AT(ActorBase, inflight);
+    AT(ActorBase, death_watch);
+    AT(ActorBase, death_reason);
+    AT(ActorBase, exit_flags);
     SIZE(ActorReplySlot);
     AT(ActorReplySlot, mutex);
     AT(ActorReplySlot, cond);
@@ -45,6 +48,7 @@ int main(void) {
     AT(Scheduler, park_mutex);
     AT(Scheduler, park_cond);
     AT(Scheduler, parked);
+    AT(Scheduler, control_pending);
     AT(Scheduler, io_registered_count);
     return 0;
 }

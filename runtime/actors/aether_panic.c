@@ -438,7 +438,8 @@ static void aether_print_stack_trace_to_stderr(void) {
  * the runtime as the AetherString codegen made it -- the catch lowering
  * adopts that object as its binding -- so printing it as a C string would
  * print the header. A literal is a plain char* and is its own text. */
-static const char* panic_reason_text(const char* reason) {
+const char* aether_panic_reason_text(const char* reason) {
+    if (!reason) return "unknown";
     if (is_aether_string(reason)) return ((const AetherString*)reason)->data;
     return reason;
 }
@@ -469,7 +470,7 @@ void aether_panic_owned(const char* reason, void (*release)(const void*)) {
     // AETHER_STACK_TRACE=0 if the noise gets in the way (e.g. tests
     // that diff stderr line-for-line).
     fprintf(stderr, "aether: panic outside any try/catch or actor: %s\n",
-            panic_reason_text(reason));
+            aether_panic_reason_text(reason));
     const char* trace_env = getenv("AETHER_STACK_TRACE");
     if (!trace_env || strcmp(trace_env, "0") != 0) {
         aether_print_stack_trace_to_stderr();
@@ -573,5 +574,5 @@ void aether_set_on_actor_death(AetherDeathHook fn) {
 
 void aether_fire_death_hook(int actor_id, const char* reason) {
     AetherDeathHook h = death_hook;
-    if (h) h(actor_id, reason ? panic_reason_text(reason) : "unknown");
+    if (h) h(actor_id, reason ? aether_panic_reason_text(reason) : "unknown");
 }

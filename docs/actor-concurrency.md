@@ -65,6 +65,7 @@ Aether implements a lightweight actor model where actors are state machines that
 2. **Send** - Send messages with the `!` operator or generated send functions
 3. **Step** - Scheduler calls the actor's step function to process mailbox messages
 4. **Deactivate** - Actor is marked inactive when its mailbox is empty
+5. **End** - A panic in its handler, `actors.kill(ref)`, `actors.stop()` from its own handler, or a C host's release ends it, once ([The end of an actor](#the-end-of-an-actor))
 
 ### Actor Structure
 
@@ -80,7 +81,7 @@ typedef struct {
 } CounterActor;
 ```
 
-The fields, in order: `active`, `id`, `mailbox`, `step`, `thread`, `auto_process`, `assigned_core`, `migrate_to`, `spsc_queue`, `reply_slot`, `step_lock`, `timeout_ns`, `last_activity_ns`, `step_payload`, `step_type`, `dead`, `alloc_size`, `destroy_state`, `release_message`, `scheduler_owned`, `inbox`, `thread_parked`, `inflight`. The header comments each one.
+The fields, in order: `active`, `id`, `mailbox`, `step`, `thread`, `auto_process`, `assigned_core`, `migrate_to`, `spsc_queue`, `reply_slot`, `step_lock`, `timeout_ns`, `last_activity_ns`, `step_payload`, `step_type`, `dead`, `alloc_size`, `destroy_state`, `release_message`, `scheduler_owned`, `inbox`, `thread_parked`, `inflight`, `death_watch`, `death_reason`, `exit_flags`. The header comments each one.
 
 An actor the compiler generates holds the base as its first member instead, `ActorBase _aether_base;`, followed by its states. So a state can be named like any of these fields (`state id`, `state active`); only a state named `_aether_base` is refused (#3094).
 
@@ -218,6 +219,29 @@ Like the mailbox, the overflow is touched only by the thread that runs the actor
 `tests/runtime/test_ask_relief.c` places the actors on chosen cores. It covers a chain of asks back to the waiting core, the waiting core's other actors, and a same-core target whose message the batch still held; and an actor sent 100 and more messages while its core waits, which moves to another core and handles them all in order, with what is sent to it later, by a local send or through the new core's queue, behind its overflow, and with a panic dropping what the overflow holds.
 
 An ask that was answered or failed returns only once its reply slot is freed. The replier lets go of the slot a few instructions after it wakes the asker, so the asker waits for that and frees the slot itself (#3245). What an ask allocated is gone when it returns, which a program that counts its heap around asks relies on. A timed-out ask does not wait; its replier frees the slot when it comes.
+
+## The end of an actor
+
+An actor ends once (#2974), by the first of these: a panic in its handler (the step's barrier catches it), `actors.kill(ref)` from anywhere (or the death of an actor it is linked to), `actors.stop()` from its own handler, or a C host's `scheduler_release_actor`. Each sets a bit in `ActorBase.dead` (`PANICKED`, `KILLED`, `STOPPED`, `RELEASED`), and the first keeps its reason in `death_reason`: the panic's reason, `"killed"` or `"normal"`. From then on a send to it is dropped.
+
+Its death is then finalized, once, on the thread that owns its mailbox and while the actor steps nothing: what waits for it (its mailbox, the overflow behind it, an actor thread's inbox) is dropped through `aether_message_drop`, an ask among them fails as dead, and every message is credited as handled and counted by `scheduler_dead_sends()` (`actors.dead_sends()`), with those sent to it later and those still on their way when it died. Its watchers are then told. Where it happens:
+
+- a panic: in the step barrier, as the step unwinds;
+- a stop, and a kill that lands while its handler runs: when the handler returns (the barrier checks the bits after every step);
+- a kill of an actor that is not stepping: its core finalizes it at the top of its loop, from a request the kill posts (`Scheduler.control`), or from its relief while it waits in an ask. `scheduler_wait` counts the requests, so `wait_for_idle()` returns only once the Downs are sent;
+- an actor with a thread of its own: on that thread, at the end of its loop (#3298: its inbox is dropped and credited too, and a sender that pushes after that drain drops what it pushed).
+
+So a `Down` never comes while the actor's handler still runs, and it comes after the last messages the actor sent its watcher, on the same core's path. A killed actor whose handler is waiting in an ask has that ask end at once, with `"the asking actor was killed"`; the handler then runs to its end, and the actor ends after it (a handler is never cut short).
+
+### Death notices
+
+`actors.monitor(ref)`, from a handler, asks for one `Down { ref: actor_ref, reason: string }` when `ref` ends, and returns the monitor's id; if `ref` has ended already, the `Down` is sent at once with the reason it died of. `actors.demonitor(id)` drops the monitor: no `Down` of it is handled after the call, one already on its way included, since the monitor's id rides in the message (`Message.payload_int`) and the generated step checks it against the watcher's own list before the arm runs (`aether_down_accept`). An actor handles it in a `Down(ref, reason) -> { ... }` arm.
+
+`Down` is the runtime's message: the compiler declares it for every program that names it, with the reserved id 254 (`AETHER_MSG_DOWN`), and checks its struct against the runtime's `AetherDownMsg`, since the runtime writes the payload; a program's own `message Down` is refused. Its `reason` is a counted string the message owns. An actor with no `Down` arm drops a `Down` as any message it has no arm for.
+
+Each actor's watchers live in its `death_watch` list (`runtime/actors/aether_supervision.c`), made on first use: who monitors it and whom it monitors. A death marks the list finished under its lock and takes its entries; a monitor that comes after finds it finished and is answered at once. No two lists are locked together.
+
+On wasi a panic ends the program, since the target has no setjmp to unwind with, so a death a monitor would watch cannot be caught there: `actors.monitor` (and `std.supervise`, built on it) is refused at compile time on that target, through an `unavailable` attribute on the runtime's declaration.
 
 ## Actor Timeouts
 

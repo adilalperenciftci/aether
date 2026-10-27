@@ -84,6 +84,9 @@ extern AETHER_TLS int current_core_id;
 static void reply_slot_decref(ActorReplySlot* slot);
 static void reply_slot_fail(ActorReplySlot* slot, int why);
 static void release_undelivered(ActorBase* actor, Message* msg);
+/* An ended actor's death, on its own thread while it steps nothing
+ * (#2974): defined with the lifecycle below. */
+static void actor_finalize(ActorBase* actor);
 /* The reply slot of the ask the stepping actor holds (defined with the
  * ask/reply machinery below), for a death that leaves it unanswered. */
 extern AETHER_TLS void* g_current_reply_slot;
@@ -225,10 +228,17 @@ static inline void aether_step_safe(ActorBase* actor) {
             g_current_reply_slot = NULL;
             reply_slot_fail(held, AETHER_ASK_NO_REPLY);
         }
-        /* The mailbox refilled from the overflow (#3241). An actor with a
-         * thread of its own takes every message through its inbox, which
-         * its thread empties. */
-        if (likely(!actor->auto_process)) {
+        /* Ended while the handler ran (#2974): its stop(), or a kill or a
+         * linked actor's death from elsewhere, takes effect now that the
+         * handler has returned, so no Down is sent while it runs. A release
+         * ends it by its own path. */
+        int ended = atomic_load_explicit(&actor->dead, memory_order_acquire);
+        if (unlikely(ended != 0)) {
+            if (!(ended & AETHER_ACTOR_RELEASED)) actor_finalize(actor);
+        } else if (likely(!actor->auto_process)) {
+            /* The mailbox refilled from the overflow (#3241). An actor with
+             * a thread of its own takes every message through its inbox,
+             * which its thread empties. */
             ActorInbox* behind = atomic_load_explicit(&actor->inbox, memory_order_acquire);
             if (unlikely(behind != NULL)) actor_overflow_refill(actor, behind);
         }
@@ -245,7 +255,8 @@ static inline void aether_step_safe(ActorBase* actor) {
     aether_try_pop();
 
     // A bit, not a store: a release may be setting its own bit meanwhile.
-    atomic_fetch_or_explicit(&actor->dead, AETHER_ACTOR_PANICKED, memory_order_release);
+    // The reason is the panic's unless something ended the actor first.
+    aether_actor_claim_end(actor, aether_panic_reason_text(reason), AETHER_ACTOR_PANICKED);
     atomic_store_explicit(&actor->active, 0, memory_order_release);
 
     /* The message its handler was running on (#3142): the release that
@@ -267,33 +278,12 @@ static inline void aether_step_safe(ActorBase* actor) {
         reply_slot_fail(held, AETHER_ASK_DIED);
     }
 
-    // Drain any pending messages so scheduler_wait() sees counters converge.
-    // Without this the dead actor's mailbox keeps mailbox.count > 0 forever,
-    // scheduler threads skip the actor (dead check), and sent > processed
-    // indefinitely — scheduler_wait() would spin or time out.
-    int drained = 0;
-    Message _discard;
-    while (mailbox_receive(&actor->mailbox, &_discard)) {
-        release_undelivered(actor, &_discard);
-        drained++;
-    }
-    /* And what waits behind it in its overflow (#3241), counted as sent
-     * the same way. An actor with a thread of its own keeps its inbox
-     * until it is ended. */
-    if (!actor->auto_process) drained += actor_overflow_drain(actor);
-    if (drained > 0) {
-        if (current_core_id >= 0 && current_core_id < num_cores) {
-            atomic_fetch_add_explicit(
-                &schedulers[current_core_id].messages_processed,
-                (uint64_t)drained, memory_order_relaxed);
-        } else {
-            // Main-thread death: attribute to core 0 so the global sent/processed
-            // accounting balances out.
-            atomic_fetch_add_explicit(
-                &schedulers[0].messages_processed,
-                (uint64_t)drained, memory_order_relaxed);
-        }
-    }
+    // Drain what waits for it and tell its watchers (#2974): see
+    // actor_finalize. Without the drain the dead actor's mailbox keeps
+    // mailbox.count > 0 forever, scheduler threads skip the actor (dead
+    // check), and sent > processed indefinitely, so scheduler_wait() would
+    // spin or time out.
+    actor_finalize(actor);
 
     /* step_lock is NOT released here (#2163). This function does not
      * acquire it -- all seven call sites take it before calling and clear
@@ -674,7 +664,179 @@ void scheduler_actor_thread_deliver(ActorBase* actor, Message msg) {
         return;
     }
     atomic_store_explicit(&actor->active, 1, memory_order_relaxed);
-    actor_thread_wake(actor);
+    actor_thread_wake(actor);   // its seq_cst fence orders the push before the load below
+    /* The actor ended (#3298): its thread drains its inbox as it finalizes
+     * the death (actor_finalize, which fences after the death bit), and a
+     * message pushed after that drain would wait there uncredited, holding
+     * scheduler_wait up. One of the two sees the other: this sender drops
+     * what is left. A released actor's inbox goes with its block. */
+    int ended = atomic_load_explicit(&actor->dead, memory_order_acquire);
+    if (unlikely(ended & AETHER_ACTOR_ENDED) && !(ended & AETHER_ACTOR_RELEASED) &&
+        (atomic_load_explicit(&actor->exit_flags, memory_order_acquire) & AETHER_EXIT_FINALIZED)) {
+        int dropped = actor_overflow_drain(actor);
+        if (dropped > 0) {
+            atomic_fetch_add_explicit(&schedulers[0].messages_processed, (uint64_t)dropped,
+                                      memory_order_relaxed);
+            scheduler_count_dead_sends(dropped);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The end of an actor (#2974)
+//
+// An actor ends once, by the first of its death bits (aether_actor_claim_end):
+// a panic in its step, a kill or a linked actor's death (KILLED), its own
+// stop() (STOPPED), or a release. The death is finalized on the thread that
+// owns the actor's mailbox, while the actor steps nothing: what waits for it
+// is dropped and credited, and its watchers are told (aether_watch_notify),
+// so no Down is sent while its handler still runs and each sender's last
+// messages before it arrive first. A panic is finalized in the step barrier,
+// a stop() and an end that came during a step after the step, an actor
+// thread's death at the end of its thread's loop, and an end from elsewhere
+// to an actor not stepping by its core, through the core's control requests.
+// A release is its own path: its watchers are told at the release and its
+// messages dropped when its block is reclaimed.
+// ---------------------------------------------------------------------------
+
+static _Atomic uint64_t g_dead_sends = 0;
+
+uint64_t scheduler_dead_sends(void) {
+    return atomic_load_explicit(&g_dead_sends, memory_order_relaxed);
+}
+
+void scheduler_count_dead_sends(int n) {
+    if (n > 0) atomic_fetch_add_explicit(&g_dead_sends, (uint64_t)n, memory_order_relaxed);
+}
+
+static void actor_finalize(ActorBase* actor) {
+    if (atomic_fetch_or_explicit(&actor->exit_flags, AETHER_EXIT_FINALIZED, memory_order_acq_rel) &
+        AETHER_EXIT_FINALIZED)
+        return;
+    // Pairs with a sender's fence after its push into an actor thread's
+    // inbox (scheduler_actor_thread_deliver, #3298).
+    atomic_thread_fence(memory_order_seq_cst);
+    int drained = 0;
+    Message discard;
+    while (mailbox_receive(&actor->mailbox, &discard)) {
+        release_undelivered(actor, &discard);
+        drained++;
+    }
+    // Its overflow (#3241), or an actor thread's inbox (#3298).
+    drained += actor_overflow_drain(actor);
+    if (drained > 0) {
+        int c = current_core_id;
+        Scheduler* credit = (c >= 0 && c < num_cores) ? &schedulers[c] : &schedulers[0];
+        atomic_fetch_add_explicit(&credit->messages_processed, (uint64_t)drained,
+                                  memory_order_relaxed);
+        scheduler_count_dead_sends(drained);
+    }
+    const char* reason = atomic_load_explicit(&actor->death_reason, memory_order_acquire);
+    aether_watch_notify(actor, reason ? reason : "normal");
+}
+
+void scheduler_actor_thread_finalize(ActorBase* actor) {
+    int d = atomic_load_explicit(&actor->dead, memory_order_acquire);
+    if ((d & AETHER_ACTOR_ENDED) && !(d & AETHER_ACTOR_RELEASED)) actor_finalize(actor);
+}
+
+/* A finalize request for `actor`, to core `core`'s loop. */
+static void control_post(int core, ActorBase* actor) {
+    Scheduler* s = &schedulers[core];
+    while (atomic_flag_test_and_set_explicit(&s->control_lock, memory_order_acquire)) AETHER_PAUSE();
+    if (s->control_count == s->control_cap) {
+        int cap = s->control_cap ? s->control_cap * 2 : 8;
+        ActorBase** grown = (ActorBase**)realloc(s->control, (size_t)cap * sizeof(ActorBase*));
+        if (!grown) {
+            atomic_flag_clear_explicit(&s->control_lock, memory_order_release);
+            fprintf(stderr, "aether: out of memory ending actor %d; it ends at its next step\n",
+                    actor->id);
+            return;
+        }
+        s->control = grown;
+        s->control_cap = cap;
+    }
+    s->control[s->control_count++] = actor;
+    // Counted until the request is done, for scheduler_wait: the Downs
+    // its finalize sends are not sent yet.
+    atomic_fetch_add_explicit(&s->control_pending, 1, memory_order_release);
+    atomic_flag_clear_explicit(&s->control_lock, memory_order_release);
+    sched_wake(s);
+}
+
+/* The core's finalize requests, on its thread where it steps nothing, or
+ * from its relief: an actor stepping lower on this thread is finalized by
+ * its own step's end instead. One that moved is passed to its core. */
+static void control_run(Scheduler* sched) {
+    if (likely(!atomic_load_explicit(&sched->control_pending, memory_order_acquire))) return;
+    while (atomic_flag_test_and_set_explicit(&sched->control_lock, memory_order_acquire)) AETHER_PAUSE();
+    ActorBase** list = sched->control;
+    int n = sched->control_count;
+    sched->control = NULL;
+    sched->control_count = 0;
+    sched->control_cap = 0;
+    atomic_flag_clear_explicit(&sched->control_lock, memory_order_release);
+    for (int i = 0; i < n; i++) {
+        ActorBase* actor = list[i];
+        int d = atomic_load_explicit(&actor->dead, memory_order_acquire);
+        int core = atomic_load_explicit(&actor->assigned_core, memory_order_acquire);
+        if (!(d & AETHER_ACTOR_ENDED) || (d & AETHER_ACTOR_RELEASED) ||
+            (atomic_load_explicit(&actor->exit_flags, memory_order_acquire) & AETHER_EXIT_FINALIZED)) {
+            // Nothing to do.
+        } else if (core != sched->core_id && core >= 0 && core < num_cores) {
+            control_post(core, actor);
+        } else if (!atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire)) {
+            actor_finalize(actor);
+            atomic_flag_clear_explicit(&actor->step_lock, memory_order_release);
+        }
+        // else stepping lower on this thread: its step's end finalizes it.
+        atomic_fetch_sub_explicit(&sched->control_pending, 1, memory_order_release);
+    }
+    free(list);
+}
+
+/* An ask the ended actor is waiting in, as its core's innermost ask, ends at
+ * once (its wait checks the bit when woken). Read under the core's lock,
+ * under which the asker puts the slot back before it lets it go. */
+static void wake_ended_asker(ActorBase* actor) {
+    int core = atomic_load_explicit(&actor->assigned_core, memory_order_acquire);
+    if (core < 0 || core >= num_cores) return;
+    Scheduler* s = &schedulers[core];
+    while (atomic_flag_test_and_set_explicit(&s->actor_lock.lock, memory_order_acquire)) AETHER_PAUSE();
+    if (atomic_load_explicit(&s->asking, memory_order_acquire) > 0 &&
+        atomic_load_explicit(&s->ask_asker, memory_order_acquire) == actor) {
+        ActorReplySlot* slot = atomic_load_explicit(&s->ask_slot, memory_order_acquire);
+        if (slot) {
+            pthread_mutex_lock(&slot->mutex);
+            pthread_cond_signal(&slot->cond);
+            pthread_mutex_unlock(&slot->mutex);
+        }
+    }
+    atomic_flag_clear_explicit(&s->actor_lock.lock, memory_order_release);
+}
+
+int scheduler_actor_end(ActorBase* actor, const char* reason, int bit) {
+    if (!actor || !aether_actor_claim_end(actor, reason, bit)) return 0;
+    if (actor->auto_process) {
+        // Its thread leaves its loop at the bit and finalizes the death
+        // there; asleep in its park, it is woken. Gone already, nothing else
+        // takes its mailbox or inbox, and the death is finalized here.
+        if (atomic_load_explicit(&actor->dead, memory_order_acquire) & AETHER_ACTOR_THREAD_GONE)
+            actor_finalize(actor);
+        else
+            actor_park_broadcast(actor_park_core(actor));
+        return 1;
+    }
+    wake_ended_asker(actor);
+    int core = atomic_load_explicit(&actor->assigned_core, memory_order_acquire);
+    if (core >= 0 && core < num_cores && atomic_load(&g_sched_state) == 2) {
+        control_post(core, actor);
+    } else {
+        // No core runs it (the scheduler is not running): nothing steps it
+        // or delivers to it, so it is finalized here.
+        actor_finalize(actor);
+    }
+    return 1;
 }
 
 static void overflow_append(int target, ActorBase* actor, Message msg) {
@@ -1482,6 +1644,8 @@ static void send_to_dead_actor(ActorBase* actor, Message* msg) {
             fprintf(stderr, "aether: message type %d sent to actor %d after its release; "
                             "dropped (reported once)\n", msg->type, actor->id);
         }
+    } else if (actor) {
+        scheduler_count_dead_sends(1);   // a panicked, killed or stopped one (#2974)
     }
 }
 
@@ -1578,6 +1742,8 @@ static void actor_free_now(ActorBase* actor) {
         }
         free(ib);
     }
+    // Its death notices go with it (#2974).
+    aether_watch_free(actor);
     if (actor->spsc_queue) {
         free(actor->spsc_queue);
         actor->spsc_queue = NULL;
@@ -1717,6 +1883,12 @@ static inline int has_pending_cross_core(Scheduler* sched) {
 static void scheduler_drop_dead_message(Scheduler* sched, ActorBase* actor, Message* msg) {
     release_undelivered(actor, msg);
     atomic_fetch_add_explicit(&sched->messages_processed, 1, memory_order_relaxed);
+    // On its way when its target died (#2974); a thread's leftovers at its
+    // exit and a released target are counted elsewhere.
+    if (actor) {
+        int d = atomic_load_explicit(&actor->dead, memory_order_relaxed);
+        if ((d & AETHER_ACTOR_ENDED) && !(d & AETHER_ACTOR_RELEASED)) scheduler_count_dead_sends(1);
+    }
 }
 
 // Whether nothing sent from core `core` is still on its way: no core's queue
@@ -1874,6 +2046,9 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                 actor_reclaim(0);
             }
         }
+
+        // Deaths to finalize here, posted from elsewhere (#2974).
+        control_run(sched);
 
         // Flush any deferred sends from the previous iteration before draining
         // from_queues.  This ensures deferred messages land on every loop and
@@ -2424,6 +2599,12 @@ void scheduler_init(int cores) {
         atomic_store_explicit(&schedulers[i].asking, 0, memory_order_relaxed);
         atomic_store_explicit(&schedulers[i].ask_target, NULL, memory_order_relaxed);
         atomic_store_explicit(&schedulers[i].ask_slot, NULL, memory_order_relaxed);
+        atomic_store_explicit(&schedulers[i].ask_asker, NULL, memory_order_relaxed);
+        atomic_flag_clear_explicit(&schedulers[i].control_lock, memory_order_relaxed);
+        atomic_store_explicit(&schedulers[i].control_pending, 0, memory_order_relaxed);
+        schedulers[i].control = NULL;
+        schedulers[i].control_count = 0;
+        schedulers[i].control_cap = 0;
         schedulers[i].relief_cursor = 0;
         schedulers[i].coalesce_buffer.count = 0;
         schedulers[i].coalesce_buffer.next = 0;
@@ -2522,6 +2703,9 @@ static inline int count_pending_messages(void) {
         }
         total_sent += core->messages_sent;
         total_proc += core->messages_processed;
+        // A death still to be finalized here (#2974): its Downs are not
+        // sent yet.
+        total += atomic_load_explicit(&core->control_pending, memory_order_acquire);
     }
     // Include main thread sends
     total_sent += atomic_load_explicit(&main_thread_sent, memory_order_relaxed);
@@ -2753,6 +2937,7 @@ static void scheduler_free_core_tables(void) {
                         free(ib);
                     }
                 }
+                aether_watch_free(actor);   // its death notices (#2974)
                 continue;
             }
             if (actor->auto_process) {
@@ -2794,6 +2979,12 @@ static void scheduler_free_core_tables(void) {
         pthread_mutex_destroy(&schedulers[i].park_mutex);
         pthread_cond_destroy(&schedulers[i].park_cond);
         pthread_mutex_destroy(&schedulers[i].foreign_lock);
+        // Finalize requests left at the stop: the actors end with the tables.
+        free(schedulers[i].control);
+        schedulers[i].control = NULL;
+        schedulers[i].control_count = 0;
+        schedulers[i].control_cap = 0;
+        atomic_store_explicit(&schedulers[i].control_pending, 0, memory_order_relaxed);
 
         // Clean up I/O event loop
         aether_io_poller_destroy(&schedulers[i].io_poller);
@@ -2827,6 +3018,9 @@ int scheduler_register_actor(ActorBase* actor, int preferred_core) {
     actor->step_payload = NULL;
     atomic_init(&actor->inbox, NULL);
     atomic_init(&actor->thread_parked, 0);
+    atomic_init(&actor->death_watch, NULL);         // #2974
+    atomic_init(&actor->death_reason, NULL);
+    atomic_init(&actor->exit_flags, 0);
     return register_actor(actor, preferred_core);
 }
 
@@ -3215,6 +3409,18 @@ static void send_through_core(ActorBase* actor, Message msg, int from_core) {
     // routed to before the message reaches its mailbox there.
     if (!actor->auto_process) {
         inflight_enter(actor, 1);
+        /* Its target's death is read again now that it is counted (#2974):
+         * a send takes effect at this read. One counted before a death is
+         * dropped where it arrives, and an actor with a message counted is
+         * not reborn (scheduler restart), so none reaches a later
+         * incarnation; one counted after it drops itself here. */
+        if (unlikely(atomic_load_explicit(&actor->dead, memory_order_acquire) != 0)) {
+            inflight_leave(actor, 1);
+            send_to_dead_actor(actor, &msg);
+            Scheduler* credit = current_core_id >= 0 ? &schedulers[current_core_id] : &schedulers[0];
+            atomic_fetch_add_explicit(&credit->messages_processed, 1, memory_order_relaxed);
+            return;
+        }
         target_core = atomic_load_explicit(&actor->assigned_core, memory_order_acquire);
         if (unlikely(target_core < 0 || target_core >= num_cores)) {
             target_core = actor->id % num_cores;
@@ -3323,7 +3529,8 @@ void scheduler_send_many(ActorBase* actor, const Message* msgs, int n) {
         int k = n - i < SEND_MANY_CHUNK ? n - i : SEND_MANY_CHUNK;
         inflight_enter(actor, k);
         int tc = atomic_load_explicit(&actor->assigned_core, memory_order_acquire);
-        if (tc == me || tc < 0 || tc >= num_cores || tls_overflow[tc].count > 0) {
+        if (tc == me || tc < 0 || tc >= num_cores || tls_overflow[tc].count > 0 ||
+            atomic_load_explicit(&actor->dead, memory_order_acquire) != 0) {
             inflight_leave(actor, k);
             scheduler_send_remote(actor, msgs[i], me);
             i++;
@@ -3474,6 +3681,14 @@ void scheduler_send_batch_flush(void) {
     }
 
     for (int i = 0; i < count; i++) {
+        // Its target's death read again now that it is counted (#2974), as
+        // in send_through_core: not counted as sent yet, so no credit.
+        if (unlikely(atomic_load_explicit(&g_batch_buffer->actors[i]->dead, memory_order_acquire) != 0)) {
+            inflight_leave(g_batch_buffer->actors[i], 1);
+            send_to_dead_actor(g_batch_buffer->actors[i], &g_batch_buffer->messages[i]);
+            targets[i] = -1;
+            continue;
+        }
         int tc = atomic_load_explicit(&g_batch_buffer->actors[i]->assigned_core, memory_order_acquire);
         if (tc < 0 || tc >= num_cores) tc = g_batch_buffer->actors[i]->id % num_cores;
         targets[i] = tc;
@@ -3495,6 +3710,7 @@ void scheduler_send_batch_flush(void) {
     memcpy(positions, offsets, num_cores * sizeof(int));
 
     for (int i = 0; i < count; i++) {
+        if (targets[i] < 0) continue;   // dropped above
         int pos = positions[targets[i]]++;
         sorted_actors[pos] = g_batch_buffer->actors[i];
         sorted_msgs[pos] = g_batch_buffer->messages[i];
@@ -3591,6 +3807,9 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
     atomic_init(&actor->inbox, NULL);
     atomic_init(&actor->thread_parked, 0);
     atomic_init(&actor->inflight, 0);
+    atomic_init(&actor->death_watch, NULL);         // #2974
+    atomic_init(&actor->death_reason, NULL);
+    atomic_init(&actor->exit_flags, 0);
     atomic_init(&actor->assigned_core, preferred_core);
     atomic_init(&actor->migrate_to, -1);
     atomic_init(&actor->reply_slot, NULL);
@@ -3628,6 +3847,15 @@ void scheduler_release_actor(ActorBase* actor) {
     int own_thread = actor->auto_process;
     int park_core = own_thread ? actor_park_core(actor) : -1;
 
+    // Its watchers are told now (#2974), before the mark: once it is set the
+    // actor may be ended at any moment, its watch list with it. A release is
+    // a normal end unless something ended the actor first; one told already
+    // (a death finalized) is told nothing more.
+    if (!(atomic_load_explicit(&actor->dead, memory_order_acquire) & AETHER_ACTOR_RELEASED)) {
+        aether_actor_claim_reason(actor, "normal");
+        aether_watch_notify(actor, atomic_load_explicit(&actor->death_reason, memory_order_acquire));
+    }
+
     // A message that still reaches the actor is dropped, not delivered.
     int was = atomic_fetch_or_explicit(&actor->dead, AETHER_ACTOR_RELEASED, memory_order_acq_rel);
     if (was & AETHER_ACTOR_RELEASED) return;   // released twice: ended once
@@ -3650,6 +3878,10 @@ void scheduler_release_actor(ActorBase* actor) {
 
 void scheduler_actor_thread_exit(ActorBase* actor) {
     int was = atomic_fetch_or_explicit(&actor->dead, AETHER_ACTOR_THREAD_GONE, memory_order_acq_rel);
+    // Ended after the thread's last look at its bits (#2974): a kill that
+    // came then finds the thread gone, or this finds the kill; whichever
+    // is second finalizes, once.
+    if ((was & AETHER_ACTOR_ENDED) && !(was & AETHER_ACTOR_RELEASED)) actor_finalize(actor);
     if (was & AETHER_ACTOR_RELEASED) actor_end(actor);
 }
 
@@ -3894,6 +4126,7 @@ static int relief_evacuate(Scheduler* sched) {
 /* One relief. Returns whether it did anything (placed a message, moved an
  * actor), when the next comes ASK_RELIEF_BUSY_NS later. */
 static int ask_relieve(Scheduler* sched) {
+    control_run(sched);   // deaths to finalize (#2974); one stepping here waits for its step
     overflow_flush_ex(sched->core_id, 0);
     int placed = relief_deliver(sched);
     return placed + relief_evacuate(sched) > 0;
@@ -3938,6 +4171,11 @@ void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg
     Scheduler* asking_core = NULL;
     ActorBase* outer_target = NULL;
     ActorReplySlot* outer_slot = NULL;
+    ActorBase* outer_asker = NULL;
+    /* The actor whose handler asks, if any: killed while it waits, its ask
+     * ends at once (#2974). */
+    ActorBase* asker = (ActorBase*)g_current_step_actor;
+    int killed = 0;
     /* Only a core's own scheduler thread (#3246): it alone may step for the
      * core, deliver its queues and move its actors. */
     if (t_reclaim_core_thread && current_core_id >= 0 && current_core_id < num_cores) {
@@ -3949,6 +4187,8 @@ void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg
         outer_slot = atomic_load_explicit(&asking_core->ask_slot, memory_order_relaxed);
         atomic_store_explicit(&asking_core->ask_target, target, memory_order_release);
         atomic_store_explicit(&asking_core->ask_slot, slot, memory_order_release);
+        outer_asker = atomic_load_explicit(&asking_core->ask_asker, memory_order_relaxed);
+        atomic_store_explicit(&asking_core->ask_asker, asker, memory_order_release);
         atomic_flag_clear_explicit(&asking_core->actor_lock.lock, memory_order_release);
     }
 
@@ -3975,6 +4215,10 @@ void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg
 
     pthread_mutex_lock(&slot->mutex);
     while (!slot->reply_ready && !slot->failed) {
+        if (asker && (atomic_load_explicit(&asker->dead, memory_order_acquire) & AETHER_ACTOR_KILLED)) {
+            killed = 1;
+            break;
+        }
         /* The target is this core's, with a message still in the batch the
          * loop was delivering when the ask began: the ask's own message
          * waits behind it, and nothing would place either (#3197). The
@@ -4046,8 +4290,10 @@ void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg
     } else if (slot->failed) {
         *status = slot->failed;
     } else {
+        // Given up, at the timeout or killed (#2974): a reply that comes
+        // later frees the slot itself.
         slot->timed_out = 1;
-        *status = AETHER_ASK_TIMED_OUT;
+        *status = killed ? AETHER_ASK_KILLED : AETHER_ASK_TIMED_OUT;
     }
     pthread_mutex_unlock(&slot->mutex);
     if (asking_core) {
@@ -4057,6 +4303,7 @@ void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg
             AETHER_PAUSE();
         atomic_store_explicit(&asking_core->ask_target, outer_target, memory_order_release);
         atomic_store_explicit(&asking_core->ask_slot, outer_slot, memory_order_release);
+        atomic_store_explicit(&asking_core->ask_asker, outer_asker, memory_order_release);
         atomic_fetch_sub_explicit(&asking_core->asking, 1, memory_order_acq_rel);
         atomic_flag_clear_explicit(&asking_core->actor_lock.lock, memory_order_release);
     }
@@ -4065,8 +4312,9 @@ void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg
      * its own thread. Answered or failed, the ask waits for that, a few
      * instructions, and frees the slot here: what an ask allocated is gone
      * when it returns, whatever the other thread's timing (#3245). A timed
-     * out ask does not wait; its replier frees the slot when it comes. */
-    if (*status != AETHER_ASK_TIMED_OUT) {
+     * out ask does not wait; its replier frees the slot when it comes, and
+     * neither does one its killed asker gave up. */
+    if (*status != AETHER_ASK_TIMED_OUT && *status != AETHER_ASK_KILLED) {
         int spins = 0;
         while (atomic_load_explicit(&slot->refcount, memory_order_acquire) > 1) {
             if (++spins < 256) AETHER_PAUSE();

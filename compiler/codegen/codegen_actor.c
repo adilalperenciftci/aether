@@ -1101,6 +1101,17 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
 
                         print_line(gen, "handle_%s:", pattern->value);
                         indent(gen);
+                        /* A Down from a monitor this actor has since
+                         * dropped is not handled (#2974). */
+                        if (strcmp(pattern->value, "Down") == 0) {
+                            print_line(gen, "if (!aether_down_accept(&self->_aether_base, &msg)) {");
+                            indent(gen);
+                            print_line(gen, "aether_message_drop(&self->_aether_base, &msg);");
+                            emit_timeout_rearm(gen, timeout_arm);
+                            print_line(gen, "return;");
+                            unindent(gen);
+                            print_line(gen, "}");
+                        }
                         if (single_int) {
                             // Single-field inline: reconstruct on stack from payload_int
                             const char* cast = "";

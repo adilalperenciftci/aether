@@ -3569,6 +3569,7 @@ destructured from there (`p, err = store ? GetRange {}`, then `lo, hi = p`).
 | `"the actor is dead"` | the actor had died (or was released) before the ask reached it |
 | `"the actor died before it replied"` | the handler panicked with the ask in hand |
 | `"the handler returned without replying"` | the handler that took the ask finished without a `reply` |
+| `"the asking actor was killed"` | the actor whose handler asked was killed while it waited (`actors.kill`), and the ask ended at once |
 
 An ask to a dead actor, in either form, ends at once rather than after the
 timeout, and so does one whose actor dies before replying or whose handler
@@ -3696,6 +3697,64 @@ per message, and an actor that `implements` a protocol has a receive arm for
 each of its messages (a `_` arm does not count). A protocol and its actors
 can come from an imported module, as messages do. `protocol` and
 `implements` are words only in these places: they stay usable as names.
+
+### Ending an actor, and Death notices
+
+An actor ends once: when its handler panics, when `actors.kill(ref)` is
+called on it (from anywhere), or when its own handler calls `actors.stop()`
+(`import std.actors`). A kill or a stop takes effect when the handler that is
+running returns; a handler is never cut short. What was queued for the actor
+is then dropped, and so is every later send to it, each counted by
+`actors.dead_sends()`.
+
+An actor that calls `actors.monitor(ref)` gets one `Down` message when `ref`
+ends, with the reason: `"normal"` for a stop, `"killed"` for a kill, the
+panic's message for a panic. `Down` is declared by the compiler, as
+`message Down { ref: actor_ref, reason: string }`, so a program handles it in
+an arm without declaring it (and may not declare its own):
+
+```aether,run
+import std.actors
+
+message Watch { who: actor_ref }
+message Work {}
+
+actor Worker {
+    receive {
+        Work() -> { panic("out of paper") }
+    }
+}
+
+actor Foreman {
+    receive {
+        Watch(who) -> { _id = actors.monitor(who) }
+        Down(ref, reason) -> { println("worker ended: ${reason}") }
+    }
+}
+
+main() {
+    w = spawn(Worker())
+    f = spawn(Foreman())
+    f ! Watch { who: w }
+    wait_for_idle()
+    w ! Work {}
+    wait_for_idle()
+}
+```
+```output
+worker ended: out of paper
+```
+
+A `Down` comes after the last messages the ended actor sent its watcher, and
+never while its handler still runs. A monitor of an actor that has ended
+already is answered at once, with the reason it ended with.
+`actors.demonitor(id)`, with the id `monitor` returned, drops a monitor: no
+`Down` of it is handled after that, one already on its way included. A
+handler that is waiting in an ask when its actor is killed gets
+`"the asking actor was killed"` from it at once.
+
+On wasi a panic ends the whole program (the target has no way to unwind), so
+`actors.monitor` is refused when compiling for it.
 
 ---
 

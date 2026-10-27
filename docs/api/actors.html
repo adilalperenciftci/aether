@@ -21,6 +21,11 @@
     <li><a href="#is_registered">is_registered</a></li>
     <li><a href="#registry_size">registry_size</a></li>
     <li><a href="#registry_clear">registry_clear</a></li>
+    <li><a href="#monitor">monitor</a></li>
+    <li><a href="#demonitor">demonitor</a></li>
+    <li><a href="#kill">kill</a></li>
+    <li><a href="#stop">stop</a></li>
+    <li><a href="#dead_sends">dead_sends</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -155,6 +160,34 @@
       <h3 class="function-name">registry_clear <span class="kind">fn</span></h3>
       <pre class="usage"><code>registry_clear()</code></pre>
       <p class="doc">Wipe all bindings. Tests use this for isolation.</p>
+    </div>
+    <div class="function" id="monitor" data-name="monitor">
+      <h3 class="function-name">monitor <span class="kind">fn</span></h3>
+      <pre class="usage"><code>monitor(ref) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">ref: actor_ref</span></p>
+      <p class="doc">From a handler: one Down to this actor when `ref` ends, at once if it has ended already. Returns the monitor's id, for demonitor.</p>
+    </div>
+    <div class="function" id="demonitor" data-name="demonitor">
+      <h3 class="function-name">demonitor <span class="kind">fn</span></h3>
+      <pre class="usage"><code>demonitor(id)</code></pre>
+      <p class="signature"><span class="sig-params">id: int</span></p>
+      <p class="doc">From a handler: no Down of monitor `id` is handled after this, one already on its way included.</p>
+    </div>
+    <div class="function" id="kill" data-name="kill">
+      <h3 class="function-name">kill <span class="kind">fn</span></h3>
+      <pre class="usage"><code>kill(ref)</code></pre>
+      <p class="signature"><span class="sig-params">ref: actor_ref</span></p>
+      <p class="doc">Ends `ref` with &quot;killed&quot; once its current handler, if one is running, returns. Its queued messages are dropped and counted (dead_sends), an ask it is waiting in ends at once, and its watchers get Down. From anywhere; a dead actor is not killed twice.</p>
+    </div>
+    <div class="function" id="stop" data-name="stop">
+      <h3 class="function-name">stop <span class="kind">fn</span></h3>
+      <pre class="usage"><code>stop()</code></pre>
+      <p class="doc">From a handler: this actor ends with &quot;normal&quot; when the handler returns.</p>
+    </div>
+    <div class="function" id="dead_sends" data-name="dead_sends">
+      <h3 class="function-name">dead_sends <span class="kind">fn</span></h3>
+      <pre class="usage"><code>dead_sends() <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="doc">Messages a panicked, killed or stopped actor did not handle: queued at its death or sent to it after, each released and counted once.</p>
     </div>
   </div>
 </main>
