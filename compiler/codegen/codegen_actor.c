@@ -974,14 +974,19 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
         // build still emitted the label-address table and died with exactly
         // the error quoted above (#1655). optimizer.c's equivalent guards
         // already list all three; this one was the outlier.
-        print_line(gen, "#if AETHER_GCC_COMPAT && !defined(__EMSCRIPTEN__) && \\");
-        print_line(gen, "    !defined(__wasi__) && !defined(__wasm__)");
+        /* An actor whose only arm is `_` names no message, so there is no
+         * label to jump to: clang refuses an indirect goto in a function
+         * with no label address (#3289). The switch below has only its
+         * default then, which falls through to the `_` arm. */
+        if (pattern_count > actor_has_wildcard_arm(actor)) {
+            print_line(gen, "#if AETHER_GCC_COMPAT && !defined(__EMSCRIPTEN__) && \\");
+            print_line(gen, "    !defined(__wasi__) && !defined(__wasm__)");
+        } else {
+            print_line(gen, "#if 0   /* only a `_` arm: nothing to dispatch by message */");
+        }
         print_line(gen, "// COMPUTED GOTO DISPATCH - 15-30%% faster than switch");
         print_line(gen, "static void* dispatch_table[256] = {");
         indent(gen);
-        /* An actor whose only arm is `_` names no message: C11 has no
-         * empty initializer. */
-        if (pattern_count == actor_has_wildcard_arm(actor)) print_line(gen, "0");
 
         // Generate dispatch table with labels (GCC/Clang path)
         for (int i = 0; i < actor->child_count; i++) {
