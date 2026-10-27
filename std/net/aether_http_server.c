@@ -5209,8 +5209,14 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
             hdr_end = strstr(conn->buf + conn->read_pos, "\r\n\r\n");
             if (hdr_end) break;
         }
-        if (conn->write_pos + 1 >= conn->buf_cap) {
-            /* Header section exceeded buffer capacity (#3252). */
+        /* A head holds no more than the connection buffer's first size,
+         * HTTP_CONN_BUF_CAP, less the NUL, answered 431 past it (#3252).
+         * The bound was the buffer itself, which grows for a body of up to
+         * that size and for bytes the proxy event loop hands over, so a head
+         * refused on a fresh connection was accepted after one such body
+         * (#3253). */
+        if (conn->write_pos - conn->read_pos + 1 >= HTTP_CONN_BUF_CAP ||
+            conn->write_pos + 1 >= conn->buf_cap) {
             conn_send_head_too_large(conn);
             return 0;
         }
@@ -5234,6 +5240,12 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
 
     int header_size = (int)(hdr_end - conn->buf) + 4 - conn->read_pos;
     int request_total = header_size;
+    /* The same bound on a head found whole in a buffer larger than that,
+     * which a read can fill in one go (#3253). */
+    if (header_size >= HTTP_CONN_BUF_CAP) {
+        conn_send_head_too_large(conn);
+        return 0;
+    }
 
     /* Resolve Content-Length and ensure the full body is buffered, once the
      * head has passed the checks the proxy event loop makes too (#3236). */

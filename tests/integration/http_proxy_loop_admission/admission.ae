@@ -285,6 +285,21 @@ main() {
     bad = bad + both_all("a request, then a head that does not end in 16 KiB", ports,
         string.concat("GET /p HTTP/1.1\r\nHost: x\r\n\r\n", endless), "200 431 closed")
 
+    // #3253: the bound holds wherever the head is read. One that ended past
+    // 16 KiB within a single read was taken by the loop, and by the worker
+    // path on a connection whose buffer a body of 16 KiB had grown.
+    lines = ""
+    i = 0
+    while i < 22 {
+        lines = string.concat(lines, "X-F${i}: ${string.pad_end("", 990, 102)}\r\n")
+        i = i + 1
+    }
+    long_head = "GET /p HTTP/1.1\r\nHost: x\r\n${lines}\r\n"
+    bad = bad + both("a head that ends past 16 KiB", ports, long_head, head_too_large)
+    grow = "POST /p HTTP/1.1\r\nHost: x\r\nContent-Length: 16384\r\n\r\n${string.pad_end("", 16384, 98)}"
+    bad = bad + both_all("a head past 16 KiB after a body that grew the buffer", ports,
+        string.concat(grow, long_head), "200 431 closed")
+
     http.server_stop(worker_gw)
     http.server_stop(loop_gw)
     http.server_stop(upstream)

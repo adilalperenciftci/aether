@@ -421,6 +421,11 @@ static int ev_request_complete(EvConn* c, size_t body_limit, size_t* out_total) 
         }
         c->in_hdr_end = (size_t)((found + 4) - c->in);
     }
+    /* The same bound on a head found whole: one read can bring in more than
+     * 16 KiB once the buffer has grown for an earlier body, and a head that
+     * ended past the bound was taken here, though the worker path refuses
+     * it on a fresh connection (#3253). It goes there, which answers 431. */
+    if (c->in_hdr_end >= HTTP_CONN_BUF_CAP) return -1;
 
     size_t header_bytes = c->in_hdr_end;
     char* hdr_end = c->in + header_bytes - 4;
