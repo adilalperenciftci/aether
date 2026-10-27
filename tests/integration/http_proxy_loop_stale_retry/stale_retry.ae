@@ -1,5 +1,6 @@
 // A retry after a stale pooled upstream connection dials a fresh one on the
-// proxy event loop, as it does on the worker path (#3260).
+// proxy event loop, as it does on the worker path (#3260), and every request
+// gets one (#3261).
 //
 // A pooled upstream connection can have been closed by the upstream while it
 // sat idle, which only using it shows. Both paths then send the request
@@ -143,6 +144,30 @@ main() {
             bad = bad + 1
         } else {
             println("  PASS after the upstream closed both pooled connections (${names[g]})")
+        }
+
+        // #3261: the retry is each request's, not the client connection's.
+        // On one kept connection, three requests, each after the upstream
+        // has closed the pooled connection the one before left.
+        k, kerr2 = tcp.connect("127.0.0.1", port)
+        if kerr2 != "" {
+            println("FAIL: connect")
+            exit(1)
+        }
+        rounds = ""
+        r = 0
+        while r < 3 {
+            tcp.write(k, "GET /p HTTP/1.1\r\nHost: x\r\n\r\n")
+            rounds = string.concat(rounds, "${status(drain(k))} ")
+            sleep(2500)
+            r = r + 1
+        }
+        tcp.close(k)
+        if rounds != "200 200 200 " {
+            println("  FAIL every request on a kept connection after a stale one (${names[g]}): got '${rounds}', expected '200 200 200 '")
+            bad = bad + 1
+        } else {
+            println("  PASS every request on a kept connection after a stale one (${names[g]})")
         }
         http.server_stop(s)
         g = g + 1

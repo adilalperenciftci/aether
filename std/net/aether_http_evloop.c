@@ -126,7 +126,7 @@ typedef struct EvConn {
     /* A connection taken from the pool that turned out to be closed has been
      * dialled again once. One retry only: a fresh connection that answers
      * nothing is the upstream's answer, not a stale descriptor. */
-    int      up_stale_retried;
+    int      up_stale_retried;   /* per request (#3261) */
     /* The next dial is that retry: a fresh connection, not another from the
      * pool, which may hold more that died the same way, as the worker path's
      * client does (#3260). One-shot; ev_begin_retry_ex clears it. */
@@ -326,6 +326,11 @@ static void ev_conn_reset_request(EvConn* c) {
     c->hooked = 0;
     c->t_start_us = 0;
     c->close_after = 0;
+    /* The stale-connection retry is each request's: kept from one request to
+     * the next, a client connection's later requests that drew a dead pooled
+     * upstream were answered 502 instead of being sent again (#3261). */
+    c->up_stale_retried = 0;
+    c->dial_fresh = 0;
 }
 
 /* Remember which connection a descriptor belongs to. The poller reports a
