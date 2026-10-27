@@ -26,6 +26,7 @@
 
 #include "aether_http.h"
 #include "aether_http_internal.h"
+#include "aether_http_pool.h"
 #include "../http/proxy/aether_proxy_internal.h"
 #include "../../runtime/scheduler/aether_io_poller.h"
 #include "../../runtime/aether_resource_caps.h"
@@ -138,6 +139,9 @@ typedef struct EvConn {
      * pool, which may hold more that died the same way, as the worker path's
      * client does (#3260). One-shot; ev_begin_retry_ex clears it. */
     int      dial_fresh;
+    /* The declared body this request holds against the loop's total
+     * (ev_request_complete), given back when the request ends (#3263). */
+    size_t   body_reserved;
 
     /* The response accumulator, kept between requests. It starts at 16 KiB,
      * and allocating and freeing one per request had the kernel handing back
@@ -219,6 +223,11 @@ struct HttpEvLoop {
     atomic_int  taken;           /* connections taken since the start (#3214) */
     atomic_int  stopping;
     atomic_int  next_driver;     /* round-robin placement of new connections */
+    /* Request bodies over the worker's buffer size the drivers hold now, by
+     * declared length, against body_slots bodies of the mount's cap: the
+     * workers the worker path would run (#3263). */
+    atomic_llong body_held;
+    int          body_slots;
 };
 
 static int ev_timer_set(EvDriver* d, EvConn* c, int64_t deadline_ms);
@@ -300,7 +309,14 @@ static void ev_release_attempt(EvConn* c) {
  * long as the client keeps talking. The head and the response accumulator go
  * through the capability allocator, so they come back through it too, with
  * the size they were charged at. */
-static void ev_conn_reset_request(EvConn* c) {
+static void ev_conn_reset_request(EvDriver* d, EvConn* c) {
+    /* The request's share of the loop's body total goes back with it, on
+     * every way a request ends: answered, handed to the worker path, closed
+     * (#3263). */
+    if (c->body_reserved) {
+        atomic_fetch_sub(&d->loop->body_held, (long long)c->body_reserved);
+        c->body_reserved = 0;
+    }
     size_t carried = c->in_len > c->in_total ? c->in_len - c->in_total : 0;
     if (carried) memmove(c->in, c->in + c->in_total, carried);
     c->in_len = carried;
@@ -408,7 +424,7 @@ static void ev_conn_close(EvDriver* d, EvConn* c) {
         close(c->client_fd);
     }
     ev_timer_set(d, c, 0);
-    ev_conn_reset_request(c);
+    ev_conn_reset_request(d, c);
     if (c->req) http_request_free(c->req);
     if (c->res) http_server_response_free(c->res);
     if (c->rxbuf) aether_caps_free(c->rxbuf, c->rxcap);
@@ -439,7 +455,8 @@ static void ev_conn_close(EvDriver* d, EvConn* c) {
  * larger than this driver buffers (#3237). `body_limit` is the largest body
  * the proxy forwards.
  */
-static int ev_request_complete(EvConn* c, size_t body_limit, size_t* out_total) {
+static int ev_request_complete(HttpEvLoop* loop, EvConn* c, size_t body_limit,
+                               size_t* out_total) {
     if (c->in_len == 0) return 0;
     c->in[c->in_len] = '\0';
 
@@ -496,6 +513,22 @@ static int ev_request_complete(EvConn* c, size_t body_limit, size_t* out_total) 
      * goes to the worker path, which streams a body that size and where the
      * proxy refuses it, 502, without reading it. */
     if ((size_t)declared > body_limit) return -1;
+    /* And no more bodies at once than the worker path holds: one per worker
+     * it would run, each up to the cap. Every connection may hold a body
+     * the size of the worker's own buffer; a larger one is admitted against
+     * the loop's total, or goes to the worker path, which streams it. Held
+     * per connection only, the loop buffered the cap times the connections a
+     * client cared to open (#3263). */
+    if ((size_t)declared > HTTP_CONN_BUF_CAP && !c->body_reserved) {
+        long long budget = (long long)loop->body_slots * (long long)body_limit;
+        long long held = atomic_fetch_add(&loop->body_held, (long long)declared)
+                       + (long long)declared;
+        if (held > budget) {
+            atomic_fetch_sub(&loop->body_held, (long long)declared);
+            return -1;
+        }
+        c->body_reserved = (size_t)declared;
+    }
     if (c->in_len < header_bytes + (size_t)declared) return 0;
     *out_total = header_bytes + (size_t)declared;
     return 1;
@@ -852,7 +885,7 @@ static int ev_step_read_request(EvDriver* d, EvConn* c) {
             size_t total = 0;
             AetherProxyOpts* opts = (AetherProxyOpts*)http_server_proxy_opts(d->loop->server);
             size_t body_limit = opts ? (size_t)opts->max_body_bytes : 0;
-            int complete = ev_request_complete(c, body_limit, &total);
+            int complete = ev_request_complete(d->loop, c, body_limit, &total);
             /* Framing this driver cannot resolve: the worker path has the
              * answer for it (a 400 for a length that is no length), so the
              * connection goes there with the bytes read, rather than being
@@ -1714,7 +1747,7 @@ static int ev_advance_states(EvDriver* d, EvConn* c) {
             /* Done with this request. The connection stays, and the next one
              * is read the same way the first was, so a client that keeps
              * talking never costs another accept. */
-            ev_conn_reset_request(c);
+            ev_conn_reset_request(d, c);
             c->state = EV_READ_REQUEST;
             continue;
         }
@@ -1902,6 +1935,8 @@ HttpEvLoop* http_evloop_start(HttpServer* server, int threads) {
     atomic_init(&loop->taken, 0);
     atomic_init(&loop->stopping, 0);
     atomic_init(&loop->next_driver, 0);
+    atomic_init(&loop->body_held, 0);
+    loop->body_slots = http_pool_default_workers();
 
     int started = 0;
     for (int i = 0; i < threads; i++) {

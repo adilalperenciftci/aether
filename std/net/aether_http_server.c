@@ -152,6 +152,7 @@ void http_server_use_request_hook_loop_safe(HttpServer* s, HttpRequestHook h, vo
 }
 int http_server_evloop_connections(HttpServer* s) { (void)s; return 0; }
 long http_server_evloop_wakeups(HttpServer* s) { (void)s; return 0; }
+int http_server_evloop_active(HttpServer* s) { (void)s; return 0; }
 const char* http_server_set_access_log_raw(HttpServer* s, const char* f, const char* p) {
     (void)s; (void)f; (void)p; return "";
 }
@@ -3192,6 +3193,10 @@ int http_server_evloop_connections(HttpServer* server) {
 
 long http_server_evloop_wakeups(HttpServer* server) {
     return server ? http_evloop_wakeups((HttpEvLoop*)server->evloop) : 0;
+}
+
+int http_server_evloop_active(HttpServer* server) {
+    return server ? http_evloop_active((HttpEvLoop*)server->evloop) : 0;
 }
 
 /* SSE route node (#260 Tier 2). */

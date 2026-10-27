@@ -45,4 +45,9 @@ int http_pool_pending(void);
 // one it is the starvation parking exists to remove (#1663).
 int http_pool_has_spare_worker(void);
 
+// The workers a server runs when the proxy event loop does not (twice the
+// cores, or AETHER_HTTP_WORKERS): one request body each is what the worker
+// path holds at once, which bounds the loop's request bodies too (#3263).
+int http_pool_default_workers(void);
+
 #endif // AETHER_HTTP_POOL_H

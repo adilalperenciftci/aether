@@ -121,6 +121,13 @@ static int http_pool_worker_count(int evloop_owns) {
     return (int)want;
 }
 
+/* The workers a server runs without the proxy event loop: what bounds the
+ * request bodies the worker path holds at once, one per worker, and so the
+ * loop's own bound (#3263). */
+int http_pool_default_workers(void) {
+    return http_pool_worker_count(0);
+}
+
 static void* http_pool_worker(void* arg) {
     HttpConnectionPool* pool = (HttpConnectionPool*)arg;
     while (1) {

@@ -373,6 +373,11 @@ configuration to do so:
   is never read as the next request (#3255), and a head that has not ended in
   16 KiB, which it refuses with 431 (#3252): the driver never buffers more
   (#3237)
+- a request body over 16 KiB once the driver already holds as many bodies of
+  the cap as the worker path has workers (`AETHER_HTTP_WORKERS`, else twice
+  the cores, eight at least): its total is the worker path's, not the cap
+  times every connection a client opens (#3263). Every connection keeps at
+  most 64 KiB of buffers between requests, on either path (#3262).
 - a server that terminates TLS with the pure-Aether stack (`AETHER_PURE_TLS=1`,
   or a build without OpenSSL): the driver's TLS is OpenSSL's (#3256)
 - a server whose first proxy mount has an https upstream: the driver dials
