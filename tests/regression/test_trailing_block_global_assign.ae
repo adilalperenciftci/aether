@@ -1,0 +1,38 @@
+// A trailing block on the right of an assignment to a MODULE-LEVEL `var`
+// runs, with the stored value as its context.
+//
+// `g = f(args) { ... }` with `g` a module `var` took the global-store path,
+// which left the statement before the trailing-block handler: the store
+// happened and the whole body vanished without a diagnostic (an aether-ui
+// app keeping `view = vstack(0) { ... }` in a global got an empty view).
+// The same call bound to a local always ran its block. The test checks the
+// block ran once, after the store, and had a context to inject.
+
+extern exit(code: int)
+
+var g = 0
+var ran = 0
+var seen = 0
+
+seven(_ctx: ptr) -> int { return 7 }
+note(_ctx: ptr) { if _ctx != null { seen = seen + 1 } }
+
+main() {
+    g = seven() {
+        ran = ran + g
+        note()
+    }
+    if g != 7 {
+        println("FAIL: global got ${g}, want 7")
+        exit(1)
+    }
+    if ran != 7 {
+        println("FAIL: the trailing block ran to ${ran}, want once after the store (7)")
+        exit(1)
+    }
+    if seen != 1 {
+        println("FAIL: the block's context was null ${seen} time(s), want the stored 7 once")
+        exit(1)
+    }
+    println("ok")
+}
