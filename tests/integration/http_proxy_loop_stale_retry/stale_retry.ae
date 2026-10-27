@@ -1,0 +1,157 @@
+// A retry after a stale pooled upstream connection dials a fresh one on the
+// proxy event loop, as it does on the worker path (#3260).
+//
+// A pooled upstream connection can have been closed by the upstream while it
+// sat idle, which only using it shows. Both paths then send the request
+// again; the worker path's client dials a fresh connection for it, because
+// the pool may hold more connections that died the same way. The event loop
+// on Linux and macOS took the next one from the pool, and when that one was
+// dead too the client got 502.
+//
+// An upstream that closes a connection after a second idle. Two requests at
+// once through the proxy leave two upstream connections in the pool; after
+// the upstream has closed both, one more request must still be answered
+// 200, through a bare proxy (the event loop on Linux and macOS) and through
+// one behind a program's middleware (the worker path). Every server listens
+// on 127.0.0.1 and a port the kernel picks.
+
+import std.http
+import std.http.proxy
+import std.string
+import std.tcp
+
+extern exit(code: int)
+extern http_client_pool_clear_raw()
+
+handle_slow(req: ptr, res: ptr, ud: ptr) {
+    sleep(300)
+    http.response_set_status(res, 200)
+    http.response_set_body(res, "slow")
+}
+
+handle_p(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_body(res, "p")
+}
+
+@c_callback mw_pass(req: ptr, res: ptr, ud: ptr) -> int {
+    return 1
+}
+
+start(server: ptr) -> int {
+    if http.server_bind(server, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    err = http.server_start_background(server)
+    if err != "" {
+        println("FAIL: ${err}")
+        exit(1)
+    }
+    return http.server_port(server)
+}
+
+gateway(up_url: string, worker: int) -> ptr {
+    s = http.server_create(0)
+    http.server_set_host(s, "127.0.0.1")
+    if worker == 1 {
+        http.server_use_middleware(s, mw_pass, 0)
+    }
+    merr = proxy.mount_simple(s, "/", up_url, 5)
+    if merr != "" {
+        println("FAIL: mount: ${merr}")
+        exit(1)
+    }
+    return s
+}
+
+// Everything `sock` sends until it closes or goes quiet for a second.
+drain(sock: ptr) -> string {
+    wire = ""
+    quiet = 0
+    while quiet < 10 {
+        ready, _perr = tcp.poll(sock, 100)
+        if ready {
+            chunk, rerr = tcp.read(sock, 4096)
+            if rerr != "" || string.length(chunk) == 0 {
+                quiet = 10
+            } else {
+                wire = string.concat(wire, chunk)
+                quiet = 0
+            }
+        } else {
+            quiet = quiet + 1
+        }
+    }
+    return wire
+}
+
+status(wire: string) -> string {
+    if string.length(wire) < 12 {
+        return "none"
+    }
+    return string.substring(wire, 9, 12)
+}
+
+main() {
+    println("=== a retry after a stale pooled connection dials a fresh one (#3260) ===")
+    upstream = http.server_create(0)
+    http.server_set_host(upstream, "127.0.0.1")
+    http.server_get(upstream, "/slow", handle_slow, 0)
+    http.server_get(upstream, "/p", handle_p, 0)
+    kerr = http.server_set_keepalive(upstream, 1, 0, 1s)
+    if kerr != "" {
+        println("FAIL: keepalive: ${kerr}")
+        exit(1)
+    }
+    up_url = "http://127.0.0.1:${start(upstream)}"
+
+    names = ["event loop", "worker path"]
+    bad = 0
+    g = 0
+    while g < 2 {
+        s = gateway(up_url, g)
+        port = start(s)
+        sleep(100)
+        http_client_pool_clear_raw()
+
+        // Two at once, so the proxy holds two upstream connections.
+        a, aerr = tcp.connect("127.0.0.1", port)
+        b, berr = tcp.connect("127.0.0.1", port)
+        if aerr != "" || berr != "" {
+            println("FAIL: connect")
+            exit(1)
+        }
+        tcp.write(a, "GET /slow HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        tcp.write(b, "GET /slow HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        first = "${status(drain(a))} ${status(drain(b))}"
+        tcp.close(a)
+        tcp.close(b)
+        // The upstream closes both after a second idle.
+        sleep(2500)
+
+        c, cerr = tcp.connect("127.0.0.1", port)
+        if cerr != "" {
+            println("FAIL: connect")
+            exit(1)
+        }
+        tcp.write(c, "GET /p HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        got = "${first} then ${status(drain(c))}"
+        tcp.close(c)
+        if got != "200 200 then 200" {
+            println("  FAIL after the upstream closed both pooled connections (${names[g]}): got '${got}', expected '200 200 then 200'")
+            bad = bad + 1
+        } else {
+            println("  PASS after the upstream closed both pooled connections (${names[g]})")
+        }
+        http.server_stop(s)
+        g = g + 1
+    }
+
+    http.server_stop(upstream)
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

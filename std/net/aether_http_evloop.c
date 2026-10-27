@@ -127,6 +127,10 @@ typedef struct EvConn {
      * dialled again once. One retry only: a fresh connection that answers
      * nothing is the upstream's answer, not a stale descriptor. */
     int      up_stale_retried;
+    /* The next dial is that retry: a fresh connection, not another from the
+     * pool, which may hold more that died the same way, as the worker path's
+     * client does (#3260). One-shot; ev_begin_retry_ex clears it. */
+    int      dial_fresh;
 
     /* The response accumulator, kept between requests. It starts at 16 KiB,
      * and allocating and freeing one per request had the kernel handing back
@@ -935,8 +939,10 @@ static int ev_begin_retry_ex(EvDriver* d, EvConn* c, int next_addr) {
         return -1;
     if (use_tls) { free(path); return ev_hand_to_tls(d, c); }   /* #3231 */
 
+    int fresh = c->dial_fresh;
+    c->dial_fresh = 0;
     int fd = next_addr ? http_upstream_redial(host, port, &c->up)
-                       : http_upstream_acquire(host, port, &c->up);
+                       : http_upstream_acquire_ex(host, port, !fresh, &c->up);
     if (fd < 0) {
         free(path);
         return ev_upstream_failed(d, c, "connection failed", 0);
@@ -1445,6 +1451,7 @@ static int ev_finish_upstream(EvDriver* d, EvConn* c) {
      * "HTTP/1.1 0 Unknown". */
     if (got == 0 && was_reused && !c->up_stale_retried) {
         c->up_stale_retried = 1;
+        c->dial_fresh = 1;          /* #3260 */
         ev_reclaim_rxbuf(c);
         return ev_begin_retry(d, c);
     }
@@ -1537,6 +1544,7 @@ static int ev_advance(EvDriver* d, EvConn* c) {
              * being dropped without an answer. */
             if (r < 0 && c->up.reused && !c->up_stale_retried) {
                 c->up_stale_retried = 1;
+                c->dial_fresh = 1;          /* #3260 */
                 ev_drop_upstream(d, c);
                 ev_reclaim_rxbuf(c);
                 r = ev_begin_retry(d, c);
@@ -1560,6 +1568,7 @@ static int ev_advance(EvDriver* d, EvConn* c) {
              * since nothing had arrived: dial fresh and send once more. */
             if (r < 0 && c->x.len == 0 && c->up.reused && !c->up_stale_retried) {
                 c->up_stale_retried = 1;
+                c->dial_fresh = 1;          /* #3260 */
                 ev_drop_upstream(d, c);
                 ev_reclaim_rxbuf(c);
                 r = ev_begin_retry(d, c);
