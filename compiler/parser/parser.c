@@ -1296,6 +1296,16 @@ static Type* parse_type_unsuffixed(Parser* parser) {
         if (match_token(parser, TOKEN_RIGHT_BRACKET)) {
             // Dynamic array
             type = create_array_type(type, -1);
+            /* A slice of slices: each further `[]` wraps once more, so
+             * `int[][]` is a slice whose elements are `int[]` -- the type
+             * `make([]int[], n)` already builds. Only the empty form
+             * repeats; a fixed length after a slice has no C shape. */
+            while (peek_token(parser) && peek_token(parser)->type == TOKEN_LEFT_BRACKET &&
+                   peek_ahead(parser, 1) && peek_ahead(parser, 1)->type == TOKEN_RIGHT_BRACKET) {
+                advance_token(parser);
+                advance_token(parser);
+                type = create_array_type(type, -1);
+            }
         } else {
             // Fixed-size array: the length is an integer constant
             // expression (#3115), reported here when it is not one.
