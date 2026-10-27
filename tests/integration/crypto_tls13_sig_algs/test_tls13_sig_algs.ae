@@ -1,0 +1,112 @@
+// Certificate signatures beyond SHA-256 RSA and P-256/P-384 ECDSA (#3307).
+//
+// tls13_cert verified a certificate's signature only for
+// sha256WithRSAEncryption, ecdsa-with-SHA256 on a P-256 key and
+// ecdsa-with-SHA384 on a P-384 key. Any other chain did not verify, so the
+// pure TLS client refused real sites whose CAs sign with
+// sha384WithRSAEncryption (www.bing.com, www.microsoft.com: Microsoft's and
+// many DigiCert chains), and every chain through a P-521 or Ed25519 CA.
+// Each chain below failed before the fix ("certificate does not chain to a
+// trusted anchor") and verifies now, and the same chain with one bit of the
+// leaf's signature flipped is refused.
+//
+// Fixtures, made once with openssl (`x509 -req -extfile`, valid 2026-01-01
+// to 2126-01-01), all under one P-256 root:
+//   rsaca     RSA-3072 CA, signed ecdsa-with-SHA384 by the P-256 root (a hash
+//             longer than the curve); rsaleaf under it, sha384WithRSAEncryption
+//   p521ca    P-521 CA; p521leaf under it, ecdsa-with-SHA512
+//   edca      Ed25519 CA; edleaf under it, Ed25519
+
+import std.list
+import std.bytes
+import std.string
+import std.cryptography.tls13_cert
+
+extern exit(code: int)
+
+fn pem_root() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBbTCCARSgAwIBAgIIAbG3Zcl3Rz4wCgYIKoZIzj0EAwIwGjEYMBYGA1UEAwwP\nQ2hhaW4gVGVzdCBSb290MCAXDTI2MDEwMTAwMDAwMFoYDzIxMjYwMTAxMDAwMDAw\nWjAaMRgwFgYDVQQDDA9DaGFpbiBUZXN0IFJvb3QwWTATBgcqhkjOPQIBBggqhkjO\nPQMBBwNCAAR9WijVAhsIJAknhWwdyIvLEtorzMadRjzVfyAQwKwOLawIHYNNOvPQ\nYmTm71x3tM534A0n3XtBlrp/j6L/QciLo0IwQDAPBgNVHRMBAf8EBTADAQH/MA4G\nA1UdDwEB/wQEAwIBBjAdBgNVHQ4EFgQUkxMUuxXX9urrj1w+az33GyEVI20wCgYI\nKoZIzj0EAwIDRwAwRAIgKZ7Y0hdZRPElIh1HvcDAMb9XHTcp/okFAMtywwN7R1sC\nIBAyiGHEuLnkCWB476svZbEXO00Ct4B80nalck9pukIL\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_rsaca() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIC3TCCAoKgAwIBAgIIJ08E2mjA6kYwCgYIKoZIzj0EAwMwGjEYMBYGA1UEAwwP\nQ2hhaW4gVGVzdCBSb290MCAXDTI2MDEwMTAwMDAwMFoYDzIxMjYwMTAxMDAwMDAw\nWjAcMRowGAYDVQQDDBFDaGFpbiBUZXN0IFJTQSBDQTCCAaIwDQYJKoZIhvcNAQEB\nBQADggGPADCCAYoCggGBAKBMhFYRaEO2114tfB1Jb8GlFhaGUqbdk/OZekv/dLOf\n9Tb6LG49svcdNYw4hp28pf/QUwh1nHNeTjFzxgYBhxbaytkO58VsetkJDoocCggM\nwXDEYMQp3L3RYQxiLpZvnR3cbAuQAIcnRoMs168vqzahKSrKp+FuVwzBFFF+XIGJ\nWJyhpa+r2Kdg/a5CCGqJqhF48/3QwRHbfWC6qTCBbaP423ZAxDBPNTxifkrLEdcF\nzd4Dt3eUxOpis6m557J2QcltCHluRi/zlcnOYGIPuCcv1gzJsrIPpgJDu2G2ZRaY\nM4JlJisH+nHjBWCTdg11MSyyIwuvseNX6/iSzMGZ1HwsROtxJ/+vkoXAbfvfY1H5\nzYApfhHpmgT+Z4guJN0nFJIwTENlEbYcjn3w+L+bUswHyYrDc9gzuK2E5UMyHDCA\nTt55rDnGW1Aw9nnsgp+lWHOY/fXkwo19dk8/IE9gaY5UwbCkRywf0c4lCoFGDM5E\nPp5OEasg7ZKrDYrdpXyYDwIDAQABo2MwYTAPBgNVHRMBAf8EBTADAQH/MA4GA1Ud\nDwEB/wQEAwIBBjAdBgNVHQ4EFgQUDnCPeVETvLxlQMa/WPiRQxKrwpAwHwYDVR0j\nBBgwFoAUkxMUuxXX9urrj1w+az33GyEVI20wCgYIKoZIzj0EAwMDSQAwRgIhAOIY\nE74i5QbjdPRm4LoxT2lMpysAgFCSMooaiKDD2QjCAiEAn5w3Ol4wOL22cuBoUmsG\nkvDwMdFR08wkWPQDcgSFamI=\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_rsaleaf() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIICxTCCAS2gAwIBAgIIK+vJ1jlCa44wDQYJKoZIhvcNAQEMBQAwHDEaMBgGA1UE\nAwwRQ2hhaW4gVGVzdCBSU0EgQ0EwIBcNMjYwMTAxMDAwMDAwWhgPMjEyNjAxMDEw\nMDAwMDBaMBYxFDASBgNVBAMMC3JzYS5leGFtcGxlMFkwEwYHKoZIzj0CAQYIKoZI\nzj0DAQcDQgAE3qiaig7tevoQ97qN9MfbVdyqM/u6+zRkL6orDuBUNb5RMHrSI/93\n5YPulg4EmJFoa7tXv+m44/tRseykHVv48qNaMFgwFgYDVR0RBA8wDYILcnNhLmV4\nYW1wbGUwHQYDVR0OBBYEFE9ilRo/qtPD8XwYdbcAZMjwpLFCMB8GA1UdIwQYMBaA\nFA5wj3lRE7y8ZUDGv1j4kUMSq8KQMA0GCSqGSIb3DQEBDAUAA4IBgQAEI2dW2NeV\nZm7mmKnsrlA5seQWCKV80FBsGOWgmqIHaw/5OShMx9DuMliVusvq7xG4LF+ZvOrY\n6EB14j1Tr2yMG828FInlBOgg14JG1yy42mr3kJPTpIQ3pLArRMe1iIXSI7SEAfWw\nS0P7rFm9QCwFzc+2MF55lVbchBNJtR2N4sc/rYg01EgvbiegVtbEHP93+Vz8MnLR\n5d1GSEXv9QKWZy/OhyoGZRuw7Aa5a7ChH6plmU10Y/z8yBSRjJaSkvSU58frlWgm\nwSt9HG20np/YoV9yMfYUcB+bIz47g09kFbulNbbzhfL90IktSw5kplFDctcSvgWJ\nfk7YRVtgn/4lmKH6zGBrmZj3lqQ2Crpc9LYogWyNwOM+iHPJCGiijXAlDhiXPdZu\nWaoQo3dGto7e0w037EomkTJByZz4rb4HO1oqd1N1//zuT2nHFrkvhtwAgHJP8Ig9\nUzCRJxRDW9UfZZ2ivCgCE+qqEuT5plI0ijfxs0UUfDdxHmdDALto+V0=\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_p521ca() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIB1zCCAX2gAwIBAgIJAMykwDLCzrhhMAoGCCqGSM49BAMCMBoxGDAWBgNVBAMM\nD0NoYWluIFRlc3QgUm9vdDAgFw0yNjAxMDEwMDAwMDBaGA8yMTI2MDEwMTAwMDAw\nMFowHjEcMBoGA1UEAwwTQ2hhaW4gVGVzdCBQLTUyMSBDQTCBmzAQBgcqhkjOPQIB\nBgUrgQQAIwOBhgAEAT4StXYnHwW2ah7EDOE5I/pG/jFnvs4fcafuqJsGVyC7Vs7V\nZvIER++2LMOWHWs/0HAcB0BQYgA3UMgFnFmqtoQMAL3shp0Lj9Ubfdnyw1xdIBgL\ntCQJlpF84qIwKyGKoSRNGqv3EHH3N1AtygiDtraMC2FwteEIARbe4koRfuyJkcIh\no2MwYTAPBgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIBBjAdBgNVHQ4EFgQU\nE6UklSdj2oM3zJwnAY5nh5HuVoUwHwYDVR0jBBgwFoAUkxMUuxXX9urrj1w+az33\nGyEVI20wCgYIKoZIzj0EAwIDSAAwRQIhAL0tPfuy5L7+IA1684JUUD+mvmURIzkK\nqXgMSYKaXbCkAiAVG/W649QoYaf7ClVheoOulUEiKM8XKkowgZYcZ0SUzQ==\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_p521leaf() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBzjCCAS+gAwIBAgIJAM3bJ7OE0BrdMAoGCCqGSM49BAMEMB4xHDAaBgNVBAMM\nE0NoYWluIFRlc3QgUC01MjEgQ0EwIBcNMjYwMTAxMDAwMDAwWhgPMjEyNjAxMDEw\nMDAwMDBaMBcxFTATBgNVBAMMDHA1MjEuZXhhbXBsZTBZMBMGByqGSM49AgEGCCqG\nSM49AwEHA0IABDLjHsTfP3K9fygqVS+izCzpa5CPbj4iMJBkGmNzdDOurDgTUQ3N\n5iV8BELiTj/Q3xQ0N8CVrrGoz7O/IS1KQJyjWzBZMBcGA1UdEQQQMA6CDHA1MjEu\nZXhhbXBsZTAdBgNVHQ4EFgQUFlRW5+ioz2jLAjwWYSTbIdNhLbUwHwYDVR0jBBgw\nFoAUE6UklSdj2oM3zJwnAY5nh5HuVoUwCgYIKoZIzj0EAwQDgYwAMIGIAkIAkjKN\nRFv3HZtNwEsI1JDBiPWU1SQM4E/R/Q5lhU1n9Q82TcLiPbCwbTL3H1nFWDrPbNOk\nhoHkHieeWyJ+dcEN25MCQgGSUKBYyIt9QZ7EplwX9KhnxLWzhPEUf7DsahEvxARL\n6hIpxdRL0QS79nZT7FZfHKhPkScb7Vk7mBnkjUAGYFeKtg==\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_edca() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBaDCCAQ2gAwIBAgIJAI/1WnTBbkFhMAoGCCqGSM49BAMCMBoxGDAWBgNVBAMM\nD0NoYWluIFRlc3QgUm9vdDAgFw0yNjAxMDEwMDAwMDBaGA8yMTI2MDEwMTAwMDAw\nMFowIDEeMBwGA1UEAwwVQ2hhaW4gVGVzdCBFZDI1NTE5IENBMCowBQYDK2VwAyEA\nyxDV23LIWpJVGsNgmFy5yeogcDsH8KoenqIPaHEdEjWjYzBhMA8GA1UdEwEB/wQF\nMAMBAf8wDgYDVR0PAQH/BAQDAgEGMB0GA1UdDgQWBBRXyp4cMkB+9hB6yhuK1eby\nS0JbwTAfBgNVHSMEGDAWgBSTExS7Fdf26uuPXD5rPfcbIRUjbTAKBggqhkjOPQQD\nAgNJADBGAiEAsXBPcihoJvR+VKBpvv61kxwRAHkIozw4Kk/UxMEU/bwCIQCXmB0s\nBV5idTGYFAprSmlO3TsCdgdYbzeqeGIXLUloAw==\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_edleaf() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBdjCCASigAwIBAgIJAKMYIsZsFQ6OMAUGAytlcDAgMR4wHAYDVQQDDBVDaGFp\nbiBUZXN0IEVkMjU1MTkgQ0EwIBcNMjYwMTAxMDAwMDAwWhgPMjEyNjAxMDEwMDAw\nMDBaMBUxEzARBgNVBAMMCmVkLmV4YW1wbGUwWTATBgcqhkjOPQIBBggqhkjOPQMB\nBwNCAARoNfqttJP/W/abMLnfE1WLfLQB3ywk9AsCZCX0EKFAqVTH/tuYpgjxej6n\nhI7YOkPNei98e6UJdpaHrG7DsVlOo1kwVzAVBgNVHREEDjAMggplZC5leGFtcGxl\nMB0GA1UdDgQWBBQ/syu84NbOSluGvOxthHQJfSmdaTAfBgNVHSMEGDAWgBRXyp4c\nMkB+9hB6yhuK1ebyS0JbwTAFBgMrZXADQQDjpeIgY2diOf/l5qYCTeGWnmm9usZ2\neNLehwsT8n48M5egIZweTT3vlc4nuv3l87ql/xKel05lj1wuSLWzruwB\n-----END CERTIFICATE-----\n"
+}
+
+fn certs(pem: string) -> ptr {
+    l = list_new()
+    tls13_cert.trust_store_add_pem(l, pem)
+    return l
+}
+
+// validate_chain(leaf, [ca], [root]) for a server in 2027, with the last
+// byte of the leaf's signature flipped when `tamper` is 1.
+fn chain_result(leaf_pem: string, ca_pem: string, tamper: int) -> string {
+    anchors = certs(pem_root())
+    inters = certs(ca_pem)
+    leaves = certs(leaf_pem)
+    r = "the leaf fixture does not parse"
+    if list_size(leaves) == 1 {
+        leaf = list.at(leaves, 0) as *LeafCert
+        if tamper == 1 {
+            k = leaf.signature_len - 1
+            bytes.set(leaf.signature, k, (bytes.get(leaf.signature, k) ^ 1) & 0xFF)
+        }
+        r = tls13_cert.validate_chain(leaf, inters, anchors, "20270101000000", tls13_cert.PURPOSE_SERVER, -1)
+    }
+    tls13_cert.free_anchors(anchors)
+    tls13_cert.free_anchors(inters)
+    tls13_cert.free_anchors(leaves)
+    return r
+}
+
+// 0 when the chain verifies and its tampered copy does not, else 1.
+fn check(label: string, leaf_pem: string, ca_pem: string) -> int {
+    fails = 0
+    good = chain_result(leaf_pem, ca_pem, 0)
+    if string.equals(good, "") == 1 {
+        println("ok   ${label}")
+    } else {
+        println("FAIL ${label}: refused (${good})")
+        fails = 1
+    }
+    bad = chain_result(leaf_pem, ca_pem, 1)
+    if string.equals(bad, "") != 1 {
+        println("ok   ${label}, tampered: refused")
+    } else {
+        println("FAIL ${label}, tampered: accepted")
+        fails = 1
+    }
+    return fails
+}
+
+main() {
+    fails = 0
+    fails = fails + check("sha384WithRSAEncryption (RSA-3072 CA under ecdsa-with-SHA384 on P-256)", pem_rsaleaf(), pem_rsaca())
+    fails = fails + check("ecdsa-with-SHA512 on a P-521 CA", pem_p521leaf(), pem_p521ca())
+    fails = fails + check("Ed25519 CA", pem_edleaf(), pem_edca())
+    if fails > 0 {
+        println("tls13_sig_algs: ${fails} FAILURES")
+        exit(1)
+    }
+    println("tls13_sig_algs: all checks pass")
+}

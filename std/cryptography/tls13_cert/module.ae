@@ -43,6 +43,7 @@ import std.cryptography.asn1
 import std.cryptography.sha2
 import std.cryptography.p256
 import std.cryptography.p384
+import std.cryptography.p521
 import std.cryptography.ed25519
 import std.os
 
@@ -353,7 +354,7 @@ verify_cert_verify(scheme: int, pubx: ptr, puby: ptr, transcript_hash: byte[], s
     if scheme == SCHEME_ECDSA_P384_SHA384 {
         // ECDSA over SHA-384(content) on a P-384 leaf key; pubx/puby are the
         // 48-byte affine coordinates. DER sig -> (r,s), each 48 bytes.
-        digest = sha384_of_bytes(bytes.view(content)[0..clen])
+        digest = digest_of(bytes.view(content)[0..clen], 2)
         r48, s48, serr = split_ecdsa_sig(sig, 48)
         if string.equals(serr, "") == 1 {
             result = p384.ecdsa_verify(pubx, puby, digest, r48, s48)
@@ -1954,30 +1955,6 @@ fn dn_equal(a: byte[], b: byte[]) -> int {
     return 1
 }
 
-// Build the DER DigestInfo for a SHA-256 hash (what PKCS#1 v1.5 verify wants):
-//   SEQUENCE { SEQUENCE { OID 2.16.840.1.101.3.4.2.1, NULL }, OCTET STRING hash }
-// The 19-byte fixed prefix for SHA-256 followed by the 32-byte hash.
-fn sha256_digestinfo(hash32: ptr) -> ptr {
-    // 30 31 30 0d 06 09 60 86 48 01 65 03 04 02 01 05 00 04 20 <hash>
-    prefix = bytes.new(19)
-    bytes.set(prefix, 0, 0x30); bytes.set(prefix, 1, 0x31)
-    bytes.set(prefix, 2, 0x30); bytes.set(prefix, 3, 0x0d)
-    bytes.set(prefix, 4, 0x06); bytes.set(prefix, 5, 0x09)
-    bytes.set(prefix, 6, 0x60); bytes.set(prefix, 7, 0x86)
-    bytes.set(prefix, 8, 0x48); bytes.set(prefix, 9, 0x01)
-    bytes.set(prefix, 10, 0x65); bytes.set(prefix, 11, 0x03)
-    bytes.set(prefix, 12, 0x04); bytes.set(prefix, 13, 0x02)
-    bytes.set(prefix, 14, 0x01); bytes.set(prefix, 15, 0x05)
-    bytes.set(prefix, 16, 0x00); bytes.set(prefix, 17, 0x04)
-    bytes.set(prefix, 18, 0x20)
-    di = bytes.new(51)
-    bytes.set(di, 50, 0)
-    bytes.copy_from_bytes(di, 0, prefix, 0, 19)
-    bytes.copy_from_bytes(di, 19, hash32, 0, 32)
-    bytes.free(prefix)
-    return di
-}
-
 // Parse an RSA SPKI key blob (the SubjectPublicKey content, which for RSA is
 // SEQUENCE { INTEGER n, INTEGER e }) into (n, e) bignums. Returns (n,e,"") or
 // (null,null,err). Caller frees the bignums with bignum.free.
@@ -2016,15 +1993,19 @@ verify_cert_signature(leaf: *LeafCert, issuer: *LeafCert) -> int {
     return verify_sig_over_bytes(bytes.view(leaf.tbs)[0..leaf.tbs_len], leaf.sig_alg_oid, bytes.view(leaf.signature)[0..leaf.signature_len], issuer.spki_algo_oid, bytes.view(issuer.spki_key)[0..issuer.spki_key_len])
 }
 
-// Verify `sig` over the raw bytes `msg[0..msg_len)` under the signature
-// algorithm named by `sig_alg_oid` (dotted-OID bytes), using the signer's SPKI
-// (`key_algo_oid` + `key`/`key_len`). Returns 1 if valid, else 0. The three
-// algorithms cover the real world for both X.509 cert signatures and OCSP
-// responder signatures (RFC 6960 §4.2.2.2 uses the same AlgorithmIdentifier /
-// key shapes as certificates):
-//   sha256WithRSAEncryption  1.2.840.113549.1.1.11  -> RSA PKCS#1 v1.5 / SHA-256
-//   ecdsa-with-SHA256        1.2.840.10045.4.3.2    -> ECDSA P-256 / SHA-256
-//   ecdsa-with-SHA384        1.2.840.10045.4.3.3    -> ECDSA P-384 / SHA-384
+// Verify `sig` over the bytes `msg` under the signature algorithm named by
+// `sig_alg_oid` (dotted-OID bytes), with the signer's SPKI (`key_algo_oid`
+// and `key`). Returns 1 if valid, else 0. Used for X.509 certificate
+// signatures and OCSP responder signatures (RFC 6960 4.2.2.2 uses the same
+// AlgorithmIdentifier and key shapes):
+//   sha256/384/512WithRSAEncryption  1.2.840.113549.1.1.11/12/13
+//       RSA PKCS#1 v1.5 on an rsaEncryption key
+//   ecdsa-with-SHA256/384/512        1.2.840.10045.4.3.2/3/4
+//       ECDSA on an id-ecPublicKey key: P-256, P-384 or P-521 by its size
+//   id-Ed25519                        1.3.101.112
+// sha384WithRSAEncryption is what Microsoft's and many DigiCert chains use
+// (x509-limbo's online::bing.com), and P-521 is in the Web PKI's roots
+// (#3307).
 fn verify_sig_over_bytes(msg: byte[], sig_alg_oid: ptr, sig: byte[], key_algo_oid: ptr, key: byte[]) -> int {
     if msg.len < 0 { panic("tls13_cert.verify_sig_over_bytes: the `msg` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     if sig.len < 0 { panic("tls13_cert.verify_sig_over_bytes: the `sig` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
@@ -2034,68 +2015,91 @@ fn verify_sig_over_bytes(msg: byte[], sig_alg_oid: ptr, sig: byte[], key_algo_oi
     if sig == null { return 0 }
     if key == null { return 0 }
 
+    // The hash: 1 SHA-256, 2 SHA-384, 3 SHA-512; and the family.
+    hid = 0
+    rsa_sig = 0
+    ec_sig = 0
+    if oid_is(sig_alg_oid, "1.2.840.113549.1.1.11") == 1 { hid = 1; rsa_sig = 1 }
+    if oid_is(sig_alg_oid, "1.2.840.113549.1.1.12") == 1 { hid = 2; rsa_sig = 1 }
+    if oid_is(sig_alg_oid, "1.2.840.113549.1.1.13") == 1 { hid = 3; rsa_sig = 1 }
+    if oid_is(sig_alg_oid, "1.2.840.10045.4.3.2") == 1 { hid = 1; ec_sig = 1 }
+    if oid_is(sig_alg_oid, "1.2.840.10045.4.3.3") == 1 { hid = 2; ec_sig = 1 }
+    if oid_is(sig_alg_oid, "1.2.840.10045.4.3.4") == 1 { hid = 3; ec_sig = 1 }
+
+    if oid_is(sig_alg_oid, "1.3.101.112") == 1 {
+        if oid_is(key_algo_oid, "1.3.101.112") != 1 || key_len != 32 { return 0 }
+        pub = bytes.from_slice(key)
+        ok = ed25519.verify(pub, msg, sig)
+        bytes.free(pub)
+        return ok
+    }
+    if hid == 0 { return 0 }
+
     result = 0
-    if oid_is(sig_alg_oid, "1.2.840.113549.1.1.11") == 1 {
-        // sha256WithRSAEncryption. Signer key must be rsaEncryption.
-        if oid_is(key_algo_oid, "1.2.840.113549.1.1.1") == 1 {
-            hash = sha256_of_bytes(msg)
-            n, e, perr = parse_rsa_spki(key)
-            if string.equals(perr, "") == 1 {
-                k = rsa.key_from_components(n, e, null)
-                di = sha256_digestinfo(hash)
-                result = rsa.verify_pkcs1(k, di, sig)
-                bytes.free(di)
-                rsa.key_free(k) // frees n, e too
+    if rsa_sig == 1 && oid_is(key_algo_oid, "1.2.840.113549.1.1.1") == 1 {
+        hash = digest_of(msg, hid)
+        n, e, perr = parse_rsa_spki(key)
+        if string.equals(perr, "") == 1 {
+            k = rsa.key_from_components(n, e, null)
+            di = digest_info(hash, hid)
+            result = rsa.verify_pkcs1(k, di, sig)
+            bytes.free(di)
+            rsa.key_free(k) // frees n, e too
+        }
+        bytes.free(hash)
+    }
+    if ec_sig == 1 && oid_is(key_algo_oid, "1.2.840.10045.2.1") == 1 {
+        coord = 0
+        if key_len == 65 { coord = 32 }
+        if key_len == 97 { coord = 48 }
+        if key_len == 133 { coord = 66 }
+        if coord > 0 {
+            hash = digest_of(msg, hid)
+            px, py, kerr = ec_point_from_spki(key, coord)
+            if string.equals(kerr, "") == 1 {
+                rr, ss, serr = split_ecdsa_sig(sig, coord)
+                if string.equals(serr, "") == 1 {
+                    if coord == 32 { result = p256.ecdsa_verify(px, py, hash, rr, ss) }
+                    if coord == 48 { result = p384.ecdsa_verify(px, py, hash, rr, ss) }
+                    if coord == 66 { result = p521.ecdsa_verify(px, py, hash, rr, ss) }
+                    bytes.free(rr); bytes.free(ss)
+                }
+                bytes.free(px); bytes.free(py)
             }
             bytes.free(hash)
-        }
-    }
-    if oid_is(sig_alg_oid, "1.2.840.10045.4.3.2") == 1 {
-        // ecdsa-with-SHA256 on a P-256 signer key (65-byte uncompressed point).
-        if oid_is(key_algo_oid, "1.2.840.10045.2.1") == 1 {
-            if key_len == 65 {
-                hash = sha256_of_bytes(msg)
-                px, py, kerr = ec_point_from_spki(key, 32)
-                if string.equals(kerr, "") == 1 {
-                    r32, s32, serr = split_ecdsa_sig(sig, 32)
-                    if string.equals(serr, "") == 1 {
-                        result = p256.ecdsa_verify(px, py, hash, r32, s32)
-                        bytes.free(r32); bytes.free(s32)
-                    }
-                    bytes.free(px); bytes.free(py)
-                }
-                bytes.free(hash)
-            }
-        }
-    }
-    if oid_is(sig_alg_oid, "1.2.840.10045.4.3.3") == 1 {
-        // ecdsa-with-SHA384 on a P-384 signer key (97-byte uncompressed point).
-        // Common on modern roots/intermediates (e.g. Google Trust Services).
-        if oid_is(key_algo_oid, "1.2.840.10045.2.1") == 1 {
-            if key_len == 97 {
-                hash = sha384_of_bytes(msg)
-                px, py, kerr = ec_point_from_spki(key, 48)
-                if string.equals(kerr, "") == 1 {
-                    r48, s48, serr = split_ecdsa_sig(sig, 48)
-                    if string.equals(serr, "") == 1 {
-                        result = p384.ecdsa_verify(px, py, hash, r48, s48)
-                        bytes.free(r48); bytes.free(s48)
-                    }
-                    bytes.free(px); bytes.free(py)
-                }
-                bytes.free(hash)
-            }
         }
     }
     return result
 }
 
-// SHA-384 of a std.bytes buffer (streaming path).
-fn sha384_of_bytes(data: byte[]) -> ptr {
-    ctx, err = sha2.new("sha384")
+// SHA-256 (hid 1), SHA-384 (2) or SHA-512 (3) of `data`.
+fn digest_of(data: byte[], hid: int) -> ptr {
+    name = "sha256"
+    if hid == 2 { name = "sha384" }
+    if hid == 3 { name = "sha512" }
+    ctx, err = sha2.new(name)
     if err != "" { return null }
     sha2.update(ctx, data)
     return sha2.final_bytes(ctx)
+}
+
+// The DER DigestInfo PKCS#1 v1.5 signs, for a hash from digest_of:
+//   SEQUENCE { SEQUENCE { OID 2.16.840.1.101.3.4.2.<hid>, NULL }, OCTET STRING hash }
+fn digest_info(hash: ptr, hid: int) -> ptr {
+    hl = bytes.length(hash)
+    di = bytes.new(19 + hl)
+    bytes.set(di, 0, 0x30); bytes.set(di, 1, 17 + hl)
+    bytes.set(di, 2, 0x30); bytes.set(di, 3, 0x0d)
+    bytes.set(di, 4, 0x06); bytes.set(di, 5, 0x09)
+    bytes.set(di, 6, 0x60); bytes.set(di, 7, 0x86)
+    bytes.set(di, 8, 0x48); bytes.set(di, 9, 0x01)
+    bytes.set(di, 10, 0x65); bytes.set(di, 11, 0x03)
+    bytes.set(di, 12, 0x04); bytes.set(di, 13, 0x02)
+    bytes.set(di, 14, hid); bytes.set(di, 15, 0x05)
+    bytes.set(di, 16, 0x00); bytes.set(di, 17, 0x04)
+    bytes.set(di, 18, hl)
+    bytes.copy_from_bytes(di, 19, hash, 0, hl)
+    return di
 }
 
 // Split an uncompressed EC point (04 || X || Y, each `coord` bytes) from an SPKI
