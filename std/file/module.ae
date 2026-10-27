@@ -30,6 +30,7 @@ extern file_fd_raw(file: ptr) -> int
 // string_concat used to duplicate borrowed strings across free boundaries.
 extern string_concat(a: string, b: string) -> string @heap
 extern string_length(str: string) -> int
+extern fs_error_message(path: string, fallback: string) -> string
 
 // Open a file. Returns (handle, "") on success, (null, error) on failure.
 open(path: string, mode: string) -> {
@@ -89,18 +90,18 @@ read(path: string) -> {
 write(path: string, content: string) -> {
     handle = file_open_raw(path, "w")
     if handle == 0 {
-        return "cannot open file for writing"
+        return fs_error_message(path, "cannot open file for writing")
     }
     length = string_length(content)
     ok = file_write_raw(handle, content, length)
-    // The bytes can sit in the handle's buffer until the close flushes
-    // them, so a full disk shows only there (#3179).
-    closed = file_close_raw(handle)
     if ok == 0 {
-        return "write failed"
+        err = fs_error_message(path, "write failed")
+        file_close_raw(handle)
+        return err
     }
+    closed = file_close_raw(handle)
     if closed < 0 {
-        return "close failed: buffered data was not written"
+        return fs_error_message(path, "close failed: buffered data was not written")
     }
     return ""
 }

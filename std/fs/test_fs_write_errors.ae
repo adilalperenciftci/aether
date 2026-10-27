@@ -1,0 +1,79 @@
+// std.fs and std.file write errors carry the path and the OS reason (#3131,
+// "std is silent"): a failed write used to return a fixed "write failed",
+// which could not tell a missing directory from a full disk or a refusal.
+
+import std.fs
+import std.file
+import std.string
+import std.spec
+
+main() {
+    fw = spec.init()
+
+    tmp, terr = fs.make_temp_dir("", "test_fs_write_err")
+    if terr != "" {
+        println("FAIL: cannot create a temp dir: ${terr}")
+        return 1
+    }
+    missing = fs.path_join(tmp, "no_such_dir/file.txt")
+
+    spec.describe(fw, "a failed write names the path and the reason") {
+        spec.it(fw, "fs.write into a missing directory") callback {
+            err = fs.write(missing, "hello")
+            spec.assert_true(string.starts_with(err, missing) == 1, "starts with the path: '${err}'")
+            spec.assert_err_contains(err, "No such file", "names ENOENT")
+        }
+        spec.it(fw, "fs.write to a directory") callback {
+            err = fs.write(tmp, "hello")
+            spec.assert_true(string.starts_with(err, tmp) == 1, "starts with the path: '${err}'")
+            // EISDIR on POSIX ("Is a directory"); Windows refuses opening a
+            // directory for writing with EACCES ("Permission denied").
+            low = string.to_lower(err)
+            said = string.contains(low, "directory") + string.contains(low, "permission denied")
+            spec.assert_true(said > 0, "names EISDIR or EACCES: '${err}'")
+        }
+        spec.it(fw, "fs.write_binary into a missing directory") callback {
+            err = fs.write_binary(missing, string.bytes("hello"))
+            spec.assert_true(string.starts_with(err, missing) == 1, "starts with the path: '${err}'")
+            spec.assert_err_contains(err, "No such file", "names ENOENT")
+        }
+        spec.it(fw, "fs.write_atomic into a missing directory") callback {
+            err = fs.write_atomic(missing, string.bytes("hello"))
+            spec.assert_true(string.starts_with(err, missing) == 1, "starts with the path: '${err}'")
+            spec.assert_err_contains(err, "No such file", "names ENOENT")
+        }
+        spec.it(fw, "fs.rename names both paths") callback {
+            src = fs.path_join(tmp, "missing_source.txt")
+            dst = fs.path_join(tmp, "target.txt")
+            err = fs.rename(src, dst)
+            spec.assert_true(string.starts_with(err, "${src} -> ${dst}: ") == 1, "names source and destination: '${err}'")
+            spec.assert_err_contains(err, "No such file", "names ENOENT")
+        }
+        spec.it(fw, "file.write into a missing directory") callback {
+            err = file.write(missing, "hello")
+            spec.assert_true(string.starts_with(err, missing) == 1, "starts with the path: '${err}'")
+            spec.assert_err_contains(err, "No such file", "names ENOENT")
+        }
+        // /dev/full opens, then refuses the bytes with ENOSPC: at the write or
+        // at the close that flushes them (#3179). The reason must survive the
+        // cleanup that follows the failing call. Linux only; elsewhere skipped.
+        spec.it(fw, "a full device reports ENOSPC through each writer") callback {
+            if fs.exists("/dev/full") == 1 {
+                e1 = fs.write("/dev/full", "hello")
+                spec.assert_err_contains(e1, "No space left", "fs.write")
+                e2 = fs.write_binary("/dev/full", string.bytes("hello"))
+                spec.assert_err_contains(e2, "No space left", "fs.write_binary")
+                e3 = file.write("/dev/full", "hello")
+                spec.assert_err_contains(e3, "No space left", "file.write")
+            }
+        }
+        spec.it(fw, "a write that succeeds still returns empty") callback {
+            ok_path = fs.path_join(tmp, "ok.txt")
+            spec.assert_ok(fs.write(ok_path, "hello"), "fs.write")
+            spec.assert_ok(fs.write_atomic(ok_path, string.bytes("again")), "fs.write_atomic")
+        }
+    }
+
+    fs.remove_tree(tmp)
+    return spec.run_summary(fw)
+}
