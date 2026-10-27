@@ -9527,6 +9527,23 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                              NULL, -1, 0);
                     break;
                 }
+                /* #3300: an optional state field the binding names is
+                 * stored into, as a state field of any other type is
+                 * (below); declared here, the binding made a local that
+                 * shadowed the state, and the value was lost. R3: the field
+                 * takes the value and drops the one it held. */
+                if (!is_var_declared(gen, stmt->value) && gen->current_actor &&
+                    is_actor_state_var(gen, stmt->value)) {
+                    const char* lv = cg_internf("self->%s", stmt->value);
+                    print_indent(gen);
+                    if (own_type_owns(gen, stmt->node_type) && stmt->child_count > 0)
+                        emit_owning_store(gen, lv, stmt->node_type, stmt->children[0], 0);
+                    else
+                        emit_opt_owner_store(gen, lv, stmt->node_type,
+                                             stmt->child_count > 0 ? stmt->children[0] : NULL,
+                                             NULL, -1, 0);
+                    break;
+                }
                 print_indent(gen);
                 if (!is_var_declared(gen, stmt->value)) {
                     /* #2902: volatile where a `try` body writes it, as

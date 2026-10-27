@@ -1,0 +1,77 @@
+// A bare-name binding of an optional state field in a handler stores into
+// the state (#3300).
+//
+// The bug: the optional binding path declared a local of the field's name
+// in the handler (`ae_opt_ptr kept = ...`), which shadowed the state, so the
+// state stayed `none` and what the binding held was lost (a buffer leaked).
+// A field of any other type was stored. Pre-fix the first check fails
+// (`Look` saw none). The fix stores an optional state field as any state
+// field is stored, dropping what it held: a `string?` field's old string
+// is released, which the macOS leaks gate checks here.
+
+import std.bytes
+
+message Fill {}
+message Clear {}
+message Look {}
+message Name { s: string }
+message GetName {}
+
+actor A {
+    state kept: ptr? = none
+    state label: string? = none
+    state n = 0
+
+    receive {
+        Fill() -> {
+            old = kept ?? null
+            if old != null {
+                bytes.free(old)
+            }
+            kept = bytes.new(4)
+            n = n + 1
+        }
+        Clear() -> {
+            old = kept ?? null
+            if old != null {
+                bytes.free(old)
+            }
+            kept = none
+        }
+        Look() -> {
+            k = kept ?? null
+            reply k != null
+        }
+        Name(s) -> {
+            label = "${s}!"
+        }
+        GetName() -> {
+            reply label ?? "none"
+        }
+    }
+}
+
+main() {
+    a = spawn(A())
+    a ! Fill {}
+    a ! Fill {}
+    seen = a ? Look {}
+    if !seen {
+        println("FAIL: the optional state field was not stored")
+        exit(1)
+    }
+    a ! Clear {}
+    seen = a ? Look {}
+    if seen {
+        println("FAIL: storing none did not clear the field")
+        exit(1)
+    }
+    a ! Name { s: "one" }
+    a ! Name { s: "two" }
+    got = a ? GetName {}
+    if got != "two!" {
+        println("FAIL: the string? state field holds '${got}'")
+        exit(1)
+    }
+    println("actor state optional store: all checks passed (3)")
+}
