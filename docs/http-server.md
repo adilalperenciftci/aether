@@ -500,7 +500,9 @@ middleware.use_cors(server,
     0,        // allow_credentials
     3600)     // max_age (seconds)
 
-// Per-IP token-bucket rate limit: 100 req per 60s
+// Per-IP token-bucket rate limit: 100 req per 60s. It holds buckets for at
+// most 16384 clients; past that the one seen least recently gives its
+// bucket up (#3266).
 middleware.use_rate_limit(server, 100, 60000)
 
 // Virtual host gate

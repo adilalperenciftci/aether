@@ -144,9 +144,13 @@ typedef struct AetherRateLimitOpts AetherRateLimitOpts;
 // Implementation: hash table keyed by the peer the request reports,
 // http_request_remote_addr (the connection's, or the client use_real_ip
 // resolved), never a client-sent header (#3173); "anonymous" when there
-// is no IP peer. Single mutex protects the table.
+// is no IP peer. Single mutex protects the table, which holds at most
+// 16384 clients: at the bound the one seen least recently gives up its
+// bucket (#3266).
 AetherRateLimitOpts* aether_rate_limit_opts_new(int max_requests, int window_ms);
 void aether_rate_limit_opts_free(AetherRateLimitOpts* opts);
+// The clients a limiter holds a bucket for, for tests and diagnostics (#3266).
+int aether_rate_limit_key_count(AetherRateLimitOpts* opts);
 
 int aether_middleware_rate_limit(HttpRequest* req, HttpServerResponse* res, void* user_data);
 

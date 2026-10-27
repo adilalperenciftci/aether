@@ -739,6 +739,39 @@ TEST(http_proxy_exchange_leaves_the_backoff_to_its_caller) {
 /* X-Real-IP is something a client can send, so use_real_ip leaves none of a
  * client's on the request (#3169). It replaced the first and kept a second,
  * which reached an upstream that reads the last X-Real-IP (#3239). */
+/* The rate limiter keeps a bucket per client address, and addresses are the
+ * clients' to have: IPv6 hands one client more than any table holds. Kept
+ * without a bound, a client cycling addresses grew the table for good under
+ * the lock every request takes (#3266). It holds at most
+ * AETHER_RATE_MAX_KEYS, the least recently seen going first, and still
+ * limits the clients it holds. */
+static int rate_limit_from(AetherRateLimitOpts* o, const char* ip) {
+    HttpRequest* req = http_parse_request("GET / HTTP/1.1\r\nHost: h\r\n\r\n");
+    if (!req) return -1;
+    req->remote_addr = strdup(ip);
+    HttpServerResponse* res = http_response_create();
+    int pass = aether_middleware_rate_limit(req, res, o);
+    http_server_response_free(res);
+    http_request_free(req);
+    return pass;
+}
+
+TEST(http_rate_limit_holds_a_bounded_set_of_clients) {
+    AetherRateLimitOpts* o = aether_rate_limit_opts_new(5, 60000);
+    ASSERT_NOT_NULL(o);
+    char ip[64];
+    for (int i = 0; i < 20000; i++) {
+        snprintf(ip, sizeof(ip), "10.%d.%d.%d", (i >> 16) & 255, (i >> 8) & 255, i & 255);
+        ASSERT_EQ(1, rate_limit_from(o, ip));
+    }
+    ASSERT_TRUE(aether_rate_limit_key_count(o) <= 16384);
+    /* One client past its five requests is still limited. */
+    int passed = 0;
+    for (int i = 0; i < 8; i++) passed += rate_limit_from(o, "192.0.2.1") == 1;
+    ASSERT_EQ(5, passed);
+    aether_rate_limit_opts_free(o);
+}
+
 TEST(http_real_ip_drops_every_x_real_ip_a_client_sent) {
     const char* raw =
         "GET / HTTP/1.1\r\nX-Real-IP: 1.1.1.1\r\nHost: h\r\nx-real-ip: 2.2.2.2\r\n\r\n";
