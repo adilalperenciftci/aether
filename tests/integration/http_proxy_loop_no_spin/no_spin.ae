@@ -1,0 +1,161 @@
+// The proxy event loop does not spin on an interest nothing waits on
+// (#3258).
+//
+// On a poller with no edge mode (poll(), the fallback on a POSIX system
+// without epoll or kqueue) a registration that stays reports its descriptor
+// on every wait for as long as the descriptor is ready. The loop left write
+// interest on a client after a send that had to wait, and read interest on a
+// client while its request waited on the upstream; a writable socket, or a
+// client that had already sent its next request, then woke the driver on
+// every wait and it spun a core with nothing to do. Each descriptor now
+// holds only the interest its connection waits on.
+//
+// The loop's wakeups (returns from its poller with work) are counted over a
+// wait in which one connection has nothing to do: a request held by a slow
+// upstream while the client has already sent its next one, and a connection
+// at rest after a response large enough to fill the socket. Either wait must
+// cost a handful of wakeups, not thousands. On epoll and kqueue, and on
+// Windows, which has no loop, the count stays small anyway. Every server
+// listens on 127.0.0.1 and a port the kernel picks.
+
+import std.http
+import std.http.proxy
+import std.string
+import std.tcp
+
+extern exit(code: int)
+extern http_server_evloop_wakeups(server: ptr) -> long
+
+const BIG = 8388608
+
+handle_slow(req: ptr, res: ptr, ud: ptr) {
+    sleep(1500)
+    http.response_set_status(res, 200)
+    http.response_set_body(res, "slow")
+}
+
+handle_fast(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_body(res, "fast")
+}
+
+handle_big(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "application/octet-stream")
+    http.response_set_body(res, string.pad_end("", BIG, 120))
+}
+
+start(server: ptr) -> int {
+    if http.server_bind(server, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    err = http.server_start_background(server)
+    if err != "" {
+        println("FAIL: ${err}")
+        exit(1)
+    }
+    return http.server_port(server)
+}
+
+need(label: string, err: string) {
+    if err != "" {
+        println("FAIL: ${label}: ${err}")
+        exit(1)
+    }
+}
+
+// Read from `sock` until `want` bytes have come or `quiet_ms` pass with none.
+read_bytes(sock: ptr, want: int, quiet_ms: int) -> int {
+    total = 0
+    quiet = 0
+    while total < want && quiet < quiet_ms {
+        ready, _perr = tcp.poll(sock, 50)
+        if ready {
+            chunk, rerr = tcp.read(sock, 65536)
+            if rerr != "" || string.length(chunk) == 0 {
+                quiet = quiet_ms
+            } else {
+                total = total + string.length(chunk)
+                quiet = 0
+            }
+        } else {
+            quiet = quiet + 50
+        }
+    }
+    return total
+}
+
+main() {
+    println("=== the event loop does not spin on an interest nothing waits on (#3258) ===")
+    upstream = http.server_create(0)
+    http.server_set_host(upstream, "127.0.0.1")
+    http.server_get(upstream, "/slow", handle_slow, 0)
+    http.server_get(upstream, "/fast", handle_fast, 0)
+    http.server_get(upstream, "/big", handle_big, 0)
+    up_url = "http://127.0.0.1:${start(upstream)}"
+
+    gateway = http.server_create(0)
+    http.server_set_host(gateway, "127.0.0.1")
+    pool = proxy.upstream_pool_new("round_robin", 10, 0, 0)
+    need("upstream_add", proxy.upstream_add(pool, up_url, 1))
+    opts = proxy.opts_new()
+    // Room for the large response: the proxy refuses one over its cap.
+    need("opts_set_body_cap", proxy.opts_set_body_cap(opts, 67108864))
+    need("mount", proxy.mount(gateway, "/", pool, opts))
+    port = start(gateway)
+    sleep(200)
+
+    sock, cerr = tcp.connect("127.0.0.1", port)
+    if cerr != "" {
+        println("FAIL: connect: ${cerr}")
+        exit(1)
+    }
+    bad = 0
+
+    // A request the upstream holds for a second and a half, and the next
+    // one sent while it waits, so the client's socket has bytes to read.
+    tcp.write(sock, "GET /slow HTTP/1.1\r\nHost: x\r\n\r\n")
+    sleep(200)
+    tcp.write(sock, "GET /fast HTTP/1.1\r\nHost: x\r\n\r\n")
+    sleep(100)
+    before = http_server_evloop_wakeups(gateway)
+    sleep(1000)
+    held = http_server_evloop_wakeups(gateway) - before
+    read_bytes(sock, 1000000, 2500)
+    if held >= 100 {
+        println("  FAIL waiting on the upstream with the next request sent: ${held} wakeups in a second")
+        bad = bad + 1
+    } else {
+        println("  PASS waiting on the upstream with the next request sent")
+    }
+
+    // A response larger than the socket holds, read late, then the
+    // connection at rest.
+    tcp.write(sock, "GET /big HTTP/1.1\r\nHost: x\r\n\r\n")
+    sleep(300)
+    got = read_bytes(sock, BIG, 2000)
+    if got < BIG {
+        println("FAIL: the large response came short: ${got} bytes")
+        exit(1)
+    }
+    sleep(200)
+    before = http_server_evloop_wakeups(gateway)
+    sleep(1000)
+    rest = http_server_evloop_wakeups(gateway) - before
+    if rest >= 100 {
+        println("  FAIL at rest after a response that filled the socket: ${rest} wakeups in a second")
+        bad = bad + 1
+    } else {
+        println("  PASS at rest after a response that filled the socket")
+    }
+
+    tcp.close(sock)
+    http.server_stop(gateway)
+    http.server_stop(upstream)
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

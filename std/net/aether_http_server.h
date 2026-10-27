@@ -1102,6 +1102,10 @@ int http_server_adopt_request(HttpServer* server, int client_fd, void* ssl,
 // 0 when it runs none (Windows, wasi, or a server it does not serve). For
 // tests and diagnostics: whether a gateway is on the loop at all (#3214).
 int http_server_evloop_connections(HttpServer* server);
+// How many times the loop's drivers came back from their pollers with work
+// since the server started, 0 without a loop. For tests and diagnostics: a
+// driver spinning on an interest nothing waits on shows here (#3258).
+long http_server_evloop_wakeups(HttpServer* server);
 
 
 /* Take a connection the event driver does not own, with the bytes it has

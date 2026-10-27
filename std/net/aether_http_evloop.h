@@ -42,6 +42,11 @@ int http_evloop_active(HttpEvLoop* loop);
  * tests and reporting (#3214). */
 int http_evloop_taken(HttpEvLoop* loop);
 
+/* How many times the drivers came back from their pollers with work since
+ * the loop started, for tests and reporting: a driver that spins on an
+ * interest nothing waits on shows here (#3258). */
+long http_evloop_wakeups(HttpEvLoop* loop);
+
 void http_evloop_stop(HttpEvLoop* loop);
 
 #endif // AETHER_HTTP_EVLOOP_H
