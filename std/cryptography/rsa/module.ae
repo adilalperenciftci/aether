@@ -4,30 +4,37 @@
 //
 // Portions copyright (c) 2026 Aether Developers.
 //
-// std.cryptography.rsa — RSA, the first consumer of std.bignum.
+// std.cryptography.rsa: RSA (RFC 8017) in pure Aether.
 //
-// Pure Aether: the modular exponentiation is std.bignum.mod_pow, the key
-// is parsed from PKCS#1 DER via std.cryptography.asn1, and PKCS#1 v1.5
-// padding is built byte-by-byte. No OpenSSL RSA — only the OS CSPRNG
-// (std.cryptography.random_bytes) for type-2 encryption padding, which is
-// a randomness source, not a reimplemented crypto algorithm.
+// The public-key operation is std.bignum.mod_pow, the key is parsed from
+// PKCS#1 DER via std.cryptography.asn1, and the paddings are built byte by
+// byte. No OpenSSL RSA; the OS CSPRNG (std.cryptography.random_buffer)
+// supplies the PKCS#1 v1.5 encryption padding and the blinding factors.
 //
 // Ported from Bouncy Castle's RsaCoreEngine + Pkcs1Encoding +
 // RsaDigestSigner (crypto/src/crypto/{engines,encodings,signers}/, MIT).
 //
-// Scope (this slice):
-//   - key_from_components(n, e, d) / key_free
-//   - key_from_pkcs1_der(bytes) — parse an RSAPrivateKey SEQUENCE
-//   - raw encrypt/decrypt primitives (m^e mod n / c^d mod n)
-//   - PKCS#1 v1.5 encrypt (type 2) / decrypt
-//   - PKCS#1 v1.5 sign (type 1) / verify over a caller-supplied DigestInfo
-//     blob (keeps RSA hash-agnostic; the digest+DigestInfo prefix is built
-//     by the caller, so any std.cryptography digest composes).
+//   key_from_components(n, e, d) / key_from_bytes(n, e, d) /
+//   key_from_pkcs1_der(der) / key_free
+//   raw_encrypt (m^e mod n) / raw_decrypt (c^d mod n)
+//   PKCS#1 v1.5 encrypt (type 2) / decrypt, sign (type 1) / verify over a
+//   caller-supplied DigestInfo blob (any std.cryptography digest composes)
+//   OAEP (SHA-256, empty label) encrypt / decrypt, PSS (SHA-256) sign / verify
 //
-// NOTE: this is the textbook construction for correctness and as the first
-// bignum consumer. Constant-time decryption, OAEP, PSS, and Montgomery
-// acceleration are follow-up slices (see docs/bignum-deferred-optimizations.md
-// for the mod_pow speedup).
+// The private-key operation (raw_decrypt, and through it decrypt_pkcs1,
+// decrypt_oaep, sign_pkcs1, sign_pss) is constant time: Montgomery
+// arithmetic on fixed-width limb vectors with masked reductions, and a
+// fixed 4-bit window exponentiation over all of d's bytes that reads every
+// table entry. The base is blinded with a fresh random r (c * r^e, then the
+// result times r^-1). The two decryptions check their padding without an
+// early exit or a branch on the plaintext, and only the final verdict (and
+// the message length) is declassified. Loading a key is not constant time
+// (the DER reader and std.bignum branch on the encoding); key_from_bytes
+// copies d without std.bignum. tests/integration/crypto_ct_valgrind checks
+// the private-key operations under Valgrind.
+//
+// A 2048-bit private-key operation takes about 11 ms with the default
+// `ae build` (27 ms on std.bignum's variable-time mod_pow before #2600).
 
 import std.string
 import std.bignum
@@ -35,9 +42,10 @@ import std.bytes
 import std.cryptography
 import std.cryptography.sha2
 import std.cryptography.asn1
+import std.cryptography.ct
 
 exports(
-    key_from_components, key_from_pkcs1_der, key_free,
+    key_from_components, key_from_bytes, key_from_pkcs1_der, key_free,
     modulus_bytes, modulus_bits,
     raw_encrypt, raw_decrypt,
     encrypt_pkcs1, decrypt_pkcs1,
@@ -51,10 +59,16 @@ extern malloc(size: int) -> ptr
 
 // An RSA key owns its component bignums (n, e, d). For a public-only key
 // `d` is null; raw_decrypt / sign require a private key.
+//
+// The private exponent is also held as `dbe`, exactly modulus_bytes(k)
+// big-endian bytes: the private-key operation reads its 4-bit windows from
+// there in constant time. Loading a key (the DER reader, std.bignum) is not
+// constant time; every operation with it is.
 struct RsaKey {
     n: ptr // modulus (bignum)
     e: ptr // public exponent (bignum)
     d: ptr // private exponent (bignum) or null
+    dbe: ptr // private exponent as k big-endian bytes (std.bytes), or null
 }
 
 // Build a key from already-parsed bignums. The key TAKES OWNERSHIP of n,
@@ -64,6 +78,60 @@ key_from_components(n: @keep ptr, e: @keep ptr, d: @keep ptr) -> ptr {
     k.n = n
     k.e = e
     k.d = d
+    k.dbe = null
+    if d != null {
+        k.dbe = to_fixed(d, (bignum.bit_length(n) + 7) / 8)
+    }
+    return k
+}
+
+// Build a key from big-endian byte strings (as JWK and PKCS#11 carry them).
+// `d` may be empty for a public key. The private exponent is copied into the
+// key byte by byte, so a key built this way never puts d through std.bignum.
+// Returns null when n or e is empty or d is longer than n.
+key_from_bytes(n: byte[], e: byte[], d: byte[]) -> ptr {
+    if n.len < 1 || e.len < 1 || d.len < 0 {
+        return null
+    }
+    nb = bytes.from_slice(n)
+    nn = bignum.from_bytes_unsigned(nb, n.len)
+    bytes.free(nb)
+    eb = bytes.from_slice(e)
+    ee = bignum.from_bytes_unsigned(eb, e.len)
+    bytes.free(eb)
+    int klen = (bignum.bit_length(nn) + 7) / 8
+    if d.len > klen {
+        // A longer d must be leading zeros; check them, publicly.
+        int i = 0
+        while i < d.len - klen {
+            if d[i] != 0 {
+                bignum.free(nn)
+                bignum.free(ee)
+                return null
+            }
+            i = i + 1
+        }
+    }
+    k = malloc(sizeof(RsaKey)) as *RsaKey
+    k.n = nn
+    k.e = ee
+    k.d = null
+    k.dbe = null
+    if d.len > 0 {
+        dbe = bytes.new(klen)
+        bytes.set(dbe, klen - 1, 0)
+        int j = 0
+        while j < klen {
+            int src = d.len - klen + j
+            int v = 0
+            if src >= 0 {
+                v = d[src] & 255
+            }
+            bytes.set(dbe, j, v)
+            j = j + 1
+        }
+        k.dbe = dbe
+    }
     return k
 }
 
@@ -73,7 +141,19 @@ key_free(k: @frees ptr) {
     if kk.n != null { bignum.free(kk.n) }
     if kk.e != null { bignum.free(kk.e) }
     if kk.d != null { bignum.free(kk.d) }
+    if kk.dbe != null { wipe_free(kk.dbe) }
     libc_free(k)
+}
+
+// Zero a std.bytes buffer, then free it.
+fn wipe_free(b: ptr) {
+    int n = bytes.length(b)
+    int i = 0
+    while i < n {
+        bytes.set(b, i, 0)
+        i = i + 1
+    }
+    bytes.free(b)
 }
 
 // Parse a PKCS#1 RSAPrivateKey DER (SEQUENCE { version, n, e, d, p, q,
@@ -135,13 +215,419 @@ fn raw_encrypt_slice(k: ptr, m_bytes: byte[]) -> ptr {
     return out
 }
 
+// c^d mod n with the private key, as k big-endian bytes (caller frees), or
+// null for a public-only key or a c longer than k bytes. Constant time in d
+// and in the result, and blinded: see private_op.
 raw_decrypt(k: ptr, c_bytes: ptr) -> ptr {
     kk = k as *RsaKey
-    klen = modulus_bytes(k)
-    c = bignum.from_bytes_unsigned(c_bytes, bytes.length(c_bytes))
-    m = bignum.mod_pow(c, kk.d, kk.n)
-    out = to_fixed(m, klen)
-    bignum.free(c); bignum.free(m)
+    if kk.dbe == null || c_bytes == null {
+        return null
+    }
+    if bytes.length(c_bytes) > modulus_bytes(k) {
+        return null
+    }
+    return private_op(kk, bytes.view(c_bytes))
+}
+
+// ---- the private-key operation: constant time, blinded ----
+//
+// Montgomery arithmetic on little-endian 32-bit limb vectors of the
+// modulus's width, on the heap for the duration of one operation and viewed
+// as unbounded uint32[]: CIOS multiplication with a masked final
+// subtraction, so the instructions and memory touched depend only on the
+// modulus's size. The exponentiation is a fixed 4-bit window from the top
+// of d (as many windows as n has bytes, whatever the bit length of d is),
+// reading all 16 table entries for each window and keeping one with a mask.
+//
+// The base is blinded as well: c is multiplied by r^e for a fresh random r
+// and the result by r^-1, so the value raised to d is uniformly random and
+// unrelated to the ciphertext an attacker chose. r^-1 comes from std.bignum's
+// variable-time mod_inverse applied to r*b for another random b (then times
+// b), so that inversion only ever sees a random number.
+
+struct RsaMont {
+    nl: int // limbs of n
+    m: ptr // n
+    m0inv: uint32 // -n^-1 mod 2^32
+    one: ptr // R mod n, R = 2^(32 nl)
+    r2: ptr // R^2 mod n
+    t: ptr // nl + 2 limbs of scratch for mont_mul
+}
+
+fn limbs_new(nl: int) -> ptr {
+    p = malloc(nl * 4)
+    v = p as uint32[]
+    int i = 0
+    while i < nl {
+        v[i] = 0
+        i = i + 1
+    }
+    return p
+}
+
+fn limbs_wipe_free(p: ptr, nl: int) {
+    v = p as uint32[]
+    int i = 0
+    while i < nl {
+        v[i] = 0
+        i = i + 1
+    }
+    libc_free(p)
+}
+
+fn limbs_copy(r: ptr, a: ptr, nl: int) {
+    rv = r as uint32[]
+    av = a as uint32[]
+    int i = 0
+    while i < nl {
+        rv[i] = av[i]
+        i = i + 1
+    }
+}
+
+// a = the big-endian bytes b, zero-extended to nl limbs (b.len <= 4 nl).
+fn limbs_from_be(a: ptr, nl: int, b: byte[]) {
+    v = a as uint32[]
+    int i = 0
+    while i < nl {
+        v[i] = 0
+        i = i + 1
+    }
+    int n = b.len
+    i = 0
+    while i < n {
+        int limb = i / 4
+        if limb < nl {
+            v[limb] = v[limb] | (((b[n - 1 - i] & 255) as uint32) << ((i % 4) * 8))
+        }
+        i = i + 1
+    }
+}
+
+// The low len bytes of a as big-endian bytes in a fresh buffer.
+fn limbs_to_be(a: ptr, nl: int, len: int) -> ptr {
+    v = a as uint32[]
+    out = bytes.new(len)
+    bytes.set(out, len - 1, 0)
+    int i = 0
+    while i < len {
+        int limb = i / 4
+        int bv = 0
+        if limb < nl {
+            bv = ((v[limb] >> ((i % 4) * 8)) & 255) as int
+        }
+        bytes.set(out, len - 1 - i, bv)
+        i = i + 1
+    }
+    return out
+}
+
+// a = 2a mod m (a < m).
+fn mont_dbl(M: *RsaMont, a: ptr) {
+    int n = M.nl
+    av = a as uint32[]
+    t = M.t as uint32[]
+    mv = M.m as uint32[]
+    uint32 cin = 0
+    int i = 0
+    while i < n {
+        uint32 w = av[i]
+        t[i] = (w << 1) | cin
+        cin = w >> 31
+        i = i + 1
+    }
+    uint64 bw = 0
+    i = 0
+    while i < n {
+        uint64 d = (t[i] as uint64) - (mv[i] as uint64) - bw
+        av[i] = d as uint32
+        bw = d >> 63
+        i = i + 1
+    }
+    uint32 mask = 0 - (((1 - cin) as uint32) & (bw as uint32))
+    i = 0
+    while i < n {
+        av[i] = av[i] ^ (mask & (av[i] ^ t[i]))
+        i = i + 1
+    }
+}
+
+// r = a * b / R mod n (CIOS); a < R, b < n. r may alias a or b.
+fn mont_mul(M: *RsaMont, r: ptr, a: ptr, b: ptr) {
+    int n = M.nl
+    t = M.t as uint32[]
+    av = a as uint32[]
+    bv = b as uint32[]
+    mv = M.m as uint32[]
+    rv = r as uint32[]
+    uint32 m0inv = M.m0inv
+    int i = 0
+    while i < n + 2 {
+        t[i] = 0
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        uint64 bi = bv[i] as uint64
+        uint64 c = 0
+        int j = 0
+        while j < n {
+            uint64 s = (t[j] as uint64) + (av[j] as uint64) * bi + c
+            t[j] = s as uint32
+            c = s >> 32
+            j = j + 1
+        }
+        uint64 s2 = (t[n] as uint64) + c
+        t[n] = s2 as uint32
+        t[n + 1] = (s2 >> 32) as uint32
+        uint64 mm = ((t[0] * m0inv) as uint32) as uint64
+        uint64 s3 = (t[0] as uint64) + mm * (mv[0] as uint64)
+        c = s3 >> 32
+        j = 1
+        while j < n {
+            uint64 s4 = (t[j] as uint64) + mm * (mv[j] as uint64) + c
+            t[j - 1] = s4 as uint32
+            c = s4 >> 32
+            j = j + 1
+        }
+        uint64 s5 = (t[n] as uint64) + c
+        t[n - 1] = s5 as uint32
+        t[n] = t[n + 1] + ((s5 >> 32) as uint32)
+        i = i + 1
+    }
+    uint64 bw = 0
+    i = 0
+    while i < n {
+        uint64 d = (t[i] as uint64) - (mv[i] as uint64) - bw
+        rv[i] = d as uint32
+        bw = d >> 63
+        i = i + 1
+    }
+    uint32 keep = (bw as uint32) & ((((t[n] as uint64) - 1) >> 63) as uint32)
+    uint32 mask = 0 - keep
+    i = 0
+    while i < n {
+        rv[i] = rv[i] ^ (mask & (rv[i] ^ t[i]))
+        i = i + 1
+    }
+}
+
+// The Montgomery context of the odd modulus whose big-endian bytes are nbe.
+fn mont_new(nbe: byte[]) -> *RsaMont {
+    M = malloc(sizeof(RsaMont)) as *RsaMont
+    int nl = (nbe.len + 3) / 4
+    M.nl = nl
+    M.m = limbs_new(nl)
+    limbs_from_be(M.m, nl, nbe)
+    M.t = limbs_new(nl + 2)
+    uint32 m0 = (M.m as uint32[])[0]
+    uint32 x = m0
+    int it = 0
+    while it < 5 {
+        x = x * (2 - m0 * x)
+        it = it + 1
+    }
+    M.m0inv = 0 - x
+    M.one = limbs_new(nl)
+    ov = M.one as uint32[]
+    ov[0] = 1
+    int k = 0
+    while k < 32 * nl {
+        mont_dbl(M, M.one)
+        k = k + 1
+    }
+    M.r2 = limbs_new(nl)
+    limbs_copy(M.r2, M.one, nl)
+    k = 0
+    while k < 32 * nl {
+        mont_dbl(M, M.r2)
+        k = k + 1
+    }
+    return M
+}
+
+fn mont_free(M: *RsaMont) {
+    int nl = M.nl
+    libc_free(M.m)
+    libc_free(M.one)
+    libc_free(M.r2)
+    limbs_wipe_free(M.t, nl + 2)
+    libc_free(M)
+}
+
+// r = a^e (Montgomery form in and out) for a PUBLIC exponent e (big-endian
+// bytes): square-and-multiply whose sequence depends on e only.
+fn mont_pow_public(M: *RsaMont, r: ptr, a: ptr, e: ptr) {
+    int nl = M.nl
+    acc = limbs_new(nl)
+    limbs_copy(acc, M.one, nl)
+    int el = bytes.length(e)
+    int bi = 0
+    while bi < el {
+        int ev = bytes.get(e, bi) & 255
+        int j = 7
+        while j >= 0 {
+            mont_mul(M, acc, acc, acc)
+            if ((ev >> j) & 1) == 1 {
+                mont_mul(M, acc, acc, a)
+            }
+            j = j - 1
+        }
+        bi = bi + 1
+    }
+    limbs_copy(r, acc, nl)
+    libc_free(acc)
+}
+
+// r = a^d (Montgomery form in and out) for the SECRET exponent d (klen
+// big-endian bytes): a fixed 4-bit window, every window four squarings and
+// one multiplication by a table entry chosen with masks.
+fn mont_pow_secret(M: *RsaMont, r: ptr, a: ptr, d: ptr, klen: int) {
+    int nl = M.nl
+    // 16 entries of nl limbs: entry j starts j * nl * 4 bytes into tbl.
+    tbl = limbs_new(16 * nl)
+    tv = tbl as uint32[]
+    limbs_copy(tbl, M.one, nl)
+    limbs_copy(tbl + nl * 4, a, nl)
+    int i = 2
+    while i < 16 {
+        mont_mul(M, tbl + i * nl * 4, tbl + (i - 1) * nl * 4, a)
+        i = i + 1
+    }
+    acc = limbs_new(nl)
+    limbs_copy(acc, M.one, nl)
+    sel = limbs_new(nl)
+    sv = sel as uint32[]
+    int bi = 0
+    while bi < klen {
+        int kv = bytes.get(d, bi) & 255
+        int half = 0
+        while half < 2 {
+            int digit = (kv >> (4 - 4 * half)) & 15
+            mont_mul(M, acc, acc, acc)
+            mont_mul(M, acc, acc, acc)
+            mont_mul(M, acc, acc, acc)
+            mont_mul(M, acc, acc, acc)
+            int w = 0
+            while w < nl {
+                sv[w] = 0
+                w = w + 1
+            }
+            int j = 0
+            while j < 16 {
+                uint32 mask = 0 - (ct.eq(j, digit) as uint32)
+                int base = j * nl
+                w = 0
+                while w < nl {
+                    sv[w] = sv[w] | (tv[base + w] & mask)
+                    w = w + 1
+                }
+                j = j + 1
+            }
+            mont_mul(M, acc, acc, sel)
+            half = half + 1
+        }
+        bi = bi + 1
+    }
+    limbs_copy(r, acc, nl)
+    limbs_wipe_free(tbl, 16 * nl)
+    limbs_wipe_free(acc, nl)
+    limbs_wipe_free(sel, nl)
+}
+
+// The blinding pair for one operation: (r^e, r^-1), both Montgomery form,
+// for a fresh random r. (null, null) when the CSPRNG fails.
+fn blinding(M: *RsaMont, kk: *RsaKey, ebe: ptr, klen: int) -> (ptr, ptr) {
+    int nl = M.nl
+    int tries = 0
+    while tries < 8 {
+        rb, rerr = cryptography.random_buffer(klen)
+        bb, berr = cryptography.random_buffer(klen)
+        if rerr != "" || berr != "" {
+            if rb != null { wipe_free(rb) }
+            if bb != null { wipe_free(bb) }
+            return null, null
+        }
+        rl = limbs_new(nl)
+        limbs_from_be(rl, nl, bytes.view(rb))
+        rm = limbs_new(nl)
+        mont_mul(M, rm, rl, M.r2) // r R
+        limbs_from_be(rl, nl, bytes.view(bb))
+        bm = limbs_new(nl)
+        mont_mul(M, bm, rl, M.r2) // b R
+        wipe_free(rb)
+        wipe_free(bb)
+        // t = r b mod n, inverted by std.bignum: t is uniformly random.
+        tm = limbs_new(nl)
+        mont_mul(M, tm, rm, bm) // r b R
+        one_plain = limbs_new(nl)
+        opv = one_plain as uint32[]
+        opv[0] = 1
+        mont_mul(M, tm, tm, one_plain) // r b
+        tbe = limbs_to_be(tm, nl, klen)
+        tbn = bignum.from_bytes_unsigned(tbe, klen)
+        wipe_free(tbe)
+        tinv = bignum.mod_inverse(tbn, kk.n)
+        bignum.free(tbn)
+        if tinv != null && bignum.is_zero(tinv) != 1 {
+            ibe = to_fixed(tinv, klen)
+            bignum.free(tinv)
+            limbs_from_be(tm, nl, bytes.view(ibe))
+            wipe_free(ibe)
+            im = limbs_new(nl)
+            mont_mul(M, im, tm, M.r2) // (r b)^-1 R
+            mont_mul(M, im, im, bm) // r^-1 R
+            am = limbs_new(nl)
+            mont_pow_public(M, am, rm, ebe) // r^e R
+            limbs_wipe_free(rl, nl)
+            limbs_wipe_free(rm, nl)
+            limbs_wipe_free(bm, nl)
+            limbs_wipe_free(tm, nl)
+            libc_free(one_plain)
+            return am, im
+        }
+        if tinv != null { bignum.free(tinv) }
+        limbs_wipe_free(rl, nl)
+        limbs_wipe_free(rm, nl)
+        limbs_wipe_free(bm, nl)
+        limbs_wipe_free(tm, nl)
+        libc_free(one_plain)
+        tries = tries + 1
+    }
+    return null, null
+}
+
+// c^d mod n for the key's d, blinded and constant time; k bytes, or null
+// when the CSPRNG fails.
+fn private_op(kk: *RsaKey, c: byte[]) -> ptr {
+    int klen = (bignum.bit_length(kk.n) + 7) / 8
+    nbe = bignum.to_bytes_unsigned(kk.n)
+    ebe = bignum.to_bytes_unsigned(kk.e)
+    M = mont_new(bytes.view(nbe))
+    bytes.free(nbe)
+    int nl = M.nl
+    am, im = blinding(M, kk, ebe, klen)
+    bytes.free(ebe)
+    if am == null {
+        mont_free(M)
+        return null
+    }
+    x = limbs_new(nl)
+    limbs_from_be(x, nl, c)
+    mont_mul(M, x, x, M.r2) // c R (any c < R reduces)
+    mont_mul(M, x, x, am) // c r^e R
+    mont_pow_secret(M, x, x, kk.dbe, klen) // (c r^e)^d R = m r R
+    mont_mul(M, x, x, im) // m R
+    one_plain = limbs_new(nl)
+    opv = one_plain as uint32[]
+    opv[0] = 1
+    mont_mul(M, x, x, one_plain) // m
+    out = limbs_to_be(x, nl, klen)
+    limbs_wipe_free(x, nl)
+    limbs_wipe_free(am, nl)
+    limbs_wipe_free(im, nl)
+    libc_free(one_plain)
+    mont_free(M)
     return out
 }
 
@@ -182,24 +668,25 @@ encrypt_pkcs1(k: ptr, msg: ptr) -> (ptr, string) {
     bytes.set(block, 0, 0x00)
     bytes.set(block, 1, 0x02)
     pslen = klen - mlen - 3
-    // fill PS with nonzero random bytes
-    rnd, rn, rerr = cryptography.random_bytes(pslen * 2 + 16)
-    if string.equals(rerr, "") != 1 {
-        bytes.free(block)
-        return null, rerr
-    }
+    // fill PS with nonzero random bytes, drawing more until it is full
     filled = 0
-    ri = 0
     while filled < pslen {
-        rb = 0
-        if ri < rn { rb = string_char_at_n(rnd, rn, ri) & 0xFF }
-        ri = ri + 1
-        if rb != 0 {
-            bytes.set(block, 2 + filled, rb)
-            filled = filled + 1
+        rnd, rerr = cryptography.random_buffer(pslen - filled + 16)
+        if rerr != "" {
+            bytes.free(block)
+            return null, rerr
         }
-        // if we run out of random, top up deterministically with a nonzero
-        if ri >= rn { ri = 0 }
+        rn = bytes.length(rnd)
+        ri = 0
+        while ri < rn && filled < pslen {
+            rb = bytes.get(rnd, ri) & 0xFF
+            if rb != 0 {
+                bytes.set(block, 2 + filled, rb)
+                filled = filled + 1
+            }
+            ri = ri + 1
+        }
+        wipe_free(rnd)
     }
     bytes.set(block, 2 + pslen, 0x00)
     i = 0
@@ -208,48 +695,48 @@ encrypt_pkcs1(k: ptr, msg: ptr) -> (ptr, string) {
         i = i + 1
     }
     c = raw_encrypt(k, block)
-    bytes.free(block)
-    string.free(rnd)
-    return c, rerr
+    wipe_free(block)
+    return c, ""
 }
 
 // Decrypt + strip PKCS#1 v1.5 type-2 padding. Returns (message, "") or
-// (null, err). (Not constant-time — a hardening follow-up.)
-decrypt_pkcs1(k: ptr, ct: ptr) -> (ptr, string) {
+// (null, err). The padding check reads every byte of the block and folds
+// the verdict into masks (a Bleichenbacher oracle needs only the timing of
+// an early exit); the verdict and, on success, the message length are
+// public once returned and go through ct.declassify.
+decrypt_pkcs1(k: ptr, ct_bytes: ptr) -> (ptr, string) {
     klen = modulus_bytes(k)
-    if sig_in_range(k, ct) != 1 {
+    if sig_in_range(k, ct_bytes) != 1 {
         return null, "ciphertext out of range"
     }
-    block = raw_decrypt(k, ct)
-    // expect 0x00 0x02 PS 0x00 M
-    ok = 1
-    if bytes.get(block, 0) != 0x00 { ok = 0 }
-    if bytes.get(block, 1) != 0x02 { ok = 0 }
-    // find the 0x00 separator after >= 8 padding bytes
-    sep = -1
-    i = 2
-    while i < klen {
-        if bytes.get(block, i) == 0x00 {
-            sep = i
-            i = klen
-        } else {
-            i = i + 1
-        }
+    block = raw_decrypt(k, ct_bytes)
+    if block == null {
+        return null, "rsa: not a private key, or no randomness for blinding"
     }
-    if sep < 0 { ok = 0 }
-    if ok == 1 { if sep < 10 { ok = 0 } } // 2 prefix + >=8 PS
-    if ok != 1 {
-        bytes.free(block)
+    // expect 0x00 0x02 PS 0x00 M, PS at least 8 bytes
+    int good = ct.eq(bytes.get(block, 0) & 255, 0x00) & ct.eq(bytes.get(block, 1) & 255, 0x02)
+    int found = 0
+    int sep = 0
+    int i = 2
+    while i < klen {
+        int is_zero = ct.eq(bytes.get(block, i) & 255, 0)
+        int first = is_zero & (1 - found)
+        sep = ct.select(first, i, sep)
+        found = found | is_zero
+        i = i + 1
+    }
+    good = good & found & (1 - ct.lt(sep, 10)) // 2 prefix + >= 8 PS
+    if ct.declassify(good) != 1 {
+        wipe_free(block)
         return null, "rsa: PKCS#1 v1.5 decryption error"
     }
+    sep = ct.declassify(sep)
     mlen = klen - sep - 1
     out = bytes.new(mlen)
-    j = 0
-    while j < mlen {
-        bytes.set(out, j, bytes.get(block, sep + 1 + j))
-        j = j + 1
+    if mlen > 0 {
+        bytes.copy_from_bytes(out, 0, block, sep + 1, mlen)
     }
-    bytes.free(block)
+    wipe_free(block)
     return out, ""
 }
 
@@ -270,6 +757,9 @@ sign_pkcs1(k: ptr, di: ptr) -> (ptr, string) {
     block = build_emsa(di, klen)
     s = raw_decrypt(k, block) // signing = private-key op (c^d mod n)
     bytes.free(block)
+    if s == null {
+        return null, "rsa: not a private key, or no randomness for blinding"
+    }
     return s, ""
 }
 
@@ -445,27 +935,32 @@ encrypt_oaep(k: ptr, msg: byte[], seed: ptr) -> ptr {
 }
 
 // Decrypt OAEP ciphertext (k bytes). Returns (plaintext, "") or
-// (null, error) on any padding/format failure.
-decrypt_oaep(k: ptr, ct: ptr) -> {
+// (null, error) on any padding/format failure. Every check reads all of the
+// block and folds into one mask (Manger's attack needs only to tell the
+// leading-byte check from the others); the verdict and the message length
+// go through ct.declassify.
+decrypt_oaep(k: ptr, ct_bytes: ptr) -> {
     klen = modulus_bytes(k)
     hlen = oaep_hlen()
-    if bytes.length(ct) != klen {
+    if bytes.length(ct_bytes) != klen {
         return null, "ciphertext length mismatch"
     }
-    if sig_in_range(k, ct) != 1 {
+    if sig_in_range(k, ct_bytes) != 1 {
         return null, "ciphertext out of range"
     }
     if klen < 2 * hlen + 2 {
         return null, "modulus too small for OAEP"
     }
-    em = raw_decrypt(k, ct)
+    em = raw_decrypt(k, ct_bytes)
+    if em == null {
+        return null, "rsa: not a private key, or no randomness for blinding"
+    }
 
     empty = bytes.new(0)
     lhash = sha256b(bytes.view(empty)[0..0])
     bytes.free(empty)
 
-    bad = 0
-    if (bytes.get(em, 0) & 0xFF) != 0 { bad = 1 } // leading byte must be 0x00
+    int good = ct.eq(bytes.get(em, 0) & 0xFF, 0) // leading byte must be 0x00
 
     // split: maskedSeed = em[1..1+hLen], maskedDB = em[1+hLen..k]
     dblen = klen - hlen - 1
@@ -481,41 +976,45 @@ decrypt_oaep(k: ptr, ct: ptr) -> {
     // DB = maskedDB ^ MGF1(seed, dblen)
     dbmask = mgf1(bytes.view(mseed)[0..hlen], dblen)
     xor_into(db, bytes.view(dbmask)[0..dblen])
-    bytes.free(dbmask)
+    wipe_free(dbmask)
 
     // DB = lHash' || PS || 0x01 || M ; check lHash' == lHash
-    i = 0
+    int diff = 0
+    int i = 0
     while i < hlen {
-        if (bytes.get(db, i) & 0xFF) != (bytes.get(lhash, i) & 0xFF) { bad = 1 }
+        diff = diff | ((bytes.get(db, i) ^ bytes.get(lhash, i)) & 0xFF)
         i = i + 1
     }
     bytes.free(lhash)
+    good = good & ct.eq(diff, 0)
 
-    // find the 0x01 separator after the zero padding
-    sep = -1
-    j = hlen
+    // the 0x01 separator after zero padding: any other byte before it is bad
+    int found = 0
+    int sep = 0
+    int stray = 0
+    int j = hlen
     while j < dblen {
-        bv = bytes.get(db, j) & 0xFF
-        if sep == -1 {
-            if bv == 0x01 {
-                sep = j
-            } else if bv != 0x00 {
-                bad = 1 // non-zero byte before the separator
-            }
-        }
+        int bv = bytes.get(db, j) & 0xFF
+        int is_one = ct.eq(bv, 0x01)
+        int is_zero = ct.eq(bv, 0x00)
+        int before = 1 - found
+        sep = ct.select(is_one & before, j, sep)
+        stray = stray | (before & (1 - is_one) & (1 - is_zero))
+        found = found | is_one
         j = j + 1
     }
-    if sep == -1 { bad = 1 }
+    good = good & found & (1 - stray)
 
-    if bad == 1 {
-        bytes.free(em); bytes.free(mseed); bytes.free(db)
+    if ct.declassify(good) != 1 {
+        wipe_free(em); wipe_free(mseed); wipe_free(db)
         return null, "decryption error"
     }
 
+    sep = ct.declassify(sep)
     mlen = dblen - sep - 1
     out = bytes.new(mlen)
     if mlen > 0 { bytes.copy_from_bytes(out, 0, db, sep + 1, mlen) }
-    bytes.free(em); bytes.free(mseed); bytes.free(db)
+    wipe_free(em); wipe_free(mseed); wipe_free(db)
     return out, ""
 }
 

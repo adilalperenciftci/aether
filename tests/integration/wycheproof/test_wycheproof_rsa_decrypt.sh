@@ -1,9 +1,9 @@
 #!/bin/sh
 # Wycheproof adversarial vector suites — RSA decryption families.
 #
-# Own harness slot (180s per-test budget): each case is a full-size
-# private-key modexp (~1-2s at CI's -O0), unlike the cheap public-op
-# verify families in test_wycheproof_asym.sh.
+# Own harness slot: each case is a full-size private-key operation (a
+# constant-time, blinded Montgomery exponentiation since #2600: about 13 s
+# for both families at the -O0 of `ae run`, 21 s on std.bignum before).
 #   rsaes-pkcs1 2048   full 67 cases  (Bleichenbacher padding shapes)
 #   rsa-oaep 2048      full 37 cases  (Manger shapes; 8 label cases
 #                      counted-skipped: decrypt_oaep has no label param)
