@@ -1,0 +1,145 @@
+// A response sent with part of its request's body unread settles the body
+// first (#3255).
+//
+// A body larger than the server's 16 KiB connection buffer is streamed: the
+// request reaches the middleware and the handler with the rest of the body
+// still on the socket. Only the route handler's path read that rest before
+// the connection took its next request. A middleware that answered without
+// reading it (a 429, the proxy refusing a body over its cap) left it there,
+// and it was parsed as the next request: a body carrying a request of its own
+// had that request served. Now every response settles the body: what is left
+// within 64 KiB is read and dropped and the connection goes on; past that,
+// the connection closes.
+//
+// Each case is one connection: a POST whose body the server does not read,
+// with a GET after it in the same write, read back until the server closes
+// the connection or goes quiet. The server listens on 127.0.0.1 and a port
+// the kernel picks.
+
+import std.http
+import std.string
+import std.tcp
+
+extern exit(code: int)
+
+// A refusal that never reads the body, as a rate limiter's is.
+@c_callback mw_limit(req: ptr, res: ptr, ud: ptr) -> int {
+    if http.request_path(req) == "/limited" {
+        http.response_set_status(res, 429)
+        http.response_set_body(res, "slow down")
+        return 0
+    }
+    return 1
+}
+
+handle_ignore(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_body(res, "ignored")
+}
+
+handle_p(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_body(res, "p")
+}
+
+// `raw` on a connection of its own, read until the server closes it or
+// sends nothing for a second: the status of each response, in order, then
+// "closed" or "open".
+answers(port: int, raw: string) -> string {
+    sock, cerr = tcp.connect("127.0.0.1", port)
+    if cerr != "" {
+        return "connect failed"
+    }
+    tcp.write(sock, raw)
+    wire = ""
+    state = "open"
+    idle = 0
+    waited = 0
+    while state == "open" && waited < 80 && idle < 10 {
+        ready, _perr = tcp.poll(sock, 100)
+        if ready {
+            chunk, rerr = tcp.read(sock, 65536)
+            if rerr != "" || string.length(chunk) == 0 {
+                state = "closed"
+            } else {
+                wire = string.concat(wire, chunk)
+                idle = 0
+            }
+        } else {
+            idle = idle + 1
+        }
+        waited = waited + 1
+    }
+    tcp.close(sock)
+    statuses = ""
+    at = string.index_of(wire, "HTTP/1.1 ")
+    while at >= 0 {
+        statuses = string.concat(statuses, "${string.substring(wire, at + 9, at + 12)} ")
+        at = string.index_of_from(wire, "HTTP/1.1 ", at + 9)
+    }
+    return "${statuses}${state}"
+}
+
+// A POST to `path` declaring `declared` bytes of body, `sent` of them sent
+// (or the inner request, when `inner` is not ""), then a GET.
+post(path: string, declared: int, sent: int, inner: string) -> string {
+    body = inner
+    if inner == "" {
+        body = string.pad_end("", sent, 98)
+    }
+    head = "POST ${path} HTTP/1.1\r\nHost: x\r\nContent-Length: ${declared}\r\n\r\n"
+    return "${head}${body}GET /p HTTP/1.1\r\nHost: x\r\n\r\n"
+}
+
+main() {
+    println("=== a response with its request's body unread settles the body first (#3255) ===")
+    server = http.server_create(0)
+    http.server_set_host(server, "127.0.0.1")
+    http.server_use_middleware(server, mw_limit, 0)
+    http.server_post(server, "/ignore", handle_ignore, 0)
+    http.server_get(server, "/p", handle_p, 0)
+    if http.server_bind(server, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    err = http.server_start_background(server)
+    if err != "" {
+        println("FAIL: ${err}")
+        exit(1)
+    }
+    port = http.server_port(server)
+    sleep(200)
+
+    smuggled = "GET /p HTTP/1.1\r\nHost: x\r\n\r\n"
+    labels = ["a middleware's answer, the body's rest within 64 KiB",
+        "a middleware's answer, a request inside a body past 64 KiB",
+        "a handler that ignores the body, its rest within 64 KiB",
+        "a handler that ignores the body, its rest past 64 KiB"]
+    raws = [post("/limited", 20000, 20000, ""),
+        post("/limited", 100000, 0, smuggled),
+        post("/ignore", 20000, 20000, ""),
+        post("/ignore", 100000, 100000, "")]
+    // Within the bound the GET after the body is the connection's next
+    // request; past it the connection closes after the response.
+    wants = ["429 200 open", "429 closed", "200 200 open", "200 closed"]
+
+    bad = 0
+    i = 0
+    while i < 4 {
+        got = answers(port, raws[i])
+        if got != wants[i] {
+            println("  FAIL ${labels[i]}: got '${got}', expected '${wants[i]}'")
+            bad = bad + 1
+        } else {
+            println("  PASS ${labels[i]}")
+        }
+        i = i + 1
+    }
+
+    http.server_stop(server)
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

@@ -307,9 +307,15 @@ main() {
     endless = string.pad_end("GET /p HTTP/1.1\r\nHost: x\r\nX-Big: ", 40000, 98)
     head_too_large = "431 request head is too large\n closed"
     bad = bad + both("a head that does not end in 16 KiB", ports, endless, head_too_large)
+    // The refusal leaves the body unread, so the connection closes: kept,
+    // the body was read as the next request, and one carrying a request of
+    // its own had it proxied (#3255).
     bad = bad + both("a body declared over the proxy's cap", ports,
         "POST /p HTTP/1.1\r\nHost: x\r\nContent-Length: 1000000\r\n\r\nabc",
-        "502 request body exceeds proxy cap\n open")
+        "502 request body exceeds proxy cap\n closed")
+    bad = bad + both_all("a request inside a body over the proxy's cap", ports,
+        "POST /p HTTP/1.1\r\nHost: x\r\nContent-Length: 100000\r\n\r\nGET /p HTTP/1.1\r\nHost: x\r\n\r\n",
+        "502 closed")
     // #3252: the refusal closes in stages, so the response to the request
     // before it, already sent, is not destroyed by a reset.
     bad = bad + both_all("a request, then a head that does not end in 16 KiB", ports,

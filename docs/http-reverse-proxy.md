@@ -367,7 +367,8 @@ configuration to do so:
 - a chunked request body, which the worker path decodes (#3228), and any
   request the worker path refuses (#3233, #3236)
 - a request body larger than the mount's body cap, which the worker path
-  streams and the proxy refuses unread, and a head that has not ended in
+  streams and the proxy refuses unread, closing the connection so the body
+  is never read as the next request (#3255), and a head that has not ended in
   16 KiB, which it refuses with 431 (#3252): the driver never buffers more
   (#3237)
 - a server whose first proxy mount has an https upstream: the driver dials

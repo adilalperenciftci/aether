@@ -4566,9 +4566,68 @@ static int response_settle_keep_alive(HttpServer* server, HttpRequest* req,
  * send the response itself and close, so every reverse-proxied response
  * (the proxy middleware answers by short-circuiting) closed its inbound
  * connection, whatever the server keep-alive setting said (#1653). */
+/* The most of a streamed request body (#626) left unread when its response is
+ * ready that is read and dropped to keep the connection. Past it the
+ * connection closes instead: reading a declared 2 GiB to keep a connection
+ * costs more than the connection is worth, and a refusal (the proxy's body
+ * cap) is a refusal to read it. The pool path keeps a receive buffer of the
+ * same size (HTTP_RX_KEEP_MAX). */
+#define HTTP_BODY_DRAIN_MAX (64 * 1024)
+
+/* Whether some of `req`'s streamed body is still on its connection, which
+ * then cannot carry another request: the next one would be read from the
+ * middle of this one's body. */
+static int request_body_unread(const HttpRequest* req) {
+    return req->stream_conn && req->stream_consumed < req->stream_total;
+}
+
+/* Settle what is left of `req`'s streamed body before its response goes out
+ * (#3255): a remainder within HTTP_BODY_DRAIN_MAX is read and dropped, so the
+ * connection's next request starts where the client put it. A larger one, or
+ * one the client stops sending, is left, request_body_unread says so, and
+ * keep_alive_decision closes the connection, in stages: the client may still
+ * be sending, and the reset that closing over unread bytes sends can destroy
+ * the response.
+ *
+ * Only the route handler's path drained before, without a bound. A
+ * middleware's answer (the proxy refusing a body over its cap before reading
+ * it, a 429 from the rate limiter, the proxy's 400 for a body that stopped
+ * short) kept the connection with the body still on it, and the body was
+ * parsed as the next request: a body carrying a request of its own had that
+ * request served, behind whatever the middleware had refused. */
+static void request_body_settle(HttpConn* conn, HttpRequest* req) {
+    if (!req->stream_conn) return;
+    HttpConn* sconn = (HttpConn*)req->stream_conn;
+    long left = req->stream_total - req->stream_consumed;
+    if (left > 0 && left <= HTTP_BODY_DRAIN_MAX) {
+        /* What is already buffered first, then off the socket in small reads
+         * (no buffer the body's size); a client that stops sending ends it at
+         * the receive timeout, leaving the rest unread. */
+        int buffered = sconn->write_pos - sconn->read_pos;
+        if (buffered > 0) {
+            int drop = buffered < (int)left ? buffered : (int)left;
+            sconn->read_pos += drop;
+            req->stream_consumed += drop;
+            left -= drop;
+        }
+        while (left > 0) {
+            char scratch[4096];
+            int chunk = left < (long)sizeof(scratch) ? (int)left : (int)sizeof(scratch);
+            int n = conn_recv(sconn, scratch, chunk);
+            if (n <= 0) break;
+            req->stream_consumed += n;
+            left -= n;
+        }
+    }
+    if (left > 0) conn->linger_on_close = 1;
+}
+
 static int finish_response(HttpServer* server, HttpConn* conn,
                            HttpRequest* req, HttpServerResponse* res,
                            int requests_served, int max_requests) {
+    /* The body's rest first: whether the connection can carry another
+     * request depends on it, and the response says which (#3255). */
+    request_body_settle(conn, req);
     int will_keep_alive = response_settle_keep_alive(server, req, res, requests_served,
                                                      max_requests, 1);
 
@@ -4604,7 +4663,9 @@ static int keep_alive_decision(HttpServer* server, HttpRequest* req, int status,
                        && (max_requests == 0 ||
                            requests_served + 1 < max_requests)
                        && status != 408
-                       && status != 426;
+                       && status != 426
+                       /* the next request would start mid-body (#3255) */
+                       && !request_body_unread(req);
 
     /* Without somewhere to park it, a kept connection holds its worker for
      * its whole life, so keeping one while others wait in the accept queue
@@ -5672,43 +5733,9 @@ static int dispatch_request(HttpServer* server, HttpConn* conn,
      * perceived round trip. Hooks may not mutate; they observe. */
     run_request_hooks(server, req, res, t_start);
 
-    /* #626 — drain any unread streaming-body bytes. A handler that
-     * streamed only part of the body (or ignored it entirely — e.g. a
-     * 413/401 rejection before reading) leaves the rest sitting on the
-     * socket. On a keep-alive connection the next request parse would
-     * then start mid-body and desync the wire. Consume whatever's left
-     * of `stream_total` so `read_pos`/the socket sit exactly at the
-     * next request boundary. Bounded scratch (no full-body buffer);
-     * we read and discard. If the peer closed mid-body the drain just
-     * stops — the keep-alive check below will see the broken stream on
-     * the next recv and close. */
-    if (req->stream_conn) {
-        HttpConn* sconn = (HttpConn*)req->stream_conn;
-        long left = req->stream_total - req->stream_consumed;
-        /* First, discard any already-buffered body bytes. */
-        if (left > 0) {
-            int buffered = sconn->write_pos - sconn->read_pos;
-            if (buffered > 0) {
-                int drop = (buffered < (int)left) ? buffered : (int)left;
-                sconn->read_pos += drop;
-                req->stream_consumed += drop;
-                left -= drop;
-            }
-        }
-        /* Then read-and-discard the rest off the socket in buffer-sized
-         * gulps (reusing the connection buffer's tail as scratch). */
-        while (left > 0) {
-            char scratch[4096];
-            int chunk = (left < (long)sizeof(scratch)) ? (int)left : (int)sizeof(scratch);
-            int n = conn_recv(sconn, scratch, chunk);
-            if (n <= 0) break;
-            req->stream_consumed += n;
-            left -= n;
-        }
-        /* The streaming body is fully consumed (or the stream broke);
-         * clear the backref so nothing touches it post-free. */
-        req->stream_conn = NULL;
-    }
+    /* #626: a handler that read part of a streamed body, or none of it,
+     * leaves the rest on the socket; finish_response settles it for this
+     * path and a middleware's answer alike (request_body_settle, #3255). */
 
     return finish_response(server, conn, req, res, requests_served, max_requests);
 }
