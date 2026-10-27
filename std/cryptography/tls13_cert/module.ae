@@ -1562,6 +1562,10 @@ fn der_tlv_slice(buf: byte[], p: int, end: int) -> (int, int, int, int) {
         clen = lb
     } else {
         nbytes = lb & 0x7F
+        // At most three length bytes (16 MB): four could overflow `clen`
+        // into a negative length that passes the bound below, and the
+        // callers would then walk backwards through the buffer (#3308).
+        if nbytes == 0 || nbytes > 3 { return -1, 0, 0, 0 }
         if q + nbytes > end { return -1, 0, 0, 0 }
         i = 0
         while i < nbytes { clen = (clen * 256) + (buf[q] & 0xFF); q = q + 1; i = i + 1 }
