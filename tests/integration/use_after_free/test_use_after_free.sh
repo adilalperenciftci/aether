@@ -228,6 +228,19 @@ slice_len() -> int {
     return buf.len
 }
 
+// A view passed beside the buffer it views is read as the call is made,
+// before the call may move the buffer (std.bytes' README does this).
+self_append() -> int {
+    b = bytes.new(4)
+    bytes.set(b, 0, 7)
+    bytes.set(b, 1, 8)
+    v = bytes.view(b)
+    bytes.copy_from_slice(b, 2, v)
+    n = bytes.length(b)
+    bytes.free(b)
+    return n
+}
+
 through_release() {
     p = malloc(8)
     release_it(p)
@@ -242,12 +255,13 @@ main() {
     println(null_after())
     println(view_again())
     println(slice_len())
+    println(self_append())
     through_release()
 }
 AE
 expect_count fine.ae E0903 0 "a near miss was reported"
 got="$(cd "$tmp" && AETHER_HOME="$ROOT" "$AE" run fine.ae 2>&1 | tr -d '\r' | tr '\n' ' ')"
-if [ "$got" != "2 0 7 4 " ]; then
+if [ "$got" != "2 0 7 4 4 " ]; then
     echo "  [FAIL] use_after_free: the near misses did not run as written (got '$got')"
     fail=1
 fi

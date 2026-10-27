@@ -327,7 +327,9 @@ static void bind(Walk* w, FState* s, const char* name, ASTNode* init) {
     }
 }
 
-static void free_call_arg(Walk* w, FState* s, ASTNode* call, ASTNode* id) {
+/* An argument the call frees, as the call is made: one freed already is
+ * freed twice, a view of storage that is gone is read. */
+static void free_call_check(Walk* w, FState* s, ASTNode* id) {
     FVar* v = get(s, id->value);
     if (!v || v->unknown) return;
     char msg[400], help[400];
@@ -343,6 +345,13 @@ static void free_call_arg(Walk* w, FState* s, ASTNode* call, ASTNode* id) {
     } else if (v->root && v->gone == FC_FREED) {
         use(w, s, id);
     }
+}
+
+/* What the call has done once it returns: the argument is freed, and with
+ * it every view of its storage (and the root a cast of it is). */
+static void free_call_mark(FState* s, ASTNode* call, ASTNode* id) {
+    FVar* v = get(s, id->value);
+    if (!v || v->unknown) return;
     v->freed = FC_FREED;
     v->freed_at = call;
     v->released = 1;
@@ -360,28 +369,38 @@ static void free_call_arg(Walk* w, FState* s, ASTNode* call, ASTNode* id) {
     }
 }
 
+/* A call: its arguments are evaluated first, in order; what it does to
+ * them (frees, moves their storage) happens after, so a view passed beside
+ * the buffer it views is read before the buffer may move
+ * (`bytes.copy_from_slice(b, 2, bytes.view(b))`). A trailing block runs
+ * inline, inside the call. */
 static void walk_call(Walk* w, ASTNode* n, FState* s) {
     for (int i = 0; i < n->child_count && !s->dead; i++) {
         ASTNode* a = n->children[i];
-        if (a && a->type == AST_CLOSURE && ast_is_trailing_block(a)) {
-            /* A trailing block runs inline, once. */
-            for (int k = a->child_count - 1; k >= 0; k--)
-                if (a->children[k] && a->children[k]->type == AST_BLOCK) {
-                    walk(w, a->children[k], s);
-                    break;
-                }
-            continue;
-        }
-        int into = 0;
-        int effect = tc_call_arg_effect(w->c->program, n, i, &into);
+        if (a && a->type == AST_CLOSURE && ast_is_trailing_block(a)) continue;
         ASTNode* place = arg_place(a);
-        if (effect == TC_ARG_FREES && place && place->type == AST_IDENTIFIER && place->value) {
-            free_call_arg(w, s, n, place);
+        if (tc_call_arg_effect(w->c->program, n, i, NULL) == TC_ARG_FREES && place &&
+            place->type == AST_IDENTIFIER && place->value) {
+            free_call_check(w, s, place);
             continue;
         }
         walk(w, a, s);
-        if (effect == TC_ARG_MOVES && place && place->type == AST_IDENTIFIER && place->value)
-            storage_gone(s, place->value, n, 1);
+    }
+    for (int i = 0; i < n->child_count && !s->dead; i++) {
+        ASTNode* a = n->children[i];
+        if (!a || a->type != AST_CLOSURE || !ast_is_trailing_block(a)) continue;
+        for (int k = a->child_count - 1; k >= 0; k--)
+            if (a->children[k] && a->children[k]->type == AST_BLOCK) {
+                walk(w, a->children[k], s);
+                break;
+            }
+    }
+    for (int i = 0; i < n->child_count && !s->dead; i++) {
+        ASTNode* place = arg_place(n->children[i]);
+        if (!place || place->type != AST_IDENTIFIER || !place->value) continue;
+        int effect = tc_call_arg_effect(w->c->program, n, i, NULL);
+        if (effect == TC_ARG_FREES) free_call_mark(s, n, place);
+        else if (effect == TC_ARG_MOVES) storage_gone(s, place->value, n, 1);
     }
     if (ast_call_never_returns(n)) s->dead = 1;
 }
