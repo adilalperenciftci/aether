@@ -1144,6 +1144,7 @@ HttpServer* http_server_create(int port) {
     server->ready_check = NULL;
     server->ready_check_user_data = NULL;
     atomic_init(&server->inflight_connections, 0);
+    atomic_init(&server->loop_plan_gen, 0);
     pthread_mutex_init(&server->live_lock, NULL);
     server->live_fds = NULL;
     server->live_count = 0;
@@ -1792,6 +1793,8 @@ const char* http_server_set_metrics_raw(HttpServer* server,
     return "";
 }
 
+static void loop_plan_changed(HttpServer* server);
+
 const char* http_server_set_tls_raw(HttpServer* server,
                                     const char* cert_path,
                                     const char* key_path) {
@@ -1808,6 +1811,7 @@ const char* http_server_set_tls_raw(HttpServer* server,
     if (env_pure && (strcmp(env_pure, "1") == 0 || strcasecmp(env_pure, "true") == 0)) {
         server->is_pure_tls = 1;
         server->tls_enabled = 1;
+        loop_plan_changed(server);   /* #3269 */
         return "";
     }
 
@@ -1851,10 +1855,12 @@ const char* http_server_set_tls_raw(HttpServer* server,
     }
     server->tls_ctx = ctx;
     server->tls_enabled = 1;
+    loop_plan_changed(server);   /* #3269 */
     return "";
 #else
     server->is_pure_tls = 1;
     server->tls_enabled = 1;
+    loop_plan_changed(server);
     return "";
 #endif
 }
@@ -3170,6 +3176,7 @@ static void server_add_middleware(HttpServer* server, HttpMiddleware middleware,
         while (tail->next) tail = tail->next;
         tail->next = node;
     }
+    loop_plan_changed(server);   /* #3269 */
 }
 
 /* Response-transformer chain node. Hidden in .c — header only
@@ -3219,29 +3226,53 @@ static HttpMiddlewareNode* server_proxy_node(HttpServer* server) {
  * are the route handler's and do not touch a proxied response on either
  * path. Middleware after the proxy sees only what the proxy passes on,
  * which the loop gives the worker path (http_server_adopt_request). */
-int http_server_evloop_serves(HttpServer* server) {
-    if (!server) return 0;
+/* What the plan is made of, walked: the chain to the first mount and every
+ * hook, and the TLS setup. */
+static void loop_plan_make(HttpServer* server, HttpLoopPlan* plan) {
     HttpMiddlewareNode* proxy = server_proxy_node(server);
-    if (!proxy) return 0;
+    plan->proxy_opts = proxy ? proxy->user_data : NULL;
+    plan->before_proxy = proxy && proxy != server->middleware_chain;
+    plan->chain_ok = proxy != NULL;
     /* The loop carries a client's TLS through OpenSSL only. A server on the
      * pure-Aether stack (AETHER_PURE_TLS=1, or a build without OpenSSL) has
      * no OpenSSL context: the loop closed every connection it took for one,
      * and a build without OpenSSL read the TLS bytes as HTTP (#3256). */
     if (server->tls_enabled) {
 #ifdef AETHER_HAS_OPENSSL
-        if (server->is_pure_tls || !server->tls_ctx) return 0;
+        if (server->is_pure_tls || !server->tls_ctx) plan->chain_ok = 0;
 #else
-        return 0;
+        plan->chain_ok = 0;
 #endif
     }
-    /* The loop dials plain HTTP only; a mount with an https upstream is the
-     * worker path's, whose client speaks TLS (#3231). */
-    if (!aether_proxy_upstreams_all_plain((const AetherProxyOpts*)proxy->user_data)) return 0;
-    for (HttpMiddlewareNode* n = server->middleware_chain; n != proxy; n = n->next)
-        if (!n->loop_safe) return 0;
+    for (HttpMiddlewareNode* n = server->middleware_chain; proxy && n != proxy; n = n->next)
+        if (!n->loop_safe) plan->chain_ok = 0;
     for (struct HttpRequestHookNode* h = server->request_hook_chain; h; h = h->next)
-        if (!h->loop_safe) return 0;
-    return 1;
+        if (!h->loop_safe) plan->chain_ok = 0;
+}
+
+int http_server_loop_plan(HttpServer* server, HttpLoopPlan* plan) {
+    if (!server || !plan) return 0;
+    int gen = atomic_load_explicit(&server->loop_plan_gen, memory_order_acquire) + 1;
+    if (plan->gen != gen) {
+        loop_plan_make(server, plan);
+        plan->gen = gen;
+    }
+    /* The loop dials plain HTTP only; a mount with an https upstream is the
+     * worker path's, whose client speaks TLS (#3231). An upstream can be
+     * added while the server runs, so this one is read each time: an atomic
+     * count, not a walk. */
+    return plan->chain_ok &&
+           aether_proxy_upstreams_all_plain((const AetherProxyOpts*)plan->proxy_opts);
+}
+
+int http_server_evloop_serves(HttpServer* server) {
+    HttpLoopPlan plan = {0};
+    return http_server_loop_plan(server, &plan);
+}
+
+/* Something the loop's plan is made of changed (#3269). */
+static void loop_plan_changed(HttpServer* server) {
+    atomic_fetch_add_explicit(&server->loop_plan_gen, 1, memory_order_release);
 }
 
 int http_server_has_before_proxy(HttpServer* server) {
@@ -4481,6 +4512,7 @@ static void server_add_request_hook(HttpServer* server, HttpRequestHook hook,
         while (tail->next) tail = tail->next;
         tail->next = node;
     }
+    loop_plan_changed(server);   /* #3269 */
 }
 
 void http_server_use_request_hook(HttpServer* server,
@@ -4865,19 +4897,36 @@ static int response_settle_keep_alive(HttpServer* server, HttpRequest* req,
  * copying path's response gets in the same place: last, after every other
  * header. */
 int http_server_keep_alive_lines(HttpServer* server, HttpRequest* req, int status,
-                                 int requests_served, char* out, size_t cap) {
+                                 int requests_served, char* out, size_t cap,
+                                 size_t* out_len) {
+    *out_len = 0;
     if (!server || !req || !out || cap == 0) return 0;
     int max_requests = server->keep_alive_max;
     int keep = keep_alive_decision(server, req, status, requests_served, max_requests, 0);
+    /* The two lines nearly every response gets are copied, not formatted: a
+     * snprintf on every response for a constant (#3269). Only a cap on the
+     * requests per connection has numbers to write. */
+    static const char close_line[] = "Connection: close\r\n";
+    static const char keep_line[]  = "Connection: keep-alive\r\n";
+    const char* line = NULL;
+    size_t n = 0;
     if (!keep) {
-        snprintf(out, cap, "Connection: close\r\n");
+        line = close_line;
+        n = sizeof(close_line) - 1;
     } else if (max_requests > 0) {
         char ka[64];
         keep_alive_value(server, requests_served, max_requests, ka, sizeof(ka));
-        snprintf(out, cap, "Connection: keep-alive\r\nKeep-Alive: %s\r\n", ka);
+        int w = snprintf(out, cap, "Connection: keep-alive\r\nKeep-Alive: %s\r\n", ka);
+        *out_len = w < 0 ? 0 : ((size_t)w < cap ? (size_t)w : cap - 1);
+        return keep;
     } else {
-        snprintf(out, cap, "Connection: keep-alive\r\n");
+        line = keep_line;
+        n = sizeof(keep_line) - 1;
     }
+    if (n >= cap) n = cap - 1;
+    memcpy(out, line, n);
+    out[n] = '\0';
+    *out_len = n;
     return keep;
 }
 
@@ -5058,52 +5107,6 @@ void http_request_copy_conn_meta(HttpRequest* req, HttpConn* conn) {
     req->is_tls = (conn->ssl != NULL || conn->pure_tls != NULL) ? 1 : 0;
 }
 
-/* Is every header line in this block one this server will read the same way
- * as whoever sent it?
- *
- * Two shapes are rejected rather than interpreted, because interpreting them
- * is where recipients disagree and a disagreement about a framing header is
- * request smuggling:
- *
- *   "Content-Length : 5"  whitespace between the name and the colon. RFC 9112
- *                         5.1 requires a server to reject it. Ignoring it,
- *                         which is what an exact-match scan does, means this
- *                         server sees no body where a laxer front end sees one.
- *
- *   "X-Fold: a\r\n b"      an obs-fold continuation. RFC 9112 5.2 deprecated it
- *                         and requires a server that does not support it to
- *                         reject the message rather than guess at where the
- *                         value ends.
- */
-static int conn_headers_well_formed(const char* block, const char* end) {
-    int count = 0;
-    for (const char* line = block; line && line < end; ) {
-        const char* eol = (const char*)memchr(line, '\n', (size_t)(end - line));
-        const char* line_end = eol ? eol : end;
-        size_t line_len = (size_t)(line_end - line);
-        if (line_len && line[line_len - 1] == '\r') line_len--;
-
-        if (line_len >= HTTP_MAX_HEADER_LINE) return -1;    /* too long to hold */
-        if (line_len > 0 && ++count > HTTP_MAX_HEADERS) return -1;
-        if (line_len > 0) {
-            if (line[0] == ' ' || line[0] == '\t') return 0;   /* obs-fold */
-            const char* colon = (const char*)memchr(line, ':', line_len);
-            if (!colon) return 0;                              /* no field name */
-            if (colon > line && (colon[-1] == ' ' || colon[-1] == '\t')) return 0;
-            size_t name_len = (size_t)(colon - line);
-            if (name_len == 0) return 0;
-            char name[128];
-            if (name_len >= sizeof(name)) return 0;
-            memcpy(name, line, name_len);
-            name[name_len] = '\0';
-            if (!http_header_name_ok(name)) return 0;
-        }
-        if (!eol) break;
-        line = eol + 1;
-    }
-    return 1;
-}
-
 /* Content-Length is a plain count of digits. Anything else, a sign, a spelled
  * number, a value that will not fit, has no length in it, and RFC 9112 6.3
  * calls that unrecoverable rather than something to guess at. */
@@ -5119,6 +5122,27 @@ static int conn_parse_content_length(const char* text, long* out) {
     return 0;
 }
 
+/* `line` (`line_len` bytes, no line ending) names header `name`
+ * (`name_len` bytes, compared without case) and its value, with the
+ * whitespace around it trimmed, goes into `out` (`cap` bytes, cut short to
+ * fit): http_find_header_span's reading of a line, which the head check
+ * makes itself as it walks the lines. */
+static int head_line_value(const char* line, size_t line_len,
+                           const char* name, size_t name_len,
+                           char* out, size_t cap) {
+    if (line_len <= name_len || line[name_len] != ':' ||
+        strncasecmp(line, name, name_len) != 0) return 0;
+    const char* v = line + name_len + 1;
+    const char* v_end = line + line_len;
+    while (v < v_end && (*v == ' ' || *v == '\t')) v++;
+    while (v_end > v && (v_end[-1] == ' ' || v_end[-1] == '\t')) v_end--;
+    size_t n = (size_t)(v_end - v);
+    if (n > cap - 1) n = cap - 1;
+    memcpy(out, v, n);
+    out[n] = '\0';
+    return 1;
+}
+
 /* What the worker path checks in a request head before it trusts the head's
  * framing, in one place, which the proxy event loop asks too (#3236): the
  * loop read Content-Length alone and forwarded heads this path refuses, a
@@ -5126,7 +5150,24 @@ static int conn_parse_content_length(const char* text, long* out) {
  * where this server sees none. `head` is the request line's first byte and
  * `hdr_end` the blank line's "\r\n\r\n". HTTP_HEAD_OK fills *content_length
  * (0 when there is none) and *chunked; anything else is the status the
- * request is refused with. */
+ * request is refused with.
+ *
+ * Each header line is read once, for its shape and for the two framing
+ * headers at the same time: three walks over the head before, on every
+ * request on both paths (#3269). Two shapes are rejected rather than
+ * interpreted, because interpreting them is where recipients disagree and a
+ * disagreement about a framing header is request smuggling:
+ *
+ *   "Content-Length : 5"  whitespace between the name and the colon. RFC 9112
+ *                         5.1 requires a server to reject it. Ignoring it,
+ *                         which is what an exact-match scan does, means this
+ *                         server sees no body where a laxer front end sees one.
+ *
+ *   "X-Fold: a\r\n b"      an obs-fold continuation. RFC 9112 5.2 deprecated it
+ *                         and requires a server that does not support it to
+ *                         reject the message rather than guess at where the
+ *                         value ends.
+ */
 int http_request_head_check(const char* head, const char* hdr_end,
                             long* content_length, int* chunked) {
     *content_length = 0;
@@ -5141,17 +5182,52 @@ int http_request_head_check(const char* head, const char* hdr_end,
     const char* rl_end = (const char*)memchr(head, '\n', (size_t)(hdr_end - head));
     size_t rl_len = rl_end ? (size_t)(rl_end - head) : (size_t)(hdr_end - head);
     if (rl_len >= HTTP_MAX_REQUEST_LINE) return HTTP_HEAD_URI_TOO_LONG;
-    /* Headers first: a line this server would read differently from the peer
-     * that sent it is refused before its framing is trusted. */
-    if (rl_end) {
-        int hdr_ok = conn_headers_well_formed(rl_end + 1, hdr_end);
-        if (hdr_ok < 0) return HTTP_HEAD_TOO_LARGE;
-        if (!hdr_ok)    return HTTP_HEAD_BAD_FRAMING;
+
+    char cl_value[64] = "";
+    char te_value[128] = "";
+    int cl_count = 0, cl_differing = 0, te_count = 0, count = 0;
+    for (const char* line = rl_end ? rl_end + 1 : hdr_end; line < hdr_end; ) {
+        const char* eol = (const char*)memchr(line, '\n', (size_t)(hdr_end - line));
+        const char* line_end = eol ? eol : hdr_end;
+        size_t line_len = (size_t)(line_end - line);
+        if (line_len && line[line_len - 1] == '\r') line_len--;
+
+        /* Headers first: a line this server would read differently from the
+         * peer that sent it is refused before its framing is trusted. */
+        if (line_len >= HTTP_MAX_HEADER_LINE) return HTTP_HEAD_TOO_LARGE;
+        if (line_len > 0 && ++count > HTTP_MAX_HEADERS) return HTTP_HEAD_TOO_LARGE;
+        if (line_len > 0) {
+            if (line[0] == ' ' || line[0] == '\t') return HTTP_HEAD_BAD_FRAMING;  /* obs-fold */
+            const char* colon = (const char*)memchr(line, ':', line_len);
+            if (!colon) return HTTP_HEAD_BAD_FRAMING;                 /* no field name */
+            if (colon > line && (colon[-1] == ' ' || colon[-1] == '\t'))
+                return HTTP_HEAD_BAD_FRAMING;
+            size_t name_len = (size_t)(colon - line);
+            if (name_len == 0) return HTTP_HEAD_BAD_FRAMING;
+            char name[128];
+            if (name_len >= sizeof(name)) return HTTP_HEAD_BAD_FRAMING;
+            memcpy(name, line, name_len);
+            name[name_len] = '\0';
+            if (!http_header_name_ok(name)) return HTTP_HEAD_BAD_FRAMING;
+
+            char value[256];
+            if (head_line_value(line, line_len, "Content-Length", 14, value, sizeof value)) {
+                /* The first value, and whether a later one disagrees, as
+                 * http_find_header_in_block reported them. */
+                if (cl_count++ == 0) {
+                    snprintf(cl_value, sizeof cl_value, "%s", value);
+                } else if (strcmp(cl_value, value) != 0) {
+                    cl_differing = 1;
+                }
+            } else if (head_line_value(line, line_len, "Transfer-Encoding", 17,
+                                       value, sizeof value)) {
+                if (te_count++ == 0) snprintf(te_value, sizeof te_value, "%s", value);
+            }
+        }
+        if (!eol) break;
+        line = eol + 1;
     }
-    char cl_value[64];
-    int cl_differing = 0;
-    int cl_count = http_find_header_in_block(head, hdr_end, "Content-Length",
-                                             cl_value, sizeof(cl_value), &cl_differing);
+
     if (cl_count > 0) {
         /* Two lengths that disagree leave no single answer about where this
          * message ends, and a value that is not a count of bytes leaves none
@@ -5172,9 +5248,6 @@ int http_request_head_check(const char* head, const char* hdr_end,
      * A message carrying both is refused rather than resolved, because the
      * two lengths are exactly what a smuggling pair is built from and no
      * legitimate sender emits both. */
-    char te_value[128];
-    int te_count = http_find_header_in_block(head, hdr_end, "Transfer-Encoding",
-                                             te_value, sizeof(te_value), NULL);
     if (te_count > 0) {
         *chunked = http_strcasestr(te_value, "chunked") != NULL;
         /* Both lengths present, or a coding this server cannot decode: refuse

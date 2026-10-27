@@ -120,6 +120,13 @@ struct AetherProxyPool {
     int   request_timeout_sec;
     int   dial_timeout_ms;
     int   max_inflight_per_up;        /* 0 = uncapped */
+    /* How many upstreams are https. The proxy event loop dials plain HTTP
+     * only, so it reads this, without the lock, for every request it takes
+     * (aether_proxy_upstreams_all_plain, #3231). With the read-mostly
+     * settings, away from rr_cursor, which every round-robin pick writes:
+     * on one cache line, each pick took the line from every driver reading
+     * this one (#3269). */
+    _Atomic int tls_upstreams;
 
     /* For algo=COOKIE_HASH only: which cookie name carries the
      * stickiness key. NULL when algo != COOKIE_HASH. */
@@ -138,11 +145,11 @@ struct AetherProxyPool {
     AetherUpstream** upstreams;
     int    upstream_count;
     int    upstream_cap;
-    _Atomic int rr_cursor;            /* RR doesn't need the lock */
-    /* How many upstreams are https. The proxy event loop dials plain HTTP
-     * only, so it reads this, without the lock, for every request it takes
-     * (aether_proxy_upstreams_all_plain, #3231). */
-    _Atomic int tls_upstreams;
+    /* RR doesn't need the lock. Written on every pick, so a cache line of
+     * its own, padded on both sides whatever the struct's alignment (#3269). */
+    char        rr_pad_before[64];
+    _Atomic int rr_cursor;
+    char        rr_pad_after[64];
 
     /* Health-check thread (one per pool — see aether_proxy_health.c). */
     int             hc_started;
