@@ -1,0 +1,72 @@
+// A string whose bytes begin like a string header is read as its bytes
+// (#3297).
+//
+// The bug: a `string` argument to an extern that is not string-aware reached
+// C as its characters, and several std C functions then asked
+// aether_string_data() or is_aether_string() of those characters again. A
+// payload beginning with the header's magic (DE C0 57 AE), a refcount of
+// zero, a capacity at least its length and a non-null "data pointer" was
+// taken for a header, and its "data pointer", made of payload bytes, was
+// read. Pre-fix this crashes (or copies from a wild address) at the first
+// call. The fix: each such extern declares the parameter `@aether`, so C
+// receives the counted string itself and never guesses.
+
+import std.bytes
+import std.regex
+import std.string
+
+// 32 bytes laid out as a 64-bit string header: magic, refcount 0, length 1,
+// capacity 1, then a "data pointer" of 0x0101010101010101.
+lookalike() -> string {
+    b = bytes.new(32)
+    bytes.set(b, 0, 222)
+    bytes.set(b, 1, 192)
+    bytes.set(b, 2, 87)
+    bytes.set(b, 3, 174)
+    i = 4
+    while i < 8 {
+        bytes.set(b, i, 0)
+        i = i + 1
+    }
+    bytes.set(b, 8, 1)
+    bytes.set(b, 16, 1)
+    i = 24
+    while i < 32 {
+        bytes.set(b, i, 1)
+        i = i + 1
+    }
+    return bytes.finish(b, 32)
+}
+
+main() {
+    s = lookalike()
+    if string.length(s) != 32 {
+        println("FAIL: the payload is ${string.length(s)} bytes, expected 32")
+        exit(1)
+    }
+
+    // std.bytes: copy the payload into a buffer and read it back.
+    dst = bytes.new(32)
+    if bytes.copy_from_string(dst, 0, s, 32) != 1 {
+        println("FAIL: copy_from_string refused the payload")
+        exit(1)
+    }
+    if bytes.get(dst, 0) != 222 || bytes.get(dst, 3) != 174 || bytes.get(dst, 31) != 1 {
+        println("FAIL: copy_from_string copied something other than the payload")
+        exit(1)
+    }
+    bytes.free(dst)
+
+    // std.regex: match against the payload's own bytes.
+    re, err = regex.compile("\\x01\\x01\\x01$")
+    if err != "" {
+        println("FAIL: compile: ${err}")
+        exit(1)
+    }
+    if regex.matches(re, s) != 1 {
+        println("FAIL: the payload's last bytes did not match")
+        exit(1)
+    }
+    regex.free(re)
+    println("string header lookalike payload: all checks passed (3)")
+}

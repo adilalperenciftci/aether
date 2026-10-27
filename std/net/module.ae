@@ -118,7 +118,7 @@ extern http_request_free(req: @frees ptr)
 extern http_response_create() -> ptr
 extern http_response_set_status(res: ptr, code: int)
 extern http_response_set_header(res: ptr, name: string, value: string)
-extern http_response_set_body(res: ptr, body: string)
+extern http_response_set_body(res: ptr, body: @aether string)
 // Length-aware sibling — binary-safe set_body. Use when the body
 // may contain embedded NULs (binary content, gzip, packed binary);
 // plain http_response_set_body uses strlen and truncates at the

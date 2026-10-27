@@ -25,7 +25,7 @@ const KIND_OTHER = 4
 // C extern declarations from std/tar/aether_tar.c
 extern aether_tar_set_mtime_raw(path: string, mtime: long, is_symlink: int) -> int
 extern aether_tar_get_mode_raw(path: string) -> int
-extern aether_tar_slice_string(data: string, offset: int, len: int) -> string @heap
+extern aether_tar_slice_string(data: @aether string, offset: int, len: int) -> string @heap
 extern aether_tar_join_name(prefix: string, name: string) -> string @heap
 
 struct TarReader {
