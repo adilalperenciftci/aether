@@ -97,11 +97,13 @@ late_reader(port: int) -> string {
     sleep(3000)
     total = 0
     quiet = 0
+    closed = 0
     while quiet < 20 {
         ready, _perr = tcp.poll(sock, 100)
         if ready {
             chunk, rerr = tcp.read(sock, 65536)
             if rerr != "" || string.length(chunk) == 0 {
+                closed = 1
                 quiet = 20
             } else {
                 total = total + string.length(chunk)
@@ -113,7 +115,7 @@ late_reader(port: int) -> string {
     }
     tcp.close(sock)
     if total > 3 * BIG {
-        return "whole"
+        return "whole (${total} bytes, closed ${closed})"
     }
     return "cut short"
 }
