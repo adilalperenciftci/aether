@@ -218,7 +218,7 @@ typedef struct {
 
     /* Returns from the poller with events, for http_evloop_wakeups. Written
      * by this driver alone; read relaxed by whoever asks (#3258). */
-    _Atomic long   wakeups;
+    _Atomic int64_t wakeups;
     int64_t        next_idle_sweep_ms;   /* ev_sweep_idle (#3269) */
 
     /* What serving a request here takes from the server (whether the loop
@@ -280,8 +280,8 @@ int http_evloop_taken(HttpEvLoop* loop) {
     return loop ? atomic_load(&loop->taken) : 0;
 }
 
-long http_evloop_wakeups(HttpEvLoop* loop) {
-    long total = 0;
+int64_t http_evloop_wakeups(HttpEvLoop* loop) {
+    int64_t total = 0;
     if (!loop) return 0;
     for (int i = 0; i < loop->driver_count; i++)
         total += atomic_load_explicit(&loop->drivers[i].wakeups, memory_order_relaxed);
@@ -844,25 +844,25 @@ static ssize_t ev_client_read(EvConn* c, void* buf, size_t n) {
     return recv(c->client_fd, buf, n, 0);
 }
 
-static ssize_t ev_client_write(EvConn* c, const void* buf, size_t n) {
 #ifdef AETHER_HAS_OPENSSL
-    if (c->ssl) {
-        ERR_clear_error();
-        c->tls_want = 0;
-        int r = SSL_write(c->ssl, buf, (int)n);
-        if (r > 0) return r;
-        int e = SSL_get_error(c->ssl, r);
-        if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
-            c->tls_want = e == SSL_ERROR_WANT_WRITE ? 2 : 1;   /* #3258 */
-            errno = EAGAIN;
-            return -1;
-        }
-        errno = EIO;
+/* A write to a TLS client. Only the TLS branch of ev_step_client_send writes
+ * one segment at a time; a plain client is written with sendmsg there, so a
+ * build without OpenSSL has no use for this and defines none (#3271). */
+static ssize_t ev_client_write(EvConn* c, const void* buf, size_t n) {
+    ERR_clear_error();
+    c->tls_want = 0;
+    int r = SSL_write(c->ssl, buf, (int)n);
+    if (r > 0) return r;
+    int e = SSL_get_error(c->ssl, r);
+    if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
+        c->tls_want = e == SSL_ERROR_WANT_WRITE ? 2 : 1;   /* #3258 */
+        errno = EAGAIN;
         return -1;
     }
-#endif
-    return send(c->client_fd, buf, n, AE_SEND_NOSIGNAL);
+    errno = EIO;
+    return -1;
 }
+#endif
 
 #ifdef AETHER_HAS_OPENSSL
 /* Carry the handshake as far as it will go without waiting.
@@ -2048,7 +2048,7 @@ int  http_evloop_submit(HttpEvLoop* loop, int client_fd) {
 }
 int  http_evloop_active(HttpEvLoop* loop) { (void)loop; return 0; }
 int  http_evloop_taken(HttpEvLoop* loop)  { (void)loop; return 0; }
-long http_evloop_wakeups(HttpEvLoop* loop) { (void)loop; return 0; }
+int64_t http_evloop_wakeups(HttpEvLoop* loop) { (void)loop; return 0; }
 void http_evloop_stop(HttpEvLoop* loop)   { (void)loop; }
 
 #endif /* AETHER_EVLOOP_SUPPORTED && AETHER_HAS_THREADS */
