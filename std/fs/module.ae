@@ -858,7 +858,9 @@ write_atomic(path: string, data: byte[]) -> {
 rename(from: string, to: string) -> {
     ok = fs_rename_raw(from, to)
     if ok == 0 {
-        return fs_error_message(from, "rename failed")
+        // Both paths: the reason can be the destination's (a missing
+        // directory, no write permission there) as well as the source's.
+        return fs_error_message("${from} -> ${to}", "rename failed")
     }
     return ""
 }

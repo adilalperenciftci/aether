@@ -205,13 +205,15 @@ static inline const char* fs_unwrap_bytes(const char* data, int explicit_len, si
 
 // File operations
 File* file_open_raw(const char* path, const char* mode) {
-    if (!path || !mode) return NULL;
+    if (!path || !mode) { errno = 0; return NULL; }
 
-    // Sandbox check: determine read vs write from mode
+    // Sandbox check: determine read vs write from mode. A refusal reads as
+    // EACCES, as libaether_sandbox_preload's refusals do, so a caller that
+    // renders errno says "Permission denied" rather than a stale reason.
     if (mode[0] == 'r') {
-        if (!aether_sandbox_check("fs_read", path)) return NULL;
+        if (!aether_sandbox_check("fs_read", path)) { errno = EACCES; return NULL; }
     } else {
-        if (!aether_sandbox_check("fs_write", path)) return NULL;
+        if (!aether_sandbox_check("fs_write", path)) { errno = EACCES; return NULL; }
     }
 
     /* Verbatim bytes on every platform. fs.read / fs.write / read_binary /
@@ -1122,11 +1124,13 @@ int fs_unlink_raw(const char* path) {
 
 #include <time.h>
 
+/* The writers below leave errno saying why they returned 0, for
+ * fs_error_message: the failing call's own errno (saved across the cleanup
+ * that follows it), EACCES for a sandbox refusal, and 0 for a bad argument,
+ * which has no OS reason and takes the caller's fallback text. */
 int fs_write_binary_raw(const char* path, const char* data, int length) {
-    if (!path || length < 0 || (length > 0 && !data) || !aether_sandbox_check("fs_write", path)) {
-        errno = 0;
-        return 0;
-    }
+    if (!path || length < 0 || (length > 0 && !data)) { errno = 0; return 0; }
+    if (!aether_sandbox_check("fs_write", path)) { errno = EACCES; return 0; }
 
     size_t want;
     const char* bytes = fs_unwrap_bytes(data, length, &want);
@@ -1158,10 +1162,8 @@ int fs_write_binary_raw(const char* path, const char* data, int length) {
 }
 
 int fs_write_atomic_raw(const char* path, const char* data, int length) {
-    if (!path || length < 0 || (length > 0 && !data) || !aether_sandbox_check("fs_write", path)) {
-        errno = 0;
-        return 0;
-    }
+    if (!path || length < 0 || (length > 0 && !data)) { errno = 0; return 0; }
+    if (!aether_sandbox_check("fs_write", path)) { errno = EACCES; return 0; }
 
     size_t want;
     const char* bytes = fs_unwrap_bytes(data, length, &want);
@@ -1298,8 +1300,9 @@ int fs_write_atomic_raw(const char* path, const char* data, int length) {
 }
 
 int fs_rename_raw(const char* from, const char* to) {
-    if (!from || !to || !aether_sandbox_check("fs_write", from) || !aether_sandbox_check("fs_write", to)) {
-        errno = 0;
+    if (!from || !to) { errno = 0; return 0; }
+    if (!aether_sandbox_check("fs_write", from) || !aether_sandbox_check("fs_write", to)) {
+        errno = EACCES;
         return 0;
     }
     return rename(from, to) == 0 ? 1 : 0;

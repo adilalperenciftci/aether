@@ -47,7 +47,7 @@ fi
 # GNU sed does not, so a substitution here breaks on one platform or the
 # other -- the same trap tests/integration/cache_symlinked_lib_edit notes.)
 # The fixture writes through the NATIVE `ae`, which on MSYS does not understand
-# an /tmp/... MSYS path -- fs.write_binary just reports "binary write failed".
+# an /tmp/... MSYS path -- fs.write_binary cannot open it.
 # Convert with cygpath where it exists, as http_middleware_d2 does.
 if command -v cygpath >/dev/null 2>&1; then
     OUT_ZST="$(cygpath -m "$TMP")/out.zst"

@@ -1,127 +1,79 @@
-// Unit tests for OS error details in std.fs and std.file write paths.
+// std.fs and std.file write errors carry the path and the OS reason (#3131,
+// "std is silent"): a failed write used to return a fixed "write failed",
+// which could not tell a missing directory from a full disk or a refusal.
 
 import std.fs
 import std.file
 import std.string
-import std.os
-
-extern exit(code: int)
-
-fn assert_contains(str: string, substr: string, test_name: string) -> int {
-    if string.index_of(str, substr) >= 0 {
-        return 0
-    }
-    println("FAIL ${test_name}: expected '${str}' to contain '${substr}'")
-    return 1
-}
-
-fn assert_starts_with(str: string, prefix: string, test_name: string) -> int {
-    if _str_starts_with(str, prefix) == 1 {
-        return 0
-    }
-    println("FAIL ${test_name}: expected '${str}' to start with '${prefix}'")
-    return 1
-}
-
-fn _str_starts_with(s: string, prefix: string) -> int {
-    ls = string_length(s)
-    lp = string_length(prefix)
-    if lp > ls { return 0 }
-    if lp == 0 { return 1 }
-    i = 0
-    while i < lp {
-        if string_char_at(s, i) != string_char_at(prefix, i) { return 0 }
-        i = i + 1
-    }
-    return 1
-}
-
-fn _str_contains_icase(str: string, substr: string) -> int {
-    // Simple case-insensitive match for "directory"
-    ls = string_length(str)
-    sub = "directory"
-    lsub = string_length(sub)
-    if lsub > ls { return 0 }
-    i = 0
-    while i <= ls - lsub {
-        match_ok = 1
-        j = 0
-        while j < lsub {
-            c1 = string_char_at(str, i + j)
-            c2 = string_char_at(sub, j)
-            if c1 >= 65 {
-                if c1 <= 90 {
-                    c1 = c1 + 32
-                }
-            }
-            if c1 != c2 {
-                match_ok = 0
-                j = lsub
-            }
-            j = j + 1
-        }
-        if match_ok == 1 {
-            return 1
-        }
-        i = i + 1
-    }
-    return 0
-}
-
-fn assert_contains_dir_icase(str: string, test_name: string) -> int {
-    if _str_contains_icase(str, "directory") == 1 {
-        return 0
-    }
-    println("FAIL ${test_name}: expected '${str}' to contain 'directory' (case-insensitive)")
-    return 1
-}
+import std.spec
 
 main() {
-    fails = 0
+    fw = spec.init()
 
-    tmp_dir, terr = fs.make_temp_dir("", "test_fs_write_err")
+    tmp, terr = fs.make_temp_dir("", "test_fs_write_err")
     if terr != "" {
-        println("FAIL: cannot create temp dir: ${terr}")
-        exit(1)
+        println("FAIL: cannot create a temp dir: ${terr}")
+        return 1
+    }
+    missing = fs.path_join(tmp, "no_such_dir/file.txt")
+
+    spec.describe(fw, "a failed write names the path and the reason") {
+        spec.it(fw, "fs.write into a missing directory") callback {
+            err = fs.write(missing, "hello")
+            spec.assert_true(string.starts_with(err, missing) == 1, "starts with the path: '${err}'")
+            spec.assert_err_contains(err, "No such file", "names ENOENT")
+        }
+        spec.it(fw, "fs.write to a directory") callback {
+            err = fs.write(tmp, "hello")
+            spec.assert_true(string.starts_with(err, tmp) == 1, "starts with the path: '${err}'")
+            // EISDIR on POSIX ("Is a directory"); Windows refuses opening a
+            // directory for writing with EACCES ("Permission denied").
+            low = string.to_lower(err)
+            said = string.contains(low, "directory") + string.contains(low, "permission denied")
+            spec.assert_true(said > 0, "names EISDIR or EACCES: '${err}'")
+        }
+        spec.it(fw, "fs.write_binary into a missing directory") callback {
+            err = fs.write_binary(missing, string.bytes("hello"))
+            spec.assert_true(string.starts_with(err, missing) == 1, "starts with the path: '${err}'")
+            spec.assert_err_contains(err, "No such file", "names ENOENT")
+        }
+        spec.it(fw, "fs.write_atomic into a missing directory") callback {
+            err = fs.write_atomic(missing, string.bytes("hello"))
+            spec.assert_true(string.starts_with(err, missing) == 1, "starts with the path: '${err}'")
+            spec.assert_err_contains(err, "No such file", "names ENOENT")
+        }
+        spec.it(fw, "fs.rename names both paths") callback {
+            src = fs.path_join(tmp, "missing_source.txt")
+            dst = fs.path_join(tmp, "target.txt")
+            err = fs.rename(src, dst)
+            spec.assert_true(string.starts_with(err, "${src} -> ${dst}: ") == 1, "names source and destination: '${err}'")
+            spec.assert_err_contains(err, "No such file", "names ENOENT")
+        }
+        spec.it(fw, "file.write into a missing directory") callback {
+            err = file.write(missing, "hello")
+            spec.assert_true(string.starts_with(err, missing) == 1, "starts with the path: '${err}'")
+            spec.assert_err_contains(err, "No such file", "names ENOENT")
+        }
+        // /dev/full opens, then refuses the bytes with ENOSPC: at the write or
+        // at the close that flushes them (#3179). The reason must survive the
+        // cleanup that follows the failing call. Linux only; elsewhere skipped.
+        spec.it(fw, "a full device reports ENOSPC through each writer") callback {
+            if fs.exists("/dev/full") == 1 {
+                e1 = fs.write("/dev/full", "hello")
+                spec.assert_err_contains(e1, "No space left", "fs.write")
+                e2 = fs.write_binary("/dev/full", string.bytes("hello"))
+                spec.assert_err_contains(e2, "No space left", "fs.write_binary")
+                e3 = file.write("/dev/full", "hello")
+                spec.assert_err_contains(e3, "No space left", "file.write")
+            }
+        }
+        spec.it(fw, "a write that succeeds still returns empty") callback {
+            ok_path = fs.path_join(tmp, "ok.txt")
+            spec.assert_ok(fs.write(ok_path, "hello"), "fs.write")
+            spec.assert_ok(fs.write_atomic(ok_path, string.bytes("again")), "fs.write_atomic")
+        }
     }
 
-    // 1. fs.write to a path inside a missing directory
-    missing_dir_path = fs.path_join(tmp_dir, "nonexistent_dir/file.txt")
-    err1 = fs.write(missing_dir_path, "hello")
-    fails = fails + assert_starts_with(err1, missing_dir_path, "fs.write missing directory prefix")
-    fails = fails + assert_contains(err1, "No such file", "fs.write missing directory OS reason")
-
-    // 2. fs.write to a directory path
-    err2 = fs.write(tmp_dir, "hello")
-    fails = fails + assert_starts_with(err2, tmp_dir, "fs.write directory path prefix")
-    fails = fails + assert_contains_dir_icase(err2, "fs.write directory path OS reason")
-
-    // 3. fs.rename from a missing source
-    missing_src = fs.path_join(tmp_dir, "missing_source.txt")
-    dst_path = fs.path_join(tmp_dir, "target.txt")
-    err3 = fs.rename(missing_src, dst_path)
-    fails = fails + assert_starts_with(err3, missing_src, "fs.rename missing source prefix")
-    fails = fails + assert_contains(err3, "No such file", "fs.rename missing source OS reason")
-
-    // 4. fs.write_atomic into a missing directory
-    missing_dir_atomic = fs.path_join(tmp_dir, "nonexistent_dir_atomic/file.txt")
-    data = string.bytes("hello")
-    err4 = fs.write_atomic(missing_dir_atomic, data)
-    fails = fails + assert_starts_with(err4, missing_dir_atomic, "fs.write_atomic missing directory prefix")
-    fails = fails + assert_contains(err4, "No such file", "fs.write_atomic missing directory OS reason")
-
-    // 5. file.write (std.file wrapper) to missing directory
-    err5 = file.write(missing_dir_path, "hello")
-    fails = fails + assert_starts_with(err5, missing_dir_path, "file.write missing directory prefix")
-    fails = fails + assert_contains(err5, "No such file", "file.write missing directory OS reason")
-
-    // Cleanup temp dir
-    fs.remove_tree(tmp_dir)
-
-    if fails == 0 {
-        println("PASS test_fs_write_errors")
-    } else {
-        println("FAIL test_fs_write_errors (${fails} failures)")
-        exit(1)
-    }
+    fs.remove_tree(tmp)
+    return spec.run_summary(fw)
 }
