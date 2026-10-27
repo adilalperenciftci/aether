@@ -120,6 +120,27 @@ if [ "$(cat "$ACTUAL")" != "ok-tls" ]; then
     exit 1
 fi
 
+# Two requests on one kept connection (#3285). A TLS response leaves the
+# socket non-blocking for its write, and the read of the next request turns
+# it back; a read that found it still non-blocking would fail at once, the
+# server would drop the connection, and curl would quietly dial again:
+# num_connects says whether the second request reused the first's.
+KEPT="$TMPDIR/kept.out"
+if ! curl --silent --max-time 10 --cacert "$CERT" \
+          --resolve localhost:$PORT:127.0.0.1 \
+          -w '%{http_code} %{num_connects}\n' \
+          https://localhost:$PORT/ -o /dev/null \
+          https://localhost:$PORT/ -o /dev/null >"$KEPT" 2>"$TMPDIR/kept.err"; then
+    echo "  [FAIL] curl failed on a kept connection:"
+    cat "$TMPDIR/kept.err"
+    exit 1
+fi
+if [ "$(tr '\n' ' ' <"$KEPT")" != "200 1 200 0 " ]; then
+    echo "  [FAIL] two requests on one kept TLS connection: expected '200 1 200 0', got:"
+    cat "$KEPT"
+    exit 1
+fi
+
 # Sanity: a plain-HTTP request to the same TLS port must fail (the
 # handshake is mandatory; the server should reject the plaintext).
 if curl --silent --max-time 2 http://localhost:$PORT/ \

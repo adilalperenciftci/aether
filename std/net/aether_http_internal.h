@@ -269,9 +269,13 @@ unsigned      http_resolver_name(const char* host, int port);
 int           http_resolver_answer(HttpResolver* r, const char* host, int port,
                                    struct AetherAddrList* out);
 /* For tests: the lookup the resolver's threads run, in place of
- * getaddrinfo's (NULL puts that back). */
+ * getaddrinfo's (NULL puts that back). It returns as aether_addr_resolve
+ * does: 0, -2 when the name does not exist, -1 for any other failure. */
 void          http_resolver_set_lookup(HttpResolver* r,
                                        int (*lookup)(const char* host, int port,
                                                      struct AetherAddrList* out));
+/* For tests: the clock the resolver ages its answers by, in milliseconds,
+ * in place of the client's (NULL puts that back). */
+void          http_resolver_set_clock(HttpResolver* r, int64_t (*now)(void));
 
 #endif // AETHER_HTTP_INTERNAL_H

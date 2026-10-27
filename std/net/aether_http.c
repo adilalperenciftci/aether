@@ -1939,9 +1939,11 @@ static void transport_apply_timeouts(Transport* t, int64_t timeout_ns) {
  * older than HTTP_RESOLVE_VALID_MS is still used, and looked up again behind
  * the dial, so a changed record is seen about that soon with no dial waiting
  * on it; one older than HTTP_RESOLVE_KEEP_MS is too old to use, and the dial
- * waits for a fresh one, unless the last lookup failed: the last answer
- * stays in use for as long as lookups fail, as nginx's resolver keeps it
- * (#3286). A name with no answer fails its dials for
+ * waits for a fresh one, unless the last lookup failed: while lookups of the
+ * name fail, the last answer stays in use up to HTTP_RESOLVE_STALE_MS old,
+ * a DNS outage served stale as RFC 8767 serves it (#3286). A lookup that
+ * says the name does not exist (aether_addr_resolve's -2) is no outage: the
+ * answer goes with it. A name with no answer fails its dials for
  * HTTP_RESOLVE_NEGATIVE_MS, then is asked again. At most HTTP_RESOLVE_MAX
  * names are kept, the least recently used given up first, in a hash table:
  * two names never take each other's place. A lookup waits for a thread only
@@ -1954,6 +1956,7 @@ static void transport_apply_timeouts(Transport* t, int64_t timeout_ns) {
  * (#3277). POSIX only, as the loop is. */
 #define HTTP_RESOLVE_VALID_MS    10000
 #define HTTP_RESOLVE_KEEP_MS     300000
+#define HTTP_RESOLVE_STALE_MS    86400000  /* a day; RFC 8767 suggests one to three */
 #define HTTP_RESOLVE_NEGATIVE_MS 1000
 #define HTTP_RESOLVE_MAX         1024
 #define HTTP_RESOLVE_BUCKETS     1024      /* a power of two */
@@ -1992,6 +1995,7 @@ struct HttpResolver {
     int              idle_threads;    /* waiting for work, a signalled one too */
     int              stopping;
     int            (*lookup)(const char* host, int port, AetherAddrList* out);
+    int64_t        (*now)(void);     /* http_now_ms; a test's clock (http_resolver_set_clock) */
     void           (*answered)(void* ctx, unsigned name);
     void*            ctx;
 };
@@ -2096,13 +2100,16 @@ static void* resolve_main(void* arg) {
         pthread_mutex_unlock(&r->lock);
 
         AetherAddrList addrs;
-        int ok = lookup(n->host, n->port, &addrs) == 0 && addrs.n > 0;
+        int rc = lookup(n->host, n->port, &addrs);
+        int ok = rc == 0 && addrs.n > 0;
 
         pthread_mutex_lock(&r->lock);
-        int64_t now = http_now_ms();
+        int64_t now = r->now();
         if (ok) {
             n->addrs = addrs;
             n->at_ms = now;
+        } else if (rc == -2) {
+            n->at_ms = 0;           /* the name is gone, and its answer with it */
         }
         n->failed = !ok;
         n->tried_ms = now;
@@ -2133,6 +2140,7 @@ HttpResolver* http_resolver_new(void (*answered)(void* ctx, unsigned name), void
         return NULL;
     }
     r->lookup = resolve_lookup_default;
+    r->now = http_now_ms;
     r->answered = answered;
     r->ctx = ctx;
     return r;
@@ -2143,6 +2151,13 @@ void http_resolver_set_lookup(HttpResolver* r,
     if (!r) return;
     pthread_mutex_lock(&r->lock);
     r->lookup = lookup ? lookup : resolve_lookup_default;
+    pthread_mutex_unlock(&r->lock);
+}
+
+void http_resolver_set_clock(HttpResolver* r, int64_t (*now)(void)) {
+    if (!r) return;
+    pthread_mutex_lock(&r->lock);
+    r->now = now ? now : http_now_ms;
     pthread_mutex_unlock(&r->lock);
 }
 
@@ -2176,9 +2191,9 @@ int http_resolver_answer(HttpResolver* r, const char* host, int port,
     if (!r || !host || !out) return -1;
     if (resolve_numeric(host, port, out)) return 1;
     unsigned hash = resolve_hash(host, port);
-    int64_t now = http_now_ms();
     int got;
     pthread_mutex_lock(&r->lock);
+    int64_t now = r->now();
     HttpResolveName* n = resolve_find(r, host, port, hash);
     if (n) {
         if (r->newest != n) {
@@ -2202,9 +2217,12 @@ int http_resolver_answer(HttpResolver* r, const char* host, int port,
         resolve_link_newest(r, n);
         r->count++;
     }
-    /* The last answer, unless it is too old and nothing says the name
-     * cannot be looked up now: while lookups fail it is kept (#3286). */
-    if (n->at_ms && (now - n->at_ms < HTTP_RESOLVE_KEEP_MS || n->failed)) {
+    /* The last answer, unless it is too old: past HTTP_RESOLVE_KEEP_MS while
+     * lookups go through, past HTTP_RESOLVE_STALE_MS while they fail
+     * (#3286). A name that does not exist has none (resolve_main). */
+    int64_t age = now - n->at_ms;
+    if (n->at_ms && (age < HTTP_RESOLVE_KEEP_MS ||
+                     (n->failed && age < HTTP_RESOLVE_STALE_MS))) {
         *out = n->addrs;
         got = 1;
         /* Due again: looked up behind this dial, which goes ahead. */
@@ -2259,6 +2277,7 @@ void http_resolver_set_lookup(HttpResolver* r,
     (void)r; (void)lookup;
 }
 void http_resolver_free(HttpResolver* r) { (void)r; }
+void http_resolver_set_clock(HttpResolver* r, int64_t (*now)(void)) { (void)r; (void)now; }
 unsigned http_resolver_name(const char* host, int port) {
     (void)host; (void)port;
     return 0;

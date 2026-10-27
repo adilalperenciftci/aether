@@ -12,4 +12,5 @@
   `write_all`, which the pure-Aether TLS server writes through, waits the
   same way and keeps what its send timeout meant: a period of it in which
   nothing went ends the write. A TLS response written in many pieces
-  changes the socket's mode once, not around each piece (#3257, #3285).
+  changes the socket's mode once, not around each piece, and its
+  close_notify waits for room as a write does (#3257, #3285).

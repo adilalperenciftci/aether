@@ -566,9 +566,9 @@ static int64_t conn_now_ms(void);
  * room that frees, and the option times each send(2) afresh. poll(2) reports
  * a socket writable only once a good part of its buffer is free, so a wait
  * here ends when the client has taken next to nothing for that long: the
- * proxy event loop's bound, and nginx's send_timeout. */
-static int conn_wait_io(HttpConn* c, short events) {
-    int ms = c->applied_send_timeout_ms;
+ * proxy event loop's bound, and nginx's send_timeout. conn_wait_io_ms waits
+ * `ms` instead, 0 for no bound. */
+static int conn_wait_io_ms(HttpConn* c, short events, int ms) {
     int64_t due = ms > 0 ? conn_now_ms() + ms : 0;
     for (;;) {
         int wait = -1;
@@ -583,6 +583,10 @@ static int conn_wait_io(HttpConn* c, short events) {
         if (r == 0) return 0;
         if (errno != EINTR) return -1;
     }
+}
+
+static int conn_wait_io(HttpConn* c, short events) {
+    return conn_wait_io_ms(c, events, c->applied_send_timeout_ms);
 }
 #endif
 
@@ -979,6 +983,34 @@ static void conn_linger(int fd) {
     }
 }
 
+#ifdef AETHER_HAS_OPENSSL
+/* Send the session's close_notify and free it. Best effort: the result is
+ * not looked at, the descriptor closes next, and a half-closed peer is not
+ * the server's problem. A TLS write may have left the socket non-blocking
+ * (#3285): the close_notify then waits for room as a write does, for the
+ * send timeout (the linger bound when none is set), rather than being
+ * dropped when the send buffer is full, which a strict client reads as the
+ * response cut off. */
+static void conn_tls_close(HttpConn* c) {
+#ifndef _WIN32
+    int ms = c->applied_send_timeout_ms > 0 ? c->applied_send_timeout_ms
+                                            : HTTP_LINGER_MAX_MS;
+    for (;;) {
+        ERR_clear_error();
+        int r = SSL_shutdown(c->ssl);
+        if (r >= 0 || !c->nonblocking ||
+            SSL_get_error(c->ssl, r) != SSL_ERROR_WANT_WRITE ||
+            conn_wait_io_ms(c, POLLOUT, ms) != 1)
+            break;
+    }
+#else
+    SSL_shutdown(c->ssl);
+#endif
+    SSL_free(c->ssl);
+    c->ssl = NULL;
+}
+#endif
+
 static void conn_close(HttpConn* c) {
     if (c->pure_tls) {
         pt_server_close(c->pure_tls);
@@ -988,14 +1020,7 @@ static void conn_close(HttpConn* c) {
         c->fd = -1;
     }
 #ifdef AETHER_HAS_OPENSSL
-    if (c->ssl) {
-        /* Best-effort graceful shutdown — ignore the result; we're
-         * about to close the fd anyway and a half-closed peer is
-         * not a server-side problem. */
-        SSL_shutdown(c->ssl);
-        SSL_free(c->ssl);
-        c->ssl = NULL;
-    }
+    if (c->ssl) conn_tls_close(c);
 #endif
     if (c->fd >= 0) {
         if (c->linger_on_close) conn_linger(c->fd);
@@ -1733,13 +1758,14 @@ static void metrics_hook(HttpRequest* req, HttpServerResponse* res,
     MetricsState* st = (MetricsState*)user_data;
     if (!st || !req || !res) return;
 
-    /* Look up by exact method+path. Production deployments would
-     * usually want path-pattern bucketing (e.g. /users/:id collapses
-     * across IDs), but the existing route table doesn't expose the
-     * matched pattern back to the dispatch path. v1 buckets by
-     * literal request path; the user can collapse via labels in a
-     * follow-up. Bounded at METRICS_MAX_SERIES series, found by hash
-     * (#3265), and keyed on the labels the scrape writes (#3282). */
+    /* Look up by method and path as the scrape writes them: escaped,
+     * cut to 63 and 255 bytes, valid UTF-8 (#3282). Production
+     * deployments would usually want path-pattern bucketing (e.g.
+     * /users/:id collapses across IDs), but the existing route table
+     * doesn't expose the matched pattern back to the dispatch path.
+     * v1 buckets by literal request path; the user can collapse via
+     * labels in a follow-up. Bounded at METRICS_MAX_SERIES series,
+     * found by hash (#3265). */
     char method[64], pattern[256];
     metrics_escape(method, sizeof(method), req->method ? req->method : "-");
     metrics_escape(pattern, sizeof(pattern), req->path ? req->path : "-");
@@ -4606,11 +4632,7 @@ void http_ws_client_free(HttpWsConn* ws) {
         /* wss:// handles own their SSL as well as the socket. Shut it down
          * before closing the fd so the peer gets a close_notify rather than
          * a truncated connection; the CTX is process-wide and stays. */
-        if (ws->conn->ssl) {
-            SSL_shutdown(ws->conn->ssl);
-            SSL_free(ws->conn->ssl);
-            ws->conn->ssl = NULL;
-        }
+        if (ws->conn->ssl) conn_tls_close(ws->conn);
 #endif
         if (ws->conn->fd >= 0) close(ws->conn->fd);
         free(ws->conn);

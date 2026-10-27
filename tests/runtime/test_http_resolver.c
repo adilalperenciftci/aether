@@ -22,10 +22,15 @@
 /* The proxy event loop's resolver (#3267, #3275). The tests give it a lookup
  * they hold until they let it go, which stands in for a resolver that is slow
  * to answer, and which gives each lookup an address of its own: 127.0.0.n
- * for the nth. */
+ * for the nth. `rs_fail` is what a failing one returns: -1 a resolver that
+ * did not answer, -2 a name that does not exist. `rs_done_ms` is when the
+ * last one ended, and `rs_clock_ms` the clock a test may give the resolver. */
 static pthread_mutex_t rs_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  rs_cond = PTHREAD_COND_INITIALIZER;
 static int rs_release, rs_fail, rs_lookups, rs_answered;
+static int64_t rs_done_ms, rs_clock_ms;
+
+static int64_t rs_now_ms(void);
 
 static int rs_lookup(const char* host, int port, struct AetherAddrList* out) {
     (void)host;
@@ -34,9 +39,10 @@ static int rs_lookup(const char* host, int port, struct AetherAddrList* out) {
     pthread_cond_broadcast(&rs_cond);
     while (!rs_release) pthread_cond_wait(&rs_cond, &rs_lock);
     int fail = rs_fail;
+    rs_done_ms = rs_now_ms();
     pthread_mutex_unlock(&rs_lock);
     out->n = 0;
-    if (fail) return -1;
+    if (fail) return fail;
     struct sockaddr_in* a = (struct sockaddr_in*)&out->ss[0];
     memset(&out->ss[0], 0, sizeof(out->ss[0]));
     a->sin_family = AF_INET;
@@ -87,6 +93,21 @@ static int64_t rs_now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* The clock a test moves by hand (http_resolver_set_clock). */
+static int64_t rs_clock(void) {
+    pthread_mutex_lock(&rs_lock);
+    int64_t now = rs_clock_ms;
+    pthread_mutex_unlock(&rs_lock);
+    return now;
+}
+
+static void rs_set(int64_t advance_ms, int fail) {
+    pthread_mutex_lock(&rs_lock);
+    rs_clock_ms += advance_ms;
+    rs_fail = fail;
+    pthread_mutex_unlock(&rs_lock);
 }
 
 static unsigned rs_addr_of(const struct AetherAddrList* a) {
@@ -153,20 +174,23 @@ TEST(http_resolver_keeps_names_apart) {
  * each, and the dial says why: the exchange answers it as the worker path's
  * "could not resolve host". */
 TEST(http_resolver_fails_a_name_that_does_not_resolve) {
-    rs_reset(1, 1);
+    rs_reset(1, -1);
     HttpResolver* r = http_resolver_new(rs_on_answer, NULL);
     if (!r) return;
     http_resolver_set_lookup(r, rs_lookup);
     struct AetherAddrList a;
     ASSERT_EQ(0, http_resolver_answer(r, "nohost.test", 80, &a));
     ASSERT_EQ(1, rs_wait_for(&rs_answered, 1));
-    int64_t failed_at = rs_now_ms();
     int got = http_resolver_answer(r, "nohost.test", 80, &a);
     HttpUpstreamConn up;
     int fd = http_upstream_acquire_nb("nohost.test", 80, 0, r, &up);
     int why = http_upstream_lookup(&up);
-    /* Within the second the failure answers for. A runner stalled past it
-     * asks again, as it should, and these say nothing. */
+    /* Within the second the failure answers for, which starts when the
+     * lookup ended. A runner stalled past it asks again, as it should, and
+     * these say nothing. */
+    pthread_mutex_lock(&rs_lock);
+    int64_t failed_at = rs_done_ms;
+    pthread_mutex_unlock(&rs_lock);
     if (rs_now_ms() - failed_at < 900) {
         ASSERT_EQ(-1, got);
         ASSERT_EQ(-1, fd);
@@ -179,7 +203,10 @@ TEST(http_resolver_fails_a_name_that_does_not_resolve) {
 /* The resolver starts a thread for a name while the threads it has are
  * taken: with one thread idle and two names asked back to back, the second
  * waited behind the first (#3284). Here the first lookup is held, and the
- * second must still be looked up. */
+ * second must still be looked up. Before the fix this failed when the idle
+ * thread had not woken between the two asks, which back to back is nearly
+ * always; a thread that woke in between was taken, and the old rule started
+ * another for the second name too. */
 static pthread_mutex_t rs2_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  rs2_cond = PTHREAD_COND_INITIALIZER;
 static int rs2_release, rs2_started;
@@ -209,9 +236,11 @@ TEST(http_resolver_looks_up_beside_a_slow_name) {
     if (!r) return;
     http_resolver_set_lookup(r, rs2_lookup);
     struct AetherAddrList a;
-    /* One thread, made idle again by a lookup that ends at once. */
+    /* One thread, idle again after a lookup that ends at once: its answer
+     * is called just before it goes back to wait, so give it the moment. */
     ASSERT_EQ(0, http_resolver_answer(r, "first.test", 80, &a));
     ASSERT_EQ(1, rs_wait_for(&rs_answered, 1));
+    usleep(50000);
     /* Two names back to back: one held, one not. */
     ASSERT_EQ(0, http_resolver_answer(r, "held.test", 80, &a));
     ASSERT_EQ(0, http_resolver_answer(r, "quick.test", 80, &a));
@@ -222,6 +251,49 @@ TEST(http_resolver_looks_up_beside_a_slow_name) {
     pthread_cond_broadcast(&rs2_cond);
     pthread_mutex_unlock(&rs2_lock);
     ASSERT_EQ(3, rs_wait_for(&rs_answered, 3));
+    http_resolver_free(r);
+}
+
+/* While lookups of a name fail, its last answer stays in use, past the five
+ * minutes an answer is otherwise kept and up to a day; a lookup that says the
+ * name does not exist takes it away (#3286). The answer used to go five
+ * minutes after the last lookup that went through, so a DNS outage longer
+ * than that turned every fresh dial into a 502. On the test's own clock. */
+TEST(http_resolver_serves_a_stale_answer_while_lookups_fail) {
+    rs_reset(1, 0);
+    rs_set(1000000, 0);
+    HttpResolver* r = http_resolver_new(rs_on_answer, NULL);
+    if (!r) return;
+    http_resolver_set_lookup(r, rs_lookup);
+    http_resolver_set_clock(r, rs_clock);
+    struct AetherAddrList a;
+    ASSERT_EQ(0, http_resolver_answer(r, "dns.test", 80, &a));
+    ASSERT_EQ(1, rs_wait_for(&rs_answered, 1));
+    ASSERT_EQ(1, http_resolver_answer(r, "dns.test", 80, &a));
+    unsigned first = rs_addr_of(&a);
+
+    /* Six minutes on, and the resolver does not answer. */
+    rs_set(6 * 60 * 1000, -1);
+    ASSERT_EQ(0, http_resolver_answer(r, "dns.test", 80, &a));
+    ASSERT_EQ(2, rs_wait_for(&rs_answered, 2));
+    ASSERT_EQ(1, http_resolver_answer(r, "dns.test", 80, &a));
+    ASSERT_EQ((int)first, (int)rs_addr_of(&a));
+
+    /* A day of failing lookups on: too stale to use. */
+    rs_set(25LL * 3600 * 1000, -1);
+    ASSERT_EQ(0, http_resolver_answer(r, "dns.test", 80, &a));
+    ASSERT_EQ(3, rs_wait_for(&rs_answered, 3));
+    ASSERT_EQ(-1, http_resolver_answer(r, "dns.test", 80, &a));
+
+    /* A name the resolver says is gone loses its answer at once. */
+    rs_set(0, 0);
+    ASSERT_EQ(0, http_resolver_answer(r, "gone.test", 80, &a));
+    ASSERT_EQ(4, rs_wait_for(&rs_answered, 4));
+    ASSERT_EQ(1, http_resolver_answer(r, "gone.test", 80, &a));
+    rs_set(6 * 60 * 1000, -2);
+    ASSERT_EQ(0, http_resolver_answer(r, "gone.test", 80, &a));
+    ASSERT_EQ(5, rs_wait_for(&rs_answered, 5));
+    ASSERT_EQ(-1, http_resolver_answer(r, "gone.test", 80, &a));
     http_resolver_free(r);
 }
 
@@ -335,7 +407,7 @@ TEST_CATEGORY(http_proxy_loop_waits_on_a_lookup_without_holding_its_drivers,
     snprintf(url, sizeof(url), "http://slow.test:%d", up_port);
 
     RsGateway g = { 0 }, g2 = { 0 };
-    ASSERT_TRUE(rs_gateway(&g, url, 1));
+    ASSERT_TRUE(rs_gateway(&g, url, 30));   /* room for the slowest runner */
     if (!g.server->evloop) {             /* no loop on this build: nothing to see */
         rs_gateway_free(&g);
         http_server_stop(up);

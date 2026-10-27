@@ -7,7 +7,8 @@
   serves the rest; the connection stays on the loop, requests waiting on one
   name share one lookup, the upstream timeout covers the wait, and the
   answer is kept, looked up again behind the dials that use it once it is
-  ten seconds old and kept in use while lookups fail. A name that does not
-  resolve is answered 502, as on the worker path. Adding an upstream looks
-  nothing up, and a program that does not proxy starts no resolver thread
-  (#3267, #3275, #3276, #3277, #3283, #3284, #3286).
+  ten seconds old, and kept in use while lookups fail, for up to a day,
+  unless the resolver says the name is gone. A name that does not resolve is
+  answered 502, as on the worker path. Adding an upstream looks nothing up,
+  and a program that does not proxy starts no resolver thread (#3267, #3275,
+  #3276, #3277, #3283, #3284, #3286).

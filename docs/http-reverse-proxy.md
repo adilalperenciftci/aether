@@ -365,15 +365,17 @@ dials it: the connection waits for the answer while the driver serves the
 rest, and stays on the driver. Requests waiting on one name share one lookup.
 The answer is kept and used for every dial after it; one older than ten
 seconds is looked up again behind the dial that uses it, so a changed record
-is seen about that soon, and the last answer stays in use for as long as
-lookups of the name fail (#3286). A name that does not resolve is answered
-502, as on the worker path, and is asked about again a second later. The
-request's upstream timeout (`request_timeout_sec`) covers the wait and the
-call after it together (#3283). Lookups run on up to four threads, so a slow
-name holds up only its own requests (#3284). Adding an upstream looks nothing
-up, and a program that does not proxy never starts the resolver (#3267,
-#3275, #3276, #3277). Stopping the server waits for a lookup under way to
-end, as it did when the driver looked names up itself.
+is seen about that soon. While lookups of the name fail, the last answer
+stays in use, for up to a day, as RFC 8767 serves stale answers (#3286);
+when the resolver says the name does not exist, it goes. A name that does
+not resolve is answered 502, as on the worker path, and is asked about again
+a second later. The request's upstream timeout (`request_timeout_sec`)
+covers the wait and the call after it together (#3283). Up to four lookups
+run at once, each on a thread of its own, so a slow name holds up only its
+own requests until four are slow together (#3284). Adding an upstream looks
+nothing up, and a program that does not proxy never starts the resolver
+(#3267, #3275, #3276, #3277). Stopping the server waits for a lookup under
+way to end, as it did when the driver looked names up itself.
 
 The driver serves HTTP/1.1 proxying, on a TLS-terminating server too: it
 carries the client's TLS handshake without waiting and reads and writes
