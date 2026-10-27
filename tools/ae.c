@@ -12141,7 +12141,15 @@ static int cmd_add(int argc, char** argv) {
      * versions the project pins rather than each default branch. "latest"
      * is the default branch. */
     const char* version = req_version;
-    if (!version && listed[0] && strcmp(listed, "latest") != 0) version = listed;
+    if (!version && listed[0] && strcmp(listed, "latest") != 0) {
+        if (!ae_version_ok(listed)) {
+            fprintf(stderr,
+                "Error: aether.toml names %s at '%s', which is not a version (a tag name).\n"
+                "       Give one: ae add %s@<version> --update\n", package, listed, package);
+            return 1;
+        }
+        version = listed;
+    }
     if (req_version && listed[0] && !ae_same_version(req_version, listed) && !update) {
         fprintf(stderr,
             "Error: aether.toml pins %s at %s.\n"

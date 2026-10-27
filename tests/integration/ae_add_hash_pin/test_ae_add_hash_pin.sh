@@ -22,7 +22,8 @@
 #      for another version is refused, not served the wrong tree,
 #   7. without a version the default branch is installed and pinned,
 #   8. editing the manifest keeps every other line and section in place,
-#   9. `..` in a package name is refused, and nothing is written (#3304).
+#   9. `..` in a package name is refused, and nothing is written (#3304); so
+#      is a version that is not a tag name, typed or read from aether.toml.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -165,5 +166,15 @@ cp "$Q/aether.toml" "$TMP/q.before"
 ( cd "$Q" && "$AE" add "example.com/../../escape" ) > "$TMP/dots.log" 2>&1 && fail "a package path with .. was accepted" "$TMP/dots.log"
 [ ! -e "$HOME/.aether/escape" ] && [ ! -e "$HOME/escape" ] || fail "a package path with .. wrote outside the cache" "$TMP/dots.log"
 same_file "$Q/aether.toml" "$TMP/q.before" || fail "a refused package path changed aether.toml" "$Q/aether.toml"
+# So is a version that is not a tag name, typed or read from the manifest:
+# it would go into the archive's URL.
+( cd "$Q" && "$AE" add "$PKG@v1?x=1" ) > "$TMP/badver.log" 2>&1 && fail "a version with ? was accepted" "$TMP/badver.log"
+R="$TMP/odd_manifest"
+mkdir -p "$R"
+printf '[package]\nname = "r"\n\n[dependencies]\n"%s" = "^1.0#frag"\n' "$PKG" > "$R/aether.toml"
+rm -rf "$CACHE" "$CACHE.fetched"
+( cd "$R" && "$AE" add "$PKG" ) > "$TMP/oddver.log" 2>&1 && fail "a manifest version with ^ and # was fetched" "$TMP/oddver.log"
+grep -q "not a version" "$TMP/oddver.log" || fail "no diagnostic for the manifest's version" "$TMP/oddver.log"
+[ ! -e "$CACHE" ] || fail "a refused version installed a tree" "$TMP/oddver.log"
 
-echo "  [PASS] ae_add_hash_pin: the tree's hash is pinned, checked on add and build, moved only by --update; .. refused"
+echo "  [PASS] ae_add_hash_pin: the tree's hash is pinned, checked on add and build, moved only by --update; .. and non-versions refused"
