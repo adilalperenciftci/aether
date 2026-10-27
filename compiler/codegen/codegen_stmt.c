@@ -7298,6 +7298,33 @@ static Type* module_global_decl_type(CodeGenerator* gen, const char* name) {
     return NULL;
 }
 
+/* A module-level `var` bound to a call with a trailing block, `g = vstack(0) {
+ * ... }`, runs the block with the stored value as its context, as the same
+ * binding of a local does. The store into the global used to leave the case
+ * before the block was reached, so the block was dropped without a word. A
+ * builder's block ran ahead of the call, inside the call's own emission. */
+static void emit_global_rebind_trailing(CodeGenerator* gen, ASTNode* stmt) {
+    if (stmt->child_count == 0 || !stmt->children[0] ||
+        stmt->children[0]->type != AST_FUNCTION_CALL) return;
+    ASTNode* call = stmt->children[0];
+    if (call->value && is_builder_func_reg(gen, call->value)) return;
+    for (int tc = 0; tc < call->child_count; tc++) {
+        ASTNode* trailing = call->children[tc];
+        if (!trailing || trailing->type != AST_CLOSURE || !trailing->value ||
+            strcmp(trailing->value, "trailing") != 0) continue;
+        for (int bi = 0; bi < trailing->child_count; bi++) {
+            if (trailing->children[bi] && trailing->children[bi]->type == AST_BLOCK) {
+                print_indent(gen);
+                fprintf(gen->output, "_aether_ctx_push((void*)(intptr_t)%s);\n",
+                        safe_c_name(stmt->value));
+                emit_trailing_block_body(gen, trailing->children[bi]);
+                return;
+            }
+        }
+    }
+}
+
+
 /* #2796: slot `j` of `_tup<id>`, of position type `pt`, into the
  * module-level `var` `name`, taken as `name = value` takes a value into a
  * global (#701, #2461, #2525): the slot's value (adopted when the call
@@ -9913,6 +9940,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         fprintf(gen->output, "; const char* _ae_old = %s; %s = _ae_new; "
                                 "aether_string_publish(%s); aether_heap_str_free(_ae_old); }\n",
                                 stmt->value, stmt->value, stmt->value);
+                        emit_global_rebind_trailing(gen, stmt);
                         break;
                     }
                     if (gt && gt->kind == TYPE_PTR && grhs && grhs->node_type &&
@@ -9923,6 +9951,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         fprintf(gen->output, "%s = ", stmt->value);
                         if (!emit_closure_into_ptr(gen, grhs)) generate_expression(gen, grhs);
                         fprintf(gen->output, ";\n");
+                        emit_global_rebind_trailing(gen, stmt);
                         break;
                     }
                     if (stmt->child_count > 0 && stmt->children[0] &&
@@ -9936,6 +9965,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                 stmt->value, stmt->value);
                         emit_closure_take(gen, stmt->children[0]);
                         fprintf(gen->output, "; _aether_closure_env_release(_ae_old); }\n");
+                        emit_global_rebind_trailing(gen, stmt);
                         break;
                     }
                     /* R3: a struct, tuple or optional that owns is stored
@@ -9944,6 +9974,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     if (grhs && gvt && gvt->kind != TYPE_ARRAY && gvt->kind != TYPE_STRING &&
                         gvt->kind != TYPE_FUNCTION && own_type_owns(gen, gvt)) {
                         emit_owning_store(gen, stmt->value, gvt, grhs, 1);
+                        emit_global_rebind_trailing(gen, stmt);
                         break;
                     }
                     fprintf(gen->output, "%s", stmt->value);
@@ -9952,6 +9983,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         generate_expression(gen, stmt->children[0]);
                     }
                     fprintf(gen->output, ";\n");
+                    emit_global_rebind_trailing(gen, stmt);
                     break;
                 }
 
