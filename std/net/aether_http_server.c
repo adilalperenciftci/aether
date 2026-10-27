@@ -4678,16 +4678,6 @@ static int response_settle_keep_alive(HttpServer* server, HttpRequest* req,
     return will_keep_alive;
 }
 
-/* The same decision for a proxied response on the proxy event loop
- * (#3229), which answered every one with the connection kept and no
- * Connection header, whatever the client or the server's policy said. */
-int http_server_settle_keep_alive(HttpServer* server, HttpRequest* req,
-                                  HttpServerResponse* res, int requests_served) {
-    if (!server || !req || !res) return 0;
-    return response_settle_keep_alive(server, req, res, requests_served,
-                                      server->keep_alive_max, 0);
-}
-
 /* For a response head the loop writes from the upstream's own bytes (its
  * direct path), the decision and the header lines that state it, which the
  * copying path's response gets in the same place: last, after every other
@@ -5093,15 +5083,10 @@ static void run_request_hooks(HttpServer* server, HttpRequest* req,
         h->hook(req, res, duration_us, h->user_data);
 }
 
-/* The same hooks on the clock they measure with, for the proxy event loop,
- * which runs them on the responses it sends (#3214). */
+/* The clock the hooks measure with, for the proxy event loop, which runs them
+ * on the responses it sends (#3214, http_server_answer_bytes). */
 int64_t http_server_clock_us(void) {
     return http_now_us();
-}
-
-void http_server_run_request_hooks(HttpServer* server, HttpRequest* req,
-                                   HttpServerResponse* res, int64_t t_start_us) {
-    if (server && req && res) run_request_hooks(server, req, res, t_start_us);
 }
 
 /* A middleware's answer on the proxy event loop (#3214), made into the bytes

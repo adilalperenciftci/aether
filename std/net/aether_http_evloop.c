@@ -871,36 +871,22 @@ static int ev_step_upstream_recv(EvDriver* d, EvConn* c) {
 
 
 
-/* The proxy has produced a response. Turn it into bytes and hand it to the
- * client-writing state, which is the only thing left to wait for. The
- * request hooks observe it first, as they observe every response the
- * server sends (#3213): here, before the bytes are built, which is where
- * run_request_hooks has them on the worker path (#3214). */
+/* A response object to send: the proxy's (an upstream's answer it copied, a
+ * cache hit, a refusal, a 502 or 504 of its own) or a middleware's ahead of
+ * it, a 429 from the rate limiter, a CORS preflight, an unknown host
+ * (#3214). It goes out as the worker path sends one
+ * (http_server_answer_bytes): the request hooks observe it first, as they
+ * observe every response the server sends (#3213); the keep-alive decision
+ * and the headers stating it are the ones finish_response makes (#3229); a
+ * HEAD carries no body, which the proxy's own answers did, so a client read
+ * the body as the next response (#3251). When the decision is to close (the
+ * client said so, HTTP/1.0, the server's keep-alive policy), the connection
+ * ends once the response is written, as it does there. */
+static int ev_answer(EvDriver* d, EvConn* c);
 static int ev_respond_from(EvDriver* d, EvConn* c) {
-    if (c->hooked)
-        http_server_run_request_hooks(d->loop->server, c->req, c->res, c->t_start_us);
-    /* Then the keep-alive decision and the headers stating it, as
-     * finish_response makes them (#3229): every proxied response kept the
-     * connection, with no Connection header, whatever the client asked or the
-     * server's policy said. */
-    c->close_after = !http_server_settle_keep_alive(d->loop->server, c->req, c->res,
-                                                    c->requests_served);
-    size_t len = 0;
-    if (!http_response_serialize_into(c->res, &c->out, &c->out_cap, &len))
-        return -1;
-    c->out_len = len;
-    c->out_sent = 0;
-    c->state = EV_CLIENT_SEND;
-    return 1;
+    return ev_answer(d, c);
 }
 
-/* A middleware ahead of the proxy answered instead of it: a 429 from the
- * rate limiter, a CORS preflight, an unknown host (#3214). The response goes
- * out as the worker path sends one (http_server_answer_bytes): the hooks see
- * it, the keep-alive decision and the headers stating it are the ones
- * finish_response makes, a HEAD carries no body. When that decision is to
- * close (the client said so, HTTP/1.0, the server's keep-alive policy), the
- * connection ends once the response is written, as it does there. */
 static int ev_answer(EvDriver* d, EvConn* c) {
     size_t len = 0;
     int keep = http_server_answer_bytes(d->loop->server, c->req, c->res, c->t_start_us,

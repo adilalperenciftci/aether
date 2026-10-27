@@ -1060,14 +1060,11 @@ int http_server_has_before_proxy(HttpServer* server);
 // 0: one answered, into `res`.
 int http_server_run_before_proxy(HttpServer* server, HttpRequest* req,
                                  HttpServerResponse* res);
-// The clock the request hooks' durations are measured on, in microseconds,
-// and the hooks on a response about to be sent, whose request began at
-// `t_start_us`.
+// The clock the request hooks' durations are measured on, in microseconds.
 int64_t http_server_clock_us(void);
-void http_server_run_request_hooks(HttpServer* server, HttpRequest* req,
-                                   HttpServerResponse* res, int64_t t_start_us);
-// A middleware's answer, made into the bytes the worker path would send for
-// it (finish_response): the hooks observe it, the keep-alive decision is
+// A response the loop sends, a middleware's answer or the proxy's, made into
+// the bytes the worker path would send for it (finish_response, #3251): the
+// hooks observe it, whose request began at `t_start_us`, the keep-alive decision is
 // made and stated in its headers, a staged file is read into the body and a
 // HEAD response carries no body. The bytes go into *buf, grown as needed.
 // `requests_served` counts the responses already sent on the connection.
@@ -1077,17 +1074,9 @@ int http_server_answer_bytes(HttpServer* server, HttpRequest* req,
                              HttpServerResponse* res, int64_t t_start_us,
                              int requests_served, char** buf, size_t* cap,
                              size_t* out_len);
-// A proxied response the loop sends, settled as finish_response settles one
-// (#3229): whether the connection carries another request after it, stated
-// in its headers (Connection, and Keep-Alive when the server caps requests
-// per connection, a definite length). 1 keeps the connection, 0 closes it
-// once the response is out. `requests_served` counts the responses already
-// sent on the connection.
-int http_server_settle_keep_alive(HttpServer* server, HttpRequest* req,
-                                  HttpServerResponse* res, int requests_served);
-// The same decision for a response head the loop writes itself (its direct
-// path, from the upstream's bytes): the header lines that state it, ending
-// in CRLF, go into `out`, to follow every other header.
+// The keep-alive decision for a response head the loop writes itself (its
+// direct path, from the upstream's bytes, #3229): the header lines that
+// state it, ending in CRLF, go into `out`, to follow every other header.
 int http_server_keep_alive_lines(HttpServer* server, HttpRequest* req, int status,
                                  int requests_served, char* out, size_t cap);
 // Take a connection whose current request has been through the middleware
