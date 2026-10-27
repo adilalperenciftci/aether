@@ -415,42 +415,99 @@ main() {
 - **A `T[N]` array converts to `T[]` implicitly** wherever a slice is expected: a parameter, a `T[]`-typed binding or field, a `return` from a `-> T[]` function. The length travels with it. `null`, and the empty literal `[]`, convert to the empty slice: `.len` is `0`, it views no storage, and it compares equal to `null`. So `s == []` is `s == null` (it asks whether `s` views any storage; test `s.len == 0` for emptiness), a C function's `T[]` parameter takes `[]` as the null pointer, and an if-expression or a `match` given to a `T[]` converts each arm on its own. A module-level `var` or `const` of type `T[]` takes either as its initial value.
 - **A string is not a slice.** Passing one where a `T[]` is expected (a parameter, a binding, a `return`) is a type error; `string.bytes(s)` is the bounded, read-only `byte[]` view of a string's bytes, and it decays to their pointer at a C extern like any slice. Reading it costs what any slice's read does; a store through it (an element store, `+=`, `++`), or through any view made from it (a sub-slice, a pattern's tail), in this function or one it is given to, panics with "a write through a read-only view of a string", and one the checker can see through a local bound to it is a compile error (E0200) (#3025). A string's own bytes are read-only too: `s[i]` reads one, and a write (`s[i] = v`, `s[i] += v`, `s[i]++`) is a compile error (E0200). Build the new text as a new string, or work on the bytes in a `byte[N]` array of your own.
 - **A slice decays to its pointer** wherever a `ptr` is expected, exactly as a `T[N]` array does: a `ptr` parameter, a C extern's parameter (including one declared `T[]`), a comparison against `null`, and pointer arithmetic (`s + n` is a `ptr` to element `n`). `s as ptr` spells the same conversion explicitly, for a `ptr` return or binding. The length is dropped at that boundary; nothing else about the extern ABI changes.
-- **`make([]T, n)`** allocates `n` zeroed elements and returns them as a bounded slice; `free(s)` releases them, and first what they hold: each element is a place a store into it takes a reference for (a string, a closure, a struct that holds one), so the free gives each back, as a struct's destroy does its fields (#3159). The elements of C memory viewed as a slice hold no reference, and its free releases only the memory. Only the slice that holds such a buffer, or a view of a raw pointer the program owns from its start (`(p as T[])[0..n]`), may be freed: a view owns nothing. `free` of a sub-slice (`b[2..4]`, `b[1..]`, a list pattern's tail), of an array viewed as a slice, of `string.bytes(s)`, or of an array `T[N]`, is a compile error where the checker sees it (a local bound once to one, or the expression itself), and a named panic at run time anywhere else (`free of a view of elements another slice or an array holds, which owns nothing`). Before, the allocator was given a pointer it never handed out. In a module that defines a `free` of its own (`bignum.free`, `json.free`), `free(s)` of a slice is still this release, unless the module's `free` itself takes a slice: the module's function would only see the slice's pointer (#3116).
-- **`T[][]` is a slice of slices**, and `T[][][]` one deeper: each further `[]` wraps the type once more, in any position a type is written (a parameter, a return type, a field, a typed local, a function type). `make([]int[], n)` builds one; `g[i] = row` stores a row, `g[i][j]` reads an element and `g[i].len` is a row's length. Each row is a slice like any other and is owned by whoever made it, so the outer slice's `free` does not free the rows: free each row, then the outer. Only the empty `[]` repeats; there is no `T[][3]`.
-- A slice does not own the storage it views. It is valid for exactly as long as that storage: an array in an enclosing scope, a `make` buffer until its `free`, a C buffer until C reclaims it. The elements are the storage's: a string read out of a `string[]` slice (`t = s[i]`, a return, a field) takes a reference of its own, and a store into an element (`s[i] = v`) takes the new string and releases the one it replaces, as a store into the array itself does. Memory C owns, viewed as `p as string[]`, owns nothing: a store there gives C the characters and takes no reference ([memory-management.md](memory-management.md#ptr-slots)).
+- **`make([]T, n)`** allocates `n` zeroed elements and returns them as a bounded slice. The local that holds it releases it when it goes out of scope ([Slice ownership](#slice-ownership)), and `free(s)` releases it early, and first what the elements hold: each element is a place a store into it takes a reference for (a string, a closure, a struct that holds one), so the free gives each back, as a struct's destroy does its fields (#3159). The elements of C memory viewed as a slice hold no reference, and its free releases only the memory. Only the slice that holds such a buffer, or a view of a raw pointer the program owns from its start (`(p as T[])[0..n]`), may be freed: a view owns nothing. `free` of a sub-slice (`b[2..4]`, `b[1..]`, a list pattern's tail), of an array viewed as a slice, of `string.bytes(s)`, or of an array `T[N]`, is a compile error where the checker sees it (a local bound once to one, or the expression itself), and a named panic at run time anywhere else (`free of a view of elements another slice or an array holds, which owns nothing`). Before, the allocator was given a pointer it never handed out. In a module that defines a `free` of its own (`bignum.free`, `json.free`), `free(s)` of a slice is still this release, unless the module's `free` itself takes a slice: the module's function would only see the slice's pointer (#3116).
+- **`T[][]` is a slice of slices**, and `T[][][]` one deeper: each further `[]` wraps the type once more, in any position a type is written (a parameter, a return type, a field, a typed local, a function type). `make([]int[], n)` builds one; `g[i] = row` stores a row, `g[i][j]` reads an element and `g[i].len` is a row's length. The outer slice owns its rows: a store into `g[i]` releases the row it replaces, and releasing the outer slice (its owner's scope exit, or `free(g)`) releases every row first; `free(g[i])` releases a row early and leaves it empty. A row read out (`r = g[i]`) is a view of it. Only the empty `[]` repeats; there is no `T[][3]`.
+- A slice does not own the storage it views. It is valid for exactly as long as that storage: an array in an enclosing scope, a `make` buffer until its owner releases it, a C buffer until C reclaims it. The elements are the storage's: a string read out of a `string[]` slice (`t = s[i]`, a return, a field) takes a reference of its own, and a store into an element (`s[i] = v`) takes the new string and releases the one it replaces, as a store into the array itself does. Memory C owns, viewed as `p as string[]`, owns nothing: a store there gives C the characters and takes no reference ([memory-management.md](memory-management.md#ptr-slots)).
 - **A slice of a function's own storage stays in the function** (E0900). An array literal in a slice slot, and a function's own fixed-size array, live in its frame, which ends when the function returns. A slice of either may be used while the function runs and passed down to the functions it calls, but it may not leave the function: returned (alone, in a struct or tuple, or in a closure that captured it), stored in a module-level `var`, or stored in a field of something that may outlive the function: a struct behind a pointer, or a global (a struct value of the function's own may take it, and is then itself such a slice). Each of those is refused at the value that leaves, `'lit' returns a slice of its own storage (an array literal)`. Keep such a slice in storage that lives as long as it: a `make([]T, n)` buffer, a slice the caller passed in, or a module-level array. A slice parameter (`xs: int[]`) views the caller's storage and may be returned; a fixed-size array parameter (`a: int[3]`) is the function's own copy of the caller's array, so a slice of it is a slice of the function's storage. What a name holds where it leaves is what counts, path by path: a local or a field of a local struct re-bound to a `make` buffer before the `return` holds no slice of the frame any more, but one that still holds it on any path to the `return` (an `if` that re-binds it in one branch only, a loop that may `break` before the re-bind) is refused. A call of a closure the function binds (`reset()` after `reset = || { v = make([]int, 4) }`) counts what the closure re-binds for sure: a name of the function it binds on every way through its body before any `return` (both branches of an `if`, every arm of a `match` that covers its value, not a loop's body) holds what the closure gave it after the call. The name is the function's own when the function binds it ahead of the closure, in a block around it, and the closure does not declare one of its own first; a closure bound more than once, or called before it is bound, re-binds nothing that counts. A `try` around such a call starts its handler from what held a slice before any statement of its body ran, or after any. The other way is counted, conservatively: a closure that may store a slice of the function's storage into one of its names (`setview = || { v = arr }`) gives that name a slice from where the closure is written on, whether and whenever it is called, and a store a closure makes through a pointer or into a module-level `var` is judged as the same store written in the function. What the closure stores is judged as the function's own stores are: a fixed-size array of the function or an array literal, a name that holds such a slice at some point of the function, a local of the closure bound to one, or a parameter of the closure it is called with one for (any parameter that can hold a slice, when the closure is passed on or stored). A slice parameter of the function, a `make` buffer, a module-level `var` or `[]` stored by a closure leaves the name as it was. A call's result is taken to be no view of the caller, so a function that hands back the slice it was given is not seen through, in a closure (`v = same(arr)`) or not.
 
-**Growing a slice: `append(xs, v)`.** `append` gives `xs` one element longer, with `v` at its end, and is used as `xs = append(xs, v)`. The buffer grows in place: its capacity doubles when it is full, so `n` appends cost O(n) in all, and between growths an append writes in place. The result is an ordinary `T[]` (`xs[i]`, `.len`, a `T[]` parameter, a sub-slice), and `free(xs)` releases it, with `defer free(xs)` keeping the free beside the binding (a `defer` reads `xs` when it runs, so it frees the buffer the last append gave).
+**Growing a slice: `xs.push(v)` and `append(xs, v)`.** `xs.push(v)` makes the slice `xs` holds one element longer, with `v` at its end, in place: it is a statement, on a place that holds a slice (a local, a field, an element, a module-level `var`). `append(xs, v)` is the expression form: it gives the slice one element longer and consumes `xs`, so it is used as `xs = append(xs, v)`. Either grows the buffer in place: its capacity doubles when it is full, so `n` pushes cost O(n) in all, and between growths a push writes in place. The result is an ordinary `T[]` (`xs[i]`, `.len`, a `T[]` parameter, a sub-slice), released by the local that owns it ([Slice ownership](#slice-ownership)).
 
 ```aether,run
 range_list(n: int) -> int[] {
     int[] xs = []                   // the empty slice starts a buffer
     for i in 0..n {
-        xs = append(xs, i * i)
+        xs.push(i * i)
     }
-    return xs
+    return xs                       // the caller owns it now
 }
 
 main() {
     xs = range_list(5)
-    defer free(xs)
     names = make([]string, 0)
-    defer free(names)
     for i in 0..3 {
         names = append(names, "n${i}")   // the element takes the string
     }
     println("${xs.len} ${xs[4]} ${names[2]}")
-}
+}                                   // xs and names are released here
 ```
 ```output
 5 16 n2
 ```
 
-- **What it grows is a buffer the program owns**: the empty slice (`[]`, `null`), a `make([]T, n)` buffer, or one an earlier `append` gave, the slices `free` releases. Growing moves the buffer, as `free` and a fresh `make` would, so it needs what `free` needs: an `append` to a view (a sub-slice, an array, `string.bytes(s)`, C memory viewed as a slice) is refused where the checker sees it, `cannot append to 's': it is a view of elements another slice or an array holds, which owns nothing` (E0200), and is a named panic at run time anywhere else. Copy a view's elements into a buffer of your own to grow them.
-- **`xs` is consumed.** When the buffer is full it is reallocated, and `xs`, with every other copy of the slice and every view into it, then points at storage that is gone, as after `free(xs)`. Use only what `append` returns, and keep one slice that holds a buffer, as with `make`. A slice parameter may be grown and handed back (`grow(xs: int[]) -> int[]`), and the caller then holds the result in place of what it passed.
-- **Its elements are places, as a `make` buffer's are.** Appending a string, a closure or a struct that holds one takes a reference to it (a fresh value is moved in), the elements move with the buffer when it grows, and `free` releases each before the buffer goes. `v` is evaluated before `xs` grows, so `xs = append(xs, xs[0])` reads the element where it is.
-- The element type may be a number, `bool`, `byte`, a `string`, a struct, a tuple, an optional or a closure. A slice of fixed-size arrays (`int[2][]`) is not grown yet: wrap the array in a struct. `v` must be of the element type, as for `xs[i] = v`. A function of the program's own named `append`, or a module's (`strbuilder.append`), keeps its name: the builtin is the one `append` that is not otherwise defined.
+- **What it grows is a buffer the program owns**: the empty slice (`[]`, `null`), a `make([]T, n)` buffer, or one an earlier `append` or `push` gave. Growing moves the buffer, as `free` and a fresh `make` would, so it needs what `free` needs: growing a view (a sub-slice, an array, `string.bytes(s)`, C memory viewed as a slice) is refused where the checker sees it, `cannot append to 's': it is a view of elements another slice or an array holds, which owns nothing` (E0200), and is a named panic at run time anywhere else. Copy a view's elements into a buffer of your own to grow them. A parameter borrows its caller's slice, so growing one is refused (E0901) unless it is declared `@keep` ([Slice ownership](#slice-ownership)).
+- **`append` consumes `xs`.** When the buffer is full it is reallocated, and every view into it then points at storage that is gone, as after `free(xs)`. Using `xs` after `append(xs, v)`, before it is bound again, is a compile error (E0903): use what `append` returns, or `xs.push(v)`, which grows `xs` where it is.
+- **Its elements are places, as a `make` buffer's are.** Pushing a string, a closure or a struct that holds one takes a reference to it (a fresh value is moved in), the elements move with the buffer when it grows, and releasing the buffer releases each. `v` is evaluated before the slice grows, so `xs.push(xs[0])` reads the element where it is.
+- The element type may be a number, `bool`, `byte`, a `string`, a struct, a tuple, an optional, a closure or a slice (a row of a `T[][]`). A slice of fixed-size arrays (`int[2][]`) is not grown yet: wrap the array in a struct. `v` must be of the element type, as for `xs[i] = v`. A function of the program's own named `append` (or `push`, taking the slice first), or a module's (`strbuilder.append`), keeps its name: the builtin is the one that is not otherwise defined.
 - The slice is still `{ ptr, len, flags }`: a buffer `append` has grown is marked, and its capacity is the smallest power of two, at least 4, that holds its length. A sub-slice is a view, so it never carries the mark.
+
+#### Slice ownership
+
+A buffer `make([]T, n)` hands out, or `push` or `append` grows, has one owner, and the owner releases it. There is no count: a slice moves from owner to owner, and the compiler checks that a slice that moved away is not used where it was.
+
+| Where the slice is | What happens |
+|---|---|
+| A local bound to a buffer (`xs = make(...)`, `xs = f()`, `int[] xs = []` then pushed) | It owns the buffer. Every exit of its scope (the end of the block, `return`, `break`, `continue`, a caught panic) releases it, its elements first. Binding the local again releases what it held. |
+| `ys = xs`, `return xs`, `s.f = xs`, `g = xs` (a module-level `var`), `rows[i] = xs`, `T { f: xs }`, `(xs, n)`, `[xs]`, a message field `xs` | The buffer moves: `xs` is left empty, and using it again before it is bound anew is E0903, `'xs' is used after it was moved (line 3): an owned slice has one owner`. |
+| `free(xs)`, `append(xs, v)` | Consume `xs`: it is released, or grown into the result, and left empty. Using it again is E0903. `free` still works on any owner (and `defer free(xs)` too): the scope exit then has nothing to release. |
+| `xs.push(v)` | Grows `xs` where it is; `xs` still owns it. |
+| `f(xs)` to a parameter `p: T[]` | `f` borrows it: `xs` still owns it after the call. In `f`, `p` is never released, and `free(p)`, `append(p, v)` and `p.push(v)` are refused (E0901), as is giving `p` to a `@keep` parameter. |
+| `f(xs)` to a parameter `p: @keep T[]` | The buffer moves into `f` (`xs` is left empty, E0903 to use it after), and `p` owns it as a local does: `f` returns it, stores it, grows it, or lets its scope release it. A field, element or `var` given there is left empty. |
+| `xs[a..b]`, `xs[..]`, `for x in xs`, `xs[i]`, `xs.len`, `xs as ptr` | Borrow it. A view (`v = xs[..]`, `v = xs[1..]`) is valid while `xs` owns the buffer, so it may be used in the function but may not leave it: returning a view of a buffer a local owns, or storing one where it outlives the function, is E0900, as for a function's own array. `v = xs[..]` before `ys = xs` is how to keep reading a buffer that moves on. |
+| `v = p` (a parameter), `v = s.f` (a field), `v = rows[i]` (an element), `v = g` (a `var`) | `v` is a view of what that place holds: it is marked at run time so nothing releases the buffer through it, and `free(v)` or `append(v, x)` is the named panic a view gets. |
+| A buffer in a field, a module-level `var`, a tuple or a message | Not released with what holds it: the program releases it with `free(s.f)`, which leaves the field empty. A slice of slices is the exception: it owns its rows. |
+| A local a closure captures, whose address is taken (`&xs`), or that a pattern or a destructure binds | Left to the program, as before: nothing releases it at its scope's exit, and it is freed with `free`. |
+
+```aether,run
+total(xs: int[]) -> int {           // borrows: never releases xs
+    t = 0
+    for x in xs {
+        t = t + x
+    }
+    return t
+}
+
+take_all(xs: @keep int[]) -> int {  // takes the buffer; released at its scope's exit
+    return xs.len
+}
+
+evens(n: int) -> int[] {
+    int[] out = []
+    for i in 0..n {
+        if i % 2 == 0 {
+            out.push(i)
+        }
+    }
+    return out                      // moved to the caller
+}
+
+main() {
+    xs = evens(10)
+    view = xs[..]                   // a view; xs still owns the buffer
+    println("${total(xs)} ${view.len}")
+    ys = xs                         // moves: xs is empty from here
+    println("${take_all(ys)}")      // ys is given away
+    rows = make([]int[], 2)
+    rows[0] = evens(4)
+    rows[1] = evens(6)
+    rows[1].push(99)
+    println("${rows[0].len} ${rows[1].len}")
+}                                   // rows releases both rows, then itself
+```
+```output
+20 5
+5
+2 4
+```
 
 **Views over a raw pointer are unbounded.** `p as T[]` (the typed-array cast) and a `T[]` handed back by a C extern have no length the compiler can know. Such a view indexes without a check, as it always did, and its `.len` is `-1`. Bound it with an explicit end to get checking back:
 
@@ -4821,8 +4878,9 @@ An error stops the build and prints its code, `error[E0301]: ...`, with the sour
 | `E0804` | A `@quotable` function that reaches itself through `@quotable` calls |
 | `E0805` | A `@quotable` function reading a variable outside it |
 | `E0900` | A slice of a function's own storage (an array literal, an array of its own) leaves the function: returned, stored in a module-level `var` or in a field that outlives it, or captured by a closure that does ([Slices](#slices-t)) |
-| `E0901` | A function frees a `string` or `*StringSeq` parameter it only borrows ([String ownership](#string-ownership)) |
+| `E0901` | A function frees a `string` or `*StringSeq` parameter it only borrows ([String ownership](#string-ownership)), or frees, grows or gives away a slice parameter not declared `@keep` ([Slice ownership](#slice-ownership)) |
 | `E0902` | A function keeps a `ptr` parameter not declared `@keep`, an `@into` parameter reaches anything but the function's result, a call's result that holds a borrowed `ptr` parameter (through an `@into` argument) escapes, `@into` is declared where it cannot apply (not a bare `ptr`, a result that cannot hold a pointer, beside `@keep`, `@retain` or `@noescape`), a `string` is given to a `@keep ptr` or an `@into ptr` without `string.keep` (a `*StringSeq` without `string.seq_retain`), a string C memory viewed as `string[]` would read after its owner frees it (one built in the statement, or any but a pinned literal where the memory outlives the function), or a function with a `@keep` or `@into` parameter goes where a call through it would be checked as borrowing (a bare `fn`, a closure type with a weaker mode, a `ptr`, a typed C function pointer, an `as fn(...)` cast) ([String ownership](#string-ownership)) |
+| `E0903` | A slice local used after its buffer moved out of it (bound to another name, returned, stored, sent, given to a `@keep` parameter), was freed, or was consumed by `append`, on every path to the use or some ([Slice ownership](#slice-ownership)) |
 | `E1000` | A file defines a function under a name it also imports selectively (`import std.string (length)` beside its own `length`), so a bare call in the function's body would reach itself ([module-system-design.md](module-system-design.md)) |
 
 ### Limits

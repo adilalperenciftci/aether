@@ -1,13 +1,16 @@
 # Memory Management
 
 Aether has no garbage collector. Every allocation is released at a point the
-source shows, in one of two ways:
+source shows, in one of three ways:
 
 - **Values the program owns are counted by the compiler.** Strings, closures,
   string sequences, and the structs, tuples, optionals, sums and fixed-size
   arrays built from them carry a reference count. Every place that holds one owns a
   reference, a store takes one, and leaving a scope releases what the scope
   held. The program writes no free for them.
+- **A slice's buffer has one owner.** The buffer `make([]T, n)` hands out,
+  or `append` and `push` grow, is released when the local that owns it goes
+  out of scope, unless it was moved out first ([Slices](#slices)).
 - **Handles are freed by the program.** A container (`list.new()`,
   `map.new()`), a C buffer (`malloc`), a parsed document or an open file is a
   `ptr`, and a `ptr` owns nothing by itself. The module that made the handle
@@ -236,15 +239,47 @@ last outside reference.
 
 ### Slices
 
-A slice (`T[]`) is a view and counts nothing. The buffer `make([]T, n)`
-hands out, and one `append(xs, v)` grows, is freed by the program, once,
-with `free(xs)`; `defer free(xs)` keeps that beside the binding, and reads
-`xs` when it runs, so a slice re-bound by `xs = append(xs, v)` in between
-frees the buffer the last append gave. The buffer's elements are places: a
-string, a closure or a struct that holds one is taken when it is stored or
-appended, and `free` releases each. `append` releases the old storage when
-it grows, so the slice it was given, and every copy of it, is then as a
-freed one ([Slices](language-reference.md#slices-t)).
+A slice (`T[]`) is a view of elements, `{ ptr, len, flags }`, and is not
+counted. The buffer `make([]T, n)` hands out, and one `append(xs, v)` or
+`xs.push(v)` grows, has one owner instead, and the owner releases it:
+
+- **A local owns the buffer it holds, and leaving its scope releases it**,
+  on every exit (the end of the block, a `return`, a `break` or `continue`,
+  a caught panic), elements first: a string, a closure or a struct that
+  holds one, stored or appended into the buffer, is given back as `free`
+  gives it back. Binding the local again releases what it held. A program
+  writes no `free` for it.
+- **A buffer moves.** `ys = xs`, `return xs`, a store of `xs` into a field,
+  a module-level `var` or an element, `xs` in a struct, a tuple, an array or
+  a message, and `xs` given to a `@keep` parameter each move the buffer out
+  of `xs`, which is left empty (its scope exit then releases nothing).
+  Using `xs` after that, before it is bound again, is a compile error
+  (E0903), and so is using it after `free(xs)` or `append(xs, v)`, which
+  consume it. `v = xs[..]` is a view of it that leaves it where it is.
+- **A parameter borrows.** A slice argument is lent for the call: the
+  function never releases it, and `free`, `append` or `push` on the
+  parameter is refused (E0901). A parameter declared `xs: @keep T[]` takes
+  the caller's buffer instead: the caller's local is left empty, and the
+  function owns it as a local does (returns it, stores it, or lets its scope
+  release it).
+- **A copy of a slice some other place holds is a view.** Bound out of a
+  parameter, a field, an element, a module-level `var`, the copy is marked
+  so that nothing frees through it, and `free` or `append` of it is the
+  named panic a view gets.
+- **A slice of slices owns its rows**: a store into `g[i]` releases the row
+  it replaces, and releasing `g` (its scope exit, or `free(g)`) releases
+  every row first.
+- **Left to the program**, as before: a buffer moved into a field, a
+  module-level `var`, a tuple or a message is not released with what holds
+  it, and is given back with `free(s.items)` (which empties the field);
+  a slice local a closure captures, whose address is taken, or that a
+  pattern or a destructure binds is not released at its scope's exit. `free`
+  works on any of these, and on a local that owns: it releases the buffer
+  early and leaves the place empty, so the scope exit releases nothing
+  twice, and neither does `defer free(xs)`.
+
+The rules, with an example, are in the language reference
+([Slice ownership](language-reference.md#slice-ownership)).
 
 ## Handles and `defer`
 
