@@ -14,6 +14,312 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.851.0]
+
+### Fixed
+
+- **The end of `main` no longer waits for an armed receive timeout.** An
+  actor with `after 60000` that handled a message just before `main` returned
+  held the exit for that minute and then ran its timeout. The end of `main`
+  now waits for the messages sent to be handled and not for countdowns, on
+  both schedulers; `wait_for_idle()` still waits for them, so a program that
+  wants a countdown to fire calls it first. The cooperative scheduler counted
+  every check of an armed countdown as work, so its `wait_for_idle()` and its
+  end of `main` spun on the CPU until the deadline; it now counts only a
+  countdown that fires, and `wait_for_idle()` sleeps while one runs (#3219).
+
+- **A Windows build without threads no longer warns about `<winsock2.h>`.**
+  `aether_cpu_available.h` included the full `<windows.h>`, which brings the
+  old `<winsock.h>`, so the HTTP server and its pool warned on every
+  `-DAETHER_NO_THREADING` build and failed one with `-Werror`. It includes it
+  lean, as `aether_thread.h` does (#3223).
+
+- **A message dropped instead of handled releases what its fields own.** Its
+  payload struct was freed and its strings, closures and structs were not:
+  the messages queued to an actor that panicked or was released, the ones
+  sent to it after, and one the scheduler refused. A message of a type its
+  receiver has no handler for, and the one a handler panicked on, leaked
+  their payload too. Each program now emits one `_aether_release_message`,
+  every spawn stores it in the actor's `release_message`, and every drop goes
+  through `aether_message_drop()`; the step records the message its handler
+  is running on, so the panic barrier drops it (#3225, step 1 of #3142).
+
+- **The proxy event loop keeps hearing its connections on the poll()
+  backend.** On a POSIX system without epoll or kqueue (Cygwin, for one) the
+  poll backend removed a descriptor after its first event even when it was
+  registered with `AETHER_IO_EDGE`, which the poller's contract says stays
+  registered, level-triggered, on a backend with no edge mode. The event loop
+  registers each connection once for its life, so the third request on a
+  kept-alive proxied connection was never read and the client waited for it
+  forever. Linux and macOS were not affected (#3214).
+
+- **A gateway keeps the proxy event loop with its middleware and hooks.** On
+  Linux and macOS a server with `use_real_ip`, a rate limiter, CORS, an access
+  log or metrics in front of a `std.http.proxy` mount served every connection
+  from a thread of its own, because the event loop ran the proxy exchange
+  alone (#3203, #3213). The loop now runs the middleware before the first
+  mount and the request hooks itself, as the per-connection path does, when
+  each is registered loop-safe: `use_real_ip`, `use_rate_limit`, `use_cors`,
+  `use_vhost`, `use_rewrite`, the access log and metrics are, and
+  `http.server_use_middleware_loop_safe` registers a program's own (from C,
+  `http_server_use_request_hook_loop_safe` a hook). The auth middleware and
+  `use_static_files` are not, and keep a server on a thread per connection,
+  as does any middleware registered with `http.server_use_middleware`. A
+  request the mount does not take goes on from the middleware after it, so a
+  rate limiter counts it once. On the loop, a TLS connection's requests now
+  say TLS, and a pipelined request with no body no longer took the next
+  request as its body when it was forwarded upstream (#3214).
+
+- **A core waiting in an ask keeps its other actors running.** An ask made
+  in a handler blocks its core's scheduler thread until the reply, and
+  nothing ran the core meanwhile: its queued messages stayed queued and its
+  other actors waited. An actor on another core that, answering, asked one of
+  them timed out, and so did the first ask. A millisecond into the wait, and
+  every millisecond after, the waiting thread now delivers what is queued for
+  its actors and moves each one with work to a core that runs it: the core
+  waiting on that very actor (whose wait steps it), else an idle one. Nothing
+  runs inside the waiting handler, so an actor that asks the waiting one
+  still waits for its handler to finish. An actor with more messages queued
+  than its mailbox holds stays until the ask ends (#3241) (#3197).
+- **The ask relief also takes a waiting core's batched messages.** An actor
+  asked while its message was still in the batch its core was delivering
+  waited out the timeout. The relief, and at once the ask whose target it
+  is, now takes the batch's messages for actors that are not stepping into
+  their mailboxes, in order; reliefs that find nothing come further apart,
+  up to 8 ms (#3197).
+
+- **`use_real_ip` and `use_rewrite` edit a request the way it is stored.**
+  Adding X-Real-IP grew the request's header arrays to one past the headers
+  they held, which shrank them, so a request object parsed into again wrote
+  up to 50 headers into a handful of slots; and replacing X-Real-IP or the
+  path called `free()` on strings that a request parsed into an arena keeps
+  in the arena. Both go through new request edits in std.net
+  (`http_request_set_header`, `http_request_remove_header`,
+  `http_request_set_path`), which grow the arrays and never shrink them, and
+  move an arena-backed request's strings out of the arena before replacing
+  one. `HttpRequest` records its arrays' size in a new trailing field,
+  `header_cap` (#3234).
+
+- **std.http.proxy forwards a request body over 16 KiB.** The server streams
+  a body larger than its connection buffer, and the proxy forwarded only what
+  was buffered, which for a streamed body is nothing: the upstream got the
+  client's Content-Length and no bytes, waited, and the client got 504 when
+  the proxy gave up. Every proxied upload over 16 KiB failed that way on
+  Windows, and on Linux and macOS on a gateway the event loop does not
+  serve. The proxy now reads a streamed body, up to its body cap, before
+  forwarding it, and refuses with 400 one that ends short of its
+  Content-Length (#3238).
+
+- **docs/http-reverse-proxy.md no longer says a TLS-terminating server
+  leaves the proxy event loop.** The loop carries the client's TLS handshake
+  and serves the connection through the session; the guide listed TLS among
+  what keeps a thread per connection (#3235).
+
+- **A request the proxy event loop hands back runs on a pool worker.** On
+  Linux and macOS a request a proxy mount does not take (`/metrics`, a health
+  check, an admin route, a second mount) went to the worker path on the
+  loop's own driver thread, so its route handler, the middleware after the
+  mount and the wait for the connection's next request held up every other
+  connection on that driver until they returned. The connection now goes to
+  the server's worker pool, as an accepted one does (#3230).
+
+- **A proxy retry's backoff no longer stalls the event loop.** The proxy
+  exchange slept the backoff before a retry itself, and on Linux and macOS
+  the proxy event loop drives that exchange on its driver thread, so every
+  connection the driver held waited out the backoff, up to 10 seconds. The
+  exchange now hands the wait to its caller: the worker path sleeps it, the
+  event loop sets a timer and serves its other connections meanwhile
+  (#3232).
+
+- **The proxy event loop answers a request it cannot parse.** On Linux and
+  macOS a request that did not parse (`GARBAGE`, an HTTP version other than
+  1.x) or whose Content-Length could not be read (two that disagree, one
+  that is not a number) had its connection closed with nothing written. The
+  loop now gives it to the worker path with the bytes it read, which answers
+  400, as it does on Windows and on every server the loop does not serve
+  (#3233).
+
+- **A proxied response on the event loop follows the keep-alive policy.** On
+  Linux and macOS the proxy event loop sent every proxied response without a
+  Connection header and kept the connection open, after a client's
+  `Connection: close`, after an HTTP/1.0 request, with keep-alive turned off
+  and past `keep_alive_max`, so a client that asked to close, or an HTTP/1.0
+  one reading to the end of the connection, waited until it gave up. The loop
+  now decides and states it as the worker path does, on the response it
+  writes from the upstream's bytes and on the one it builds, and a
+  connection it hands to the worker path keeps its request count (#3229).
+
+- **The proxy event loop frees what each proxied request builds.** On Linux
+  and macOS the loop dropped the proxy exchange's outbound request and its
+  URL instead of freeing them, so every proxied request leaked its URL and
+  every one with a body leaked a copy of the body (50 POSTs of 2000 bytes:
+  100000 bytes) for as long as the server ran. They are freed once each
+  attempt is over, as the worker path frees them after its send (#3242).
+
+- **A proxy to an https upstream answers on Linux and macOS.** The proxy
+  event loop dials plain HTTP only, yet it served a server whose proxy mount
+  had an https upstream, and closed each client connection with nothing
+  written. A mount with an https upstream is now served on the
+  per-connection path, whose client speaks TLS, from the next request when
+  one is added while the server runs, and a retry that reaches one hands its
+  request there instead of dropping it (#3231).
+
+- **The proxy event loop records a response once when its direct path
+  fails.** On Linux and macOS, when the loop could not build the head of a
+  response it answers from the upstream's own bytes (an allocation failure),
+  it fell back to the copying path after the response had been recorded, so
+  its status was counted twice, the breaker fed twice and the upstream's
+  in-flight count decremented twice. It now closes the connection, as a
+  failure later on that path already did (#3244).
+
+- **A failed upstream dial no longer closes descriptor 0.** A fresh upstream
+  connection started from descriptor 0, and a dial that failed before it made
+  a socket (an upstream name that does not resolve) kept it, so on Linux and
+  macOS the proxy event loop closed descriptor 0 when the client connection
+  ended: the program's stdin, or whichever connection held 0 by then. It now
+  starts from -1, no descriptor (#3248).
+
+- **A retry on the proxy event loop no longer leaks its receive buffer.** On
+  Linux and macOS a retry after an upstream's 5xx cleared the exchange with
+  the connection's receive buffer still lent to it, dropping 16 KiB or more
+  per retried attempt. The buffer is taken back before the next attempt
+  starts (#3249).
+
+- **An upstream timeout on the proxy event loop counts against the
+  upstream.** On Linux and macOS the loop answered a timed out upstream call
+  with 504 itself, so the upstream's in-flight count was never decremented
+  (an upstream with an in-flight cap stayed full for good), its breaker never
+  heard of the failure, and a retry policy never applied. The timeout now
+  goes back to the proxy exchange as a failed call, as on the worker path
+  (#3250).
+
+- **A HEAD the proxy answers itself has no body on the event loop either.**
+  On Linux and macOS the proxy event loop wrote the responses the proxy made
+  without an upstream's answer (a 502 for an upstream it cannot reach or an
+  upgrade it does not forward, 503 no_upstream, the 504 for a timeout, a
+  cache hit) with their bodies to a HEAD request, which a client reads as the
+  start of the next response. They now go out as the worker path writes
+  every response, the head only for HEAD (#3251).
+
+- **A request head over 16 KiB is answered 431.** A head that did not fit
+  the server's connection buffer was refused by closing the connection with
+  nothing written and the rest of the head unread, so the client got no
+  status and the reset the close sent could destroy the response to a
+  request pipelined ahead of it. It is now answered 431 Request Header Fields
+  Too Large and the connection closed in stages, as every other refusal of a
+  request not read to its end is; the proxy event loop hands such a
+  connection to that path (#3252).
+
+- **The 16 KiB request head bound holds however the head is read.** The
+  worker path bounded a head by its connection buffer, which grows for a
+  buffered body, so after a request with a 16 KiB body the next head could be
+  twice as long; the proxy event loop checked the bound only until it found
+  the head's end, so a head that ended past 16 KiB within one read was
+  accepted. Both now refuse any head over 16 KiB with 431 (#3253).
+
+- **A proxy gateway on pure-Aether TLS is served on the worker path.** On
+  Linux and macOS the proxy event loop took the connections of a gateway that
+  terminates TLS with the pure-Aether stack (`AETHER_PURE_TLS=1`, or a build
+  without OpenSSL), though its TLS is OpenSSL's: it closed every connection,
+  or in a build without OpenSSL read the TLS bytes as HTTP. Such a gateway now
+  keeps the worker path, which runs the pure stack (#3256).
+
+- **A sender that moves between cores keeps its messages in order.** A core
+  takes in messages through one queue per sending core and drains them in
+  index order, so an actor moved (a gather toward a core that sends to it, a
+  steal) while a message it sent still waited in a receiver's queue could
+  have its next message, sent from its new core, delivered first: a pipeline
+  example printed its first item last. A core now moves an actor only while
+  nothing sent from it is still on its way (#3240).
+
+- **An ask returns only once its reply slot is freed.** The replier let go
+  of the slot just after it woke the asker, from its own thread, so the slot
+  was sometimes freed a moment after the ask returned, and a program that
+  counted its heap around asks saw it in the wrong window (a 104-byte
+  difference failed a test on Windows). An answered or failed ask now waits
+  those few instructions and frees the slot itself (#3245).
+
+- **An actor with a thread of its own sends as a foreign thread.** It ran
+  with its core's id, so its sends went straight into that core's mailboxes
+  and into other cores' queues from that core, whose single producer is the
+  core's own thread: messages were lost or delivered twice, and a sender
+  could spin forever. It now sends through the locked foreign channel, and
+  only a core's own scheduler thread steps for an ask or relieves its core
+  (#3246).
+
+- **A core's overflow flush is not entered again from a step it makes.** Its
+  own-core path steps actors before it takes their entries off the buffer,
+  and a step that flushed in turn (an inline send, an ask's relief) delivered
+  those entries a second time. A flush under way now finishes alone, and the
+  flag that says the buffers hold anything is worked out from the buffers, so
+  an entry appended during a flush is not hidden from the next (#3247).
+
+### Security
+
+- **`use_real_ip` leaves none of the X-Real-IP headers a client sent.** It
+  replaced the first with the client it resolved and kept any further one,
+  so a client that sent the header twice had its second value forwarded by
+  std.http.proxy, where an upstream that reads the last X-Real-IP took it
+  (#3239).
+
+- **The proxy event loop honours Transfer-Encoding.** On Linux and macOS it
+  framed a request by Content-Length alone: a chunked request body was
+  forwarded as empty and its chunks then parsed as the next request, and a
+  request carrying both Content-Length and Transfer-Encoding was forwarded
+  with Content-Length bytes as its body, where the worker path refuses it
+  with 400 because the two lengths are what request smuggling is built
+  from. A request with Transfer-Encoding now goes to the worker path, which
+  decodes a chunked body and refuses the rest (#3228).
+
+- **The proxy event loop checks a request head as the worker path does.** On
+  Linux and macOS it read Content-Length alone and forwarded heads the
+  worker path refuses: whitespace between a header's name and its colon
+  (`Content-Length : 2`, which a front end may read as a length where this
+  server saw none), an obs-fold continuation line, a signed Content-Length,
+  more headers than the parser holds, and a header line too long for it,
+  whose remainder was forwarded upstream as the request body. Both paths now
+  run one check (`http_request_head_check`), and a head the loop does not
+  pass goes to the worker path, which answers 400, 414 or 431 (#3236).
+
+- **The proxy event loop bounds what a request makes it buffer.** On Linux
+  and macOS it grew a connection's buffer for as long as a client kept
+  sending header bytes without a blank line, and read a declared
+  Content-Length whole before anything looked at it, 2 GiB declared, 2 GiB
+  buffered. A head that has not ended within the worker path's 16 KiB
+  connection buffer, and a body declared larger than the proxy mount's body
+  cap, now go to the worker path, which closes on the first and streams the
+  second, where the proxy refuses it with 502 unread (#3237).
+
+- **The proxy event loop closes a quiet client's connection.** On Linux and
+  macOS the proxy event loop had no timeout on its clients: a connection that
+  sent nothing, before its first request, between requests or partway
+  through one or through a TLS handshake, was held for as long as the client
+  kept it open, so a client could hold as many descriptors and buffers as the
+  server would take. The loop now closes it after the server's keep-alive
+  idle timeout (30 seconds unless set), as the worker path's receive timeout
+  does (#3243).
+
+- **A NUL byte in a request head is refused with 400.** The worker path
+  looked for the end of a head with strstr, which stops at a NUL, and waited
+  out the idle timeout for an end that had already arrived; on Linux and
+  macOS the proxy event loop found the end, and the parse, stopping at the
+  NUL, forwarded the rest of the head upstream as the request's body. Both
+  paths now answer 400 malformed HTTP request (RFC 9110 section 5.5)
+  (#3254).
+
+- **A streamed request body left unread is never read as the next
+  request.** A body over the server's 16 KiB connection buffer reaches the
+  middleware streamed. One that a middleware answered without reading (the
+  proxy refusing a body over its cap, a 429 from the rate limiter, the
+  proxy's 400 for a body that stopped short) stayed on the kept connection
+  and was parsed as the next request, so a body carrying a request of its
+  own had that request served: request smuggling, on a bare proxy gateway on
+  Linux and macOS too since such requests go to the worker path. Every
+  response now settles the body first: a remainder of 64 KiB or less is read
+  and dropped, and past that the response says `Connection: close` and the
+  connection closes in stages. A route handler that ignores a larger body no
+  longer has the server read all of it to keep the connection (#3255).
+
 ## [0.850.0]
 
 ### Added
