@@ -15878,6 +15878,20 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             if (!check_return_statement(stmt, table)) return 0;
             return 1;
 
+        case AST_REPLY_STATEMENT:
+            /* #3301: a reply's value is an expression, checked as one, so
+             * its type (the one the asker is given) is stamped on it. As a
+             * statement's child it went to typecheck_node, which checks no
+             * expression: `reply o ?? d` left `??` untyped, and the reply
+             * went out as an int. */
+            for (int i = 0; i < stmt->child_count; i++) {
+                ASTNode* v = stmt->children[i];
+                if (!v) continue;
+                if (v->type == AST_MESSAGE_CONSTRUCTOR) typecheck_message_constructor(v, table);
+                else typecheck_expression(v, table);
+            }
+            return 1;
+
         default:
             // Type check all children
             for (int i = 0; i < stmt->child_count; i++) {
