@@ -218,7 +218,7 @@ TEST(slices_typechecker_slice_decays_for_extern_ptr_null_and_arithmetic) {
         "extern free(p: ptr)\n"
         "extern take(p: int[])\n"
         "main() { arr = [1, 2, 3]\n  v = arr[..]\n"
-        "  free(v)\n  take(v)\n  z = v == null\n  q = v + 1 }");
+        "  take(v)\n  z = v == null\n  q = v + 1\n  free(v) }");   /* free last: a use after it is E0903 (#1300) */
     ASSERT_NOT_NULL(ast);
     ASSERT_EQ(1, typecheck_program(ast));
     ASTNode* fr = find_call(ast, "free");

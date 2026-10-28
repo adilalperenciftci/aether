@@ -1532,9 +1532,16 @@ static void parse_param_modes(Parser* parser, char** annotation) {
            peek_ahead(parser, 1) && peek_ahead(parser, 1)->type == TOKEN_IDENTIFIER &&
            peek_ahead(parser, 1)->value &&
            (strcmp(peek_ahead(parser, 1)->value, "keep") == 0 ||
-            strcmp(peek_ahead(parser, 1)->value, "into") == 0)) {
-        const char* marker = strcmp(peek_ahead(parser, 1)->value, "keep") == 0 ? "keep_param"
-                                                                               : "into_param";
+            strcmp(peek_ahead(parser, 1)->value, "into") == 0 ||
+            strcmp(peek_ahead(parser, 1)->value, "frees") == 0 ||
+            strcmp(peek_ahead(parser, 1)->value, "moves") == 0)) {
+        /* #1300: `@frees` (the function frees what it is given) and
+         * `@moves` (it may move the storage the argument holds). */
+        const char* word = peek_ahead(parser, 1)->value;
+        const char* marker = strcmp(word, "keep") == 0    ? "keep_param"
+                             : strcmp(word, "into") == 0  ? "into_param"
+                             : strcmp(word, "frees") == 0 ? "frees_param"
+                                                          : "moves_param";
         advance_token(parser);
         advance_token(parser);
         *annotation = annotation_add_marker(*annotation, marker);
@@ -5344,6 +5351,38 @@ ASTNode* parse_panic_statement(Parser* parser) {
 
 // Actor V2 - Message Definition Parsing
 // Syntax: message MessageName { field1: type1, field2: type2 }
+/* #385: `protocol Name { from -> Message -> to ... }`, one transition per
+ * line (a comma may separate them too). `protocol` is a contextual word: the
+ * caller has seen `protocol <ident> {`. */
+static ASTNode* parse_protocol_definition(Parser* parser) {
+    Token* kw = peek_token(parser);
+    advance_token(parser);   // consume 'protocol'
+    Token* name = expect_token(parser, TOKEN_IDENTIFIER);
+    if (!name) return NULL;
+    if (!expect_token(parser, TOKEN_LEFT_BRACE)) return NULL;
+    ASTNode* proto = create_ast_node(AST_PROTOCOL_DEFINITION, name->value, kw->line, kw->column);
+    while (!match_token(parser, TOKEN_RIGHT_BRACE)) {
+        if (is_at_end(parser)) {
+            parser_error(parser, "Unexpected end of file in protocol definition: its `}` is missing");
+            return proto;
+        }
+        Token* from = expect_token(parser, TOKEN_IDENTIFIER);
+        if (!from) return proto;
+        if (!expect_token(parser, TOKEN_ARROW)) return proto;
+        Token* msg = expect_token(parser, TOKEN_IDENTIFIER);
+        if (!msg) return proto;
+        if (!expect_token(parser, TOKEN_ARROW)) return proto;
+        Token* to = expect_token(parser, TOKEN_IDENTIFIER);
+        if (!to) return proto;
+        ASTNode* t = create_ast_node(AST_PROTOCOL_TRANSITION, msg->value, from->line, from->column);
+        add_child(t, create_ast_node(AST_IDENTIFIER, from->value, from->line, from->column));
+        add_child(t, create_ast_node(AST_IDENTIFIER, to->value, to->line, to->column));
+        add_child(proto, t);
+        match_token(parser, TOKEN_COMMA);
+    }
+    return proto;
+}
+
 ASTNode* parse_message_definition(Parser* parser) {
     Token* message_token = peek_token(parser);
     advance_token(parser); // consume 'message'
@@ -5884,10 +5923,25 @@ ASTNode* parse_actor_definition(Parser* parser) {
     advance_token(parser); // actor
     Token* name = expect_token(parser, TOKEN_IDENTIFIER);
     if (!name) return NULL;
-    
+
+    /* #385: `actor Name implements Protocol {`, carried on the actor as
+     * its annotation `implements:Protocol`. `implements` is contextual. */
+    char* implements = NULL;
+    Token* impl = peek_token(parser);
+    if (impl && impl->type == TOKEN_IDENTIFIER && impl->value &&
+        strcmp(impl->value, "implements") == 0) {
+        advance_token(parser);
+        Token* proto = expect_token(parser, TOKEN_IDENTIFIER);
+        if (!proto) return NULL;
+        size_t n = strlen(proto->value) + sizeof("implements:");
+        implements = malloc(n);
+        if (implements) snprintf(implements, n, "implements:%s", proto->value);
+    }
+
     expect_token(parser, TOKEN_LEFT_BRACE);
-    
+
     ASTNode* actor = create_ast_node(AST_ACTOR_DEFINITION, name->value, name->line, name->column);
+    actor->annotation = implements;
     
     /* No cap on the body: each pass consumes a declaration or a token. It
      * stopped after 1000 with nothing said, and an actor left open at the
@@ -6280,12 +6334,16 @@ static void parse_extern_param_attrs_and_type(Parser* parser, ASTNode* param) {
                 tag = "keep_param";
             } else if (strcmp(attr->value, "holds") == 0) {
                 tag = "holder_param";
+            } else if (strcmp(attr->value, "frees") == 0) {
+                tag = "frees_param";   /* #1300 */
+            } else if (strcmp(attr->value, "moves") == 0) {
+                tag = "moves_param";   /* #1300 */
             }
             if (tag) advance_token(parser);
         }
         if (!tag) {
             parser_error(parser, "unknown extern-param attribute (expected @aether, @retain, "
-                                 "@noescape, @into, @keep or @holds)");
+                                 "@noescape, @into, @keep, @holds, @frees or @moves)");
             break;
         }
         /* Append to the comma-separated set, deduping. */
@@ -7934,6 +7992,16 @@ ASTNode* parse_top_level_decl(Parser* parser) {
             }
         }
 
+        // #385: `protocol Name { ... }`. `protocol` is a contextual word:
+        // only the `protocol <ident> {` shape here is intercepted.
+        if (token->type == TOKEN_IDENTIFIER && token->value &&
+            strcmp(token->value, "protocol") == 0) {
+            Token* n1 = peek_ahead(parser, 1);
+            Token* n2 = peek_ahead(parser, 2);
+            if (n1 && n1->type == TOKEN_IDENTIFIER && n2 && n2->type == TOKEN_LEFT_BRACE)
+                return parse_protocol_definition(parser);
+        }
+
         // #480: `type Name = distinct Base` — a zero-cost nominal type over
         // Base. `type` and `distinct` are contextual identifiers (usable as
         // names elsewhere); only the `type <ident> = distinct ...` shape here
@@ -7960,6 +8028,47 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                     ASTNode* d = create_ast_node(AST_DISTINCT_TYPE_DEF,
                                                  name->value, name->line, name->column);
                     d->node_type = base;
+                    match_token(parser, TOKEN_SEMICOLON);
+                    return d;
+                }
+                /* #3142: `type Name = owned ptr drop f`, a pointer with one
+                 * owner, released by `f` when its owner lets go. A distinct
+                 * type over `ptr` that carries `owned_drop:<f>`. `owned` and
+                 * `drop` are words only here. */
+                if (dk && dk->type == TOKEN_IDENTIFIER && dk->value &&
+                    strcmp(dk->value, "owned") == 0) {
+                    advance_token(parser);                   // consume 'owned'
+                    Type* base = parse_type(parser);
+                    if (!base) {
+                        parser_error(parser, "expected `ptr` after `owned`: `type Name = owned ptr drop f`");
+                        return NULL;
+                    }
+                    Token* dw = peek_token(parser);
+                    if (!dw || dw->type != TOKEN_IDENTIFIER || !dw->value ||
+                        strcmp(dw->value, "drop") != 0) {
+                        parser_error(parser, "an owned type names the function that releases it: "
+                                             "`type Name = owned ptr drop f`");
+                        free_type(base);
+                        return NULL;
+                    }
+                    advance_token(parser);                   // consume 'drop'
+                    Token* fn = expect_token(parser, TOKEN_IDENTIFIER);
+                    if (!fn) { free_type(base); return NULL; }
+                    char qname[256];
+                    snprintf(qname, sizeof(qname), "%s", fn->value);
+                    while (peek_token(parser) && peek_token(parser)->type == TOKEN_DOT &&
+                           peek_ahead(parser, 1) && peek_ahead(parser, 1)->type == TOKEN_IDENTIFIER) {
+                        advance_token(parser);
+                        Token* part = expect_token(parser, TOKEN_IDENTIFIER);
+                        size_t used = strlen(qname);
+                        snprintf(qname + used, sizeof(qname) - used, ".%s", part->value);
+                    }
+                    ASTNode* d = create_ast_node(AST_DISTINCT_TYPE_DEF,
+                                                 name->value, name->line, name->column);
+                    d->node_type = base;
+                    size_t n = strlen(qname) + sizeof("owned_drop:");
+                    d->annotation = malloc(n);
+                    if (d->annotation) snprintf(d->annotation, n, "owned_drop:%s", qname);
                     match_token(parser, TOKEN_SEMICOLON);
                     return d;
                 }

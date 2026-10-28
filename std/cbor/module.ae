@@ -1501,7 +1501,7 @@ tag(tag_num: long, child: @keep ptr) -> ptr {
 
 // ---- RECURSIVE CLEANUP ----
 
-free_value(cv: ptr) {
+free_value(cv: @frees ptr) {
     if cv == null { return }
     cv_val = cv as *CborValue
     if cv_val.type == CBOR_ARRAY || ((cv_val.type == CBOR_TEXT || cv_val.type == CBOR_BYTES) && cv_val.list_val != null) {
@@ -1536,7 +1536,7 @@ free_value(cv: ptr) {
     heap.free(cv_val)
 }
 
-free(value: ptr) {
+free(value: @frees ptr) {
     free_value(value)
 }
 

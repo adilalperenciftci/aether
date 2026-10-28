@@ -25,8 +25,10 @@ fail=0
 
 # program NAME ARM: an actor whose arm is ARM (on line 12), over
 # `message Connect { next: actor_ref, tries: int }` and `message Ping {}`.
+# A `_` arm takes the Connect main sends whatever ARM is (#385 refuses a
+# send no arm takes).
 program() {
-    printf 'message Connect {\n    next: actor_ref\n    tries: int\n}\n\nmessage Ping {}\n\nactor A {\n    state seen = 0\n\n    receive {\n        %s -> {\n            seen = seen + 1\n        }\n    }\n}\n\nmain() {\n    a = spawn(A())\n    a ! Connect { next: a, tries: 1 }\n    wait_for_idle()\n}\n' "$2" > "$TMP/$1.ae"
+    printf 'message Connect {\n    next: actor_ref\n    tries: int\n}\n\nmessage Ping {}\n\nactor A {\n    state seen = 0\n\n    receive {\n        %s -> {\n            seen = seen + 1\n        }\n        _ -> {}\n    }\n}\n\nmain() {\n    a = spawn(A())\n    a ! Connect { next: a, tries: 1 }\n    wait_for_idle()\n}\n' "$2" > "$TMP/$1.ae"
 }
 
 # refuse NAME ARM WHERE MESSAGE HELP

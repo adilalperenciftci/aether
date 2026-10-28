@@ -52,25 +52,25 @@ const FLAG_UNGREEDY = 0x00040000 // greedy quantifiers become lazy and vice vers
 
 // ---- Raw externs (resolved by std/regex/aether_regex.c).
 
-extern aether_regex_compile(pattern: string, flags: int) -> ptr
-extern aether_regex_free(re: ptr)
-extern aether_regex_matches(re: ptr, s: string) -> int
+extern aether_regex_compile(pattern: @aether string, flags: int) -> ptr
+extern aether_regex_free(re: @frees ptr)
+extern aether_regex_matches(re: ptr, s: @aether string) -> int
 
-extern aether_regex_captures(re: ptr, s: string) -> ptr
+extern aether_regex_captures(re: ptr, s: @aether string) -> ptr
 extern aether_regex_captures_count(caps: ptr) -> int
 extern aether_regex_captures_get(caps: ptr, index: int) -> string @heap
 extern aether_regex_captures_start(caps: ptr, index: int) -> int
 extern aether_regex_captures_end(caps: ptr, index: int) -> int
-extern aether_regex_captures_free(caps: ptr)
+extern aether_regex_captures_free(caps: @frees ptr)
 
-extern aether_regex_find_all(re: ptr, s: string) -> ptr
+extern aether_regex_find_all(re: ptr, s: @aether string) -> ptr
 extern aether_regex_find_all_count(fa: ptr) -> int
 extern aether_regex_find_all_start(fa: ptr, index: int) -> int
 extern aether_regex_find_all_end(fa: ptr, index: int) -> int
-extern aether_regex_find_all_free(fa: ptr)
+extern aether_regex_find_all_free(fa: @frees ptr)
 
-extern aether_regex_replace(re: ptr, s: string, repl: string) -> string @heap
-extern aether_regex_replace_all(re: ptr, s: string, repl: string) -> string @heap
+extern aether_regex_replace(re: ptr, s: @aether string, repl: @aether string) -> string @heap
+extern aether_regex_replace_all(re: ptr, s: @aether string, repl: @aether string) -> string @heap
 
 extern aether_regex_last_error() -> string
 extern aether_regex_clear_last_error()
@@ -93,7 +93,7 @@ compile_flags(pattern: string, flags: int) -> ptr! {
 }
 
 // Free a compiled regex. Safe to call with null.
-free(re: ptr) {
+free(re: @frees ptr) {
     aether_regex_free(re)
 }
 
@@ -162,7 +162,7 @@ capture_end(caps: ptr, index: int) -> int {
     return aether_regex_captures_end(caps, index)
 }
 
-captures_free(caps: ptr) { aether_regex_captures_free(caps) }
+captures_free(caps: @frees ptr) { aether_regex_captures_free(caps) }
 
 // ---- find_all -------------------------------------------------------
 //
@@ -182,7 +182,7 @@ find_all(re: ptr, s: string) -> ptr! {
 find_all_count(fa: ptr) -> int { return aether_regex_find_all_count(fa) }
 find_all_start(fa: ptr, index: int) -> int { return aether_regex_find_all_start(fa, index) }
 find_all_end(fa: ptr, index: int) -> int { return aether_regex_find_all_end(fa, index) }
-find_all_free(fa: ptr) { aether_regex_find_all_free(fa) }
+find_all_free(fa: @frees ptr) { aether_regex_find_all_free(fa) }
 
 // ---- Replace --------------------------------------------------------
 //

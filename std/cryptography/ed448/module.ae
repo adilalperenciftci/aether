@@ -137,7 +137,7 @@ pt_new(x: @keep ptr, y: @keep ptr, z: @keep ptr) -> *Pt {
     q.x = x; q.y = y; q.z = z
     return q
 }
-pt_free(q: *Pt) {
+pt_free(q: @frees *Pt) {
     bignum.free(q.x); bignum.free(q.y); bignum.free(q.z)
     libc_free(q)
 }

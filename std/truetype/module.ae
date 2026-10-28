@@ -416,7 +416,7 @@ adopt(blob: @keep ptr, size: int, path: string) -> *Typeface {
     return f
 }
 
-typeface_free(f: *Typeface) {
+typeface_free(f: @frees *Typeface) {
     if f == null { return }
     if f.blob != null { bytes.free(f.blob) }
     heap.free(f) // and the path it owns
@@ -659,7 +659,7 @@ points_new() -> *GlyphPoints {
     return p
 }
 
-points_free(p: *GlyphPoints) {
+points_free(p: @frees *GlyphPoints) {
     if p == null { return }
     if p.xs != null { free(p.xs) }
     if p.ys != null { free(p.ys) }
@@ -963,7 +963,7 @@ outline_new() -> *GlyphOutline {
     return o
 }
 
-outline_free(o: *GlyphOutline) {
+outline_free(o: @frees *GlyphOutline) {
     if o == null { return }
     if o.segments != null { free(o.segments) }
     heap.free(o)

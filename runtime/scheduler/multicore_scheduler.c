@@ -89,6 +89,89 @@ static void release_undelivered(ActorBase* actor, Message* msg);
 extern AETHER_TLS void* g_current_reply_slot;
 
 // --------------------------------------------------------------------------
+// The overflow of an actor a core runs (#3241)
+//
+// A relief (a core waiting in an ask, below) that finds an actor's mailbox
+// full with more of its messages queued takes them, in order, into an
+// overflow that belongs to the actor: its `inbox`, the unbounded FIFO an
+// actor with a thread of its own takes every message in (#2598). There, as
+// in the mailbox, a message is the actor's and is no longer counted in
+// flight, so the actor can be moved, mailbox and overflow together, to a
+// core that runs it.
+//
+// The overflow then holds the actor's newest messages, behind its mailbox:
+// every delivery to the actor while its overflow holds anything goes behind
+// it, and every step refills the mailbox from it, so each sender's messages
+// keep their order on whichever core runs the actor. Like the mailbox, the
+// overflow is touched only by the thread that delivers to the actor and steps
+// it (its core's), and a move hands both over at once. Only a relief starts
+// one; a mailbox found full elsewhere is made room in or queued, as before.
+//
+// The cost on the paths that do not use it: one load of `inbox` (NULL for an
+// actor that never overflowed) per delivery and per step.
+// --------------------------------------------------------------------------
+
+/* The actor's overflow while it holds a message, else NULL. */
+static inline ActorInbox* actor_overflow_pending(ActorBase* actor) {
+    ActorInbox* ib = atomic_load_explicit(&actor->inbox, memory_order_acquire);
+    if (likely(ib == NULL) || atomic_load_explicit(&ib->count, memory_order_relaxed) == 0) return NULL;
+    return ib;
+}
+
+/* `msg` behind what the overflow holds. Out of memory for a list node the
+ * message has no place that keeps its order, and the process stops, as an
+ * out-of-memory deferred send does (overflow_append). */
+static void actor_overflow_push(ActorBase* actor, ActorInbox* ib, Message msg) {
+    if (likely(actor_inbox_push(ib, msg))) return;
+    fprintf(stderr, "aether: out of memory queueing a message for actor %d behind its "
+                    "overflow\n", actor->id);
+    abort();
+}
+
+/* `msg` for `actor`, delivered by the thread that runs it: behind what its
+ * overflow holds, else into its mailbox. 0 when the mailbox is full and the
+ * overflow empty, which the caller handles as a full mailbox. */
+static inline int deliver_owned(ActorBase* actor, Message msg) {
+    ActorInbox* ib = actor_overflow_pending(actor);
+    if (unlikely(ib != NULL)) {
+        actor_overflow_push(actor, ib, msg);
+        return 1;
+    }
+    return mailbox_send(&actor->mailbox, msg);
+}
+
+/* After a step: what the overflow holds moves into the mailbox, oldest
+ * first, once the mailbox is down to half, so its lock is taken once per
+ * several steps. While the overflow holds anything the mailbox therefore
+ * never runs empty (the overflow starts behind a full mailbox), and every
+ * loop that steps an actor while its mailbox has messages steps it until
+ * both are drained. After the step rather than before: a step that took
+ * several messages leaves no gap either. */
+static void actor_overflow_refill(ActorBase* actor, ActorInbox* ib) {
+    int have = atomic_load_explicit(&actor->mailbox.count, memory_order_relaxed);
+    if (have > MAILBOX_SIZE / 2 || atomic_load_explicit(&ib->count, memory_order_relaxed) == 0)
+        return;
+    Message moved[MAILBOX_SIZE];
+    int n = actor_inbox_take(ib, moved, MAILBOX_SIZE - have);
+    mailbox_send_batch(&actor->mailbox, moved, n);
+}
+
+/* Everything the overflow holds, released undelivered (the actor died);
+ * returns how many, for the caller's processed credit. */
+static int actor_overflow_drain(ActorBase* actor) {
+    ActorInbox* ib = atomic_load_explicit(&actor->inbox, memory_order_acquire);
+    if (!ib) return 0;
+    int drained = 0;
+    Message spill[AETHER_INBOX_RING];
+    int got;
+    while ((got = actor_inbox_take(ib, spill, AETHER_INBOX_RING)) > 0) {
+        for (int k = 0; k < got; k++) release_undelivered(actor, &spill[k]);
+        drained += got;
+    }
+    return drained;
+}
+
+// --------------------------------------------------------------------------
 // aether_step_safe — call actor->step() inside a sigsetjmp barrier.
 //
 // If the handler calls aether_panic() or takes a caught signal, the barrier
@@ -142,6 +225,13 @@ static inline void aether_step_safe(ActorBase* actor) {
             g_current_reply_slot = NULL;
             reply_slot_fail(held, AETHER_ASK_NO_REPLY);
         }
+        /* The mailbox refilled from the overflow (#3241). An actor with a
+         * thread of its own takes every message through its inbox, which
+         * its thread empties. */
+        if (likely(!actor->auto_process)) {
+            ActorInbox* behind = atomic_load_explicit(&actor->inbox, memory_order_acquire);
+            if (unlikely(behind != NULL)) actor_overflow_refill(actor, behind);
+        }
         g_current_reply_slot = outer_slot;
         g_current_step_actor = outer_actor;
         return;
@@ -187,6 +277,10 @@ static inline void aether_step_safe(ActorBase* actor) {
         release_undelivered(actor, &_discard);
         drained++;
     }
+    /* And what waits behind it in its overflow (#3241), counted as sent
+     * the same way. An actor with a thread of its own keeps its inbox
+     * until it is ended. */
+    if (!actor->auto_process) drained += actor_overflow_drain(actor);
     if (drained > 0) {
         if (current_core_id >= 0 && current_core_id < num_cores) {
             atomic_fetch_add_explicit(
@@ -417,7 +511,8 @@ static inline void sched_wake(Scheduler* target) {
 //
 // So every message routed through the queues is counted in the target's
 // `inflight` before the sender reads assigned_core (inflight_enter), and
-// uncounted when it reaches the mailbox (inflight_leave). An actor moves
+// uncounted when it reaches the mailbox, or the overflow behind it (#3241),
+// either of which moves with the actor (inflight_leave). An actor moves
 // only by its own core, at a point of that core's loop where it is stepping
 // nothing (so no local send to it is under way), or from the relief of that
 // core waiting in an ask (#3197), where the step under way is blocked in the
@@ -732,7 +827,7 @@ static void overflow_flush_ex(int from_core, int own) {
                     scheduler_drop_dead_message(&schedulers[from_core], actor, &msg);
                     flushed++;
                 } else if (ac == from_core && !actor->auto_process) {
-                    if (mailbox_send(&actor->mailbox, msg)) {
+                    if (deliver_owned(actor, msg)) {
                         inflight_leave(actor, 1);
                         atomic_store_explicit(&actor->active, 1, memory_order_relaxed);
                         flushed++;
@@ -1858,7 +1953,7 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                 } else {
                     // Actor has an invalid assigned_core — deliver directly to mailbox
                     // to prevent silent message loss.
-                    if (!mailbox_send(&actor->mailbox, msg)) {
+                    if (!deliver_owned(actor, msg)) {
                         requeue_own(sched->core_id, actor, msg);
                     } else if (!actor->auto_process) {
                         inflight_leave(actor, 1);
@@ -1886,9 +1981,10 @@ void* AETHER_HOT scheduler_thread(void* arg) {
             // room in by stepping the actor here, its owner, so no message
             // gives up its place: re-queued at the back of this core's
             // queue, as it was, a message could be overtaken by a later one
-            // of the same sender (#3093). The run is then uncounted at once,
-            // with every message of it in the mailbox (#3090), which keeps
-            // the count off this loop's per-message path.
+            // of the same sender (#3093). Behind the actor's overflow while
+            // it holds anything (#3241). The run is then uncounted at once,
+            // with every message of it the actor's (#3090), which keeps the
+            // count off this loop's per-message path.
             int run_end = i + 1;
             while (run_end < sched->coalesce_buffer.count &&
                    sched->coalesce_buffer.actors[run_end] == (void*)actor) {
@@ -1896,7 +1992,7 @@ void* AETHER_HOT scheduler_thread(void* arg) {
             }
             int placed = i;
             while (placed < run_end) {
-                if (mailbox_send(&actor->mailbox, sched->coalesce_buffer.messages[placed])) {
+                if (deliver_owned(actor, sched->coalesce_buffer.messages[placed])) {
                     placed++;
                     continue;
                 }
@@ -2019,19 +2115,6 @@ void* AETHER_HOT scheduler_thread(void* arg) {
             }
 
             if (likely(actor->step)) {
-                // Drain SPSC queue (lock-free same-core messages, only for auto_process actors)
-                Message spsc_msgs[128];
-                int spsc_count = actor->spsc_queue
-                    ? spsc_dequeue_batch(actor->spsc_queue, spsc_msgs, 128) : 0;
-                if (spsc_count > 0) {
-                    int sent_count = mailbox_send_batch(&actor->mailbox, spsc_msgs, spsc_count);
-                    for (int m = sent_count; m < spsc_count; m++) {
-                        // Into the queues: counted as every such message is.
-                        inflight_enter(actor, 1);
-                        requeue_own(sched->core_id, actor, spsc_msgs[m]);
-                    }
-                }
-
                 int processed = 0;
                 if (!atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire)) {
                     while (atomic_load_explicit(&actor->mailbox.count, memory_order_relaxed) > 0 &&
@@ -2656,6 +2739,20 @@ static void scheduler_free_core_tables(void) {
                 // send is refused while the scheduler is not running, and
                 // the last foreign one has finished, above).
                 atomic_store_explicit(&actor->inflight, 0, memory_order_relaxed);
+                // Its overflow (#3241) is the runtime's and goes with the
+                // queues, what it holds dropped as a release drops it: the
+                // caller frees the actor's memory, which is all it knows of.
+                if (!actor->auto_process) {
+                    ActorInbox* ib = atomic_exchange_explicit(&actor->inbox, NULL,
+                                                              memory_order_acq_rel);
+                    if (ib) {
+                        Message spill[AETHER_INBOX_RING];
+                        int got;
+                        while ((got = actor_inbox_take(ib, spill, AETHER_INBOX_RING)) > 0)
+                            for (int m = 0; m < got; m++) release_undelivered(actor, &spill[m]);
+                        free(ib);
+                    }
+                }
                 continue;
             }
             if (actor->auto_process) {
@@ -2987,9 +3084,10 @@ void scheduler_send_local(ActorBase* actor, Message msg) {
         // the queues (#3093): a message of it waiting in this core's queue,
         // its mailbox full when it was sent, is older, and one put in the
         // mailbox past it was stepped first. Otherwise queued behind it.
+        // With nothing queued, behind what its overflow holds (#3241).
         int queued = current_core_id >= 0 &&
                      atomic_load_explicit(&actor->inflight, memory_order_relaxed) != 0;
-        if (unlikely(queued || !mailbox_send(&actor->mailbox, msg))) {
+        if (unlikely(queued || !deliver_owned(actor, msg))) {
             // Mailbox full: re-queue via self-channel or overflow buffer.
             // Without this, the message is lost but messages_sent was already
             // incremented, causing scheduler_wait to hang forever.
@@ -3000,7 +3098,7 @@ void scheduler_send_local(ActorBase* actor, Message msg) {
                 requeue_own(core, actor, msg);
             } else {
                 // Main thread: spin-retry mailbox (rare, small mailbox pressure)
-                while (!mailbox_send(&actor->mailbox, msg)) { AETHER_PAUSE(); }
+                while (!deliver_owned(actor, msg)) { AETHER_PAUSE(); }
             }
         }
     }
@@ -3099,9 +3197,9 @@ static void send_through_core(ActorBase* actor, Message msg, int from_core) {
     if (from_core >= 0 && from_core == target_core &&
         from_core == current_core_id) {
         // Behind anything of the actor's already in the queues, as in
-        // scheduler_send_local (#3093).
+        // scheduler_send_local (#3093), or in its overflow (#3241).
         if (unlikely(atomic_load_explicit(&actor->inflight, memory_order_relaxed) != 0 ||
-                     !mailbox_send(&actor->mailbox, msg))) {
+                     !deliver_owned(actor, msg))) {
             // Mailbox full: re-queue via self-channel or overflow, counted
             // as every message in the queues is.
             inflight_enter(actor, 1);
@@ -3188,6 +3286,66 @@ static void send_through_core(ActorBase* actor, Message msg, int from_core) {
     // never block the loop.
     overflow_append(target_core, actor, msg);
     AETHER_STAT_INC(queue_sends);
+}
+
+/* Messages to an actor of another core, enqueued in one batch. */
+#define SEND_MANY_CHUNK 256
+
+void scheduler_send_many(ActorBase* actor, const Message* msgs, int n) {
+    const int me = current_core_id;
+    // Not a core's thread, an actor with a thread of its own, or no actor:
+    // each message by the path an unbuffered send of it takes (the shared
+    // channel under its lock, refused while the scheduler is stopped, the
+    // inbox, the drop).
+    if (!actor || me < 0 || me >= num_cores || actor->auto_process) {
+        for (int i = 0; i < n; i++) scheduler_send_remote(actor, msgs[i], me);
+        return;
+    }
+    int i = 0;
+    while (i < n) {
+        // Dead, or this core's own: one message as aether_send_message
+        // sends it (a local send goes behind what is queued for the actor
+        // and its overflow, #3093, #3241, and may step it inline).
+        if (atomic_load_explicit(&actor->dead, memory_order_acquire) ||
+            atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == me) {
+            if (atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == me)
+                scheduler_send_local(actor, msgs[i]);
+            else
+                scheduler_send_remote(actor, msgs[i], me);
+            i++;
+            continue;
+        }
+        // Another core's: counted in flight before its core is read again
+        // (#3090), as send_through_core does, then one batch through this
+        // core's channel to it. Behind this thread's deferred sends to that
+        // core, or the batch would pass them (#3093): with any, one message
+        // goes the way send_through_core takes it.
+        int k = n - i < SEND_MANY_CHUNK ? n - i : SEND_MANY_CHUNK;
+        inflight_enter(actor, k);
+        int tc = atomic_load_explicit(&actor->assigned_core, memory_order_acquire);
+        if (tc == me || tc < 0 || tc >= num_cores || tls_overflow[tc].count > 0) {
+            inflight_leave(actor, k);
+            scheduler_send_remote(actor, msgs[i], me);
+            i++;
+            continue;
+        }
+        void* actors[SEND_MANY_CHUNK];
+        for (int j = 0; j < k; j++) actors[j] = actor;
+        int enq = queue_enqueue_batch(&schedulers[tc].from_queues[me], actors,
+                                      (Message*)(msgs + i), k);
+        // What the queue had no room for waits in this thread's deferred
+        // sends, in order and still counted, as a single send's would.
+        for (int j = enq; j < k; j++) overflow_append(tc, actor, msgs[i + j]);
+        schedulers[me].messages_sent += k;
+        if (enq > 0) {
+            atomic_fetch_add_explicit(&schedulers[tc].work_count, enq, memory_order_relaxed);
+            sched_wake(&schedulers[tc]);
+        }
+        // The gather a single send asks for (#3090), not for an ask (#3196).
+        if (!g_pending_reply_slot)
+            atomic_store_explicit(&actor->migrate_to, me, memory_order_relaxed);
+        i += k;
+    }
 }
 
 // ==============================================================================
@@ -3429,7 +3587,7 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
     atomic_init(&actor->active, 0);  // inactive until first message send
     actor->thread = 0;
     actor->auto_process = 0;
-    actor->spsc_queue = NULL;  // Lazy-allocated by send_buffer_flush
+    actor->spsc_queue = NULL;  // filled by nothing since #3292
     atomic_init(&actor->inbox, NULL);
     atomic_init(&actor->thread_parked, 0);
     atomic_init(&actor->inflight, 0);
@@ -3557,9 +3715,13 @@ static void reply_slot_fail(ActorReplySlot* slot, int why) {
  *   from this core is still on its way (#3240). An actor stepping on this
  *   thread (the asker, and any below it) holds its step lock and stays.
  *
- * An actor with more messages queued than its mailbox holds keeps a message
- * in flight, and moved, it could be overtaken by what its senders send
- * next: it waits for the ask, as before (#3241).
+ * A message for an actor whose mailbox is full goes into the actor's
+ * overflow, which starts there (#3241, see the overflow notes at the top):
+ * the actor's from then on, it no longer holds the actor on this core, and
+ * an actor with more messages queued than its mailbox holds moves with all
+ * of them, in order. Left in the queue, as it was, it kept the actor here
+ * until the ask ended, since moved, its senders' next messages would leave
+ * through other queues and could overtake it.
  *
  * Nothing is stepped here. An actor stepped on this thread would run inside
  * the asker's handler, and one that asked the asker in turn could never be
@@ -3581,13 +3743,22 @@ static int relief_batch_holds(const Scheduler* sched, const void* actor) {
     return 0;
 }
 
+/* A message for `actor`, this core's, whose mailbox is full and whose
+ * overflow is empty: the overflow starts with it (#3241). 0 only when the
+ * overflow cannot be made or grown; the message then stays where it was. */
+static int actor_overflow_start(ActorBase* actor, Message msg) {
+    ActorInbox* ib = actor_inbox_of(actor);
+    return ib && actor_inbox_push(ib, msg);
+}
+
 /* The batch's messages for actors of this core that are not stepping, into
- * their mailboxes in order, taken out of the batch: they are the oldest each
- * has, and an actor asked while its message waited there was stepped by
- * nothing until the ask timed out. The loop skips a taken entry. An actor
- * stepping (its step lock held: the asker, one below it, the one make_room
- * is making room in) keeps its entries, and so does one whose mailbox fills,
- * from that entry on, so none of its messages passes another. */
+ * their mailboxes in order (behind their overflows, or starting them, #3241),
+ * taken out of the batch: they are the oldest each has, and an actor asked
+ * while its message waited there was stepped by nothing until the ask timed
+ * out. The loop skips a taken entry. An actor stepping (its step lock held:
+ * the asker, one below it, the one make_room is making room in) keeps its
+ * entries, and so does one whose message finds no place, from that entry
+ * on, so none of its messages passes another. */
 static int relief_claim_batch(Scheduler* sched) {
     ActorBase* kept[64];
     int nkept = 0, taken = 0;
@@ -3602,7 +3773,8 @@ static int relief_claim_batch(Scheduler* sched) {
                    atomic_load_explicit(&actor->assigned_core, memory_order_acquire) == sched->core_id;
         int placed = 0;
         if (mine && !atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire)) {
-            placed = mailbox_send(&actor->mailbox, sched->coalesce_buffer.messages[k]);
+            Message msg = sched->coalesce_buffer.messages[k];
+            placed = deliver_owned(actor, msg) || actor_overflow_start(actor, msg);
             atomic_flag_clear_explicit(&actor->step_lock, memory_order_release);
         }
         if (placed) {
@@ -3642,7 +3814,10 @@ static int relief_place(Scheduler* sched, ActorBase* actor, Message* msg) {
         sched_wake(&schedulers[ac]);
         return 1;
     }
-    if (!mailbox_send(&actor->mailbox, *msg)) return 0;
+    // Into the mailbox, or behind the overflow, and a full mailbox starts
+    // one (#3241). One with no handler takes nothing more: the loop drops
+    // what is queued for it.
+    if (!deliver_owned(actor, *msg) && !(actor->step && actor_overflow_start(actor, *msg))) return 0;
     inflight_leave(actor, 1);
     atomic_store_explicit(&actor->active, 1, memory_order_relaxed);
     return 1;

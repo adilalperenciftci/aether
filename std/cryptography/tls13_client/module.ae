@@ -223,7 +223,7 @@ transcript_hash_algo(t: ptr, algo: string) -> ptr {
     return sha2.final_bytes(ctx)
 }
 
-transcript_free(t: ptr) {
+transcript_free(t: @frees ptr) {
     tt = t as *Transcript
     bytes.free(tt.buf)
     libc_free(t)

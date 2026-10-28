@@ -102,7 +102,7 @@ extern aether_quote_read_long(cell: ptr) -> long
 extern aether_quote_read_bool(cell: ptr) -> int
 extern aether_quote_read_string(cell: ptr) -> string
 extern aether_quote_read_ptr(cell: ptr) -> ptr
-extern aether_quote_free(t: ptr)
+extern aether_quote_free(t: @frees ptr)
 extern aether_quote_helper_count(t: ptr) -> int
 extern aether_quote_helper_at(t: ptr, i: int) -> ptr
 extern aether_quote_function_name(t: ptr) -> string

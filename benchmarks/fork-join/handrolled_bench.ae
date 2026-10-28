@@ -21,7 +21,9 @@ burn() -> int {
 
 kernel(p: ptr) -> ptr {
     sink = sink + burn()
-    return p
+    // The work is what is measured; the sink observes it. The item is
+    // borrowed, so it is not handed back (E0902).
+    return null
 }
 
 main() {
@@ -58,7 +60,7 @@ main() {
         slot = k
         worker.run(
             || { return kernel(item) },
-            | r: ptr | { list.set(out, slot, r) }
+            | r: @keep ptr | { list.set(out, slot, r) }
         )
         k = k + 1
     }

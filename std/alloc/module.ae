@@ -7,10 +7,10 @@ exports(
 
 extern aether_allocator_system() -> ptr
 extern aether_allocator_arena(arena: ptr) -> ptr
-extern aether_allocator_arena_destroy(a: ptr)
+extern aether_allocator_arena_destroy(a: @frees ptr)
 extern aether_allocator_alloc(a: ptr, size: size_t) -> ptr
 extern aether_allocator_realloc(a: ptr, block: ptr, old_size: size_t, new_size: size_t) -> ptr
-extern aether_allocator_free(a: ptr, block: ptr, size: size_t)
+extern aether_allocator_free(a: @frees ptr, block: ptr, size: size_t)
 
 system() -> ptr {
     return aether_allocator_system()
@@ -19,7 +19,7 @@ system() -> ptr {
 of_arena(arena: ptr) -> ptr {
     return aether_allocator_arena(arena)
 }
-arena_free(a: ptr) {
+arena_free(a: @frees ptr) {
     aether_allocator_arena_destroy(a)
 }
 

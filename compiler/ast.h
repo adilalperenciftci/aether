@@ -352,7 +352,16 @@ typedef enum {
     // `value` is then the quote's index in that table. Not an AST_CLOSURE
     // with a marker: codegen special-cases closures in many places, and
     // closure discovery would hoist it.
-    AST_QUOTE
+    AST_QUOTE,
+    // `protocol Name { from -> Message -> to ... }` (#385): the messages an
+    // actor reference may be sent, and in which order. `value` is the
+    // name; children are AST_PROTOCOL_TRANSITION nodes in source order, the
+    // first naming the initial state.
+    AST_PROTOCOL_DEFINITION,
+    // One `from -> Message -> to` line of a protocol: `value` is the
+    // message; children are two AST_IDENTIFIER nodes, the state it is sent
+    // in and the state it leads to.
+    AST_PROTOCOL_TRANSITION
 } ASTNodeType;
 
 typedef enum {

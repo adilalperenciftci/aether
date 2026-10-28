@@ -254,7 +254,7 @@ counted. The buffer `make([]T, n)` hands out, and one `append(xs, v)` or
   a message, and `xs` given to a `@keep` parameter each move the buffer out
   of `xs`, which is left empty (its scope exit then releases nothing).
   Using `xs` after that, before it is bound again, is a compile error
-  (E0903), and so is using it after `free(xs)` or `append(xs, v)`, which
+  (E0906), and so is using it after `free(xs)` or `append(xs, v)`, which
   consume it. `v = xs[..]` is a view of it that leaves it where it is.
 - **A parameter borrows.** A slice argument is lent for the call: the
   function never releases it, and `free`, `append` or `push` on the

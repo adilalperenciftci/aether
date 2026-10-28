@@ -135,11 +135,27 @@ the same line. `fs.move(a, b)`, `mem.move(dst, src, n)` (bare after
 `import std.mem (*)`), a program's own `move()` and a variable called `move`
 are unaffected.
 
-**What is not done yet.** The receiver owns the buffer and frees it as it
-would any other; the runtime does not. A receiver that drops the buffer
-without freeing it leaks it, and so does a message still queued when its
-receiver dies. Freeing it there needs the runtime to know how to free a
-`ptr`, which it does not, and the dead-actor delivery rules in #2974.
+**A buffer that is released wherever it ends up: an owned type (#3142).** A
+plain `ptr` owns nothing, so a `ptr` field moved to a receiver is the
+receiver's to free by hand, and it leaks if the handler forgets or if the
+message is dropped undelivered. An owned type names the function that
+releases it, and then every place that holds one releases it:
+
+```aether,fragment
+type Buf = owned ptr drop bytes.free
+
+message Chunk { data: Buf }
+
+r ! Chunk { data: move buf }   // buf holds nothing now
+```
+
+The handler's binding releases it when the handler ends, unless the arm
+moves it on (`kept = move data` into a state field, `w ! Chunk { data: move
+data }` to another actor); a state field releases what it held when it is
+stored into or the actor ends; a message dropped undelivered (its actor died,
+the program is ending) releases it with the message. Freeing it by hand is
+refused, since it would be freed twice. The rules are in the language
+reference, [Owned pointers](language-reference.md#owned-pointers-type-t--owned-ptr-drop-f).
 
 ## What lowers and runs today, and what is a follow-up
 

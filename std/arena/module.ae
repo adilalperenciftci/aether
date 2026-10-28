@@ -37,7 +37,7 @@ extern arena_create(size: size_t) -> ptr
 extern arena_alloc(arena: ptr, bytes: size_t) -> ptr
 extern arena_alloc_aligned(arena: ptr, bytes: size_t, alignment: size_t) -> ptr
 extern arena_reset(arena: ptr)
-extern arena_destroy(arena: ptr)
+extern arena_destroy(arena: @frees ptr)
 extern arena_get_used(arena: ptr) -> size_t
 extern arena_get_size(arena: ptr) -> size_t
 
@@ -68,7 +68,7 @@ reset(arena: ptr) {
 
 // Destroy the arena and free its memory. All pointers become
 // invalid.
-destroy(arena: ptr) {
+destroy(arena: @frees ptr) {
     arena_destroy(arena)
 }
 

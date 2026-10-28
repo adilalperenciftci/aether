@@ -62,7 +62,7 @@ extern intarr_set_unchecked(arr: ptr, i: int, value: int) @c_import
 extern intarr_fill(arr: ptr, value: int)
 
 // Release. Idempotent on null.
-extern intarr_free(arr: ptr)
+extern intarr_free(arr: @frees ptr)
 
 // ---- Go-style wrappers ----
 

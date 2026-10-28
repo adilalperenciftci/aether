@@ -371,7 +371,7 @@ map_set(val: ptr, key: string, value: @keep ptr) -> int {
 
 // ---- Recursive Free ----
 
-free(val: ptr) {
+free(val: @frees ptr) {
     if val == null { return }
     let m = val as *MsgValue
     if m.type_id == TYPE_ARRAY {

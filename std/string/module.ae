@@ -191,7 +191,7 @@ extern string_trim(str: string) -> string @heap
 extern string_split(str: string, delimiter: string) -> ptr
 extern string_array_size(arr: ptr) -> int
 extern string_array_get(arr: ptr, index: int) -> string
-extern string_array_free(arr: ptr)
+extern string_array_free(arr: @frees ptr)
 
 // ---- Cons-cell string sequence (Erlang/Elixir-shaped) --------------
 //

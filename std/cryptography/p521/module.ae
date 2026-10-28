@@ -103,7 +103,7 @@ from_be66(b: ptr) -> ptr {
 // ---- Jacobian point (X:Y:Z) ----
 struct P521Pt { x: ptr y: ptr z: ptr }
 pt_new(x: @keep ptr, y: @keep ptr, z: @keep ptr) -> *P521Pt { q = malloc(sizeof(P521Pt)) as *P521Pt; q.x = x; q.y = y; q.z = z; return q }
-pt_free(q: *P521Pt) { bignum.free(q.x); bignum.free(q.y); bignum.free(q.z); libc_free(q) }
+pt_free(q: @frees *P521Pt) { bignum.free(q.x); bignum.free(q.y); bignum.free(q.z); libc_free(q) }
 
 // Point at infinity: Z = 0.
 pt_infinity() -> *P521Pt { return pt_new(bignum.from_int(1), bignum.from_int(1), bignum.from_int(0)) }

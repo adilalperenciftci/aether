@@ -143,30 +143,17 @@ typedef struct __attribute__((aligned(64))) {
 
 Cache line padding on `head` and `tail` prevents false sharing between producer and consumer cores. Power-of-2 sizing enables bitwise AND masking instead of modulo division.
 
-### SPSC Queue for Same-Core Messaging
+### Sender-Side Batching (the send buffer)
 
-**Implementation:** `runtime/actors/aether_spsc_queue.h`
+**Implementation:** `runtime/actors/aether_send_buffer.c`, `scheduler_send_many` in `runtime/scheduler/multicore_scheduler.c`
 
-`auto_process` actors get a dedicated SPSC (single-producer, single-consumer) queue for receiving messages. The queue is lazy-allocated by `ensure_spsc_queue` on the first enqueue; `scheduler_spawn_actor` initializes `actor->spsc_queue` to `NULL`, so regular actors never allocate one and receive through their mailbox instead. This separates the auto-process delivery path from ordinary mailbox delivery.
+`send_buffered(actor, msg)` gathers a thread's messages to one actor in a thread-local buffer of `SEND_BUFFER_SIZE` (256), and a flush hands them to `scheduler_send_many`, which sends them as that many single sends would go: counted as sent, behind whatever is queued for the actor, and kept when a queue is full. To an actor of another core, from a core's thread, they are enqueued in one batch (one atomic update), what the queue has no room for waiting in the sender's deferred buffer in order. A flush always empties the buffer (#3292). Same-core messages used to go to a per-actor SPSC queue (`runtime/actors/aether_spsc_queue.h`, `ActorBase.spsc_queue`), outside every ordering rule; nothing fills it now.
 
 ### Direct Mailbox Delivery
 
-**Implementation:** `runtime/scheduler/multicore_scheduler.c` (`scheduler_send_remote`)
+**Implementation:** `runtime/scheduler/multicore_scheduler.c` (`scheduler_send_local`, `send_through_core`)
 
-When the sender is on the same core as the target actor and is actually running on that core's scheduler thread (verified via `current_core_id`), messages bypass the incoming queue entirely and write directly to the actor's mailbox or SPSC queue.
-
-```c
-if (from_core >= 0 && from_core == target_core &&
-    from_core == current_core_id) {
-    if (unlikely(actor->auto_process)) {
-        spsc_enqueue(&actor->spsc_queue, msg);
-    } else {
-        mailbox_send(&actor->mailbox, msg);
-    }
-    actor->active = 1;
-    return;
-}
-```
+When the sender is on the same core as the target actor and is actually running on that core's scheduler thread (verified via `current_core_id`), the message bypasses the incoming queue and goes straight into the actor's mailbox, unless a message of the actor is still in the queues (#3093) or in its overflow (#3241), which it then goes behind. An actor with a thread of its own takes every message in its inbox instead (#2598).
 
 The `current_core_id` guard prevents non-scheduler threads (such as the main thread) from writing to the mailbox concurrently with the scheduler thread, which would be a data race on the non-thread-safe ring buffer.
 

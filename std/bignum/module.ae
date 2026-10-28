@@ -1996,7 +1996,7 @@ append_limb_nolead(sb: ptr, v: long) {
 
 // ---- free ----
 
-free(n: ptr) {
+free(n: @frees ptr) {
     if n == null {
         return
     }

@@ -16,7 +16,7 @@
  * in a struct, a tuple, an array or a message, and giving it to a `@keep`
  * parameter each take it out of the local, which is left empty (and its
  * drop finds nothing). Using the local again before it is bound anew is an
- * error (E0903), as it is after `free(xs)` and after `append(xs, v)`, which
+ * error (E0906), as it is after `free(xs)` and after `append(xs, v)`, which
  * consume it. A parameter borrows: it is never dropped, and `free`,
  * `append` and `push` on it are refused (E0901) unless it is declared
  * `xs: @keep T[]`, when the caller's buffer moves into it and it is

@@ -69,7 +69,7 @@ extern aether_proxy_pool_new(algo: int,
     request_timeout_sec: int,
     dial_timeout_ms: int,
     max_inflight_per_up: int) -> ptr
-extern aether_proxy_pool_free(pool: ptr)
+extern aether_proxy_pool_free(pool: @frees ptr)
 extern aether_proxy_upstream_add(pool: ptr, base_url: string, weight: int) -> string
 extern aether_proxy_upstream_remove(pool: ptr, base_url: string) -> string
 extern aether_proxy_upstream_drain(pool: ptr, base_url: string) -> string
@@ -98,10 +98,10 @@ extern aether_proxy_cache_new(max_entries: int,
     max_body_bytes: int,
     default_ttl_sec: int,
     key_strategy: int) -> ptr
-extern aether_proxy_cache_free(cache: ptr)
+extern aether_proxy_cache_free(cache: @frees ptr)
 
 extern aether_proxy_opts_new() -> ptr
-extern aether_proxy_opts_free(opts: ptr)
+extern aether_proxy_opts_free(opts: @frees ptr)
 extern aether_proxy_opts_set_strip_prefix(opts: ptr, prefix: string) -> string
 extern aether_proxy_opts_set_preserve_host(opts: ptr, on: int) -> string
 extern aether_proxy_opts_set_xforwarded(opts: ptr, xff: int, xfp: int, xfh: int) -> string
@@ -154,7 +154,7 @@ upstream_pool_new(lb_algo: string,
 
 // Decrement pool refcount; free + join the health-check thread on
 // zero. NULL-safe.
-upstream_pool_free(pool: ptr) {
+upstream_pool_free(pool: @frees ptr) {
     aether_proxy_pool_free(pool)
 }
 
@@ -275,7 +275,7 @@ cache_new(max_entries: int,
         default_ttl_sec, strat)
 }
 
-cache_free(cache: ptr) {
+cache_free(cache: @frees ptr) {
     aether_proxy_cache_free(cache)
 }
 
@@ -285,7 +285,7 @@ opts_new() -> ptr {
     return aether_proxy_opts_new()
 }
 
-opts_free(opts: ptr) {
+opts_free(opts: @frees ptr) {
     aether_proxy_opts_free(opts)
 }
 

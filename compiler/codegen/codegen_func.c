@@ -2284,6 +2284,7 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
             // Every string local releases what it holds when the function
             // exits, by every path (R2), and is journaled for a panic.
             push_heap_string_exit_free_defers(gen, body);
+            hoist_owned_locals(gen, body);   /* #3142 */
             push_builder_config_exit_release(gen, func, body);   /* #2871 */
         }
         // If body is a block, it handles its own scope

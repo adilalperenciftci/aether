@@ -60,7 +60,7 @@ extern longarr_set_unchecked(arr: ptr, i: int, value: long) @c_import
 extern longarr_fill(arr: ptr, value: long)
 
 // Release. Idempotent on null.
-extern longarr_free(arr: ptr)
+extern longarr_free(arr: @frees ptr)
 
 // ---- Go-style wrappers ----
 

@@ -196,6 +196,17 @@ Type* infer_unary_type(ASTNode* operand, AeTokenType operator);
 
 // Type compatibility functions
 int is_type_compatible(Type* from, Type* to);
+
+/* #1300: what a call does to the memory its argument `i` points at (see
+ * typechecker.c). */
+#define TC_ARG_FREES 2
+#define TC_ARG_MOVES 1
+int tc_call_arg_effect(ASTNode* program, ASTNode* call, int i, int* into);
+
+/* #3142: whether `t` is an owned pointer type (`type T = owned ptr drop f`),
+ * and the C function that releases a value of it (NULL when not owned). */
+int tc_type_is_owned(const Type* t);
+const char* tc_owned_drop_c(const Type* t);
 /* #2499: did the program convert a `ptr` into a closure (`fn`) anywhere?
  * Such a closure may have been made outside the program, so codegen does
  * not assume it borrows its arguments. Reset by typecheck_program. */

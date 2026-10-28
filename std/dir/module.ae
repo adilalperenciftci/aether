@@ -15,7 +15,7 @@ extern dir_list_raw(path: string) -> ptr
 extern dir_list_count(list: ptr) -> int
 extern dir_list_get(list: ptr, index: int) -> string
 extern dir_list_kind(list: ptr, index: int) -> int
-extern dir_list_free(list: ptr)
+extern dir_list_free(list: @frees ptr)
 
 // Create a directory. Returns "" on success, error on failure.
 create(path: string) -> {

@@ -58,7 +58,7 @@ extern floatarr_set_unchecked(arr: ptr, i: int, value: float) @c_import
 extern floatarr_fill(arr: ptr, value: float)
 
 // Release. Idempotent on null.
-extern floatarr_free(arr: ptr)
+extern floatarr_free(arr: @frees ptr)
 
 // ---- Go-style wrappers ----
 

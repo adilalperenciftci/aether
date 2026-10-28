@@ -38,7 +38,7 @@ extern io_delete_file_raw(path: string) -> int
 
 // File info
 extern io_file_info_raw(path: string) -> ptr
-extern io_file_info_free(info: ptr)
+extern io_file_info_free(info: @frees ptr)
 
 // Environment variables
 extern io_getenv(name: string) -> string @heap

@@ -8,7 +8,7 @@
 
 /* Host triple as the release convention spells it ("linux-x86_64",
  * "linux-x86_64-musl", "macos-arm64"). Returns NULL for unsupported hosts,
- * which forces the git-clone path. */
+ * which takes the source archive. */
 static const char* ae_host_triple(void) {
 #if defined(__linux__)
     /* The libc headers describe the ABI this ae runs against. musl has no

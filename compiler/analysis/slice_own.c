@@ -637,7 +637,7 @@ static int keeps_arg(Ctx* c, ASTNode* call, int i) {
         ASTNode* p = d->children[j];
         if (!p || p->type == AST_BLOCK) continue;
         if (p->type != AST_PATTERN_VARIABLE && p->type != AST_VARIABLE_DECLARATION) continue;
-        if (k++ == i) return has_marker(p, "keep_param") && type_is_slice(p->node_type);
+        if (k++ == i) return (has_marker(p, "keep_param") || has_marker(p, "frees_param")) && type_is_slice(p->node_type);
     }
     return 0;
 }
@@ -1715,7 +1715,7 @@ static void check_frame(Ctx* c, ASTNode* owner, const StrMap* outer) {
             Local* l = new_local(&f, &top, p, NULL);
             l->param = 1;
             l->pidx = npar++;
-            l->keep = has_marker(p, "keep_param") && owner->type != AST_CLOSURE;
+            l->keep = (has_marker(p, "keep_param") || has_marker(p, "frees_param")) && owner->type != AST_CLOSURE;
         } else if (owner->type == AST_RECEIVE_ARM || owner->type == AST_TIMEOUT_ARM) {
             resolve(&r, &top, p, NULL);
         }

@@ -1770,6 +1770,8 @@ const char* ast_node_type_to_string(ASTNodeType type) {
         case AST_FIELD_ATTRIBUTE: return "FIELD_ATTRIBUTE"; // #2298
         case AST_SCHEMA_OF: return "SCHEMA_OF";             // #2298
         case AST_QUOTE: return "QUOTE";                     // docs/quote.md
+        case AST_PROTOCOL_DEFINITION: return "PROTOCOL_DEFINITION";   // #385
+        case AST_PROTOCOL_TRANSITION: return "PROTOCOL_TRANSITION";
         default: return "UNKNOWN";
     }
 }

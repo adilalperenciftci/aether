@@ -762,9 +762,11 @@ extern do_thing(aether_msg: @aether string,
 - Calling a function exported via `export foo(s: string) { ... }` from another `.ae` file linked into the same binary.
 - The caller's value is binary content (contains NULs, returned from `bytes.finish` / `encoding.base64_decode` / `fs.read_binary` / etc.) and the receiver needs to see the full length, not the strlen-truncated prefix.
 
+- **The C function looks for a header** (`is_aether_string`, `aether_string_data`, `aether_string_length` on the parameter). It must be declared `@aether`, always (#3297). Unwrapped, it receives the characters and asks them whether they are a header: a payload that begins with the magic bytes `DE C0 57 AE` and plausible header fields is taken for one, and the "data pointer" read out of the payload is followed. A file, a network body or a blob an attacker shapes can point it anywhere. Declared `@aether`, the C function receives the counted string itself and never guesses. std's and contrib's externs follow this rule (std.bytes' `copy_from_string`, std.regex, std.tar, contrib.sqlite), and `http_response_set_body_n`, whose body is bytes with a length, reads it as bytes.
+
 **When NOT to reach for it:**
 
-- The receiver is hand-written C that takes `const char*`. Use bare `s: string` the auto-unwrap is doing the right thing.
+- The receiver is hand-written C that takes `const char*` and treats it as characters. Use bare `s: string` the auto-unwrap is doing the right thing, and the C must then never call the header helpers on it.
 - The receiver works on text content with no NULs. `strlen()` and the stored length agree, so either annotation works; bare is simpler.
 
 What the receiving side sees for a `string` argument:

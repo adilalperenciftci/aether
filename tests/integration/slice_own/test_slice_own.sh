@@ -1,7 +1,7 @@
 #!/bin/sh
 # Slice ownership, what the checker refuses: a slice local used after its
 # buffer moved out of it (bound to another name, freed, consumed by
-# `append`, given to a `@keep` parameter), on every path or some (E0903); a
+# `append`, given to a `@keep` parameter), on every path or some (E0906); a
 # parameter freed, appended to or pushed to, or given to a `@keep`
 # parameter, which would release or move the caller's buffer (E0901);
 # `push` on what is no place. And what it takes: a moved name bound again,
@@ -51,7 +51,7 @@ accepted() {
     fi
 }
 
-refused use_after_move E0903 "'xs' is used after it was moved (line 3): an owned slice has one owner" 4:16 <<'AE'
+refused use_after_move E0906 "'xs' is used after it was moved (line 3): an owned slice has one owner" 4:16 <<'AE'
 main() {
     xs = make([]int, 3)
     ys = xs
@@ -59,7 +59,7 @@ main() {
 }
 AE
 
-refused use_after_free E0903 "'xs' is used after it was freed (line 3)" 4:16 <<'AE'
+refused use_after_free E0906 "'xs' is used after it was freed (line 3)" 4:16 <<'AE'
 main() {
     xs = make([]int, 3)
     free(xs)
@@ -67,7 +67,7 @@ main() {
 }
 AE
 
-refused use_after_append E0903 "'xs' is used after \`append\` consumed it (line 3)" 4:16 <<'AE'
+refused use_after_append E0906 "'xs' is used after \`append\` consumed it (line 3)" 4:16 <<'AE'
 main() {
     xs = make([]int, 3)
     ys = append(xs, 4)
@@ -75,7 +75,7 @@ main() {
 }
 AE
 
-refused use_after_keep E0903 "'xs' is used after it was given to 'take_all', which keeps it (line 7)" 8:16 <<'AE'
+refused use_after_keep E0906 "'xs' is used after it was given to 'take_all', which keeps it (line 7)" 8:16 <<'AE'
 take_all(v: @keep int[]) -> int {
     return v.len
 }
@@ -87,7 +87,7 @@ main() {
 }
 AE
 
-refused maybe_moved E0903 "'xs' is used after a path where it was moved (line 5)" 7:16 <<'AE'
+refused maybe_moved E0906 "'xs' is used after a path where it was moved (line 5)" 7:16 <<'AE'
 main() {
     xs = make([]int, 3)
     ys = make([]int, 0)
@@ -98,7 +98,7 @@ main() {
 }
 AE
 
-refused moved_in_loop E0903 "'xs' is used after a path where it was moved (line 5)" 5:14 <<'AE'
+refused moved_in_loop E0906 "'xs' is used after a path where it was moved (line 5)" 5:14 <<'AE'
 main() {
     xs = make([]int, 3)
     ys = make([]int, 0)

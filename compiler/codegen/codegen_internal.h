@@ -635,6 +635,11 @@ void push_own_drop_carrier(CodeGenerator* gen, const char* name, Type* t, int li
 void emit_value_take(CodeGenerator* gen, ASTNode* e, Type* t);
 ASTNode* find_message_definition(ASTNode* program, const char* name);
 int message_owns_fields(CodeGenerator* gen, const char* name);
+/* #3142: owned pointers (`type T = owned ptr drop f`). */
+int tc_type_is_owned(const Type* t);
+const char* tc_owned_drop_c(const Type* t);
+int emit_owned_ptr_drop(CodeGenerator* gen, Type* t, const char* lv);
+void hoist_owned_locals(CodeGenerator* gen, ASTNode* body);
 int program_releases_messages(CodeGenerator* gen);
 int expr_is_c_view_of_slice(CodeGenerator* gen, const ASTNode* expr);
 void emit_array_fill(CodeGenerator* gen, const char* dst, ASTNode* e, Type* at);

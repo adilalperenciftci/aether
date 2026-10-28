@@ -134,7 +134,7 @@ reader_new(b: @keep ptr) -> ptr {
     return r
 }
 
-reader_free(r: ptr) {
+reader_free(r: @frees ptr) {
     if r == null { return }
     libc_free(r)
 }

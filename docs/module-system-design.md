@@ -598,12 +598,17 @@ Inputs are merged in the same priority order the build path uses: explicit `--li
 
 #### Dependencies resolve onto the search path
 
-`ae add` installs into `~/.aether/packages/<host>/<owner>/<name>` and records the dependency:
+`ae add` installs into `~/.aether/packages/<host>/<owner>/<name>` and records the dependency, with the hash of the tree it installed:
 
 ```toml
 [dependencies]
 "github.com/aether-lang-dev/selaenium" = "0.2.0"
+
+[dependency-hashes]
+"github.com/aether-lang-dev/selaenium" = "sha256-..."
 ```
+
+A build stops when an installed dependency is not the tree its manifest pins ([package-fetching.md](package-fetching.md)).
 
 `ae run`, `ae build` and `ae lib-path` read that section and join the package's modules to the search path. **No `--lib` is needed to import from a declared dependency.** All three walk up to the project's manifest first, so they behave the same from a subdirectory as from the project root.
 

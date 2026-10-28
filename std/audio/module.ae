@@ -72,7 +72,7 @@ extern aether_audio_is_looping(sound: ptr) -> int
 extern aether_audio_fade_ms(sound: ptr, from: float, to: float, ms: long) -> int
 extern aether_audio_played_frames(sound: ptr) -> long
 extern aether_audio_group_new() -> ptr
-extern aether_audio_group_free(group: ptr)
+extern aether_audio_group_free(group: @frees ptr)
 extern aether_audio_group_set_volume(group: ptr, v: float) -> int
 extern aether_audio_group_get_volume(group: ptr) -> float
 extern aether_audio_set_group(sound: ptr, group: ptr) -> int
@@ -363,7 +363,7 @@ group_new() -> ptr! {
 
 // Release a group. Sources still routed through it fall silent until
 // reassigned, so unload or `set_group` them first.
-group_free(group: ptr) { aether_audio_group_free(group) }
+group_free(group: @frees ptr) { aether_audio_group_free(group) }
 
 // Set the group's volume in [0.0, 1.0] (clamped); it multiplies each
 // member's own volume. Returns true on success.

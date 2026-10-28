@@ -62,7 +62,7 @@ extern json_last_error_kind() -> int
 extern json_last_error_line() -> int
 extern json_last_error_col() -> int
 extern json_stringify_raw(value: ptr) -> string @heap
-extern json_free(value: ptr)
+extern json_free(value: @frees ptr)
 
 // ---- type introspection (infallible, no wrapper needed) ----
 extern json_type(value: ptr) -> int

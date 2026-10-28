@@ -44,7 +44,7 @@ extern aether_pqueue_peek_priority(pq: ptr) -> long
 extern aether_pqueue_size(pq: ptr) -> int
 extern aether_pqueue_is_empty(pq: ptr) -> int
 extern aether_pqueue_clear(pq: ptr)
-extern aether_pqueue_free(pq: ptr)
+extern aether_pqueue_free(pq: @frees ptr)
 
 // ---- Aether-side wrappers ----
 
@@ -95,6 +95,6 @@ clear(pq: ptr) {
 
 // Release the queue. Items were never owned by it, so free them
 // yourself if they were heap allocated.
-free(pq: ptr) {
+free(pq: @frees ptr) {
     aether_pqueue_free(pq)
 }

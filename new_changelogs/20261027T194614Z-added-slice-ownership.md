@@ -8,7 +8,7 @@
   storing it in a field, a `var`, an element, a struct, a tuple or a message,
   and giving it to a parameter declared `xs: @keep T[]` leave `xs` empty, and
   using `xs` after a move, `free(xs)` or `append(xs, v)` is a compile error
-  (E0903, new); `v = xs[..]` is a view that leaves it in place. A parameter
+  (E0906, new); `v = xs[..]` is a view that leaves it in place. A parameter
   borrows: `free`, `append` and `push` on one that is not `@keep` are E0901
   (functions that freed or grew a slice parameter now declare it `@keep`),
   and a copy read out of a parameter, a field, an element or a `var` is

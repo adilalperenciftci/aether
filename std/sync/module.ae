@@ -88,7 +88,7 @@ extern aether_sync_atomic_sub(cell: ptr, delta: long) -> long
 extern aether_sync_atomic_cas(cell: ptr, expected: long, desired: long) -> int
 
 // Free the cell. A null cell is a no-op (mirrors libc free).
-extern aether_sync_atomic_free(cell: ptr)
+extern aether_sync_atomic_free(cell: @frees ptr)
 
 // ---- Ergonomic wrappers ----
 
@@ -124,6 +124,6 @@ atomic_cas(cell: ptr, expected: long, desired: long) -> int {
 }
 
 // Free the cell.
-atomic_free(cell: ptr) {
+atomic_free(cell: @frees ptr) {
     aether_sync_atomic_free(cell)
 }
