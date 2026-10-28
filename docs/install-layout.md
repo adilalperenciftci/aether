@@ -158,11 +158,12 @@ disagree. The flag that matters:
 
 - **`-DAETHER_HAS_SANDBOX`**, gates `aether_sandbox_check()`.
   When defined, `runtime/aether_sandbox.h` provides a `static
-  inline aether_sandbox_check()` that consults the global
-  `_aether_sandbox_checker` (defined in `libaether.a`); when
-  undefined, the header replaces it with a no-op macro that
-  always returns 1. There's no linker error on skew, the
-  function is inline in both branches, so a build that compiles
+  inline aether_sandbox_check()` that reads the count of threads
+  with a grant level in force and, when there is one, checks the
+  calling thread's levels (`aether_sandbox_check_slow`, defined in
+  `libaether.a`); when undefined, the header replaces it with a
+  no-op macro that always returns 1. There's no linker error on
+  skew, the macro branch links nothing, so a build that compiles
   the header without the flag silently loses sandbox enforcement
   even when linked against a sandbox-enabled library. The shipped
   `libaether.a` is always built with this flag (see `CFLAGS` in

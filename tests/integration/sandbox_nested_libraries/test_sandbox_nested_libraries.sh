@@ -1,0 +1,128 @@
+#!/bin/sh
+# #2955 (D2): a library's export called from inside another library's
+# enforce block, through a host service on the same thread, is held to that
+# block's grants, and an enforce of its own only narrows them.
+#
+# The grant levels lived in each library's generated code, with one
+# process-wide checker pointer each enforce installed and cleared. Inside
+# the outer block's deny-all, the inner library's grant_all enforce replaced
+# the outer checker with its own (PATH read), and its end cleared the
+# pointer, so the rest of the outer block ran unchecked (PATH read again).
+# The levels are now each thread's, in the runtime.
+#
+# 1. one runtime: both libraries' C linked into the host;
+# 2. each library built the default way, with its own copy of the runtime:
+#    on macOS and Windows the copies stay apart, so the inner one cannot read
+#    the outer block's grants; it refuses, and its message names
+#    --shared-runtime (on Linux and FreeBSD ELF interposition binds both to
+#    one copy: the same answers, no message);
+# 3. both built with --shared-runtime (skipped where build/shared has none).
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+AE="$ROOT/build/ae"
+AETHERC="$ROOT/build/aetherc"
+CC="${CC:-cc}"
+export AETHER_HOME="$ROOT"
+
+[ -x "$AE" ] || { echo "  [SKIP] sandbox_nested_libraries: $AE not built"; exit 0; }
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP" || true' EXIT
+fail=0
+want="before 1 inner 0 granted 0 outer 0 after 1"
+
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) ext=dll; apart=1; dl="" ;;
+    Darwin) ext=dylib; apart=1; dl="" ;;
+    Linux) ext=so; apart=0; dl="-ldl" ;;
+    *) ext=so; apart=0; dl="" ;;
+esac
+
+# 1. one runtime
+if ! "$AETHERC" --emit=lib --with=os,extern "$SCRIPT_DIR/outer.ae" "$TMP/outer.c" > "$TMP/outer.log" 2>&1 ||
+   ! "$AETHERC" --emit=lib --with=os,extern "$SCRIPT_DIR/inner.ae" "$TMP/inner.c" > "$TMP/inner.log" 2>&1; then
+    echo "  [FAIL] sandbox_nested_libraries: aetherc --emit=lib failed"
+    tail -5 "$TMP/outer.log" "$TMP/inner.log" | sed 's/^/        /'
+    exit 1
+fi
+# shellcheck disable=SC2046
+if ! "$CC" -O1 -DHOST_STATIC $("$AE" cflags --cflags) "$TMP/outer.c" "$TMP/inner.c" \
+        "$SCRIPT_DIR/hooks.c" "$SCRIPT_DIR/host.c" -o "$TMP/host_static" \
+        $("$AE" cflags --libs) > "$TMP/cc.log" 2>&1; then
+    echo "  [FAIL] sandbox_nested_libraries: the one-runtime host did not build"
+    head -10 "$TMP/cc.log" | sed 's/^/        /'
+    exit 1
+fi
+got="$("$TMP/host_static" 2>"$TMP/static.err" | tr -d '\r')"
+if [ "$got" != "$want" ]; then
+    echo "  [FAIL] sandbox_nested_libraries: one runtime: got '$got', want '$want'"
+    head -5 "$TMP/static.err" | sed 's/^/        /'
+    fail=1
+fi
+
+# The host that loads the two libraries at run time.
+if ! "$CC" -O1 "$SCRIPT_DIR/host.c" -o "$TMP/host_dyn" $dl > "$TMP/cc_dyn.log" 2>&1; then
+    echo "  [FAIL] sandbox_nested_libraries: the loading host did not build"
+    head -10 "$TMP/cc_dyn.log" | sed 's/^/        /'
+    exit 1
+fi
+
+# $1 = label, $2 = extra build flags
+build_pair() {
+    mkdir -p "$TMP/$1"
+    # shellcheck disable=SC2086
+    (cd "$TMP/$1" &&
+     "$AE" build --emit=lib $2 --with=os,extern "$SCRIPT_DIR/outer.ae" --extra "$SCRIPT_DIR/hooks.c" \
+         -o "$TMP/$1/libouter.$ext" > "$TMP/$1/outer.log" 2>&1 &&
+     "$AE" build --emit=lib $2 --with=os,extern "$SCRIPT_DIR/inner.ae" --extra "$SCRIPT_DIR/hooks.c" \
+         -o "$TMP/$1/libinner.$ext" > "$TMP/$1/inner.log" 2>&1)
+}
+
+# 2. a runtime per library
+if ! build_pair static ""; then
+    echo "  [FAIL] sandbox_nested_libraries: ae build --emit=lib failed"
+    tail -5 "$TMP/static/outer.log" "$TMP/static/inner.log" 2>/dev/null | sed 's/^/        /'
+    exit 1
+fi
+got="$("$TMP/host_dyn" "$TMP/static/libouter.$ext" "$TMP/static/libinner.$ext" 2>"$TMP/apart.err" | tr -d '\r')"
+if [ "$got" != "$want" ]; then
+    echo "  [FAIL] sandbox_nested_libraries: a runtime per library: got '$got', want '$want'"
+    head -5 "$TMP/apart.err" | sed 's/^/        /'
+    fail=1
+fi
+if [ "$apart" = 1 ] && ! grep -q -- "--shared-runtime" "$TMP/apart.err"; then
+    echo "  [FAIL] sandbox_nested_libraries: a runtime per library: the refusal does not name --shared-runtime"
+    head -5 "$TMP/apart.err" | sed 's/^/        /'
+    fail=1
+fi
+
+# 3. one shared runtime
+if ls "$ROOT/build/shared/" 2>/dev/null | grep -q "aether"; then
+    if ! build_pair shared "--shared-runtime"; then
+        echo "  [FAIL] sandbox_nested_libraries: ae build --emit=lib --shared-runtime failed"
+        tail -5 "$TMP/shared/outer.log" "$TMP/shared/inner.log" 2>/dev/null | sed 's/^/        /'
+        exit 1
+    fi
+    got="$(PATH="$ROOT/build/shared:$PATH" \
+           LD_LIBRARY_PATH="$ROOT/build/shared${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+           DYLD_LIBRARY_PATH="$ROOT/build/shared${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" \
+           "$TMP/host_dyn" "$TMP/shared/libouter.$ext" "$TMP/shared/libinner.$ext" 2>"$TMP/shared.err" | tr -d '\r')"
+    if [ "$got" != "$want" ]; then
+        echo "  [FAIL] sandbox_nested_libraries: --shared-runtime: got '$got', want '$want'"
+        head -5 "$TMP/shared.err" | sed 's/^/        /'
+        fail=1
+    fi
+    if grep -q "another copy" "$TMP/shared.err"; then
+        echo "  [FAIL] sandbox_nested_libraries: --shared-runtime: one runtime reported another copy"
+        fail=1
+    fi
+    shared_note=", and on one shared runtime"
+else
+    shared_note=" (no shared runtime in build/shared: that leg skipped)"
+fi
+
+if [ "$fail" = 0 ]; then
+    echo "  [PASS] sandbox_nested_libraries: an inner library's export inside an outer enforce is held to it, its own grant_all narrows nothing, and the outer block stays checked: one runtime, a runtime per library (refused where the copies stay apart)$shared_note"
+fi
+exit $fail

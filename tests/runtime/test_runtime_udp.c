@@ -5,6 +5,8 @@
 #include "../../std/udp/aether_udp.h"
 #include "../../std/string/aether_string.h"
 #include "../../runtime/aether_sandbox.h"
+#include "../../runtime/sandbox/aether_audit.h"
+#include "../../std/collections/aether_collections.h"
 #include <string.h>
 
 TEST_CATEGORY(udp_null_handles, TEST_CATEGORY_NETWORK) {
@@ -49,28 +51,29 @@ TEST_CATEGORY(udp_bind_ephemeral_port_is_read_back, TEST_CATEGORY_NETWORK) {
     ASSERT_EQ(0, udp_close(s));
 }
 
-/* What udp_bind_raw asked the sandbox to allow, and a checker that records
- * it and refuses the bind, so nothing is bound. */
-static char udp_asked_host[64];
-
-static int udp_record_and_refuse(const char* category, const char* resource) {
-    if (!category || strcmp(category, "udp") != 0) return 1;
-    snprintf(udp_asked_host, sizeof(udp_asked_host), "%s", resource ? resource : "(null)");
-    return 0;
-}
-
 /* An empty host means every IPv4 interface. Read from the address the bind
  * asks the sandbox for instead of binding it: a socket on every interface
- * opens a Windows firewall prompt for each new test binary (#2639). */
+ * opens a Windows firewall prompt for each new test binary (#2639). An empty
+ * grant list on this thread refuses the bind, so nothing is bound, and the
+ * audit ring holds what was asked. */
 TEST_CATEGORY(udp_empty_host_means_every_interface, TEST_CATEGORY_NETWORK) {
-    aether_sandbox_check_fn saved = _aether_sandbox_checker;
-    udp_asked_host[0] = '\0';
-    _aether_sandbox_checker = udp_record_and_refuse;
+    ArrayList* nothing = list_new();
+    ASSERT_NOT_NULL(nothing);
+    aether_audit_clear();
+    aether_sandbox_push(nothing);
     UdpSocket* s = udp_bind_raw("", 0);  /* loopback-ok: refused before any bind */
-    _aether_sandbox_checker = saved;
+    aether_sandbox_pop();
+    list_free(nothing);
     ASSERT_NULL(s);
     /* The resource is host:port (aether_net_resource): port 0 here. */
-    ASSERT_STREQ("0.0.0.0:0", udp_asked_host);
+    const char* asked = NULL;
+    for (int i = 0; i < aether_audit_count(); i++) {
+        if (strcmp(aether_audit_entry_category(i), "udp") == 0 && !aether_audit_entry_allowed(i))
+            asked = aether_audit_entry_resource(i);
+    }
+    ASSERT_NOT_NULL(asked);
+    ASSERT_STREQ("0.0.0.0:0", asked);
+    aether_audit_clear();
 }
 
 TEST_CATEGORY(udp_recv_on_idle_socket_would_block, TEST_CATEGORY_NETWORK) {

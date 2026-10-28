@@ -974,6 +974,12 @@ ae build app.ae -o app                                            # imports both
   pointer) and a builder that uses its config have none. Where the copies
   stay apart (macOS, Windows), importing a static library that has such an
   export is an error naming each one, with the rebuild: `--shared-runtime`.
+- A sandbox's grants are each thread's, in the runtime: on one runtime a
+  library's export called from inside another's `sandbox.enforce` block is
+  held to the block's grants. Where the copies stay apart, the inner copy
+  cannot read them and refuses what the block would check, with a message
+  naming `--shared-runtime`
+  ([containment-sandbox.md](containment-sandbox.md#threads-libraries-and-panics)).
 - Hooks a program supplies to the runtime by `@c_callback` (the pure-TLS
   client and server) reach a shared runtime by registration: every
   `@c_callback` registers itself by name when its image loads, and the

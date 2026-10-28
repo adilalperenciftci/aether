@@ -126,14 +126,22 @@ new(name: string) -> Grants {
 // grant_* call made with it from inside the block, by code it was passed to)
 // does not widen what the running block may do. For the same reason the block
 // is not given the list: its parameter is null.
+//
+// The grants apply to the thread that runs the block, and to every program
+// and library on the same runtime the block calls into on that thread: an
+// export of another library called from inside the block (through a host
+// service, say) is held to these grants too, and an enforce of its own can
+// only narrow them. A message the block sends is handled on an actor's
+// thread, with no grants. A library built without --shared-runtime on macOS
+// or Windows has a runtime of its own and cannot read these grants: called
+// from inside the block, its checked operations are refused, with a message
+// naming --shared-runtime (docs/containment-sandbox.md).
 enforce(perms: Grants, code: fn) {
     frozen = freeze(perms as ptr)
     defer free_list(frozen)
     sandbox_push(frozen)
-    sandbox_install()
     call(code, null)
     sandbox_pop()
-    sandbox_uninstall()
 }
 
 // A private copy of a grant list, with copies of its strings: what enforce

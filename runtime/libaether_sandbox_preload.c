@@ -59,10 +59,14 @@ static void* (*real_dlopen)(const char*, int) = NULL;
 // the in-process checker and the host bridges use.
 #include "aether_sandbox_match.h"
 
-// Check the in-process Aether sandbox checker first (embedded mode),
-// then fall back to file-based grants (LD_PRELOAD mode)
-typedef int (*aether_sandbox_check_fn)(const char*, const char*);
-extern aether_sandbox_check_fn _aether_sandbox_checker __attribute__((weak));
+// The calling thread's in-process grant levels first (embedded mode: an
+// Aether enforce block, a host bridge's run_sandboxed), then the file-based
+// grants (LD_PRELOAD mode). Weak: a process with no Aether runtime has only
+// the file. 1 allowed, 0 refused, -1 no level in force on this thread
+// (#2955; it used to read a process-wide checker pointer, which one thread
+// leaving its enforce cleared under another).
+extern int aether_sandbox_check_resolved(const char* category, const char* resource) __attribute__((weak));
+extern int aether_sandbox_levels_here(void) __attribute__((weak));
 
 static void log_deny(const char* category, const char* resource) {
     if (log_mode == LOG_NONE) return;
@@ -89,7 +93,8 @@ static int check_grant(const char* category, const char* resource) {
     const char* match_target = resource;
     if (category && strncmp(category, "fs_", 3) == 0 && resource) {
         if (!aether_sandbox_canon_path(resource, resolved, sizeof(resolved))) {
-            if ((&_aether_sandbox_checker && _aether_sandbox_checker) || sandbox_active) {
+            int in_process = aether_sandbox_levels_here ? aether_sandbox_levels_here() : 0;
+            if (in_process > 0 || sandbox_active) {
                 log_deny(category, resource);
                 return 0;
             }
@@ -98,11 +103,13 @@ static int check_grant(const char* category, const char* resource) {
         match_target = resolved;
     }
 
-    // In-process checker takes priority (embedded Python mode)
-    if (&_aether_sandbox_checker && _aether_sandbox_checker) {
-        int result = _aether_sandbox_checker(category, match_target);
-        if (!result) log_deny(category, match_target);
-        return result;
+    // In-process levels take priority (embedded Python mode)
+    if (aether_sandbox_check_resolved) {
+        int result = aether_sandbox_check_resolved(category, match_target);
+        if (result >= 0) {
+            if (!result) log_deny(category, match_target);
+            return result;
+        }
     }
     // Fall back to file-based grants (LD_PRELOAD mode)
     if (!sandbox_active) return 1;

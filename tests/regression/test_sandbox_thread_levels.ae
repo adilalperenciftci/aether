@@ -1,0 +1,169 @@
+// Each thread's sandbox levels are its own, and a level ends with its block
+// however the block is left (#2955, D1).
+//
+// 1. An enforce block on one thread is not switched off by another thread
+//    leaving its own. One process-wide checker pointer was installed by
+//    every enforce and cleared by any thread whose own depth reached 0, so
+//    a deny-all block on one core read PATH while another core churned an
+//    allow-all block; or it called the pointer just cleared and the process
+//    died of an access violation, within half a second.
+// 2. A panic inside an enforce block in an actor's handler ends the level
+//    with the actor: the next handler on that scheduler thread was still
+//    held to the dead block's grants (a list its unwind freed).
+// 3. A 65th level is refused: past 64 the push was dropped, so the block ran
+//    under the outer grants alone, and its pop took an outer level off.
+
+import std.sandbox
+import std.os
+import std.sync
+
+message Run { stop: ptr, reads: ptr, leaks: ptr }
+message Churn { stop: ptr }
+message Boom {}
+message Read {}
+
+extern exit(code: int)
+
+fn path_readable() -> int {
+    v = os.os_getenv("PATH")
+    if v == null {
+        return 0
+    }
+    return 1
+}
+
+actor Confined {
+    receive {
+        Run(stop, reads, leaks) -> {
+            nothing = sandbox.new("nothing") {
+            }
+            sandbox.enforce(nothing) callback {
+                while sync.atomic_load(stop) == 0 {
+                    sync.atomic_add(reads, 1)
+                    if path_readable() == 1 {
+                        sync.atomic_add(leaks, 1)
+                    }
+                }
+            }
+            sandbox.free(nothing)
+        }
+    }
+}
+
+actor Churner {
+    receive {
+        Churn(stop) -> {
+            everything = sandbox.new("everything") {
+                grant_all()
+            }
+            while sync.atomic_load(stop) == 0 {
+                sandbox.enforce(everything) callback {
+                }
+            }
+            sandbox.free(everything)
+        }
+    }
+}
+
+actor Dier {
+    receive {
+        Boom() -> {
+            nothing = sandbox.new("nothing") {
+            }
+            sandbox.enforce(nothing) callback {
+                panic("inside the block")
+            }
+        }
+    }
+}
+
+actor Reader {
+    receive {
+        Read() -> { reply path_readable() }
+    }
+}
+
+// Nests enforce blocks from level `d` to `top`: each grants everything, the
+// innermost nothing; there `result` is set to whether PATH reads.
+fn nest(d: int, top: int, everything: sandbox.Grants, nothing: sandbox.Grants, result: ptr) {
+    if d == top {
+        sandbox.enforce(nothing) callback {
+            sync.atomic_store(result, path_readable())
+        }
+        return
+    }
+    sandbox.enforce(everything) callback {
+        nest(d + 1, top, everything, nothing, result)
+    }
+}
+
+check(label: string, ok: bool) -> int {
+    if !ok {
+        println("  FAIL ${label}")
+        return 1
+    }
+    println("  PASS ${label}")
+    return 0
+}
+
+main() {
+    println("=== each thread's sandbox levels are its own (#2955) ===")
+    fails = 0
+
+    stop = sync.atomic_new(0)
+    reads = sync.atomic_new(0)
+    leaks = sync.atomic_new(0)
+    c = spawn(Confined(), core: 1 % num_cores)
+    h = spawn(Churner(), core: 2 % num_cores)
+    c ! Run { stop: stop, reads: reads, leaks: leaks }
+    h ! Churn { stop: stop }
+    sleep(300)
+    sync.atomic_store(stop, 1)
+    wait_for_idle()
+    fails = fails + check("a deny-all block read while another thread churned allow-all blocks",
+        sync.atomic_load(reads) > 0)
+    fails = fails + check("and never got PATH: ${sync.atomic_load(leaks)} leaks",
+        sync.atomic_load(leaks) == 0)
+    sync.atomic_free(stop)
+    sync.atomic_free(reads)
+    sync.atomic_free(leaks)
+
+    d = spawn(Dier(), core: 0)
+    r = spawn(Reader(), core: 0)
+    d ! Boom {}
+    wait_for_idle()
+    int freed = r ? Read {}
+    fails = fails + check("after a handler panicked inside a block, the next handler on its thread is free: ${freed}",
+        freed == 1)
+
+    everything = sandbox.new("everything") {
+        grant_all()
+    }
+    nothing = sandbox.new("nothing") {
+    }
+    result = sync.atomic_new(-1)
+    nest(1, 64, everything, nothing, result)
+    fails = fails + check("64 levels: the innermost refuses, got ${sync.atomic_load(result)}",
+        sync.atomic_load(result) == 0)
+    sync.atomic_store(result, -1)
+    why = ""
+    try {
+        nest(1, 65, everything, nothing, result)
+    } catch e {
+        why = e
+    }
+    fails = fails + check("65 levels: refused before the innermost block runs, got ${sync.atomic_load(result)}",
+        sync.atomic_load(result) == -1)
+    fails = fails + check("with the reason: ${why}", why != "")
+    fails = fails + check("and the levels are gone after the catch: ${path_readable()}",
+        path_readable() == 1)
+    sync.atomic_free(result)
+    sandbox.free(everything)
+    sandbox.free(nothing)
+
+    if fails > 0 {
+        println("FAIL: ${fails} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

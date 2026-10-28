@@ -2,7 +2,7 @@
 //
 // Unlike Python/Lua, Duktape has NO built-in filesystem or env access.
 // We provide native bindings (env, readFile, print) that go through
-// the Aether sandbox checker. This is the purest containment model —
+// the Aether sandbox check of the calling thread. This is the purest containment model —
 // the guest can ONLY do what we explicitly expose.
 //
 // LOADING MODEL: dlopen, not -lduktape. Mirrors contrib/host/python,
@@ -162,8 +162,6 @@ static const char* dh_safe_to_string(duk_context* c, duk_idx_t idx) {
 
 static duk_context* ctx = NULL;
 
-static void* duktape_perms_stack[64];
-static int   duktape_perms_depth = 0;
 
 extern int list_size(void*);
 extern void* list_get_raw(void*, int);
@@ -175,26 +173,11 @@ extern const char* aether_string_data(const void*);
 // The shared grant matcher (runtime/aether_sandbox_match.h).
 #include "aether_sandbox_match.h"
 
-static int perms_allow(void* perms, const char* category, const char* resource) {
-    if (!perms) return 1;
-    int n = list_size(perms);
-    if (n == 0) return 0;
-    for (int i = 0; i < n; i += 2) {
-        const char* cat = aether_string_data(list_get_raw(perms, i));
-        const char* pat = aether_string_data(list_get_raw(perms, i + 1));
-        if (!cat || !pat) continue;
-        if (cat[0] == '*' && pat[0] == '*') return 1;
-        if (strcmp(cat, category) == 0 && aether_grant_match(category, pat, resource)) return 1;
-    }
-    return 0;
-}
-
+/* What JS reaches goes through the natives below; each checks the calling
+ * thread's grant levels, the ones run_sandboxed pushed and any enforce block
+ * around the call, so a nested call can only narrow them (#2955). */
 static int check_sandbox(const char* category, const char* resource) {
-    if (duktape_perms_depth <= 0) return 1;
-    for (int level = 0; level < duktape_perms_depth; level++) {
-        if (!perms_allow(duktape_perms_stack[level], category, resource)) return 0;
-    }
-    return 1;
+    return aether_sandbox_check(category, resource);
 }
 
 // --- Duktape native bindings (exposed to JS) -------------------------------
@@ -342,10 +325,8 @@ int duktape_run_sandboxed(void* perms, const char* code) {
     if (!code) return -1;
     if (duktape_init() != 0) return -1;
 
-    if (duktape_perms_depth >= 64) return -1;
-    duktape_perms_stack[duktape_perms_depth++] = perms;
-    aether_sandbox_check_fn prev = _aether_sandbox_checker;
-    _aether_sandbox_checker = NULL;  // JS uses direct check_sandbox, not libc interception
+    if (aether_sandbox_depth() >= AETHER_SANDBOX_MAX_LEVELS) return -1;
+    aether_sandbox_push(perms);
 
     int result = 0;
     if (dh_peval_string(ctx, code) != 0) {
@@ -356,8 +337,7 @@ int duktape_run_sandboxed(void* perms, const char* code) {
         g_duk.duk_pop(ctx);
     }
 
-    _aether_sandbox_checker = prev;
-    duktape_perms_depth--;
+    aether_sandbox_pop();
 
     return result;
 }
@@ -396,10 +376,8 @@ int duktape_run_sandboxed_with_map(void* perms, const char* code, uint64_t map_t
     aether_shared_map_freeze_inputs_by_token(map_token);
     duktape_current_map_token = map_token;
 
-    if (duktape_perms_depth >= 64) return -1;
-    duktape_perms_stack[duktape_perms_depth++] = perms;
-    aether_sandbox_check_fn prev = _aether_sandbox_checker;
-    _aether_sandbox_checker = NULL;
+    if (aether_sandbox_depth() >= AETHER_SANDBOX_MAX_LEVELS) return -1;
+    aether_sandbox_push(perms);
 
     int result = 0;
     if (dh_peval_string(ctx, code) != 0) {
@@ -410,8 +388,7 @@ int duktape_run_sandboxed_with_map(void* perms, const char* code, uint64_t map_t
         g_duk.duk_pop(ctx);
     }
 
-    _aether_sandbox_checker = prev;
-    duktape_perms_depth--;
+    aether_sandbox_pop();
     duktape_current_map_token = 0;
 
     return result;

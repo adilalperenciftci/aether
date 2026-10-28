@@ -1,0 +1,29 @@
+// The outer library (#2955): a deny-all enforce block whose code calls a
+// host service, which runs exports of the inner library on this thread.
+import std.sandbox
+import std.os
+
+extern host_service()
+extern host_note(which: int, got: int)
+
+// 1 when this code can read PATH.
+fn outer_read_path() -> int {
+    v = os.os_getenv("PATH")
+    if v == null {
+        return 0
+    }
+    return 1
+}
+
+outer() -> int {
+    nothing = sandbox.new("nothing") {
+    }
+    sandbox.enforce(nothing) callback {
+        host_service()
+        // Note 2: the rest of the block, once the inner library's own
+        // enforce has ended.
+        host_note(2, outer_read_path())
+    }
+    sandbox.free(nothing)
+    return 0
+}

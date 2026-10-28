@@ -195,8 +195,8 @@ visibility into the permissions it grants.
 ### Contained cannot reach container
 
 The block handed to `sandbox.enforce(worker) { … }` runs with the
-worker's grants installed: `sandbox.enforce` pushes the grant list,
-installs the checker, runs the block, then pops and uninstalls. Every
+worker's grants in force: `sandbox.enforce` pushes the grant list as a
+level of the calling thread's, runs the block, then pops it. Every
 capability the block exercises through std (`fs.read`, `os.getenv`,
 `os.exec`, `tcp.connect`, …) is checked, and so is everything those
 functions call, however deep. Names are a separate matter: the block can
@@ -227,10 +227,30 @@ sandbox.enforce(outer) callback {
 }
 ```
 
-The checker consults every grant list on the stack and allows an
+The check consults every level in force on the thread and allows an
 operation only when each of them does, so the inner block gets the
 intersection of the two. An inner grant list cannot widen what an outer
 one refused.
+
+### Threads, libraries and panics
+
+The levels belong to the thread that entered them, and are kept by the
+runtime (#2955):
+
+| Case | What holds |
+|---|---|
+| two threads, each in its own block | each is checked against its own levels only; one leaving its block changes nothing for the other |
+| a message sent from a block | handled on an actor's thread, with no grants: an actor is not the block |
+| a library's export called from inside a block on the same thread (through a host service, say), one runtime | held to the block's grants; its own `enforce` only narrows them, and when it ends the block is checked as before |
+| the same, with libraries built without `--shared-runtime` on macOS or Windows | each library has a copy of the runtime of its own, which cannot read another copy's grants: the inner library's checked operations are refused, and the first refusal prints a message naming `--shared-runtime`. Detected where the copies can find each other by name: libraries a host loads (globally, on Linux and FreeBSD, where `RTLD_LOCAL` hides them), and a program with the libraries it loads; on Windows a program's own copy finds a library's only if the library was loaded before the program's first checked operation |
+| a contrib host bridge (`lua.run_sandboxed(perms, code)` and the others) | pushes `perms` as a level of the thread, so inside an `enforce` the guest gets the intersection |
+| a panic out of a block, caught anywhere (a `try` in any code, an actor's barrier) | the levels pushed inside the catching frame end with it, so the catch is held only to the blocks still around it |
+| more than 64 levels on one thread (blocks, trusted calls, bridge calls) | the 65th is refused with a panic before its block runs |
+
+`sandbox_install()` and `sandbox_uninstall()`, which a hand-written
+`sandbox_push` / `sandbox_pop` pair used to need, do nothing now: the push
+is all it takes. A C host pushes and pops with `aether_sandbox_push` and
+`aether_sandbox_pop` (runtime/aether_sandbox.h).
 
 A level cannot be widened from inside, either. `enforce` freezes the grant
 list when the block starts and checks against its own copy, which nothing
@@ -255,7 +275,7 @@ resource (`grant_tcp("*", 0)` is any host on any port), `"/etc/*"` a prefix, and
 | `classPathElement("x.jar")` | Not applicable (Aether is single-binary) |
 | `grant(new SocketPermission(...))` | `grant_tcp("host", port)` |
 | `component("Bear")` | `sandbox.enforce(perms) { bear_code() }` |
-| SecurityManager check | the checker `sandbox.enforce` installs, consulted by std |
+| SecurityManager check | the check of the thread's levels, consulted by std |
 | ClassLoader isolation | `seal except` on the enforced block |
 
 ## Mapping to Docker/VM containment

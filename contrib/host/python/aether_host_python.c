@@ -1,7 +1,7 @@
 // aether_host_python.c — Embedded Python Language Host Module
 //
 // Embeds CPython in the Aether process. When run_sandboxed is called,
-// installs the Aether sandbox checker so Python's libc calls are
+// pushes its grants as a level of the calling thread's (#2955), so Python's libc calls are
 // intercepted and checked against the grant list.
 //
 // LOADING MODEL: dlopen, not -lpython. Resolves libpython at the
@@ -153,8 +153,6 @@ static int load_libpython(void) {
 
 static int python_initialized = 0;
 
-static void* python_perms_stack[64];
-static int   python_perms_depth = 0;
 
 extern int list_size(void*);
 extern void* list_get_raw(void*, int);
@@ -165,28 +163,6 @@ extern const char* aether_string_data(const void*);
 
 // The shared grant matcher (runtime/aether_sandbox_match.h).
 #include "aether_sandbox_match.h"
-
-static int perms_allow(void* ctx, const char* category, const char* resource) {
-    if (!ctx) return 1;
-    int n = list_size(ctx);
-    if (n == 0) return 0;
-    for (int i = 0; i < n; i += 2) {
-        const char* cat = aether_string_data(list_get_raw(ctx, i));
-        const char* pat = aether_string_data(list_get_raw(ctx, i + 1));
-        if (!cat || !pat) continue;
-        if (cat[0] == '*' && pat[0] == '*') return 1;
-        if (strcmp(cat, category) == 0 && aether_grant_match(category, pat, resource)) return 1;
-    }
-    return 0;
-}
-
-static int host_python_checker(const char* category, const char* resource) {
-    if (python_perms_depth <= 0) return 1;
-    for (int level = 0; level < python_perms_depth; level++) {
-        if (!perms_allow(python_perms_stack[level], category, resource)) return 0;
-    }
-    return 1;
-}
 
 int python_init(void) {
     if (python_initialized) return 0;
@@ -212,18 +188,15 @@ int python_run(const char* code) {
 int python_run_sandboxed(void* perms, const char* code) {
     if (!code) return -1;
     if (python_init() != 0) return -1;
-    if (python_perms_depth >= 64) return -1;
+    if (aether_sandbox_depth() >= AETHER_SANDBOX_MAX_LEVELS) return -1;
 
-    // Push perms onto our stack and install our checker
-    python_perms_stack[python_perms_depth++] = perms;
-    aether_sandbox_check_fn prev = _aether_sandbox_checker;
-    _aether_sandbox_checker = host_python_checker;
+    // The grants as a level of this thread's, in the runtime (#2955)
+    aether_sandbox_push(perms);
 
     int result = g_py.PyRun_SimpleStringFlags(code, NULL);
 
     // Restore
-    _aether_sandbox_checker = prev;
-    python_perms_depth--;
+    aether_sandbox_pop();
 
     return result;
 }
@@ -300,20 +273,17 @@ int python_run_sandboxed_with_map(void* perms, const char* code, uint64_t map_to
     const char* preamble =
         "from _aether_map import aether_map_get, aether_map_put\n";
 
-    if (python_perms_depth >= 64) return -1;
+    if (aether_sandbox_depth() >= AETHER_SANDBOX_MAX_LEVELS) return -1;
 
-    // Push perms and install checker
-    python_perms_stack[python_perms_depth++] = perms;
-    aether_sandbox_check_fn prev = _aether_sandbox_checker;
-    _aether_sandbox_checker = host_python_checker;
+    // The grants as a level of this thread's, in the runtime (#2955)
+    aether_sandbox_push(perms);
 
     // Run preamble + user code
     g_py.PyRun_SimpleStringFlags(preamble, NULL);
     int result = g_py.PyRun_SimpleStringFlags(code, NULL);
 
     // Restore
-    _aether_sandbox_checker = prev;
-    python_perms_depth--;
+    aether_sandbox_pop();
     py_current_map_token = 0;
 
     return result;

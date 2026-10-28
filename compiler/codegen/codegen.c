@@ -7186,7 +7186,7 @@ static void emit_sandbox_trust_wrappers(CodeGenerator* gen, ASTNode* program) {
         }
         if (pc == 0) fprintf(gen->output, "void");
         fprintf(gen->output, ") {\n");
-        fprintf(gen->output, "    int _aether_sbx_saved = _aether_sandbox_trust_enter(%d);\n", site);
+        fprintf(gen->output, "    int _aether_sbx_saved = aether_sandbox_trust_enter(&_aether_sandbox_image, %d);\n", site);
         fprintf(gen->output, "    ");
         if (returns) {
             emit_trust_return_type(gen, def);
@@ -7197,7 +7197,7 @@ static void emit_sandbox_trust_wrappers(CodeGenerator* gen, ASTNode* program) {
             fprintf(gen->output, "%s_aether_sbx_p%d", k ? ", " : "", k);
         }
         fprintf(gen->output, ");\n");
-        fprintf(gen->output, "    _aether_sandbox_depth = _aether_sbx_saved;\n");
+        fprintf(gen->output, "    aether_sandbox_restore(_aether_sbx_saved);\n");
         if (returns) fprintf(gen->output, "    return _aether_sbx_r;\n");
         fprintf(gen->output, "}\n");
     }
@@ -9605,100 +9605,30 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * grant that worked in a plain function was refused inside a
      * `spec.describe` block. Two different things were sharing one stack. */
     // Only emit sandbox bridge code if the program actually uses sandbox builtins.
-    // This avoids preamble bloat and the list_size/list_get dependency for programs
-    // that don't use sandboxing.
     bool has_sandbox = uses_sandbox(program);
     gen->uses_sandbox = has_sandbox ? 1 : 0;
-    /* Per thread: an enforce block contains the code that runs on its own
-     * thread. With one stack for the process, every other thread (an actor's,
-     * a std.worker's) was checked against the block's grants while it ran,
-     * and the stack itself was raced. These live in this translation unit,
-     * written and read only by its own code, so the TLS model never crosses
-     * an archive boundary (#1751). */
-    print_line(gen, "static AETHER_TLS void* _aether_sandbox_stack[64];");
-    print_line(gen, "static AETHER_TLS int _aether_sandbox_depth = 0;");
+    /* #2955: the grant levels are each thread's, kept by the runtime
+     * (runtime/aether_sandbox.c) and reached only through its functions, so
+     * every program and library on one runtime image shares a thread's
+     * levels: a library's export called inside another's enforce block is
+     * held to that block's grants, and can only narrow them. They used to
+     * live here, a stack per translation unit, with one process-wide
+     * checker pointer each enforce installed and cleared: a thread leaving
+     * its block switched off another thread's (or that thread called the
+     * pointer just cleared), and a nested library's stack was empty, or
+     * replaced the outer checker and then cleared it. A caught panic, in
+     * any code, leaves the levels pushed inside its try frame (the runtime
+     * does that in aether_panic); the per-thread stack was #1751's fix for
+     * other threads checked against a block's grants, and stays so. */
     if (has_sandbox) {
-        /* Trusted names in `sandbox.enforce(perms, foo) { ... }`: each level
-         * of the stack records which enforce site pushed it (0 for any other
-         * push). A trusted call runs with the authority of the code that
-         * wrote the enforce: it pushes a barrier, a level whose skip_to
-         * names the level its own site was entered at, and the checker
-         * walking down from the top jumps from the barrier to below that
-         * level, so the levels between (the block's grants, and any
-         * enforce inside it) do not apply. Never higher: a site is looked
-         * for only among the levels in force (not ones an earlier barrier
-         * hides), and one found nowhere on the live stack (a block that
-         * escaped its enforce, a level a panic abandoned) pushes nothing.
-         *
-         * It used to drop the depth to that level instead, and put it back
-         * after. An enforce inside the trusted function then pushed into the
-         * level it had dropped, over the block's grants, and freed what it
-         * pushed when it ended: the block was checked against freed memory
-         * from then on (allowing or refusing whatever that held), and with
-         * the depth at 0 the inner enforce's end uninstalled the checker for
-         * the rest of the block. A barrier only ever adds a level above the
-         * ones it hides, so nothing pushed inside reaches them, and a panic
-         * unwound by a `try`, which puts the depth back, leaves them as
-         * they were. */
-        print_line(gen, "static AETHER_TLS int _aether_sandbox_site_at[64];");
-        print_line(gen, "static AETHER_TLS int _aether_sandbox_skip_to[64];");
-        print_line(gen, "static AETHER_TLS int _aether_sandbox_pending_site = 0;");
-        print_line(gen, "static inline void _aether_sandbox_push(void* ctx) { if (_aether_sandbox_depth < 64) { _aether_sandbox_site_at[_aether_sandbox_depth] = _aether_sandbox_pending_site; _aether_sandbox_skip_to[_aether_sandbox_depth] = -1; _aether_sandbox_stack[_aether_sandbox_depth++] = ctx; } _aether_sandbox_pending_site = 0; }");
-        print_line(gen, "static inline AETHER_MAYBE_UNUSED int _aether_sandbox_trust_enter(int site) { int saved = _aether_sandbox_depth; for (int l = _aether_sandbox_depth - 1; l >= 0; l--) { if (_aether_sandbox_skip_to[l] >= 0) { l = _aether_sandbox_skip_to[l]; continue; } if (_aether_sandbox_site_at[l] == site) { if (_aether_sandbox_depth < 64) { _aether_sandbox_site_at[_aether_sandbox_depth] = 0; _aether_sandbox_skip_to[_aether_sandbox_depth] = l; _aether_sandbox_stack[_aether_sandbox_depth++] = (void*)0; } break; } } return saved; }");
-    } else {
-        print_line(gen, "static inline void _aether_sandbox_push(void* ctx) { if (_aether_sandbox_depth < 64) _aether_sandbox_stack[_aether_sandbox_depth++] = ctx; }");
-    }
-    print_line(gen, "static inline void _aether_sandbox_pop(void) { if (_aether_sandbox_depth > 0) _aether_sandbox_depth--; }");
-    if (has_sandbox) {
-        // Sandbox bridge: connects compiler-generated context stack to runtime checks.
-        print_line(gen, "typedef int (*aether_sandbox_check_fn)(const char*, const char*);");
-        print_line(gen, "extern aether_sandbox_check_fn _aether_sandbox_checker;");
-        print_line(gen, "extern int list_size(void*);");
-        print_line(gen, "extern void* list_get_raw(void*, int);");
-        print_line(gen, "#include \"aether_sandbox_match.h\"");
-        print_line(gen, "static int _aether_perms_allow(void* ctx, const char* category, const char* resource) {");
-        print_line(gen, "    if (!ctx) return 1;");
-        print_line(gen, "    int n = list_size(ctx);");
-        print_line(gen, "    if (n == 0) return 0;");
-        print_line(gen, "    for (int i = 0; i < n; i += 2) {");
-        /* An element is either string shape (a plain char* or an
-         * AetherString, as a grant copied by a wrapper that keeps its
-         * parameter is): read it through aether_string_data. */
-        print_line(gen, "        const void* cat_v = list_get_raw(ctx, i);");
-        print_line(gen, "        const void* pat_v = list_get_raw(ctx, i + 1);");
-        print_line(gen, "        if (!cat_v || !pat_v) continue;");
-        print_line(gen, "        const char* cat = aether_string_data(cat_v);");
-        print_line(gen, "        const char* pat = aether_string_data(pat_v);");
-        print_line(gen, "        if (cat[0] == '*' && pat[0] == '*') return 1;");
-        /* The shared matcher (runtime/aether_sandbox_match.h): globs, ports
-         * for tcp/udp, IPv4-mapped addresses. */
-        print_line(gen, "        if (strcmp(cat, category) == 0 && aether_grant_match(category, pat, resource)) return 1;");
-        print_line(gen, "    }");
-        print_line(gen, "    return 0;");
-        print_line(gen, "}");
-        print_line(gen, "extern void aether_sandbox_audit(const char*, const char*, int);");
-        print_line(gen, "static int _aether_sandbox_check_impl(const char* category, const char* resource) {");
-        print_line(gen, "    if (_aether_sandbox_depth <= 0) return 1;");
-        print_line(gen, "    int _allowed = 1;");
-        /* From the top down, a trusted call's barrier jumping over the
-         * levels it hides. With none left in force the check is the one an
-         * unsandboxed program makes: allowed, and not audited. */
-        print_line(gen, "    int _in_force = 0;");
-        print_line(gen, "    for (int level = _aether_sandbox_depth - 1; level >= 0; level--) {");
-        print_line(gen, "        if (_aether_sandbox_skip_to[level] >= 0) { level = _aether_sandbox_skip_to[level]; continue; }");
-        print_line(gen, "        _in_force = 1;");
-        print_line(gen, "        if (!_aether_perms_allow(_aether_sandbox_stack[level], category, resource)) { _allowed = 0; break; }");
-        print_line(gen, "    }");
-        print_line(gen, "    if (!_in_force) return 1;");
-        // Audit every in-process permission check — allowed and denied.
-        // The sink is opt-in (AETHER_SANDBOX_AUDIT) and the ring buffer
-        // is cheap, so this is unconditional. Note this runs only when a
-        // sandbox is active (_aether_sandbox_depth > 0).
-        print_line(gen, "    aether_sandbox_audit(category, resource, _allowed);");
-        print_line(gen, "    return _allowed;");
-        print_line(gen, "}");
-        print_line(gen, "static void _aether_sandbox_install(void) { _aether_sandbox_checker = _aether_sandbox_check_impl; }");
-        print_line(gen, "static void _aether_sandbox_uninstall(void) { if (_aether_sandbox_depth <= 0) _aether_sandbox_checker = 0; }");
+        /* This code's identity for trusted names: a site number is unique
+         * only within one program or library, and the levels are shared. */
+        print_line(gen, "static AETHER_MAYBE_UNUSED char _aether_sandbox_image;");
+        print_line(gen, "extern void aether_sandbox_push(void* grants);");
+        print_line(gen, "extern void aether_sandbox_pop(void);");
+        print_line(gen, "extern void aether_sandbox_tag_site(const void* image, int site);");
+        print_line(gen, "extern int aether_sandbox_trust_enter(const void* image, int site);");
+        print_line(gen, "extern void aether_sandbox_restore(int depth);");
         print_line(gen, "extern int aether_spawn_sandboxed(void* grant_list, const char* program, const char* arg);");
     }
     print_line(gen, "");

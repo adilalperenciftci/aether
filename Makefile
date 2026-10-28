@@ -1221,7 +1221,7 @@ compiler: $(BUILD_DIR)/aetherc$(EXE_EXT) $(BUILD_TARGET_STAMP)
 # The runtime pieces aetherc links, for this rule and compiler-fast alike:
 # compiler-fast kept a list of its own, which lost aether_spawn.c and
 # aether_sandbox.c and could not link (#3351).
-AETHERC_RUNTIME_SRC = runtime/utils/aether_spawn.c runtime/aether_sandbox.c runtime/aether_resource_caps.c runtime/aether_locale_num.c runtime/aether_callbacks.c
+AETHERC_RUNTIME_SRC = runtime/utils/aether_spawn.c runtime/aether_sandbox.c runtime/sandbox/aether_audit.c runtime/actors/aether_panic.c runtime/actors/aether_unwind.c runtime/aether_resource_caps.c runtime/aether_locale_num.c runtime/aether_callbacks.c
 AETHERC_RUNTIME_OBJS = $(patsubst %.c,$(OBJ_DIR)/%.o,$(AETHERC_RUNTIME_SRC))
 
 $(BUILD_DIR)/aetherc$(EXE_EXT): $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(AETHERC_RUNTIME_OBJS) $(IO_POLLER_OBJS) $(MANIFEST_OBJ) | $(VERSION_HEADER) $(STDLIB_SYMS_HEADER) $(FRONTEND_ID_HEADER)

@@ -12753,12 +12753,10 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             indent(gen);
             /* A panic that unwinds out of an enforced block (or out of a
              * trusted call inside one) skips the code that pops the sandbox
-             * or restores its depth. Catching it puts the depth back to what
-             * it was here, so a catch inside the block stays sandboxed and
-             * one outside it is no longer held to the block's grants. */
-            if (gen->uses_sandbox) {
-                print_line(gen, "int _aether_try_sbx_%d = _aether_sandbox_depth;", uid);
-            }
+             * or restores its depth. The runtime leaves the levels pushed
+             * inside this frame as the panic reaches it (#2955), so a catch
+             * inside the block stays sandboxed and one outside it is no
+             * longer held to the block's grants, whichever code catches. */
             /* #2810: so does a panic out of a trailing block: the builder
              * context stack goes back to its depth here, and the configs of
              * the builder blocks the panic abandoned are released. */
@@ -12774,9 +12772,6 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             unindent(gen);
             print_line(gen, "} else {");
             indent(gen);
-            if (gen->uses_sandbox) {
-                print_line(gen, "_aether_sandbox_depth = _aether_try_sbx_%d;", uid);
-            }
             print_line(gen, "_aether_ctx_unwind(_aether_try_ctx_%d);", uid);
             /* #2739: a binding a `try` of its handler writes is volatile:
              * the handler is outside that try, whose setjmp sees it. */

@@ -3689,9 +3689,7 @@ import std.audit
 
 run_sandboxed(perms: ptr, code: fn) {
     sandbox_push(perms)
-    sandbox_install()
     call(code, perms)
-    sandbox_uninstall()
     sandbox_pop()
 }
 

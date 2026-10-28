@@ -3,6 +3,7 @@
  * from std/string is linked, so a runtime-only link (the WASI panic lib)
  * still resolves. */
 #include "../../std/string/aether_string.h"
+#include "../aether_sandbox.h"
 
 #include <signal.h>
 #include <stdio.h>
@@ -455,6 +456,14 @@ void aether_panic_owned(const char* reason, void (*release)(const void*)) {
     if (f) {
         f->reason = reason;
         f->reason_release = release;
+#ifdef AETHER_HAS_SANDBOX
+        // The sandbox levels pushed inside the frame are left with it, in
+        // the runtime, whichever code catches (#2955): a catch in code that
+        // never enforces, or an actor's barrier, restored nothing, and the
+        // thread stayed held to grants freed with the block. Before the
+        // drain, which may free them.
+        aether_sandbox_unwind_to_frame(aether_try_depth());
+#endif
         // Free the innermost frame's still-live journaled allocations
         // before the jump skips their deferred frees (aether_unwind.c).
         aether_unwind_drain_current();
@@ -527,6 +536,9 @@ static void aether_sig_handler(int sig, siginfo_t* info, void* ucontext) {
     }
     f->reason = reason;
     f->reason_release = NULL;
+#ifdef AETHER_HAS_SANDBOX
+    aether_sandbox_unwind_to_frame(aether_try_depth());
+#endif
     AETHER_SIGLONGJMP(f->buf, 1);
 }
 

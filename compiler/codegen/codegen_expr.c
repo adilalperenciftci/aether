@@ -9460,7 +9460,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 if (site) {
                     const ASTNode* saved_site = g_sandbox_site_wrapping;
                     g_sandbox_site_wrapping = expr;
-                    fprintf(gen->output, "(_aether_sandbox_pending_site = %d, ", site);
+                    fprintf(gen->output, "(aether_sandbox_tag_site(&_aether_sandbox_image, %d), ", site);
                     generate_expression(gen, expr);
                     fprintf(gen->output, ")");
                     g_sandbox_site_wrapping = saved_site;
@@ -10385,22 +10385,23 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     }
                     fprintf(gen->output, ")");
                 }
-                // ctx_push(ptr) / ctx_pop() — explicit context stack manipulation
+                // sandbox_push(grants) / sandbox_pop(): a grant level on this
+                // thread, kept by the runtime (#2955)
                 else if (strcmp(func_name, "sandbox_push") == 0 && expr->child_count == 1) {
-                    fprintf(gen->output, "_aether_sandbox_push((void*)(intptr_t)");
+                    fprintf(gen->output, "aether_sandbox_push((void*)(intptr_t)");
                     generate_expression(gen, expr->children[0]);
                     fprintf(gen->output, ")");
                 }
                 else if (strcmp(func_name, "sandbox_pop") == 0 && expr->child_count == 0) {
-                    fprintf(gen->output, "_aether_sandbox_pop()");
+                    fprintf(gen->output, "aether_sandbox_pop()");
                 }
-                // sandbox_install() — activate runtime sandbox checking
-                else if (strcmp(func_name, "sandbox_install") == 0 && expr->child_count == 0) {
-                    fprintf(gen->output, "_aether_sandbox_install()");
-                }
-                // sandbox_uninstall() — deactivate runtime sandbox checking
-                else if (strcmp(func_name, "sandbox_uninstall") == 0 && expr->child_count == 0) {
-                    fprintf(gen->output, "_aether_sandbox_uninstall()");
+                // sandbox_install() / sandbox_uninstall(): nothing to do
+                // since #2955. The check reads the thread's levels, so a push
+                // is all it takes; the process-wide checker these set and
+                // cleared is gone. Kept so code that calls them still builds.
+                else if ((strcmp(func_name, "sandbox_install") == 0 ||
+                          strcmp(func_name, "sandbox_uninstall") == 0) && expr->child_count == 0) {
+                    fprintf(gen->output, "((void)0)");
                 }
                 // builder_depth() — returns the current builder nesting depth
                 else if (strcmp(func_name, "builder_depth") == 0) {
