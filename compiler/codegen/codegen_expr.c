@@ -12067,6 +12067,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 case TYPE_UINT64:     c_type = "uint64_t"; c_zero = "0"; break;
                                 case TYPE_DURATION:   c_type = "int64_t"; c_zero = "0"; break;
                                 case TYPE_PTR:        c_type = "void*"; c_zero = "NULL"; break;
+                                /* #3332: a reference is a pointer; as an int it lost its high half. */
+                                case TYPE_ACTOR_REF:  c_type = "void*"; c_zero = "NULL"; break;
                                 case TYPE_FUNCTION:   c_type = "_AeClosure"; c_zero = "(_AeClosure){0}"; break;
                                 default:              c_type = "int"; c_zero = "0"; break;
                             }

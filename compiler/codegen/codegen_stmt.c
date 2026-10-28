@@ -13492,6 +13492,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             case TYPE_UINT64:     c_type = "uint64_t"; break;
                             case TYPE_DURATION:   c_type = "int64_t"; break;
                             case TYPE_PTR:        c_type = "void*"; break;
+                            /* #3332: a reference is a pointer, as on the asker's side. */
+                            case TYPE_ACTOR_REF:  c_type = "void*"; break;
                             default:              c_type = "int"; break;
                         }
                         fprintf(gen->output, "{ %s _reply_val = (%s)(", c_type, c_type);

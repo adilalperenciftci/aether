@@ -1,0 +1,47 @@
+// #3332: a reply of an actor reference keeps its type through the ask.
+// The reply was packed as an `int` (the pointer cut to its low half) and
+// the ask's result typed `int`, so the asker could not send through it:
+// the C did not compile (`void *` from `int`). Here an ask returns a worker
+// held by another actor, bare and inside a reply message, and messages
+// sent through both reach the worker.
+
+extern exit(code: int)
+
+message Ping {}
+message Count {}
+message Get {}
+message GetBoxed {}
+message Boxed { ref: actor_ref }
+
+actor Worker {
+    state n = 0
+    receive {
+        Ping() -> { n = n + 1 }
+        Count() -> { reply n }
+    }
+}
+
+actor Holder {
+    state w: actor_ref = null
+    receive {
+        Get() -> { reply w }
+        GetBoxed() -> { reply Boxed { ref: w } }
+    }
+}
+
+main() {
+    h = spawn(Holder())
+    worker = spawn(Worker())
+    h.w = worker
+    r = h ? Get {}
+    r ! Ping {}
+    b = h ? GetBoxed {}
+    b ! Ping {}
+    wait_for_idle()
+    n = worker ? Count {}
+    if n != 2 {
+        println("FAIL: the worker counted ${n} pings, not 2")
+        exit(1)
+    }
+    println("ok")
+}
