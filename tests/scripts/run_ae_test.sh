@@ -29,6 +29,12 @@
 # Behaviour is unchanged from the generated version on every platform.
 set -u
 
+# The tree is what the sweep tests, never an install: an inherited AETHER_HOME
+# (install.sh sets it) points a test that runs build/aetherc without pinning
+# it at the installed std, which fails where the two differ (#3342). A test
+# that wants an install names one itself.
+unset AETHER_HOME
+
 f="$1"
 tmpdir="$2"
 root="$3"
