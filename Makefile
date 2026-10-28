@@ -974,6 +974,7 @@ TEST_SRC = tests/runtime/test_harness.c \
            tests/runtime/test_actor_death.c \
            tests/runtime/test_actor_rebirth.c \
            tests/runtime/test_mailbox_bound.c \
+           tests/runtime/test_win_mutex_no_debug_info.c \
            tests/runtime/test_http_server.c \
            tests/runtime/test_http_resolver.c \
            tests/runtime/test_resource_caps.c \
@@ -1217,19 +1218,31 @@ compiler: $(BUILD_DIR)/aetherc$(EXE_EXT) $(BUILD_TARGET_STAMP)
 # the binary other tests were executing at that moment: macOS kills a process
 # whose text file changed under it, which is a SIGKILL in a test that never
 # went near the build system.
-$(BUILD_DIR)/aetherc$(EXE_EXT): $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(OBJ_DIR)/runtime/utils/aether_spawn.o $(OBJ_DIR)/runtime/aether_sandbox.o $(OBJ_DIR)/runtime/aether_resource_caps.o $(OBJ_DIR)/runtime/aether_locale_num.o $(OBJ_DIR)/runtime/aether_callbacks.o $(IO_POLLER_OBJS) $(MANIFEST_OBJ) | $(VERSION_HEADER) $(STDLIB_SYMS_HEADER) $(FRONTEND_ID_HEADER)
+# The runtime pieces aetherc links, for this rule and compiler-fast alike:
+# compiler-fast kept a list of its own, which lost aether_spawn.c and
+# aether_sandbox.c and could not link (#3351).
+AETHERC_RUNTIME_SRC = runtime/utils/aether_spawn.c runtime/aether_sandbox.c runtime/aether_resource_caps.c runtime/aether_locale_num.c runtime/aether_callbacks.c
+AETHERC_RUNTIME_OBJS = $(patsubst %.c,$(OBJ_DIR)/%.o,$(AETHERC_RUNTIME_SRC))
+
+$(BUILD_DIR)/aetherc$(EXE_EXT): $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(AETHERC_RUNTIME_OBJS) $(IO_POLLER_OBJS) $(MANIFEST_OBJ) | $(VERSION_HEADER) $(STDLIB_SYMS_HEADER) $(FRONTEND_ID_HEADER)
 	@echo "Linking compiler..."
-	@$(CC) $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(OBJ_DIR)/runtime/utils/aether_spawn.o $(OBJ_DIR)/runtime/aether_sandbox.o $(OBJ_DIR)/runtime/aether_resource_caps.o $(OBJ_DIR)/runtime/aether_locale_num.o $(OBJ_DIR)/runtime/aether_callbacks.o $(IO_POLLER_OBJS) $(MANIFEST_OBJ) -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) $(AETHERC_STACK_LDFLAGS)
+	@$(CC) $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(AETHERC_RUNTIME_OBJS) $(IO_POLLER_OBJS) $(MANIFEST_OBJ) -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) $(AETHERC_STACK_LDFLAGS)
 	@echo "Compiler built successfully"
 
-# Fast compiler target (monolithic, for clean builds)
-compiler-fast: $(FRONTEND_ID_HEADER)
+# Fast compiler target (monolithic, for clean builds): the same sources and
+# generated headers as the rule above, compiled in one command. The sources
+# compiled with flags of their own (the vendored lzf and miniaudio, which
+# relax warnings for them alone) come from their own rules; one command
+# cannot give one file different flags.
+COMPILER_FAST_OWN_SRC = std/lzf/lzf_c.c std/lzf/lzf_d.c std/lzf/aether_lzf.c std/audio/aether_audio.c
+COMPILER_FAST_OWN_OBJS = $(patsubst %.c,$(OBJ_DIR)/%.o,$(filter $(COMPILER_FAST_OWN_SRC),$(STD_SRC)))
+compiler-fast: $(COMPILER_FAST_OWN_OBJS) $(MANIFEST_OBJ) | $(VERSION_HEADER) $(STDLIB_SYMS_HEADER) $(FRONTEND_ID_HEADER)
 ifdef WINDOWS_NATIVE
 	@if not exist "$(BUILD_DIR)" mkdir "$(BUILD_DIR)"
 else
 	@$(MKDIR) $(BUILD_DIR)
 endif
-	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) $(IO_POLLER_SRC) runtime/aether_resource_caps.c runtime/aether_locale_num.c runtime/aether_callbacks.c -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) $(AETHERC_STACK_LDFLAGS)
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(COMPILER_SRC) $(filter-out $(COMPILER_FAST_OWN_SRC),$(STD_SRC)) $(COMPILER_FAST_OWN_OBJS) $(COLLECTIONS_SRC) $(AETHERC_RUNTIME_SRC) $(IO_POLLER_SRC) $(MANIFEST_OBJ) -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) $(AETHERC_STACK_LDFLAGS)
 
 test: $(TEST_OBJS) $(COMPILER_LIB_OBJS) $(RUNTIME_OBJS) $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS)
 	@echo "==================================="
@@ -2045,6 +2058,7 @@ $(BUILD_DIR)/libaether_main.a: runtime/windows/aether_lib_main.c $(BUILD_FLAGS_S
 
 $(BUILD_DIR)/aether_manifest.o: runtime/windows/aether.rc runtime/windows/aether.manifest
 	@echo "Compiling the Windows application manifest..."
+	@mkdir -p $(BUILD_DIR)
 	@$(WINDRES) -I runtime/windows runtime/windows/aether.rc -O coff -o $@
 
 # The archive is a FILE target, not a phony one. As a phony `stdlib` it was
