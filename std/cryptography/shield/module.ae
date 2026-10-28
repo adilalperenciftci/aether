@@ -1,0 +1,125 @@
+// MIT License (https://opensource.org/licenses/MIT)
+// Portions copyright (c) 2026 Aether Developers.
+//
+// std.cryptography.shield: a long-lived secret (a private key) held
+// encrypted in memory, in the clear only while it is used (#3376).
+//
+// A key a server keeps for its whole life sits at one address for as long
+// as the process runs, which is what memory-reading attacks need: RAMBleed
+// (Rowhammer used to read, Kwong et al., IEEE S&P 2020, which recovered an
+// RSA key from OpenSSH), Spectre-class reads, a core dump. Shielding, as
+// OpenSSH has done since 8.2:
+//
+//   wrap(secret)    a fresh 16 KiB random pre-key; the secret sealed with
+//                   ChaCha20-Poly1305 under SHA-512(pre-key) (its first 32
+//                   bytes the key, the next 12 the nonce); the plaintext
+//                   wiped. -> (handle, "") or (null, why)
+//   unwrap(handle)  SHA-512 of the pre-key again, the secret opened into a
+//                   fresh buffer the caller wipes after the one use
+//                   (bytes.wipe_free). -> (secret, "") or (null, why)
+//   free(handle)    the pre-key and the sealed secret wiped and freed
+//
+// To read the secret, an attacker must read the whole pre-key without a
+// single wrong bit, as well as the sealed secret: far beyond what those
+// channels give, where a plain key needs only its own few hundred bits. The
+// plaintext exists for the length of one use. The Poly1305 tag also catches
+// a bit that flipped in the sealed secret or the pre-key: unwrap refuses
+// it, so a corrupted key is never used. The cost per unwrap is one SHA-512
+// over 16 KiB and the decryption of the secret.
+//
+// What it does not do: lock the pre-key in memory (mlock), keep it out of
+// core dumps (MADV_DONTDUMP) or out of the kernel's direct map
+// (memfd_secret). Hardware memory encryption (Intel TME, AMD SME) stops
+// RAMBleed outright, and is the operator's choice.
+
+import std.bytes
+import std.cryptography
+import std.cryptography.sha2
+import std.cryptography.chacha20poly1305
+
+exports(
+    wrap, unwrap, free, PREKEY_SIZE, Shielded
+)
+
+// The pre-key's size, OpenSSH's (SSHKEY_SHIELD_PREKEY_LEN).
+const PREKEY_SIZE = 16384
+
+// What a handle points to. Its fields are the module's; they are exported
+// so a test can show a changed bit is refused.
+struct Shielded {
+    prekey: ptr // PREKEY_SIZE random bytes
+    sealed: ptr // the secret under ChaCha20-Poly1305, its tag appended
+}
+
+// The AEAD key and nonce from the pre-key: SHA-512(prekey), the first 32
+// bytes the key and the next 12 the nonce. Each wrap has its own pre-key,
+// so a nonce never serves two keys. The caller wipes both.
+fn derive(prekey: ptr) -> (ptr, ptr) {
+    h = sha2.sha512_bytes(bytes.view(prekey))
+    if h == null { return null, null }
+    key = bytes.new(32)
+    nonce = bytes.new(12)
+    bytes.copy_from_bytes(key, 0, h, 0, 32)
+    bytes.copy_from_bytes(nonce, 0, h, 32, 12)
+    bytes.wipe_free(h)
+    return key, nonce
+}
+
+// Seal `secret` (a std.bytes buffer, consumed: wiped and freed on every
+// path) behind a fresh pre-key. (handle, "") or (null, why): no randomness,
+// or an empty or null secret.
+wrap(secret: @frees ptr) -> (ptr, string) {
+    if secret == null { return null, "the secret is null" }
+    n = bytes.length(secret)
+    if n < 1 {
+        bytes.wipe_free(secret)
+        return null, "the secret is empty"
+    }
+    prekey, rerr = cryptography.random_buffer(PREKEY_SIZE)
+    if rerr != "" || prekey == null {
+        bytes.wipe_free(secret)
+        return null, "no randomness for the pre-key: ${rerr}"
+    }
+    key, nonce = derive(prekey)
+    if key == null {
+        bytes.wipe_free(prekey)
+        bytes.wipe_free(secret)
+        return null, "SHA-512 is not available"
+    }
+    sealed = chacha20poly1305.aead_seal(key, nonce, bytes.view(prekey)[0..0], bytes.view(secret))
+    bytes.wipe_free(key)
+    bytes.wipe_free(nonce)
+    bytes.wipe_free(secret)
+    h = heap.new(Shielded)
+    h.prekey = prekey
+    h.sealed = sealed
+    return h as ptr, ""
+}
+
+// The secret, in a fresh buffer the caller wipes with bytes.wipe_free as
+// soon as it is used; (null, why) when the handle is null or the sealed
+// secret or the pre-key changed in memory (the tag does not hold), in
+// which case the secret must not be used.
+unwrap(handle: @keep ptr) -> (ptr, string) {
+    if handle == null { return null, "the handle is null" }
+    h = handle as *Shielded
+    key, nonce = derive(h.prekey)
+    if key == null { return null, "SHA-512 is not available" }
+    secret, oerr = chacha20poly1305.aead_open(key, nonce, bytes.view(h.prekey)[0..0], bytes.view(h.sealed))
+    bytes.wipe_free(key)
+    bytes.wipe_free(nonce)
+    if oerr != "" {
+        if secret != null { bytes.wipe_free(secret) }
+        return null, "the shielded secret changed in memory (${oerr}): it is not used"
+    }
+    return secret, ""
+}
+
+// Wipe and free what wrap made. Idempotent on null.
+free(handle: @frees ptr) {
+    if handle == null { return }
+    h = handle as *Shielded
+    bytes.wipe_free(h.prekey)
+    bytes.wipe_free(h.sealed)
+    heap.free(h)
+}
