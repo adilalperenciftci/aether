@@ -94,6 +94,9 @@ tests/integration/emit_lib_interrupt/
 # #2956: alloc.ae is a library with no main; the driver builds it and its C host
 # calls it past a memory cap and with allocations made to fail.
 tests/integration/emit_lib_alloc_failure/
+# #3377: kinds.ae is a library and outside.ae a program the driver runs with
+# allocations made to fail; the driver builds both.
+tests/integration/emit_lib_generated_alloc/
 tests/integration/emit_lib_keeps_main/
 tests/integration/emit_lib_net/
 tests/integration/emit_lib_typed_ptr/

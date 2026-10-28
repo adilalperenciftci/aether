@@ -8571,6 +8571,33 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * or cancel) re-raises it after its own cleanup. */
     print_line(gen, "extern int  aether_exec_interrupting(void);");
     print_line(gen, "extern void aether_exec_reraise(void);");
+    /* #3377: every allocation the generated code makes for itself (a
+     * captured variable's cell, a ref, a closure's environment or box, a
+     * thunk, heap.new) goes through _aether_alloc. Out of memory, it ends a
+     * library call with AETHER_OUT_OF_MEMORY and is a panic naming what ran
+     * out elsewhere (aether_out_of_memory); the result used to be used
+     * unchecked, a NULL dereference. A malloc the program calls itself keeps
+     * returning NULL (_aether_alloc_or_null) and ends a library call at its
+     * next safe point. The flag and the refusal are the runtime's test hook
+     * (aether_test_fail_alloc_after): one load while no test armed it. The
+     * names are parenthesized where the helpers are defined, so a test can
+     * wrap the call sites in a macro of the same name (closure_local_env_free
+     * counts closure environments and cells that way). */
+    print_line(gen, "extern _Atomic int aether_alloc_test_armed;");
+    print_line(gen, "extern int  aether_alloc_test_refuses(void);");
+    print_line(gen, "extern void aether_alloc_failed(int why);");
+    print_line(gen, "static inline void* (_aether_alloc)(size_t size, int zeroed, const char* what) {");
+    print_line(gen, "    void* p = (atomic_load_explicit(&aether_alloc_test_armed, memory_order_relaxed) &&");
+    print_line(gen, "               aether_alloc_test_refuses()) ? (void*)0 : zeroed ? calloc(1, size) : malloc(size);");
+    print_line(gen, "    if (!p) aether_out_of_memory(what);");
+    print_line(gen, "    return p;");
+    print_line(gen, "}");
+    print_line(gen, "static inline void* (_aether_alloc_or_null)(size_t size) {");
+    print_line(gen, "    void* p = (atomic_load_explicit(&aether_alloc_test_armed, memory_order_relaxed) &&");
+    print_line(gen, "               aether_alloc_test_refuses()) ? (void*)0 : calloc(1, size);");
+    print_line(gen, "    if (!p) aether_alloc_failed(5);  /* AETHER_STOP_OUT_OF_MEMORY */");
+    print_line(gen, "    return p;");
+    print_line(gen, "}");
     print_line(gen, "#include \"aether_slice.h\"");   /* #1286 `T[]` fat pointer */
     /* Cons-cell sequence type — std.collections.string_seq.
      *
@@ -9255,8 +9282,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * releases included. */
     print_line(gen, "typedef union { atomic_long _refs; long double _ld; void* _p; long long _ll; } _AeCellHeader;");
     print_line(gen, "static inline void* _aether_cell_new(size_t size) {");
-    print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)calloc(1, sizeof(_AeCellHeader) + size);");
-    print_line(gen, "    if (!h) aether_out_of_memory(\"out of memory allocating a captured variable\");");
+    print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)_aether_alloc(sizeof(_AeCellHeader) + size, 1, \"out of memory allocating a captured variable\");");
     print_line(gen, "    atomic_init(&h->_refs, 1);");
     print_line(gen, "    return (void*)(h + 1);");
     print_line(gen, "}");
@@ -9603,7 +9629,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "extern void aether_sleep_ms(int ms);");
     // Ref cells: heap-allocated mutable values for shared state in closures
     print_line(gen, "#if !AETHER_GCC_COMPAT");
-    print_line(gen, "static void* _aether_ref_new(intptr_t val) { intptr_t* r = malloc(sizeof(intptr_t)); *r = val; return (void*)r; }");
+    print_line(gen, "static void* _aether_ref_new(intptr_t val) { intptr_t* r = (intptr_t*)_aether_alloc(sizeof(intptr_t), 0, \"out of memory allocating a ref\"); *r = val; return (void*)r; }");
     print_line(gen, "#endif");
     // Closure support: generic closure struct (function pointer + captured environment)
     print_line(gen, "typedef struct { void (*fn)(void); void* env; } _AeClosure;");
@@ -9686,8 +9712,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "typedef struct { void (*fn)(void); void* env; unsigned long long tag; } _AeClosureBox;");
     print_line(gen, "#define _AE_CLOSURE_TAG 0xAEC105EDB0CEDULL");
     print_line(gen, "static inline void* _aether_box_closure(_AeClosure c) {");
-    print_line(gen, "    _AeClosureBox* p = (_AeClosureBox*)malloc(sizeof(_AeClosureBox));");
-    print_line(gen, "    if (!p) return (void*)0;");
+    print_line(gen, "    _AeClosureBox* p = (_AeClosureBox*)_aether_alloc(sizeof(_AeClosureBox), 0, \"out of memory boxing a closure\");");
     print_line(gen, "    p->fn = c.fn; p->env = c.env; p->tag = _AE_CLOSURE_TAG;");
     print_line(gen, "    return (void*)p;");
     print_line(gen, "}");
@@ -9728,7 +9753,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "}");
     // Lazy evaluation: thunks (deferred computation with memoization)
     print_line(gen, "typedef struct { _AeClosure compute; intptr_t value; int evaluated; } _AeThunk;");
-    print_line(gen, "static inline void* _aether_thunk_new(_AeClosure c) { _AeThunk* t = malloc(sizeof(_AeThunk)); t->compute = c; t->value = 0; t->evaluated = 0; return (void*)t; }");
+    print_line(gen, "static inline void* _aether_thunk_new(_AeClosure c) { _AeThunk* t = (_AeThunk*)_aether_alloc(sizeof(_AeThunk), 0, \"out of memory allocating a lazy value\"); t->compute = c; t->value = 0; t->evaluated = 0; return (void*)t; }");
     print_line(gen, "static inline intptr_t _aether_thunk_force(void* p) { _AeThunk* t = (_AeThunk*)p; if (!t->evaluated) { t->value = (intptr_t)((intptr_t(*)(void*))t->compute.fn)(t->compute.env); t->evaluated = 1; } return t->value; }");
     // thunk_free: free the thunk struct. The closure env is owned by
     // the closure variable (auto-deferred), not the thunk. The thunk

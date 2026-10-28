@@ -116,10 +116,14 @@ int aether_exec_stop_reason(void);
 void aether_alloc_failed(int why);
 
 /* Test hook (runtime C tests and C hosts of tests only; generated code never
- * calls it): the n-th cap-aware allocation from now on this thread fails as
- * if the allocator were out of memory, once; 0 turns it off. */
+ * arms it): the n-th checked allocation from now on this thread fails as if
+ * the allocator were out of memory, once; 0 turns it off. The checked ones
+ * are the cap-aware allocators, a send's payload copy and every allocation
+ * the generated code makes (_aether_alloc and _aether_alloc_or_null). */
 void aether_test_fail_alloc_after(int n);
-/* Whether the hook refuses this allocation (it counts it). */
+/* Whether the hook refuses this allocation (it counts it); read the flag
+ * first, as the generated code does: nonzero once a test armed the hook. */
+extern _Atomic int aether_alloc_test_armed;
 int aether_alloc_test_refuses(void);
 
 /* For a C-backed std operation that runs long on its input: 1 when the

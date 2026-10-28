@@ -626,9 +626,14 @@ or when it returns, with `AETHER_MEMORY_CAP` or `AETHER_OUT_OF_MEMORY`
 and the zero value: its defers run, and a `try` in the script does not
 catch it. The call does not unwind from inside the allocator, which would
 skip the C code between it and the safe point. An allocation the code
-cannot go on without (a message's payload copy, a captured variable's
-cell, `make([]T, n)`) ends the call at once with `AETHER_OUT_OF_MEMORY`;
-outside an export those still stop the process or panic, as before.
+cannot go on without ends the call at once with `AETHER_OUT_OF_MEMORY`: a
+message's payload copy, `make([]T, n)`, and every allocation the generated
+code makes for itself (a captured variable's cell, `ref`, `lazy`, a
+closure's environment, a closure boxed into a `ptr`, `heap.new`, #3377).
+Outside an export a send stops the process as before, and the others are
+a panic naming what ran out (they used to dereference NULL). A `malloc`
+the program declares and calls itself still returns NULL, as C's does,
+and ends the call when it next reaches a safe point or returns.
 Neither the outcome nor the unwind allocates: the reasons are static
 strings and the journal is drained in place. One failure still stops the
 process, inside an export or not: a message the scheduler has no memory to

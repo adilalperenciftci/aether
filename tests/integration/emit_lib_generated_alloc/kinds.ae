@@ -1,0 +1,87 @@
+// The library of the generated-allocation test (#3377): each export makes
+// one kind of allocation the generated code makes for itself, with the
+// runtime's test hook set to fail exactly that one. Each call must end with
+// AETHER_OUT_OF_MEMORY, not dereference NULL.
+import std.list
+
+extern aether_test_fail_alloc_after(n: int)
+extern malloc(n: int) -> ptr
+extern free(p: ptr)
+
+struct Point {
+    x: int
+}
+
+// A captured variable a closure writes: its cell.
+k_cell(n: int) -> int {
+    aether_test_fail_alloc_after(1)
+    x = n
+    bump = || { x = x + 1 }
+    bump()
+    return x
+}
+
+// ref(value): its cell.
+k_ref(n: int) -> int {
+    aether_test_fail_alloc_after(1)
+    r = ref(n)
+    v = ref_get(r)
+    ref_free(r)
+    return v
+}
+
+// lazy(closure): its thunk.
+k_lazy(n: int) -> int {
+    c = || { return 42 }
+    aether_test_fail_alloc_after(1)
+    l = lazy(c)
+    v = force(l)
+    thunk_free(l)
+    return v + n
+}
+
+// A closure that captures a value: its environment.
+k_env(n: int) -> int {
+    y = n
+    aether_test_fail_alloc_after(1)
+    f = || { return y + 1 }
+    return f()
+}
+
+// A closure kept in a list: its box.
+k_box(n: int) -> int {
+    l = list.new()
+    f = || { return 1 }
+    aether_test_fail_alloc_after(1)
+    _ = list.add(l, f)
+    s = list.size(l)
+    list.free(l)
+    return s + n
+}
+
+// heap.new(T): the struct.
+k_heap(n: int) -> int {
+    aether_test_fail_alloc_after(1)
+    p = heap.new(Point)
+    p.x = n
+    v = p.x
+    heap.free(p)
+    return v
+}
+
+// The program's own malloc: NULL, as C's is, and the call ends when it
+// returns.
+k_malloc(n: int) -> int {
+    aether_test_fail_alloc_after(1)
+    p = malloc(16)
+    if p == null {
+        return -1
+    }
+    free(p)
+    return n
+}
+
+// Nothing fails.
+plain(n: int) -> int {
+    return n * 2
+}

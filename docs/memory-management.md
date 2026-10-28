@@ -144,7 +144,12 @@ are its variants: a sum owns when one of its variant structs does, and its
 retain and drop are that variant's, for the variant its tag names. A struct
 parameter is borrowed; one its body writes into is copied on entry. A
 struct boxed with `heap.new(T)` owns its fields as a local struct does, and
-`heap.free(p)` releases them before it frees the box. A
+`heap.free(p)` releases them before it frees the box. Out of memory,
+`heap.new`, like every allocation the compiler makes for the program (a
+captured variable's cell, `ref`, `lazy`, a closure's environment or box),
+is a panic naming what ran out, and inside a library call it ends the call
+with `AETHER_OUT_OF_MEMORY` (#3377); a `malloc` the program calls itself
+returns NULL. A
 fixed-size array is held by value wherever it goes: a local, a field, a
 message field, an optional's payload, a function's result (returned in a
 struct of its own), a temporary passed as an argument.

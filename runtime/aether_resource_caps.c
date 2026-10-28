@@ -173,17 +173,18 @@ uint64_t aether_caps_used_bytes(void) {
  * which holds memory and may hold a lock. */
 
 /* aether_test_fail_alloc_after: one global load per allocation while no
- * test has asked, the count per thread so a test is deterministic. */
-static _Atomic int g_alloc_test_armed = 0;
+ * test has asked, the count per thread so a test is deterministic. The flag
+ * is read by generated code too (_aether_alloc, #3377), so it is exported. */
+_Atomic int aether_alloc_test_armed = 0;
 static AETHER_TLS_SHARED int t_alloc_fail_after = 0;
 
 void aether_test_fail_alloc_after(int n) {
     t_alloc_fail_after = n > 0 ? n : 0;
-    if (n > 0) atomic_store_explicit(&g_alloc_test_armed, 1, memory_order_relaxed);
+    if (n > 0) atomic_store_explicit(&aether_alloc_test_armed, 1, memory_order_relaxed);
 }
 
 int aether_alloc_test_refuses(void) {
-    if (!atomic_load_explicit(&g_alloc_test_armed, memory_order_relaxed)) return 0;
+    if (!atomic_load_explicit(&aether_alloc_test_armed, memory_order_relaxed)) return 0;
     if (t_alloc_fail_after <= 0) return 0;
     return --t_alloc_fail_after == 0;
 }

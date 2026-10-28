@@ -5257,7 +5257,7 @@ void emit_closure_definitions(CodeGenerator* gen) {
             fprintf(gen->output, "static void* _aether_make_env_%d(", id);
             emit_make_closure_params(gen, ci);
             fprintf(gen->output, ") {\n");
-            fprintf(gen->output, "    _closure_env_%d* _e = malloc(sizeof(_closure_env_%d));\n", id, id);
+            fprintf(gen->output, "    _closure_env_%d* _e = (_closure_env_%d*)_aether_alloc(sizeof(_closure_env_%d), 0, \"out of memory allocating a closure environment\");\n", id, id, id);
             fprintf(gen->output, "    _e->_dtor = _closure_env_%d_free;\n", id);
             fprintf(gen->output, "    atomic_init(&_e->_refs, 1);\n");
             for (int i = 0; i < cap_count; i++) {
@@ -7647,7 +7647,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     "in heap.new", AETHER_ERR_NONE);
                 struct_c = "void";
             }
-            fprintf(gen->output, "((%s*)calloc(1, sizeof(%s)))",
+            fprintf(gen->output, "((%s*)_aether_alloc(sizeof(%s), 1, \"out of memory in heap.new\"))",
                     struct_c, struct_c);
             break;
         }
@@ -9475,9 +9475,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
              * pointer later reaches its type (`malloc(n) as *T`, or a `ptr`
              * bound first and cast after), then has its fields read by a
              * field store, which releases the value it replaces; malloc left
-             * them garbage (#1873). */
+             * them garbage (#1873). It still returns NULL when out of
+             * memory, as the program's own malloc does, and a library call
+             * then ends at its next safe point (#3377). */
             if (call_is_c_malloc(gen, expr)) {
-                fprintf(gen->output, "calloc(1, (size_t)(");
+                fprintf(gen->output, "_aether_alloc_or_null((size_t)(");
                 generate_expression(gen, expr->children[0]);
                 fprintf(gen->output, "))");
                 break;
@@ -10166,7 +10168,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 // ref(value) — create a heap-allocated mutable cell
                 else if (strcmp(func_name, "ref") == 0 && expr->child_count == 1) {
                     fprintf(gen->output, "\n#if AETHER_GCC_COMPAT\n");
-                    fprintf(gen->output, "({ intptr_t* _r = malloc(sizeof(intptr_t)); *_r = (intptr_t)(");
+                    fprintf(gen->output, "({ intptr_t* _r = (intptr_t*)_aether_alloc(sizeof(intptr_t), 0, \"out of memory allocating a ref\"); *_r = (intptr_t)(");
                     generate_expression(gen, expr->children[0]);
                     fprintf(gen->output, "); (void*)_r; })");
                     fprintf(gen->output, "\n#else\n");
@@ -12261,7 +12263,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             } else {
                 // Heap-allocate the environment (portable, no use-after-free)
                 fprintf(gen->output, "\n#if AETHER_GCC_COMPAT\n");
-                fprintf(gen->output, "({ _closure_env_%d* _e = malloc(sizeof(_closure_env_%d)); _e->_dtor = _closure_env_%d_free; atomic_init(&_e->_refs, 1); ", id, id, id);
+                fprintf(gen->output, "({ _closure_env_%d* _e = (_closure_env_%d*)_aether_alloc(sizeof(_closure_env_%d), 0, \"out of memory allocating a closure environment\"); _e->_dtor = _closure_env_%d_free; atomic_init(&_e->_refs, 1); ", id, id, id, id);
                 for (int i = 0; i < cap_count; i++) {
                     const char* src = capture_source(gen, captures[i]);   /* #2890 */
                     if (capture_is_closure_value(gen, captures[i], cl_parent_func)) {

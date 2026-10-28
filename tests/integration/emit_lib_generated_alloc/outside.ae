@@ -1,0 +1,25 @@
+// Outside a library call (#3377): a generated allocation that fails is a
+// panic naming what ran out, which a try catches; with no try, the program
+// stops with that message instead of dereferencing NULL.
+extern aether_test_fail_alloc_after(n: int)
+
+struct Point {
+    x: int
+}
+
+main() {
+    try {
+        aether_test_fail_alloc_after(1)
+        p = heap.new(Point)
+        p.x = 1
+        heap.free(p)
+        println("not refused")
+    } catch e {
+        println("caught: ${e}")
+    }
+    aether_test_fail_alloc_after(1)
+    q = heap.new(Point)
+    q.x = 2
+    println("not reached ${q.x}")
+    heap.free(q)
+}

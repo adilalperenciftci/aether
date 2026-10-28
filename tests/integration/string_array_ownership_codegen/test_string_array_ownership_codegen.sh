@@ -95,11 +95,13 @@ grep -qF "_ae_drop_arr2_str(((const char**)t))" "$tmp/owning.c" ||
     fail "an owning array is not released at its exit"
 grep -q "aether_uniform_heap_str((const char\*)(t\[" "$tmp/owning.c" ||
     fail "an owning array's element is returned without a copy"
-grep -q "((Named\*)(calloc(1, " "$tmp/boxes.c" ||
+# The program's malloc is the zeroing _aether_alloc_or_null (#3377), whose
+# definition in the prelude is the one malloc the C may name.
+grep -q "((Named\*)(_aether_alloc_or_null(" "$tmp/boxes.c" ||
     fail "malloc(n) as *Named is not a zeroing allocation"
-grep -q "raw = calloc(1, " "$tmp/boxes.c" ||
+grep -q "raw = _aether_alloc_or_null(" "$tmp/boxes.c" ||
     fail "a malloc bound to a ptr is not a zeroing allocation"
-if grep -q "malloc(" "$tmp/boxes.c"; then
+if grep "malloc(" "$tmp/boxes.c" | grep -v "calloc(1, size) : malloc(size)" | grep -q "malloc("; then
     sed 's/^/    /' "$tmp/boxes.c"
     fail "a call of malloc is left as it was"
 fi
