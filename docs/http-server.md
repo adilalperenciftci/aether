@@ -129,7 +129,9 @@ the certificate and key). The pure server speaks TLS 1.3 only. It signs with
 an ECDSA P-256, P-384 or P-521, Ed25519 or RSA (2048 to 16384 bits) key, the
 key's own scheme when the client offers it, in constant time (see
 [writing-security-sensitive-code.md](writing-security-sensitive-code.md))
-(#3326). `server_set_tls` loads the certificate and key on this backend as on
+(#3326), and checks each signature against the certificate's key before
+sending it, so a signature computed wrongly, which can disclose the key, is
+never sent (#3376). `server_set_tls` loads the certificate and key on this backend as on
 OpenSSL's, and returns why when it cannot serve them: an unreadable file, an
 encrypted or too-short key, a key that does not match the certificate
 (#3328). A chain or a response over one TLS record (2^14 bytes) goes out in

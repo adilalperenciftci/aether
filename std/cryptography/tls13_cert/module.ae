@@ -59,7 +59,8 @@ exports(
     sign_server_cert_verify_ecdsa, sign_server_cert_verify_ed25519, sign_server_cert_verify_rsa_pss,
     sign_server_cert_verify_rsa_pss_scheme, SCHEME_RSA_PSS_RSAE_SHA384, SCHEME_RSA_PSS_RSAE_SHA512,
     KEY_NONE, KEY_RSA, KEY_P256, KEY_P384, KEY_P521, KEY_ED25519,
-    verify_cert_verify, verify_cert_verify_rsa_pss, parse_certificate, free_leaf,
+    verify_cert_verify, verify_cert_verify_rsa_pss, verify_cert_verify_rsa_pss_scheme, leaf_signature_holds,
+    parse_certificate, free_leaf,
     split_ecdsa_sig,
     LeafCert,
     leaf_not_before, leaf_not_before_len, leaf_not_after, leaf_not_after_len,
@@ -482,16 +483,81 @@ verify_cert_verify(scheme: int, pubx: ptr, puby: ptr, transcript_hash: byte[], s
 // this scheme are fixed: SHA-256 for both the message hash and MGF1, salt
 // length = hash length = 32. Returns 1 if valid, 0 otherwise.
 verify_cert_verify_rsa_pss(spki_key: byte[], transcript_hash: byte[], sig: byte[]) -> int {
+    return verify_cert_verify_rsa_pss_scheme(spki_key, SCHEME_RSA_PSS_RSAE_SHA256, transcript_hash, sig)
+}
+
+// The same for `scheme` rsa_pss_rsae_sha256, _sha384 or _sha512 (0x0804,
+// 0x0805, 0x0806): the content hashed with that hash, MGF1 with it, a salt
+// of its length, as sign_server_cert_verify_rsa_pss_scheme signs. 0 for
+// another scheme (#3376).
+verify_cert_verify_rsa_pss_scheme(spki_key: byte[], scheme: int, transcript_hash: byte[], sig: byte[]) -> int {
+    if spki_key.len < 0 { panic("tls13_cert.verify_cert_verify_rsa_pss_scheme: the `spki_key` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    if transcript_hash.len < 0 { panic("tls13_cert.verify_cert_verify_rsa_pss_scheme: the `transcript_hash` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    if sig.len < 0 { panic("tls13_cert.verify_cert_verify_rsa_pss_scheme: the `sig` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    algo = "sha256"
+    hl = 32
+    hid = 1
+    if scheme == SCHEME_RSA_PSS_RSAE_SHA384 {
+        algo = "sha384"
+        hl = 48
+        hid = 2
+    } else if scheme == SCHEME_RSA_PSS_RSAE_SHA512 {
+        algo = "sha512"
+        hl = 64
+        hid = 3
+    } else if scheme != SCHEME_RSA_PSS_RSAE_SHA256 {
+        return 0
+    }
     n, e, perr = parse_rsa_spki(spki_key)
     if string.equals(perr, "") != 1 { return 0 }
     content, clen = cert_verify_content(transcript_hash)
-    digest = sha256_of_bytes(bytes.view(content)[0..clen])
+    digest = digest_of(bytes.view(content)[0..clen], hid)
     k = rsa.key_from_components(n, e, null)
-    result = rsa.verify_pss(k, digest, sig, 32)
+    result = 0
+    if digest != null { result = rsa.verify_pss_hash(k, algo, digest, sig, hl) }
     rsa.key_free(k) // frees n, e
     bytes.free(content)
     bytes.free(digest)
     return result
+}
+
+// 1 when `sig` is a valid CertificateVerify signature (RFC 8446 4.4.3) by
+// the key of the parsed certificate `leaf` under `scheme`, over
+// `transcript_hash`; 0 otherwise, a scheme that does not fit the key
+// included. Every scheme this module signs: ECDSA P-256, P-384 and P-521
+// (0x0403, 0x0503, 0x0603), rsa_pss_rsae_sha256, _sha384 and _sha512
+// (0x0804 to 0x0806) and Ed25519 (0x0807). A server checks its own
+// signature with it before sending one (#3376); check_leaf_cert_verify
+// gives a peer's its alert.
+leaf_signature_holds(leaf: *LeafCert, scheme: int, transcript_hash: byte[], sig: byte[]) -> int {
+    if transcript_hash.len < 0 { panic("tls13_cert.leaf_signature_holds: the `transcript_hash` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    if sig.len < 0 { panic("tls13_cert.leaf_signature_holds: the `sig` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    want = KEY_NONE
+    if scheme == SCHEME_ECDSA_P256_SHA256 { want = KEY_P256 }
+    if scheme == SCHEME_ECDSA_P384_SHA384 { want = KEY_P384 }
+    if scheme == SCHEME_ECDSA_P521_SHA512 { want = KEY_P521 }
+    if scheme == SCHEME_RSA_PSS_RSAE_SHA256 || scheme == SCHEME_RSA_PSS_RSAE_SHA384 || scheme == SCHEME_RSA_PSS_RSAE_SHA512 { want = KEY_RSA }
+    if scheme == SCHEME_ED25519 { want = KEY_ED25519 }
+    if want == KEY_NONE || leaf.key_kind != want { return 0 }
+    if want == KEY_RSA {
+        return verify_cert_verify_rsa_pss_scheme(bytes.view(leaf.spki_key)[0..leaf.spki_key_len], scheme, transcript_hash, sig)
+    }
+    if want == KEY_ED25519 {
+        return verify_cert_verify(scheme, leaf.spki_key, null, transcript_hash, sig)
+    }
+    // An uncompressed point of the curve's size, as spki_key_check made
+    // sure: 0x04 || X || Y.
+    w = (leaf.spki_key_len - 1) / 2
+    px = bytes.new(w)
+    py = bytes.new(w)
+    bytes.set(px, w - 1, 0)
+    bytes.set(py, w - 1, 0)
+    bytes.copy_from_bytes(px, 0, leaf.spki_key, 1, w)
+    bytes.copy_from_bytes(py, 0, leaf.spki_key, 1 + w, w)
+    ok = verify_cert_verify(scheme, px, py, transcript_hash, sig)
+    bytes.free(px)
+    bytes.free(py)
+    return ok
 }
 
 // Check a peer's CertificateVerify (RFC 8446 4.4.3) with the key of its
@@ -515,27 +581,7 @@ check_leaf_cert_verify(leaf: *LeafCert, scheme: int, transcript_hash: byte[], si
     if leaf.key_kind == KEY_NONE { return 42, "CertificateVerify: the certificate's key is not one this client accepts" }
     if want == KEY_NONE { return 47, "CertificateVerify: signature scheme ${scheme} is not one this client verifies" }
     if leaf.key_kind != want { return 47, "CertificateVerify: signature scheme ${scheme} does not fit the certificate's key" }
-    key = bytes.view(leaf.spki_key)[0..leaf.spki_key_len]
-    ok = 0
-    if want == KEY_RSA {
-        ok = verify_cert_verify_rsa_pss(key, transcript_hash, sig)
-    } else if want == KEY_ED25519 {
-        ok = verify_cert_verify(scheme, leaf.spki_key, null, transcript_hash, sig)
-    } else {
-        // An uncompressed point of the curve's size, as spki_key_check
-        // made sure: 0x04 || X || Y.
-        w = (leaf.spki_key_len - 1) / 2
-        px = bytes.new(w)
-        py = bytes.new(w)
-        bytes.set(px, w - 1, 0)
-        bytes.set(py, w - 1, 0)
-        bytes.copy_from_bytes(px, 0, leaf.spki_key, 1, w)
-        bytes.copy_from_bytes(py, 0, leaf.spki_key, 1 + w, w)
-        ok = verify_cert_verify(scheme, px, py, transcript_hash, sig)
-        bytes.free(px)
-        bytes.free(py)
-    }
-    if ok != 1 { return 51, "CertificateVerify signature invalid" }
+    if leaf_signature_holds(leaf, scheme, transcript_hash, sig) != 1 { return 51, "CertificateVerify signature invalid" }
     return 0, ""
 }
 

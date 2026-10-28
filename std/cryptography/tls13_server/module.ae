@@ -13,7 +13,9 @@
 //     client offers it; a client that offers none gets handshake_failure.
 //     An encrypted key is refused. std.http's server_set_tls checks that
 //     the key and the certificate are a pair when the server is set up
-//     (#3328).
+//     (#3328). Every signature is checked against the leaf's key before it
+//     is sent; one that does not verify ends the handshake with
+//     internal_error instead (#3376).
 //   - Key exchange: X25519MLKEM768 (post-quantum hybrid) and X25519.
 //   - Buffer arguments are std.bytes HANDLES, never bytes.data(b) -- see the
 //     header of tls13_client for why that distinction bites.
@@ -735,7 +737,9 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
     // c. CertificateVerify, with the scheme of the server's key when the
     // client's signature_algorithms offers it (RFC 8446 4.4.3, #3326). An
     // ECDSA nonce is RFC 6979's (no randomness to fail, none to leak the
-    // key); an RSA-PSS signature is constant time and blinded.
+    // key); an RSA-PSS signature is constant time and blinded. The
+    // signature is checked against the leaf's key before it is sent
+    // (#3376).
     skey = priv_key as *ServerKey
     scheme = key_scheme(skey, ch_parsed.sig_algs)
     th_cert = transcript_hash_algo(tr, hash_algo)
@@ -750,11 +754,25 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
         if ch_parsed.saw_sig_algs == 0 { cv_alert = 109 }
         cv_err = "the client offers no signature scheme the server's key signs with"
     } else {
-        sig = sign_cert_verify(skey, scheme, bytes.view(th_cert)[0..hash_len])
-        if sig == null {
-            cv_alert = 80
-            cv_err = "the server's private key could not sign (a scalar out of range, or no randomness)"
+        leaf = tls13_cert.LeafCert { tbs: null }
+        tls13_cert.init_leaf(&leaf)
+        lerr = "the chain has no certificate"
+        if list_size(cert_chain) > 0 {
+            leaf_der = list.at(cert_chain, 0) as ptr
+            lerr = tls13_cert.parse_certificate(bytes.view(leaf_der)[0..bytes.length(leaf_der)], &leaf)
         }
+        if string.equals(lerr, "") != 1 {
+            cv_alert = 80
+            cv_err = "the server's certificate does not parse: ${lerr}"
+        } else {
+            signed, why = sign_cert_verify(skey, &leaf, scheme, bytes.view(th_cert)[0..hash_len])
+            sig = signed
+            if sig == null {
+                cv_alert = 80
+                cv_err = why
+            }
+        }
+        tls13_cert.free_leaf(&leaf)
     }
     if cv_alert != 0 {
         send_hs_alert(sock, srv_hs_ctx, cv_alert)
@@ -1583,12 +1601,29 @@ fn key_scheme(k: *ServerKey, offered: int) -> int {
     return 0
 }
 
-// The CertificateVerify signature with the key under `scheme` (key_scheme's) over
-// `transcript_hash`, or null when the key cannot sign.
-fn sign_cert_verify(k: *ServerKey, scheme: int, transcript_hash: byte[]) -> ptr {
-    if k.kind == tls13_cert.KEY_ED25519 { return tls13_cert.sign_server_cert_verify_ed25519(k.secret, transcript_hash) }
-    if k.kind == tls13_cert.KEY_RSA { return tls13_cert.sign_server_cert_verify_rsa_pss_scheme(k.rsa, scheme, transcript_hash) }
-    return tls13_cert.sign_server_cert_verify_ecdsa(k.kind, k.secret, transcript_hash)
+// The CertificateVerify signature with the key under `scheme` (key_scheme's)
+// over `transcript_hash`, checked against the public key of the parsed
+// certificate `leaf` before it is given back: a signature computed wrongly
+// (a fault in the arithmetic, a bit that flipped in memory) can disclose the
+// key, one faulty RSA-CRT signature or two of one message under a
+// deterministic nonce being enough, so one that does not verify is wiped
+// and never sent (#3376). OpenSSL checks its RSA-CRT signatures the same
+// way. The signature and "", or null and why.
+fn sign_cert_verify(k: *ServerKey, leaf: *tls13_cert.LeafCert, scheme: int, transcript_hash: byte[]) -> (ptr, string) {
+    var sig: ptr = null
+    if k.kind == tls13_cert.KEY_ED25519 {
+        sig = tls13_cert.sign_server_cert_verify_ed25519(k.secret, transcript_hash)
+    } else if k.kind == tls13_cert.KEY_RSA {
+        sig = tls13_cert.sign_server_cert_verify_rsa_pss_scheme(k.rsa, scheme, transcript_hash)
+    } else {
+        sig = tls13_cert.sign_server_cert_verify_ecdsa(k.kind, k.secret, transcript_hash)
+    }
+    if sig == null { return null, "the server's private key could not sign (a scalar out of range, or no randomness)" }
+    if tls13_cert.leaf_signature_holds(leaf, scheme, transcript_hash, bytes.view(sig)) != 1 {
+        bytes.wipe_free(sig)
+        return null, "the server's signature does not verify with its certificate's key, so it was not sent (a fault while signing, or a key that is not the certificate's)"
+    }
+    return sig, ""
 }
 
 // "" when `key` and the certificate `leaf_der` are a pair, else why not:
@@ -1614,30 +1649,11 @@ fn key_matches_cert(k: *ServerKey, leaf_der: ptr) -> string {
         i = i + 1
     }
     // Any scheme the key signs with: an RSA key's pair check is rsa_pss_rsae_sha256.
-    sig = sign_cert_verify(k, key_scheme(k, 0x7FFFFFFF), bytes.view(th)[0..32])
-    ok = 0
-    if sig != null {
-        sl = bytes.length(sig)
-        if k.kind == tls13_cert.KEY_RSA {
-            ok = tls13_cert.verify_cert_verify_rsa_pss(bytes.view(leaf.spki_key)[0..leaf.spki_key_len], bytes.view(th)[0..32], bytes.view(sig)[0..sl])
-        } else if k.kind == tls13_cert.KEY_ED25519 {
-            ok = tls13_cert.verify_cert_verify(tls13_cert.SCHEME_ED25519, leaf.spki_key, null, bytes.view(th)[0..32], bytes.view(sig)[0..sl])
-        } else {
-            // An uncompressed point, 0x04 || X || Y.
-            size = curve_size(k.kind)
-            x = bytes.new(size)
-            y = bytes.new(size)
-            bytes.copy_from_bytes(x, 0, leaf.spki_key, 1, size)
-            bytes.copy_from_bytes(y, 0, leaf.spki_key, 1 + size, size)
-            ok = tls13_cert.verify_cert_verify(key_scheme(k, 31), x, y, bytes.view(th)[0..32], bytes.view(sig)[0..sl])
-            bytes.free(x)
-            bytes.free(y)
-        }
-        bytes.free(sig)
-    }
+    sig, _why = sign_cert_verify(k, &leaf, key_scheme(k, 0x7FFFFFFF), bytes.view(th)[0..32])
     bytes.free(th)
     tls13_cert.free_leaf(&leaf)
-    if ok != 1 { return "the private key does not match the certificate" }
+    if sig == null { return "the private key does not match the certificate" }
+    bytes.free(sig)
     return ""
 }
 

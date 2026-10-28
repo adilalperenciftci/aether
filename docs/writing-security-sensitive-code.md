@@ -145,6 +145,31 @@ Where you must write something new:
 - Do not derive a nonce from something the peer controls.
 - Where a counter is the nonce, the overflow case is a failure, not a wrap.
 
+## Keys in memory, and the signatures that leave it
+
+A long-lived private key is exposed by what it leaves behind and by what a
+fault makes it compute (#3376).
+
+- **Wipe a secret before you free it, with `bytes.wipe_free`.** A loop that
+  zeroes a buffer right before `free` is a dead store, and a compiler that
+  inlines it may drop it. `bytes.wipe` and `bytes.wipe_free` (and
+  `aether_wipe` in C, `runtime/utils/aether_wipe.h`) zero the whole
+  capacity through a call the compiler cannot see through. That covers key
+  material, nonces and the text of a private key. A `string` cannot be
+  wiped, so a secret that must be wiped lives in a `bytes` buffer, sized
+  for its final length, because a buffer that grows leaves its old contents
+  in the memory it moved out of.
+- **Verify a signature before it leaves the process.** One faulty RSA-CRT
+  signature factors the modulus (Boneh, DeMillo and Lipton), and a fault in
+  one of two signatures of the same message under a deterministic nonce
+  (RFC 6979 ECDSA, Ed25519) gives the key. A fault can come from a voltage
+  or clock glitch, or from Rowhammer, from software. The pure TLS server
+  checks every CertificateVerify against its certificate's key
+  (`tls13_cert.leaf_signature_holds`), and a signature that fails is wiped
+  and never sent: the handshake ends with internal_error. Verify against
+  the key the peer will use (the certificate's), not the private key's own
+  public half, so a fault in the key's memory is caught too.
+
 ## Constant time, checked by a tool
 
 Code that handles a secret must not branch on it, index memory with it, or
@@ -219,6 +244,8 @@ For any diff touching crypto, TLS or authentication:
 - [ ] No branch, loop bound or memory index depends on a secret, and the
       operation is in `tests/integration/crypto_ct_valgrind`
 - [ ] No signing API takes a nonce from its caller
+- [ ] A signature is verified before it is sent, and secrets are freed with
+      `bytes.wipe_free`
 - [ ] Every verification failure returns an error naming the check
 - [ ] Failure paths free what they allocated
 - [ ] No `println` in library code

@@ -109,6 +109,12 @@ knowing before debugging a handshake:
   key's schemes gets `handshake_failure` (#3326). `server_set_tls` checks the
   certificate and key when the server is set up and says why it cannot serve
   them, as the OpenSSL backend does (#3328)
+- every CertificateVerify signature is checked against the certificate's
+  key before it is sent: a signature computed wrongly (a fault while
+  signing, a bit flipped in memory) can disclose the key, so one that does
+  not verify is never sent, and the handshake ends with `internal_error`
+  (#3376). The check is a verification per handshake, about as costly as
+  the signature for ECDSA and Ed25519, about a tenth of it for RSA
 - key exchange is **X25519MLKEM768** (the post-quantum hybrid, preferred
   when the client offers it), **X25519 or secp256r1** (P-256, which RFC 8446
   9.1 requires, #3357); a client that names one of them in supported_groups
