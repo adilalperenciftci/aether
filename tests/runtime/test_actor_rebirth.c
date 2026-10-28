@@ -323,7 +323,83 @@ static void test_rebirth_keeps_watch_list(void) {
     ASSERT_TRUE(killed_again);           // which tells its own death through it
 }
 
+/* Holds the core that steps it until `release`. */
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    atomic_int in_step;
+    atomic_int release;
+} RbBlocker;
+
+static void rb_blocker_step(RbBlocker* b) {
+    Message msg;
+    if (mailbox_receive(&b->mailbox, &msg)) {
+        aether_free_message(msg.payload_ptr);
+        atomic_store(&b->in_step, 1);
+        for (int w = 0; w < 10000 && !atomic_load(&b->release); w++) rb_sleep_ms(1);
+    }
+    atomic_store_explicit(&b->active, b->mailbox.count > 0, memory_order_relaxed);
+}
+
+/* Sends the blocker its message from a thread of its own: a send from the
+ * main thread would flush the main thread's pending batch first. */
+static void* rb_go_thread(void* b) {
+    rb_send(b, RB_GO);
+    return NULL;
+}
+
+/* A main-thread batch (a fan-out loop's sends) flushed while a restart
+ * claim is live. Its message, added while the child was alive, is counted
+ * only at the flush, after the claim read the child's inflight count, so
+ * nothing waits for it: the flush reads the child's death again (it does
+ * while a claim is live) and drops it, counted. The child's core is held
+ * meanwhile, so a message the flush let through would reach the child only
+ * after the restart, and the new incarnation would handle a message sent
+ * before it existed. */
+static void test_rebirth_batched_send_during_claim(void) {
+    scheduler_init(2);
+    scheduler_start();
+    ActorBase* t = rb_spawn_target(1);
+    RbBlocker* b = (RbBlocker*)scheduler_spawn_actor(1, (void (*)(void*))rb_blocker_step,
+                                                     sizeof(RbBlocker));
+    atomic_init(&b->in_step, 0);
+    atomic_init(&b->release, 0);
+    scheduler_spawn_ready((ActorBase*)b);
+
+    scheduler_send_batch_start();
+    RbMsg m = { RB_NUMBER, 0, 1 };
+    aether_send_message_batch(t, &m, sizeof m);   // t alive: held in the batch
+    aether_actor_kill(t);
+    int claimed = 0;
+    for (int w = 0; w < 3000 && (claimed = aether_actor_rebirth_begin(t)) == 0; w++)
+        rb_sleep_ms(1);
+    pthread_t go;
+    int go_started = pthread_create(&go, NULL, rb_go_thread, b) == 0;
+    if (go_started) pthread_join(go, NULL);
+    for (int w = 0; w < 3000 && !atomic_load(&b->in_step); w++) rb_sleep_ms(1);
+    int held = atomic_load(&b->in_step);
+
+    uint64_t dead0 = scheduler_dead_sends();
+    scheduler_send_batch_flush();
+    int dropped = (int)(scheduler_dead_sends() - dead0);
+    ActorBase* again = claimed == 1 ? rb_spawn_target(1) : NULL;
+    int ended = claimed == 1 ? aether_actor_rebirth_end(t) : 0;
+    atomic_store(&b->release, 1);
+    scheduler_wait();
+    int handled = ((RbTarget*)t)->count;
+    scheduler_shutdown();
+    scheduler_cleanup();
+
+    ASSERT_TRUE(held);
+    ASSERT_EQ(1, claimed);
+    ASSERT_EQ(1, dropped);
+    ASSERT_TRUE(again == t);
+    ASSERT_EQ(1, ended);
+    ASSERT_EQ(0, handled);   // the new incarnation never saw it
+}
+
 void register_actor_rebirth_tests(void) {
+    register_test_with_category("Rebirth: a batch flushed during a claim drops what it sends the child",
+        test_rebirth_batched_send_during_claim, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Rebirth: the death notice list survives a restart",
         test_rebirth_keeps_watch_list, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Rebirth: the claim waits for messages in flight",

@@ -3680,8 +3680,14 @@ void scheduler_send_batch_flush(void) {
 
     for (int i = 0; i < count; i++) {
         // Its target's death read again now that it is counted (#2974), as
-        // in send_through_core: not counted as sent yet, so no credit.
-        if (unlikely(atomic_load_explicit(&g_batch_buffer->actors[i]->dead, memory_order_acquire) != 0)) {
+        // in send_through_core, when a restart claim is live: with none, a
+        // later claim sees this message in flight and waits for it, and a
+        // dead target drops it where it arrives. The death is on a line its
+        // core writes at every step, read here a whole batch after the add
+        // read it, so reading it for every message cost fork_join 2%. Not
+        // counted as sent yet, so no credit.
+        if (unlikely(atomic_load_explicit(&g_aether_spawn_watch, memory_order_seq_cst) != 0) &&
+            atomic_load_explicit(&g_batch_buffer->actors[i]->dead, memory_order_acquire) != 0) {
             inflight_leave(g_batch_buffer->actors[i], 1);
             send_to_dead_actor(g_batch_buffer->actors[i], &g_batch_buffer->messages[i]);
             targets[i] = -1;
