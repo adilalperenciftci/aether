@@ -239,7 +239,8 @@ What a send promises, on both schedulers (#2974):
    - the ask in hand and the actor stepping: a handler that sends, or asks, before it replies still answers its own asker;
    - the in-step flags the signal handler reads: the outer handler keeps its signal recovery after an inner step;
    - a supervisor's restart claim, the reborn block and the spawn brackets: a nested step's spawn takes no claimed block and is no factory's child, and its panic undoes no enclosing claim;
-   - the sandbox levels in force on the thread, in every runtime copy that shares the count: a receiver stepped inside an enforce block is checked as on a thread of its own, against the levels it pushes itself, and the block's levels are in force again when the send returns (#3393).
+   - the sandbox levels in force on the thread, in every runtime copy that shares the count: a receiver stepped inside an enforce block is checked as on a thread of its own, against the levels it pushes itself, and the block's levels are in force again when the send returns (#3393);
+   - the library calls running on the thread, with what they carry: an interruption on its way, the call's deadline and cancel, the stop a failed allocation notes, and the caller info the host set for the call. An actor stepped inside a call (a send's inline step on a core's thread, or a cooperative ask's poll in an export) is not the call: its loops are not cut by the call's deadline, a `try` in it catches its own panics, and it reads no caller info, as on a core's thread; the call is cut at its own next safe point once the step returns (#3392, #3396).
 
    A part costs a step only when some thread holds that kind of context: it is put aside behind one load of a global that says so.
 
@@ -394,6 +395,8 @@ In single-core mode, actors run cooperatively. The scheduler processes actors in
 Each step runs inside the same panic barrier the multi-core scheduler uses (`runtime/actors/aether_step_barrier.h`, #2974), so a panic in a handler ends that actor, not the program: its death is finalized on the spot (or when its handler returns, for a kill or a stop that came during it) and its watchers get a `Down`, as above. Where the target has no setjmp (wasi), a panic still ends the program, and watching a death is refused at compile time.
 
 An ask polls the actors until its reply comes, on the one thread. Its timeout holds as with threads (#3330): the polls stop at the deadline, and a handler slower than the timeout, which the poll cannot leave while it runs, has its reply discarded as late, so the ask ends with `"ask timed out after N ms"`. The deadline is the only bound: an ask behind a long queue gets its reply once the queue ahead of it is handled, as with threads. An ask whose message is still queued at its deadline leaves it there as a plain send: it is handled later and its reply goes nowhere. An ask nothing can answer (no actor has a message left and no receive timeout is armed) ends at once with the same reason.
+
+An export of a library on this runtime that asks (or waits) steps the actors it polls on the call's thread, inside the call, and they run outside it, as every nested step does ("The delivery contract", item 5): the call's deadline does not cut their loops and they read none of the call's caller info. A call can only wait for an actor it steps to return; its deadline then cuts it at its own next safe point (#3392).
 
 ## Multi-Core Runtime
 

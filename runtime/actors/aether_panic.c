@@ -491,7 +491,7 @@ const char* aether_exec_reason(int outcome) {
  * allocates. Outside one it is the panic `what` it always was. */
 void aether_out_of_memory(const char* what) {
     AetherFrames* F = aether_frames_here();
-    if (F->exec_depth > 0) {
+    if (F->exec_depth > F->exec_floor) {   /* an execution of this code's (#3392) */
         F->interrupting = AETHER_OUT_OF_MEMORY;
         aether_panic(aether_exec_reason(AETHER_OUT_OF_MEMORY));
     }

@@ -1,0 +1,77 @@
+// The library of the actor step context test (#3392, #3396): exports that
+// ask an actor. On the cooperative runtime the ask polls, so the actor is
+// stepped inside the export's call, on its thread; with threads it runs on
+// a core's. Either way the actor's handler runs outside the call: the
+// call's deadline does not interrupt it, an interruption is never left on
+// its way for a later call, and it reads no caller info the host set for
+// the call.
+import std.host
+import std.time
+
+message Spin { ms: int }
+message Who { tag: string }
+
+var g_spun = 0
+
+actor Spinner {
+    receive {
+        Spin(ms) -> {
+            t0 = time.now_ms()
+            while time.now_ms() - t0 < ms {
+            }
+            g_spun = g_spun + 1
+            reply 7
+        }
+    }
+}
+
+actor Teller {
+    receive {
+        Who(tag) -> { reply host.caller_identity() }
+    }
+}
+
+fn next_of(i: int) -> int {
+    return i + 1
+}
+
+// Asks a Spinner to spin `ms` milliseconds, then loops once: the call's
+// deadline, passed by then, ends the call at that loop head.
+ask_spin(ms: int) -> int {
+    sp = spawn(Spinner())
+    v, err = sp ? Spin { ms: ms }
+    if err != "" {
+        return -1
+    }
+    i = 0
+    while i < 1 {   // a call in the step, so the loop runs, safe point and all
+        i = next_of(i)
+    }
+    return v
+}
+
+// How many spins ran to their end.
+spun() -> int {
+    return g_spun
+}
+
+// An ordinary panic, which the try catches.
+catches() -> int {
+    got = 0
+    try {
+        panic("ordinary")
+    } catch e {
+        got = 1
+    }
+    return got
+}
+
+// The caller identity an actor this call asks reads.
+teller_sees() -> string {
+    t = spawn(Teller())
+    s, err = t ? Who { tag: "x" }
+    if err != "" {
+        return "error: ${err}"
+    }
+    return s
+}

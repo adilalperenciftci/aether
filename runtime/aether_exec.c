@@ -56,6 +56,45 @@ int aether_exec_depth(void) {
     return aether_frames_here()->exec_depth;
 }
 
+int aether_exec_floor(void) {
+    return aether_frames_here()->exec_floor;
+}
+
+/* An actor step's part of the executions it runs inside, in the files only
+ * a library call links (aether_frames.h, aether_unwind.c; #3392, #3396):
+ * the call's deadline, which the step's loop heads must not see, and the
+ * caller info the host set for the call, which the step must not read. */
+static void step_execs(AetherExecAside* s, int hide) {
+    if (hide) {
+        AetherDeadlineState d;
+        aether_caps_deadline_save(&d);
+        s->deadline_at_ns = d.at_ns;
+        s->deadline_tripped = d.tripped;
+        AetherDeadlineState none = { 0, 0 };
+        aether_caps_deadline_restore(&none);
+        s->caller = aether_caller_put_aside();
+    } else {
+        aether_caller_give_back(s->caller);
+        AetherDeadlineState d = { s->deadline_at_ns, s->deadline_tripped };
+        aether_caps_deadline_restore(&d);
+    }
+}
+
+/* Installed before any execution of this copy can run: at load where the
+ * compiler has constructors, else at the first entry. */
+#if AETHER_GCC_COMPAT
+AETHER_CONSTRUCTOR static void exec_install_step_part(void) {
+    atomic_store_explicit(&aether_step_execs_hook, step_execs, memory_order_release);
+}
+#define EXEC_STEP_PART_AT_ENTRY() ((void)0)
+#else
+#define EXEC_STEP_PART_AT_ENTRY()                                                           \
+    do {                                                                                    \
+        if (!atomic_load_explicit(&aether_step_execs_hook, memory_order_relaxed))           \
+            atomic_store_explicit(&aether_step_execs_hook, step_execs, memory_order_release); \
+    } while (0)
+#endif
+
 void aether_exec_mark_view(int depth) {
     AetherFrames* F = aether_frames_here();
     if (depth >= 1 && depth <= F->exec_depth) F->exec[depth - 1].has_view = 1;
@@ -63,7 +102,7 @@ void aether_exec_mark_view(int depth) {
 
 void aether_exec_set_next_deadline(int64_t ms) {
     AetherFrames* F = aether_frames_here();
-    if (F->exec_depth <= 0) {
+    if (F->exec_depth <= F->exec_floor) {   /* none of this code's */
         aether_caps_set_deadline_ms(ms);
         return;
     }
@@ -81,9 +120,10 @@ static inline AetherJmpFrame* exec_push(AetherFrames* F, void** buf) {
                 AETHER_PANIC_MAX_DEPTH);
         abort();
     }
+    EXEC_STEP_PART_AT_ENTRY();
     int d = F->exec_depth;
     AetherExecRecord* x = &F->exec[d];
-    if (d > 0) {
+    if (d > F->exec_floor) {
         /* Nested: the outer execution's deadline comes back when this one
          * returns, and the one a host service set for it applies. */
         AetherDeadlineState s;
@@ -140,7 +180,7 @@ static inline void exec_finish(AetherFrames* F, int outcome) {
     F->exec_depth--;
     AetherExecRecord* x = &F->exec[F->exec_depth];
     /* A nested execution: the outer one's deadline, trip flag and all. */
-    if (F->exec_depth > 0) {
+    if (F->exec_depth > F->exec_floor) {
         AetherDeadlineState s = { x->deadline_at_ns, x->deadline_tripped };
         aether_caps_deadline_restore(&s);
     }
@@ -222,7 +262,7 @@ static void interrupt(AetherFrames* F, int why) {
 
 int aether_exec_poll(void) {
     AetherFrames* F = aether_frames_here();
-    if (F->exec_depth > 0) {
+    if (F->exec_depth > F->exec_floor) {
         /* A stop already noted (a failed allocation, a C-backed operation
          * that stopped early), else the deadline or a cancel. */
         int why = F->exec[F->exec_depth - 1].stop;
@@ -260,7 +300,7 @@ AETHER_EXEC_API AetherExecToken aether_exec_token(void) {
     AetherExecToken t;
     t.cell = F->cell;
     /* The running execution's, or the next one's when none runs. */
-    t.serial = F->exec_depth > 0 ? F->exec[F->exec_depth - 1].serial : F->serial + 1;
+    t.serial = F->exec_depth > F->exec_floor ? F->exec[F->exec_depth - 1].serial : F->serial + 1;
     return t;
 }
 

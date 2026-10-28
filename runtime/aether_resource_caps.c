@@ -191,7 +191,7 @@ int aether_alloc_test_refuses(void) {
 
 void aether_alloc_failed(int why) {
     AetherFrames* F = aether_frames_here();
-    if (F->exec_depth <= 0) return;
+    if (F->exec_depth <= F->exec_floor) return;   /* none of this code's (#3392) */
     AetherExecRecord* x = &F->exec[F->exec_depth - 1];
     if (!x->stop) x->stop = why;
     caps_arm();
@@ -292,9 +292,10 @@ int aether_exec_stop_reason(void) {
     if (!s) return 0;
     /* The cancelled execution, or one nested inside it: the innermost goes
      * first; the cancelled one at its own next safe point, once the host
-     * code between them has returned. */
+     * code between them has returned. One an actor step runs inside is not
+     * this code's to stop, and is not spent either: it waits (#3392). */
     for (int i = F->exec_depth - 1; i >= 0; i--)
-        if (F->exec[i].serial == s) return AETHER_STOP_CANCELLED;
+        if (F->exec[i].serial == s) return i >= F->exec_floor ? AETHER_STOP_CANCELLED : 0;
     /* A cancel for an execution that already ended: spent. One that has not
      * begun yet waits for it. */
     if (s <= F->serial)
@@ -306,7 +307,7 @@ int aether_exec_stop_reason(void) {
 int aether_exec_should_stop(void) {
     if (!atomic_load_explicit(&aether_caps_armed, memory_order_relaxed)) return 0;
     AetherFrames* F = aether_frames_here();
-    if (F->exec_depth <= 0) return 0;
+    if (F->exec_depth <= F->exec_floor) return 0;
     /* Already stopping (an allocation failed, or an earlier check): stop. */
     if (F->exec[F->exec_depth - 1].stop) return 1;
     int why = aether_exec_stop_reason();

@@ -5,6 +5,7 @@
 #include "aether_unwind.h"
 #include "../utils/aether_compiler.h"
 #include "aether_frames.h"
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,6 +54,50 @@ AetherJmpFrame* aether_try_push(void) {
     f->reason_release = NULL;
     f->exec_buf = NULL;
     return f;
+}
+
+/* aether_frames.h. NULL until a library call ran on some thread of this
+ * runtime copy: until then no step can find an execution to put aside. */
+void (*_Atomic aether_step_execs_hook)(AetherExecAside* s, int hide) = NULL;
+
+/* The executions an actor step runs inside are not its own (#3392): it is
+ * code a library call reached, a send's inline step or a cooperative ask's
+ * poll, not the call. Above the floor, the step's own: a loop head in its
+ * handler sees no call's deadline or cancel, a try catches its ordinary
+ * panics (no interruption is on its way), a failed allocation notes no stop
+ * for the call, and its caller info is none. */
+static void step_put_aside_execs(AetherFrames* F, AetherExecAside* s) {
+    s->exec_floor = F->exec_floor;
+    s->interrupting = F->interrupting;
+    F->exec_floor = F->exec_depth;
+    F->interrupting = 0;
+    void (*hook)(AetherExecAside*, int) = atomic_load_explicit(&aether_step_execs_hook,
+                                                               memory_order_acquire);
+    s->execs_part = hook != NULL;
+    if (hook) hook(s, 1);
+}
+
+AetherJmpFrame* aether_step_push(AetherExecAside* s, int* hid) {
+    AetherFrames* F = &t_frames;
+    /* An execution above the floor, or an interruption on its way (its
+     * unwind runs defers, which can send): the step puts them aside. */
+    *hid = 0;
+    if (unlikely(F->exec_depth != F->exec_floor || F->interrupting)) {
+        step_put_aside_execs(F, s);
+        *hid = 1;
+    }
+    return aether_try_push();
+}
+
+void aether_step_give_back_execs(const AetherExecAside* s) {
+    AetherFrames* F = &t_frames;
+    if (s->execs_part) {
+        void (*hook)(AetherExecAside*, int) = atomic_load_explicit(&aether_step_execs_hook,
+                                                                   memory_order_acquire);
+        hook((AetherExecAside*)s, 0);
+    }
+    F->exec_floor = s->exec_floor;
+    F->interrupting = s->interrupting;
 }
 
 void aether_try_pop(void) {

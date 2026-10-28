@@ -88,7 +88,8 @@ static Message payload_message(ActorBase* actor, void* message_data, size_t mess
          * message's own values are released (they moved into it) and the
          * call ends with AETHER_OUT_OF_MEMORY. Elsewhere the process stops,
          * as it always did: the send has no way to fail. */
-        if (aether_frames_here()->exec_depth > 0) {
+        AetherFrames* F = aether_frames_here();
+        if (F->exec_depth > F->exec_floor) {
             if (actor->release_message) actor->release_message(*(int*)message_data, message_data);
             aether_out_of_memory("out of memory copying a message");
         }

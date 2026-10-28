@@ -269,6 +269,14 @@ int64_t     aether_caller_deadline_ms(void);
  * execution at `depth` returns. */
 void aether_caller_leave(int depth);
 
+/* An actor step inside an execution (#3396, aether_step_barrier.h): the
+ * setting is put away for the step, which reads none and sets its own,
+ * and is back when the step ends. The token is NULL for an empty setting.
+ * With no memory to keep it, the step still reads none, and a setting it
+ * makes is refused (-1), so the enclosing one is never lost. */
+void* aether_caller_put_aside(void);
+void  aether_caller_give_back(void* token);
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif

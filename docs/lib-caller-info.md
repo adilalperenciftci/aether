@@ -98,6 +98,13 @@ copy of what the running exports see. When there is no memory for that
 copy, `aether_set_caller` returns `-1` and `aether_clear_caller` does
 nothing, so a running export never loses its view.
 
+An actor stepped on the export's thread, inside the call (a send that
+steps an idle actor of the same core inline, or a cooperative ask's poll),
+is not the export: it reads no caller info, as on a core's thread of its
+own, and a setting it makes is gone when its step ends, when the export's
+is back (#3396). With no memory to keep the export's setting aside while it
+runs, it still reads none and its settings are refused.
+
 ## Storage limits
 
 Default caps:

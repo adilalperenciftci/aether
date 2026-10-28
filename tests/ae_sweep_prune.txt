@@ -97,6 +97,9 @@ tests/integration/emit_lib_alloc_failure/
 # #3377: kinds.ae is a library and outside.ae a program the driver runs with
 # allocations made to fail; the driver builds both.
 tests/integration/emit_lib_generated_alloc/
+# #3392: steps.ae is a library with no main; the driver builds it into a C
+# host, on threads and (make ci-coop) on the cooperative scheduler.
+tests/integration/emit_lib_actor_step_context/
 # #3388: results.ae and words.ae are libraries with no main, and app.ae
 # imports words.ae in binary form; the driver builds them and fails an
 # allocation in each call.

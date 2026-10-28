@@ -46,6 +46,10 @@ typedef struct {
     int              depth;    /* live frames; the innermost is frames[depth-1] */
     AetherExecRecord exec[AETHER_PANIC_MAX_DEPTH];
     int              exec_depth;
+    /* The executions below are the code's an actor step runs inside
+     * (#3392): put aside for the step, which runs outside every one of them
+     * (aether_step_put_aside_execs below). Only those above it run here. */
+    int              exec_floor;
     int              outcome;  /* the last execution's, aether_last_outcome() */
     char             outcome_text[AETHER_OUTCOME_TEXT_MAX];
     int              interrupting; /* the outcome an interruption on its way carries */
@@ -75,5 +79,30 @@ typedef struct {
  * g_current_step_actor) has no adjacent store to merge with. The send buffer
  * (aether_send_buffer.c) follows the same rule. */
 AetherFrames* aether_frames_here(void);
+
+/* What an actor step puts aside of the executions it runs inside (#3392,
+ * #3396; the rule is aether_step_barrier.h's): the floor below which the
+ * executions are not the step's, an interruption on its way through them,
+ * and, through aether_exec.c, the call's deadline and its caller info. */
+typedef struct {
+    int     exec_floor;
+    int     interrupting;
+    int     execs_part;     /* aether_exec.c took its part (the hook was set) */
+    int64_t deadline_at_ns;
+    int     deadline_tripped;
+    void*   caller;         /* aether_host.c's: the setting, put away */
+} AetherExecAside;
+
+/* Set by aether_exec.c at its first execution: puts aside (hide 1) or gives
+ * back (hide 0) the deadline and the caller info, which live in files only
+ * a library call links. */
+extern void (*_Atomic aether_step_execs_hook)(AetherExecAside* s, int hide);
+
+/* An actor step begins and ends (aether_step_barrier.h): the executions
+ * running on this thread are put aside, 1 when there were any (or an
+ * interruption on its way), and given back. The step's try frame is pushed
+ * with them, in one look at this thread's block. */
+AetherJmpFrame* aether_step_push(AetherExecAside* s, int* hid);
+void aether_step_give_back_execs(const AetherExecAside* s);
 
 #endif /* AETHER_FRAMES_H */

@@ -667,7 +667,11 @@ with `AETHER_CANCELLED`. A call nested inside the cancelled one ends first;
 the cancelled one at its own next safe point, once the host code between
 them has returned. A cancel of a call that already ended does nothing.
 Outside any export (a library's actor, say) a loop head breaks at a passed
-deadline, as it did before.
+deadline, as it did before. An actor stepped on the call's thread inside
+it (a send's inline step, a cooperative ask's poll) is outside it too: the
+call's deadline and cancel do not reach its loops, a `try` in it catches
+its own panics, and the call is cut at its own next safe point once the
+step returns (#3392).
 
 The safe points are loop heads, and `json.parse`, which checks every 4096
 values it reads and then fails with "stopped: the call's deadline passed or

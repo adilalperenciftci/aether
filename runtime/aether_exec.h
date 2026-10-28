@@ -65,6 +65,9 @@ void aether_exec_enter_at(void** buf);
 
 /* Executions running on this thread (0 outside any). */
 int aether_exec_depth(void);
+/* The executions below this depth are the ones an actor step runs inside
+ * (#3392): not the running code's. 0 outside any step that put some aside. */
+int aether_exec_floor(void);
 
 /* aether_host.c keeps a copy of the caller info the execution at `depth`
  * was entered with (aether_host.h): it is put back when that one returns. */

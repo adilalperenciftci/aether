@@ -225,25 +225,37 @@ typedef struct {
 
 static AETHER_TLS_SHARED CallerView* t_view[AETHER_EXEC_MAX_DEPTH + 1];
 
+/* Actor steps running inside executions that could not put the setting
+ * away for lack of memory (aether_caller_put_aside): while there are any,
+ * the thread reads no caller info and its settings are refused. */
+static AETHER_TLS_SHARED int t_caller_blind = 0;
+static const AetherCallerInfo k_no_caller = { .identity_off = -1 };
+
 static const AetherCallerInfo* caller_seen(void) {
+    if (t_caller_blind) return &k_no_caller;
     int d = aether_exec_depth();
-    if (d > 0 && d <= AETHER_EXEC_MAX_DEPTH && t_view[d]) return &t_view[d]->info;
+    /* An execution an actor step runs inside is not the step's (#3396):
+     * below the floor its view is not read. */
+    if (d > aether_exec_floor() && d <= AETHER_EXEC_MAX_DEPTH && t_view[d]) return &t_view[d]->info;
     return &tls_caller;
 }
 
 /* Before the setting changes while executions run: each that reads it
- * keeps what it saw. 0 when there was no room for the copy. */
+ * keeps what it saw. 0 when there was no room for the copy. The executions
+ * an actor step runs inside are not running meanwhile; the step's end puts
+ * their setting back (aether_caller_give_back). */
 static int caller_keep_views(void) {
     int d = aether_exec_depth();
     if (d > AETHER_EXEC_MAX_DEPTH) d = AETHER_EXEC_MAX_DEPTH;
+    int first = aether_exec_floor() + 1;
     int need = 0;
-    for (int k = 1; k <= d; k++) if (!t_view[k]) need++;
+    for (int k = first; k <= d; k++) if (!t_view[k]) need++;
     if (need == 0) return 1;
     CallerView* v = (CallerView*)malloc(sizeof(CallerView));
     if (!v) return 0;
     v->refs = need;
     v->info = tls_caller;
-    for (int k = 1; k <= d; k++) {
+    for (int k = first; k <= d; k++) {
         if (t_view[k]) continue;
         t_view[k] = v;
         aether_exec_mark_view(k);
@@ -258,6 +270,38 @@ void aether_caller_leave(int depth) {
     t_view[depth] = NULL;
     tls_caller = v->info;
     if (--v->refs == 0) free(v);
+}
+
+/* aether_host.h (#3396). */
+static char k_caller_blind_token;
+
+void* aether_caller_put_aside(void) {
+    if (t_caller_blind) {
+        t_caller_blind++;
+        return &k_caller_blind_token;
+    }
+    if (!tls_caller.present) return NULL;   /* empty: the step starts as it is */
+    AetherCallerInfo* keep = (AetherCallerInfo*)malloc(sizeof(AetherCallerInfo));
+    if (!keep) {
+        t_caller_blind++;
+        return &k_caller_blind_token;
+    }
+    *keep = tls_caller;
+    tls_caller = k_no_caller;
+    return keep;
+}
+
+void aether_caller_give_back(void* token) {
+    if (token == &k_caller_blind_token) {
+        t_caller_blind--;
+        return;
+    }
+    if (token) {
+        tls_caller = *(AetherCallerInfo*)token;
+        free(token);
+    } else {
+        tls_caller = k_no_caller;
+    }
 }
 
 /* Append a NUL-terminated copy of `s` to the arena. Returns the
@@ -277,6 +321,7 @@ int aether_set_caller(const char* identity,
                       const char** attr_vals,
                       size_t n,
                       int64_t deadline_ms) {
+    if (t_caller_blind) return -1;   /* the enclosing setting could not be kept (#3396) */
     if (n > AETHER_CALLER_INFO_MAX_ATTRS) return -1;
     if (n > 0 && (!attr_keys || !attr_vals)) return -1;
 
@@ -310,6 +355,7 @@ int aether_set_caller(const char* identity,
 }
 
 void aether_clear_caller(void) {
+    if (t_caller_blind) return;
     /* Without room to keep the running executions' views, nothing changes. */
     if (!caller_keep_views()) return;
     AetherCallerInfo empty = { .identity_off = -1 };

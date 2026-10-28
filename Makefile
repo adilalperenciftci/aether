@@ -3667,6 +3667,15 @@ ci-coop: clean compiler ae
 		cat /tmp/ae_coop_out.txt | head -10; \
 		fail=$$((fail + 1)); \
 	fi; \
+	printf "  %-50s " "an export's ask steps actors outside it (#3392)"; \
+	if sh tests/integration/emit_lib_actor_step_context/test_emit_lib_actor_step_context.sh >/tmp/ae_coop_out.txt 2>&1; then \
+		echo "PASS"; \
+		pass=$$((pass + 1)); \
+	else \
+		echo "FAIL"; \
+		cat /tmp/ae_coop_out.txt | head -10; \
+		fail=$$((fail + 1)); \
+	fi; \
 	echo ""; \
 	echo "  $$pass passed, $$fail failed"; \
 	if [ "$$fail" -gt 0 ]; then exit 1; fi

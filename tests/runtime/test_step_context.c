@@ -7,6 +7,9 @@
  * state stayed changed for the rest of the outer handler: the in-step flag
  * and the actor id the signal handler reads were 0 and -1 after it, so a
  * fault in the rest of the outer handler was not recovered as a panic.
+ *
+ * A step inside a library call is not the call either (#3392, #3396):
+ * the last test steps an actor inside an execution, on a core's thread.
  */
 
 #include "test_harness.h"
@@ -100,4 +103,115 @@ TEST_CATEGORY(step_context_in_step_flags_come_back, TEST_CATEGORY_RUNTIME) {
     ASSERT_EQ(a->id, atomic_load(&a->id_after));
     free(a);
     free(b);
+}
+
+/* #3392, #3396: an actor stepped inside a library call is not the call.
+ * On core 0's thread, X's handler sets a caller, arms a deadline that has
+ * passed by then and enters an execution, as a host service calling an
+ * export from a handler does; inside it, it sends to Y, idle on core 0, so
+ * Y is stepped inline, inside the call. Y polls as a loop head does and
+ * reads the caller. Before: the poll raised the call's deadline in Y, Y's
+ * barrier caught it (Y died, its loop cut), the interruption stayed marked
+ * for the call, and Y read "alice". Now Y runs as on a core's thread, and
+ * the call is cut at its own next safe point. */
+#include "../../runtime/aether_exec.h"
+#include "../../runtime/aether_host.h"
+#include <string.h>
+
+extern void aether_set_call_deadline(int64_t ms);
+
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    ActorBase* tell;
+    atomic_int polled;         // Y: what its poll returned, -1 before
+    atomic_int no_caller;      // Y: it read no caller identity
+    atomic_int interrupting;   // X: an interruption marked after the send
+    atomic_int cut_at_own;     // X: the call ended at its own safe point
+    atomic_int outcome;        // X: the call's outcome
+    atomic_int done;
+} ExActor;
+
+static ExActor* g_ex_x;
+
+static void ex_call_body(void) {
+    ScMsg m = { 1, 0 };
+    aether_send_message(g_ex_x->tell, &m, sizeof m);
+    atomic_store(&g_ex_x->interrupting, aether_exec_interrupting());
+    atomic_store(&g_ex_x->cut_at_own, 1);
+    (void)aether_exec_poll();   // the call's own loop head: cut here
+    atomic_store(&g_ex_x->cut_at_own, 0);
+}
+
+static void ex_step(ExActor* self) {
+    Message msg;
+    if (!mailbox_receive(&self->mailbox, &msg)) {
+        atomic_store_explicit(&self->active, 0, memory_order_relaxed);
+        return;
+    }
+    aether_reply_slot_set(msg._reply_slot);
+    if (msg.payload_ptr) aether_free_message(msg.payload_ptr);
+    if (self->tell) {
+        g_ex_x = self;
+        aether_set_caller("alice", NULL, NULL, 0, 0);
+        aether_set_call_deadline(1);
+        sc_sleep_ms(5);
+        AetherJmpFrame* x = aether_exec_enter();
+        if (AETHER_SIGSETJMP(x->buf, 1)) {
+            aether_exec_failed();
+        } else {
+            ex_call_body();
+            aether_exec_leave();
+        }
+        atomic_store(&self->outcome, aether_last_outcome());
+        aether_set_call_deadline(0);
+        aether_clear_caller();
+        atomic_store(&self->done, 1);
+    } else {
+        atomic_store(&self->polled, aether_exec_poll());
+        atomic_store(&self->no_caller, strcmp(aether_caller_identity(), "") == 0);
+        atomic_store(&self->done, 1);
+    }
+    atomic_store_explicit(&self->active, self->mailbox.count > 0, memory_order_relaxed);
+}
+
+static ExActor* ex_actor(int core) {
+    ExActor* a = calloc(1, sizeof(ExActor));
+    static int next_id = 9800;
+    a->id = next_id++;
+    a->step = (void (*)(void*))ex_step;
+    atomic_init(&a->polled, -1);
+    atomic_init(&a->assigned_core, -1);
+    atomic_init(&a->migrate_to, -1);
+    atomic_init(&a->reply_slot, NULL);
+    atomic_flag_clear_explicit(&a->step_lock, memory_order_relaxed);
+    mailbox_init(&a->mailbox);
+    scheduler_register_actor((ActorBase*)a, core);
+    return a;
+}
+
+TEST_CATEGORY(step_context_runs_outside_the_call, TEST_CATEGORY_RUNTIME) {
+    scheduler_init(1);
+    ExActor* y = ex_actor(0);
+    ExActor* x = ex_actor(0);
+    x->tell = (ActorBase*)y;
+    scheduler_start();
+
+    ScMsg m = { 1, 0 };
+    aether_send_message(x, &m, sizeof m);
+    int done = sc_wait(&x->done, 1, 6000);
+    int stepped = sc_wait(&y->done, 1, 2000);
+    int y_dead = atomic_load(&y->dead) != 0;
+    scheduler_shutdown();
+    scheduler_cleanup();
+
+    ASSERT_TRUE(done);
+    ASSERT_TRUE(stepped);
+    ASSERT_EQ(0, atomic_load(&y->polled));        // not cut by the call's deadline
+    ASSERT_FALSE(y_dead);
+    ASSERT_EQ(1, atomic_load(&y->no_caller));     // no caller info of the call
+    ASSERT_EQ(0, atomic_load(&x->interrupting));  // nothing left on its way
+    ASSERT_EQ(1, atomic_load(&x->cut_at_own));    // the call cut at its own loop head
+    ASSERT_EQ(AETHER_DEADLINE, atomic_load(&x->outcome));
+    free(x);
+    free(y);
 }

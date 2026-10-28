@@ -37,12 +37,25 @@
  *     every other it shares the count with (aether_sandbox.c, #3393): a
  *     receiver stepped inside an enforce block is checked as it is on a
  *     thread of its own, against the levels it pushes itself and no other,
- *     and the block's levels are in force again when the send returns.
+ *     and the block's levels are in force again when the send returns;
+ *   - the library calls (executions) running on the thread, with what they
+ *     carry (aether_unwind.c, aether_exec.c, aether_host.c, #3392, #3396):
+ *     an interruption on its way through them, the call's deadline and
+ *     cancel, the stop a failed allocation notes for the call, and the
+ *     caller info the host set for it. An actor stepped inside a call (a
+ *     send's inline step, a cooperative ask's poll in an export) is not the
+ *     call: its loop heads are not cut by the call's deadline, a try in it
+ *     catches its own panics, its failed allocations are its own, and it
+ *     reads no caller info, as on a core's thread. The call is cut at its
+ *     own next safe point once the step returns.
  *
  * Each part costs a step only when some thread holds that kind of context:
  * it is put aside behind a load of a global that says so
  * (g_aether_spawn_watch for the claim; for the levels, the count of threads
- * with one, through aether_sandbox_in_force); the ask and the actor are two
+ * with one, through aether_sandbox_in_force), or behind two fields of the
+ * thread's frames block, which the step's try frame is pushed on anyway
+ * (the executions: their depth against the floor, and an interruption on
+ * its way); the ask and the actor are two
  * thread-local words, and the in-step flags are restored from what the
  * step read when it set them. Neither the locals holding what was put aside
  * nor the variables change between the sigsetjmp and a longjmp back to it,
@@ -58,6 +71,7 @@
  * first arm and a panic aborts the program (aether_panic.h). */
 
 #include "aether_panic.h"
+#include "aether_frames.h"
 #include "../scheduler/multicore_scheduler.h"
 #include "../utils/aether_trace.h"
 
@@ -81,6 +95,8 @@ typedef struct {
     int sandbox_hid;
     AetherSpawnAside spawn;
     int sandbox[2];
+    int execs_hid;
+    AetherExecAside execs;
 } AetherStepAside;
 
 static inline void aether_step_put_aside(AetherStepAside* s) {
@@ -100,6 +116,7 @@ static inline void aether_step_put_aside(AetherStepAside* s) {
 }
 
 static inline void aether_step_give_back(const AetherStepAside* s) {
+    if (unlikely(s->execs_hid)) aether_step_give_back_execs(&s->execs);
     if (unlikely(s->sandbox_hid))
         atomic_load_explicit(&aether_step_sandbox_show, memory_order_relaxed)(s->sandbox);
     if (unlikely(s->spawn_hid)) aether_spawn_give_back(&s->spawn);
@@ -116,7 +133,9 @@ static inline void aether_step_barrier(ActorBase* actor,
     AetherStepAside aside;
     aether_step_put_aside(&aside);
 
-    AetherJmpFrame* f = aether_try_push();
+    /* The try frame, with the executions running on the thread put aside
+     * in the same look at its block (aether_unwind.c). */
+    AetherJmpFrame* f = aether_step_push(&aside.execs, &aside.execs_hid);
     if (AETHER_SIGSETJMP(f->buf, 1) == 0) {
         g_aether_in_actor_step = 1;
         g_aether_current_actor_id = actor->id;
