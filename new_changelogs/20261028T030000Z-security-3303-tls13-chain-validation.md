@@ -19,4 +19,6 @@
   than 0x00 or 0xFF (a cA, or an extension's critical flag) is no longer
   read as TRUE; each makes the certificate refused.
   `tls13_cert.check_validity_at(c, at)` checks one certificate at a
-  given time. `std/http/README.md` lists what the pure client validates.
+  given time. A self-signed certificate pinned as its own anchor is trusted
+  as it stands, whatever its basicConstraints say, as OpenSSL trusts it.
+  `std/http/README.md` lists what the pure client validates.

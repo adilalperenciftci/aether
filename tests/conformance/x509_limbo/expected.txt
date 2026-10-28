@@ -11,6 +11,17 @@
 # a server: purpose sslserver, the host or IP, no partial chains, plus the
 # backend's own flags where the command has none (NO_PARTIAL_WILDCARDS,
 # NEVER_CHECK_SUBJECT, security level 2).
+#
+# bettertls, where every case agrees with limbo, differs from OpenSSL on 183
+# cases, none where the pure backend accepts what OpenSSL refuses for a
+# reason that matters:
+#   90 accepted here, refused by OpenSSL, which applies DNS name constraints
+#      to the subject CN of a leaf with no DNS SAN; neither backend uses the
+#      CN for names;
+#   71 refused here, accepted by `openssl verify`, which matches the host
+#      against the CN; the OpenSSL backend never does (#3313);
+#   22 accepted here, refused by OpenSSL, which does not try the other path
+#      that is valid.
 
 # ---- Not run ----
 

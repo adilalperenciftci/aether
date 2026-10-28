@@ -2609,6 +2609,8 @@ const MAX_CHAIN_DEPTH = 8
 //     a SAN of a form this code does not process (otherName, x400Address,
 //     ediPartyName, registeredID) below a constraint of that form, are
 //     refused;
+//   - (a self-signed leaf that is itself an anchor, a pinned certificate,
+//     is trusted as it stands, as OpenSSL trusts it);
 //   - there are at most max_depth intermediates that are not self-issued
 //     (a negative max_depth means MAX_CHAIN_DEPTH).
 // The search spends at most CHAIN_SIG_BUDGET signature checks and
@@ -3092,6 +3094,21 @@ fn chain_dfs(cx: *ChainCtx, cert: *LeafCert, at: string, depth: int) -> int {
     return 0
 }
 
+// 1 when `c` is one of `anchors`, byte for byte (its signed body and its
+// signature).
+fn pinned_anchor(anchors: ptr, c: *LeafCert) -> int {
+    n = list_size(anchors)
+    i = 0
+    while i < n {
+        a = list.at(anchors, i) as *LeafCert
+        if a != null && a.tbs != null && c.tbs != null && a.signature != null && c.signature != null {
+            if bytes_same(a.tbs, c.tbs) == 1 && bytes_same(a.signature, c.signature) == 1 { return 1 }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
 // "" when there is a valid path from `leaf` through `intermediates` (a
 // std.list of *LeafCert, or null) to one of `anchors` at `at` (a
 // "YYYYMMDDHHMMSS" key, "" for now) for `purpose` (PURPOSE_SERVER or
@@ -3107,6 +3124,10 @@ validate_chain(leaf: *LeafCert, intermediates: ptr, anchors: ptr, at: string, pu
     if purpose_ok(leaf, purpose) == 0 { return chain_error(CHAIN_PURPOSE) }
     if leaf.has_key_usage == 1 && (leaf.key_usage & KU_DIGITAL_SIGNATURE) == 0 { return chain_error(CHAIN_LEAF_KEY_USAGE) }
     if cert_time_ok(leaf, at_key) == 0 { return chain_error(CHAIN_VALIDITY) }
+    // A self-signed leaf that is itself one of the anchors (a pinned
+    // certificate) is trusted as it stands, as OpenSSL trusts it: it has no
+    // issuer to check, so basicConstraints cA FALSE does not refuse it.
+    if (leaf.ext_bits & EXT_SELF_SIGNED) != 0 && pinned_anchor(anchors, leaf) == 1 { return "" }
     md = max_depth
     if md < 0 { md = MAX_CHAIN_DEPTH }
     cx = ChainCtx { intermediates: intermediates, anchors: anchors, path: list_new(), purpose: purpose, max_depth: md, err: CHAIN_NO_PATH, budget: CHAIN_SIG_BUDGET, nc_budget: CHAIN_NC_BUDGET }

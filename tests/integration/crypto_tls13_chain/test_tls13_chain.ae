@@ -48,6 +48,7 @@
 //               key, issuer (CN=Someone Else), serial, or all three, each
 //               with a leaf (akikeyidleaf and so on); akiself, whose AKI
 //               names its own serial, and akiselfleaf
+//   pinned      a self-signed leaf (peer.example, cA FALSE), its own anchor
 
 import std.list
 import std.string
@@ -189,6 +190,10 @@ fn pem_kunoca() -> string {
 
 fn pem_kunocaleaf() -> string {
     return "-----BEGIN CERTIFICATE-----\nMIIBmzCCAUGgAwIBAgIJAI4YOTUjHLNgMAoGCCqGSM49BAMCMCwxKjAoBgNVBAMM\nIUNoYWluIFRlc3Qga2V5Q2VydFNpZ24gd2l0aG91dCBjQTAgFw0yNjAxMDEwMDAw\nMDBaGA8yMTI2MDEwMTAwMDAwMFowGTEXMBUGA1UEAwwOa3Vub2NhLmV4YW1wbGUw\nWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAQOEGq2nZ/yKWa4xrWbmuPAnEB+2gwH\nfqQmT1QyrS9FgfdJRyDXBBNJZp05NxpWncWO3+upiV1v5XgJJzBqBFrio10wWzAZ\nBgNVHREEEjAQgg5rdW5vY2EuZXhhbXBsZTAdBgNVHQ4EFgQUgW5LjmTj6c4Egf60\nb8wu5txZVWkwHwYDVR0jBBgwFoAUP0bdmnXnyOTyUOTtAzxdCgnnaJEwCgYIKoZI\nzj0EAwIDSAAwRQIgbe1tX6ydTS5d3prag2Ip72rrO60o2ph5MQsz8y5wwi4CIQDB\nrL4LFy1fzH5tG44zbSg/fyhYhf+A78fY5FK8B0xQXg==\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_pinned() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBezCCASGgAwIBAgIFUEVFUgEwCgYIKoZIzj0EAwIwFzEVMBMGA1UEAwwMcGVl\nci5leGFtcGxlMCAXDTI2MDEwMTAwMDAwMFoYDzIxMjYwMTAxMDAwMDAwWjAXMRUw\nEwYDVQQDDAxwZWVyLmV4YW1wbGUwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARv\n7S9eWT57ZTmAOztQD2+5EetBRQ+B+cOtLJCr7BVBQPQExOwo/jrT1ahb6i7ZxObZ\nFrq4KWW801ggO2EZ0SqXo1gwVjAMBgNVHRMBAf8EAjAAMA4GA1UdDwEB/wQEAwIH\ngDAXBgNVHREEEDAOggxwZWVyLmV4YW1wbGUwHQYDVR0OBBYEFH8HRengm5cRK0K4\na6DbxP8afdpfMAoGCCqGSM49BAMCA0gAMEUCIDCIjkFoXJK1RI1twupNRu+WcP5M\nrU1MCAQ84vwQWP4tAiEArDbfJRioR7QSSuE4iKxVCCFaHbJs/7eLq3CNJGUFXoM=\n-----END CERTIFICATE-----\n"
 }
 
 fn pem_icabadku() -> string {
@@ -363,6 +368,10 @@ main() {
     fails = fails + check("a root whose AKI names another key, issuer and serial", anchor_result(pem_akiall(), pem_akiallleaf(), ""), 0)
     fails = fails + check("a root whose AKI names its own serial", anchor_result(pem_akiself(), pem_akiselfleaf(), ""), 1)
     fails = fails + check("the same leaf under its root", anchor_result(pem_root(), pem_leaf(), pem_ica()), 1)
+
+    // A pinned self-signed leaf with basicConstraints cA FALSE: trusted as
+    // it stands (it has no issuer), as OpenSSL trusts it.
+    fails = fails + check("a pinned self-signed leaf (cA FALSE)", anchor_result(pem_pinned(), pem_pinned(), ""), 1)
 
     if fails > 0 {
         println("tls13_chain: ${fails} FAILURES")
