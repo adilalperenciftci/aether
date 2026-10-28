@@ -305,3 +305,5 @@ tests/integration/emit_lib_execution_frame/
 tests/integration/https_server_tls_pem/
 # #3371: reload.ae takes its certificates from its driver.
 tests/integration/https_tls_reload/
+# #3293: rngfail.ae (with rng_fail_shim.c) and listener.ae dial each other; test_random_failure.sh pairs them.
+tests/integration/crypto_random_failure/
