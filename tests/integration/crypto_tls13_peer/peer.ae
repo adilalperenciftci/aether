@@ -20,6 +20,7 @@
 //   hrr=MODE        a HelloRetryRequest first (see hrr_msg)
 //   sh_version=HEX  the ServerHello's legacy_version
 //   sh_sid=bad      a ServerHello session id echo one bit off
+//   sh_comp=1       a ServerHello with compression method 1
 //   pack_sh=1       handshake bytes after the ServerHello in its record
 //   sh_tail=N       N bytes of application_data records behind the
 //                   ServerHello, in the same write, and the answer read
@@ -246,7 +247,8 @@ fn server_hello(random: ptr, sid: ptr, sid_len: int, suite: int, group: int, ks:
     // sh_sid=bad: a session id echo that is not the client's (#3318).
     if knob("sh_sid") == "bad" && sid_len > 0 { bytes.set(w.b, w.n - 1, (bytes.get(w.b, w.n - 1) ^ 1) & 0xFF) }
     put16(w, suite)
-    put8(w, 0)
+    // sh_comp=1: compression method 1 (#3364).
+    if knob("sh_comp") != "" { put8(w, 1) } else { put8(w, 0) }
     put16(w, bytes.length(e))
     put_bytes(w, e, 0, bytes.length(e))
     bytes.free(e)
@@ -1081,7 +1083,8 @@ const HRR_COOKIE = "c00c1e0f"
 
 // A HelloRetryRequest for MODE: "cookie" (HRR_COOKIE), "group:HEX" (a
 // key_share naming that group), "none" (neither), "emptycookie" (a cookie
-// of no bytes); "twice" and "suite" add to "cookie" (see main).
+// of no bytes); "twice" and "suite" add to "cookie" (see main), "comp"
+// gives it compression method 1.
 fn hrr_msg(sid: ptr, sid_len: int, suite: int, mode: string) -> ptr {
     exts = buf_new()
     put16(exts, 0x002b)
@@ -1116,7 +1119,8 @@ fn hrr_msg(sid: ptr, sid_len: int, suite: int, mode: string) -> ptr {
     put8(w, sid_len)
     put_bytes(w, sid, 0, sid_len)
     put16(w, suite)
-    put8(w, 0)
+    // "comp" in the mode: compression method 1 (#3364).
+    if string.contains(mode, "comp") == 1 { put8(w, 1) } else { put8(w, 0) }
     put16(w, bytes.length(e))
     put_bytes(w, e, 0, bytes.length(e))
     bytes.free(e)

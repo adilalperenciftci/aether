@@ -28,6 +28,8 @@
 #   #3325  HelloRetryRequest, client and server.
 #   #3318  the ServerHello's legacy_version and session id echo.
 #   #3357  the pure server's ClientHello checks, secp256r1, skipped 0-RTT data.
+#   #3364  decode_error for a repeated EncryptedExtensions extension (found
+#          before it is judged unsolicited) and a nonzero compression method.
 #   #3368  the client reads what the server sent before it closes a failed
 #          handshake, so a reset does not take its alert.
 #
@@ -97,7 +99,8 @@ run_case "EE: ec_point_formats (TLS 1.2)" "ee_ext=000b00020100" "ERR" "ALERT 110
 run_case "EE: early_data, not offered" "ee_ext=002a0000" "ERR" "ALERT 110"
 run_case "EE: key_share, offered but out of place" "ee_ext=00330000" "ERR" "ALERT 47"
 run_case "EE: supported_versions, out of place" "ee_ext=002b00020304" "ERR" "ALERT 47"
-run_case "EE: the same extension twice" "ee_ext=000a00040002001d000a00040002001d" "ERR" "ALERT 47"
+run_case "EE: the same extension twice (#3364)" "ee_ext=000a00040002001d000a00040002001d" "ERR" "ALERT 50"
+run_case "EE: an unknown extension twice, refused as a repeat (#3364)" "ee_ext=fafa0000fafa0000" "ERR" "ALERT 50"
 run_case "EE: ALPN naming h2, never offered" "ee_ext=001000050003026832" "ERR" "ALERT 47"
 run_case "EE: ALPN naming http/1.1" "ee_ext=0010000b000908687474702f312e31" "OK" "FINISHED"
 run_case "EE: an empty server_name ack" "ee_ext=00000000" "OK" "FINISHED"
@@ -111,6 +114,7 @@ run_case "SH: server_name, offered but out of place" "sh_ext=00000000" "ERR" "AL
 run_case "SH: pre_shared_key in a full handshake" "sh_ext=002900020000" "ERR" "ALERT 110"
 run_case "SH: supported_versions twice" "sh_ext=002b00020304" "ERR" "ALERT 47"
 run_case "SH: an unknown extension, 32 KiB behind it (#3368)" "sh_ext=fafa0000;sh_tail=32768" "ERR" "ALERT 110"
+run_case "SH: compression method 1 (#3364)" "sh_comp=1" "ERR" "ALERT 50"
 
 
 # #3316: CertificateEntry extensions (RFC 8446 4.4.2).
@@ -332,6 +336,7 @@ run_case "HRR: asking for no change" "hrr=none" "ERR" "ALERT 47"
 run_case "HRR: an empty cookie" "hrr=emptycookie" "ERR" "ALERT 50"
 run_case "HRR: a second one" "hrr=cookie,twice" "ERR" "ALERT 10"
 run_case "HRR: then a ServerHello with another suite" "hrr=cookie,suite" "ERR" "ALERT 47"
+run_case "HRR: compression method 1 (#3364)" "hrr=cookie,comp" "ERR" "ALERT 50"
 HRR=ok run_cf_case "server HRR: asks for x25519, then the handshake" "ok" "CLOSED" "ACCEPTED"
 HRR=noshare run_cf_case "server HRR: the second ClientHello without the share" "ok" "HRR ALERT 47" "REFUSED"
 HRR=sid run_cf_case "server HRR: the second ClientHello with another session id" "ok" "HRR ALERT 47" "REFUSED"
