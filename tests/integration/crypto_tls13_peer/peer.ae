@@ -11,6 +11,7 @@
 //   ee_body=HEX     the whole EncryptedExtensions body instead ("-": empty)
 //   cert_ext=HEX    the leaf CertificateEntry's extensions
 //   ccs=1|2|bad     change_cipher_spec records after the ServerHello
+//   pre_ccs=1|2|bad the same before the ServerHello
 //   empty_hs=1      an empty protected handshake record before EE
 //   plain_ee=1      EncryptedExtensions in a plaintext record
 //   flight_alerts=HEX  alert records (level, description pairs) before
@@ -662,6 +663,16 @@ main() {
 
     srnd, _sr = cryptography.random_buffer(32)
     sh = server_hello(srnd, chp.session_id, chp.session_id_len, chp.cipher_suite, chp.group, ks, bytes.length(ks))
+    pck = knob("pre_ccs")
+    if pck != "" {
+        // change_cipher_spec records before the ServerHello: "1" the one
+        // compatibility mode allows, "2" two, "bad" one of value 2 (#3379).
+        pc = from_hex("01")
+        if pck == "bad" { bytes.set(pc, 0, 2) }
+        send_plain(sock, 20, pc)
+        if pck == "2" { send_plain(sock, 20, pc) }
+        bytes.free(pc)
+    }
     splitk = knob("split_sh")
     if splitk != "" {
         // The ServerHello in records of at most N bytes each (RFC 8446 5.1).

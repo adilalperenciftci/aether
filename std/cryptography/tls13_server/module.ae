@@ -111,7 +111,32 @@ fn recio_free(r: *RecordIO) {
     libc_free(r as ptr)
 }
 
+// Drop what has been consumed before reading more (#3379): back to the
+// start when everything was consumed, else, once the consumed part is
+// past RECIO_COMPACT_AT bytes and at least half of what is held, the rest
+// moved to a fresh buffer. A connection then holds about one record and
+// one read however long it lives, not everything it ever received.
+const RECIO_COMPACT_AT = 16384
+
+fn recio_compact(r: *RecordIO) {
+    if r.off == 0 { return }
+    if r.off >= r.len {
+        r.off = 0
+        r.len = 0
+        return
+    }
+    if r.off < RECIO_COMPACT_AT || r.off * 2 < r.len { return }
+    rest = r.len - r.off
+    nb = bytes.new(rest + 4096)
+    bytes.copy_from_bytes(nb, 0, r.buf, r.off, rest)
+    bytes.free(r.buf)
+    r.buf = nb
+    r.off = 0
+    r.len = rest
+}
+
 fn recio_fill(r: *RecordIO) -> int {
+    recio_compact(r)
     tries = 0
     filling = 1
     result = -1
@@ -181,7 +206,9 @@ fn recio_next(r: *RecordIO) -> (ptr, int, string) {
 // for the ClientHello after a HelloRetryRequest, which the client's one
 // compatibility change_cipher_spec may come before (D.4, #3325), and 2 for
 // one after a first ClientHello that offered early data: the 0-RTT records
-// before it are read past, up to MAX_EARLY_SKIP bytes (4.2.10, #3357).
+// before it are read past, up to MAX_EARLY_SKIP bytes (4.2.10, #3357);
+// application data anywhere else, an empty record included, is
+// unexpected_message (#3379).
 fn recio_next_client_hello(r: *RecordIO, second: int) -> (ptr, int, string) {
     skip = 0
     if second == 2 { skip = MAX_EARLY_SKIP }
@@ -194,9 +221,12 @@ fn recio_next_client_hello(r: *RecordIO, second: int) -> (ptr, int, string) {
             return null, 0, err
         }
         ct = bytes.get(rec, 0) & 0xFF
-        if ct == 0x17 && alen == 0 && skip >= rlen - 5 {
+        if second == 2 && ct == 0x17 && alen == 0 && rlen - 5 >= MIN_PROTECTED && skip >= rlen - 5 {
             // The 0-RTT data a first ClientHello sent, which a
             // HelloRetryRequest refused: read past (RFC 8446 4.2.10, #3357).
+            // Only then, and only records a protected one can be: an empty
+            // one cost nothing against `skip`, so any number of them went by,
+            // before a first ClientHello too (#3379).
             bytes.free(rec)
             skip = skip - (rlen - 5)
         } else if ct == 0x14 && second >= 1 && alen == 0 && r.ccs == 0 && rlen == 6 && (bytes.get(rec, 5) & 0xFF) == 1 {
@@ -1027,6 +1057,10 @@ const MAX_EMPTY_RECORDS = 32
 // 0-RTT data (RFC 8446 4.2.10 bounds it by max_early_data_size; this server
 // issues no tickets, so this is the bound BoringSSL keeps), #3357.
 const MAX_EARLY_SKIP = 16384
+
+// The smallest protected record: its content type byte and the AEAD tag
+// (RFC 8446 5.2).
+const MIN_PROTECTED = 17 // 1 + tls13_record.TAG_LEN
 
 // KeyUpdates without application data between them the server reads past
 // before it refuses the stream (#3320), as BoringSSL bounds them.

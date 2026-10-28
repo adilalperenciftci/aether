@@ -35,6 +35,8 @@
 #   #3367  a message the server's flight cannot hold ends it at once.
 #   #3369  the client names secp384r1 without a share and follows a
 #          HelloRetryRequest for it; the ServerHello must be for that group.
+#   #3379  one change_cipher_spec (the byte 1) in a client handshake; no
+#          application data before a ClientHello.
 #   #3368  the client reads what the server sent before it closes a failed
 #          handshake, so a reset does not take its alert.
 #
@@ -135,6 +137,10 @@ run_case "Certificate: one stapled response" "cert_ext=0005000501000001ff" "OK" 
 run_case "flight: the one compatibility change_cipher_spec" "ccs=1" "OK" "FINISHED"
 run_case "flight: two change_cipher_spec records" "ccs=2" "ERR" "ALERT 10"
 run_case "flight: a change_cipher_spec of value 2" "ccs=bad" "ERR" "ALERT 10"
+run_case "SH: the one change_cipher_spec before it" "pre_ccs=1" "OK" "FINISHED"
+run_case "SH: two change_cipher_spec records before it (#3379)" "pre_ccs=2" "ERR" "ALERT 10"
+run_case "SH: a change_cipher_spec of value 2 before it (#3379)" "pre_ccs=bad" "ERR" "ALERT 10"
+run_case "SH: one change_cipher_spec before it and one after (#3379)" "pre_ccs=1;ccs=1" "ERR" "ALERT 10"
 run_case "flight: an empty protected handshake record" "empty_hs=1" "ERR" "ALERT 10"
 run_case "flight: EncryptedExtensions in the clear" "plain_ee=1" "ERR" "ALERT 10"
 run_case "flight: bytes after the Finished in its record" "fin_trailing=1" "ERR" "ALERT 10"
@@ -172,6 +178,7 @@ run_server_case() {
 run_server_case "server: a record of unknown type first" "180303000100" "ALERT 10"
 run_server_case "server: a plaintext record over 2^14" "1603034001" "ALERT 22"
 run_server_case "server: a change_cipher_spec before the ClientHello" "140303000101" "ALERT 10"
+run_server_case "server: empty application_data records before the ClientHello (#3379)" "170303000017030300001703030000" "ALERT 10"
 
 # #3321: a handshake message split across records (RFC 8446 5.1).
 run_case "SH: split into 8-byte records" "split_sh=8" "OK" "FINISHED"
