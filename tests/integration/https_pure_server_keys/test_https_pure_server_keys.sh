@@ -18,7 +18,9 @@
 #      the text (#3378);
 #   5. a chain over 16 KiB goes out in several records and verifies, the
 #      server serves the next connection, and a 40000-byte response is
-#      whole (#3380).
+#      whole (#3380);
+#   6. a request body of 16384 bytes or more reaches the handler whole
+#      (#3381).
 #
 # In a build without OpenSSL only the "aether" client cases run.
 
@@ -210,6 +212,23 @@ for b in $BACKENDS; do
         esac
     done
     echo "    ok: a chain over 16 KiB, two connections, client \"$b\""
+done
+
+
+# 6. Reads (#3381): a request body of 16384 bytes or more comes in records
+#    of 16384 bytes, more than the server's first read takes, so it must
+#    keep what one read could not take for the next.
+start_server p256 p256
+[ -n "$S_PORT" ] || { echo "    got: $OUT"; fail "the P-256 server did not start"; }
+for b in $BACKENDS; do
+    for blen in 16384 40000; do
+        run env URL="https://localhost:$S_PORT/len" CAFILE="$TMP/p256.pem" BACKEND="$b" BODY_LEN="$blen" "$TMP/client"
+        case "$OUT" in
+            *"STATUS 200 BODY len-$blen"*) ;;
+            *) echo "    got: $OUT"; fail "a $blen-byte request body, client \"$b\": not whole" ;;
+        esac
+    done
+    echo "    ok: request bodies of 16384 and 40000 bytes, client \"$b\""
 done
 
 echo "  [PASS] $NAME"

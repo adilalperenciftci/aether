@@ -3,9 +3,9 @@
 //
 //   CERT_PATH, KEY_PATH   the certificate and key
 //
-// Prints "READY <port>" and serves "/" and "/big" (40000 bytes) until
-// killed, or "FAIL: server_set_tls: <why>" when the pure server refuses
-// the certificate and key, and exits 1.
+// Prints "READY <port>" and serves "/", "/big" (40000 bytes) and POST "/len"
+// (the request body's length) until killed, or "FAIL: server_set_tls:
+// <why>" when the pure server refuses the certificate and key, and exits 1.
 
 import std.http
 import std.os
@@ -31,6 +31,13 @@ handle_big(req: ptr, res: ptr, ud: ptr) {
     http.response_set_status(res, 200)
     http.response_set_header(res, "Content-Type", "text/plain")
     http.response_set_body(res, strbuilder.finish(sb))
+}
+
+// POST /len: the length of the request body it got, as "len-<n>" (#3381).
+handle_len(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "len-${http.request_body_length(req)}")
 }
 
 message StartSrv { raw: ptr }
@@ -64,6 +71,7 @@ main() {
     println("READY ${http.server_port(raw)}")
     http.server_get(raw, "/", handle_root, 0)
     http.server_get(raw, "/big", handle_big, 0)
+    http.server_post(raw, "/len", handle_len, 0)
     a = spawn(SrvActor())
     a ! StartSrv { raw: raw }
     sleep(60000)

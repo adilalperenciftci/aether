@@ -4,6 +4,7 @@
 //   URL       the https URL to GET
 //   CAFILE    the certificate to pin (set_cafile)
 //   BACKEND   "aether" or "openssl"
+//   BODY_LEN  when set, POST that many bytes of body instead of a GET
 //
 // Prints "BACKEND-ERR: <error>" when set_tls_backend refuses, else
 // "STATUS <code> BODY <body>" (with LEN_ONLY=1, "STATUS <code> LEN <n>")
@@ -12,9 +13,25 @@
 import std.http.client
 import std.cryptography.tls13_client
 import std.os
+import std.bytes
+import std.string
 
 main() {
-    req = client.request("GET", os.getenv("URL"))
+    // BODY_LEN=n: a POST with n bytes of body instead of a GET (#3381).
+    blen, _be = string.to_int(os.getenv("BODY_LEN"))
+    method = "GET"
+    if blen > 0 { method = "POST" }
+    req = client.request(method, os.getenv("URL"))
+    if blen > 0 {
+        body = bytes.new(blen)
+        i = 0
+        while i < blen {
+            bytes.set(body, i, 113)
+            i = i + 1
+        }
+        _se = client.set_body(req, bytes.view(body)[0..blen], "application/octet-stream")
+        bytes.free(body)
+    }
     client.set_timeout(req, 10s)
     client.set_cafile(req, os.getenv("CAFILE"))
     berr = client.set_tls_backend(req, os.getenv("BACKEND"))
