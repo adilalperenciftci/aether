@@ -8,6 +8,9 @@
 #          unsupported_extension (110) for what the client never offered,
 #          illegal_parameter (47) for an offered one out of place or twice,
 #          decode_error (50) for a block that does not parse.
+#   #3317  the record layer (RFC 8446 5): limits, types, change_cipher_spec,
+#          empty records; client and server.
+#   #3321  handshake messages split across records, client and server.
 #   #3316  CertificateEntry extensions (RFC 8446 4.4.2): the same alerts,
 #          and decode_error for a status_request that is not one OCSP
 #          response.
@@ -142,6 +145,12 @@ run_server_case() {
 run_server_case "server: a record of unknown type first" "180303000100" "ALERT 10"
 run_server_case "server: a plaintext record over 2^14" "1603034001" "ALERT 22"
 run_server_case "server: a change_cipher_spec before the ClientHello" "140303000101" "ALERT 10"
+
+# #3321: a handshake message split across records (RFC 8446 5.1).
+run_case "SH: split into 8-byte records" "split_sh=8" "OK" "FINISHED"
+run_case "SH: split into 1-byte records" "split_sh=1" "OK" "FINISHED"
+run_case "SH: more handshake bytes after it in its record" "pack_sh=1" "ERR" "ALERT 10"
+run_server_case "server: a ClientHello split over two records" "split_ch" "SERVERHELLO"
 
 [ "$fails" = 0 ] || fail "$fails case(s)"
 echo "  [PASS] $NAME"

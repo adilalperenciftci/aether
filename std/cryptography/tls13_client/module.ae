@@ -469,41 +469,69 @@ fn recio_fill(r: *RecordIO) -> int {
 // carries the OS socket timeout, so this caps the total post-handshake wait.
 const RECIO_MAX_TIMEOUT_RETRIES = 50
 
-// Read exactly one complete TLS record. Returns (record_bytes, total_len, "")
-// where record_bytes is a fresh buffer of the whole record (header + payload),
-// Like recio_next but skips any ChangeCipherSpec records (content type 0x14),
-// which a TLS 1.3 server may interleave for middlebox compatibility (notably
-// right after a HelloRetryRequest). Returns the next non-CCS record.
+// The ServerHello, whatever records it came in, as one record: a 5-byte
+// header, then the message (RFC 8446 5.1: a handshake message may be split
+// across records, #3321). Dummy change_cipher_spec records are dropped;
+// an alert record is the server refusing the ClientHello; anything else
+// is unexpected_message, as are bytes after the message in its last
+// record (a key change follows the ServerHello) and a message over 2^16
+// bytes. r.alert says what to send on an error.
 fn recio_next_hs(r: *RecordIO) -> (ptr, int, string) {
-    looking = 1
-    rec = null
-    rlen = 0
-    err = ""
-    while looking == 1 {
+    acc = bytes.new(0)
+    alen = 0
+    while 1 == 1 {
         rec, rlen, err = recio_next(r)
-        if string.equals(err, "") != 1 { looking = 0 } else {
-            ct = bytes.get(rec, 0) & 0xFF
-            if ct == 0x14 {
-                bytes.free(rec) // skip CCS
-            } else {
-                if ct == 0x15 {
-                    // A plaintext Alert where the ServerHello belongs: the
-                    // server refused the ClientHello outright. Parsing it as a
-                    // ServerHello produced "server hello: truncated header",
-                    // which named the wrong layer. The usual cause is a server
-                    // that does not speak TLS 1.3, which answers this client's
-                    // TLS-1.3-only offer with protocol_version (OpenSSL) or
-                    // handshake_failure (no cipher suite in common).
-                    err = server_hello_alert_error(rec, rlen)
-                    bytes.free(rec)
-                    rec = null
-                    rlen = 0
+        if string.equals(err, "") != 1 {
+            bytes.free(acc)
+            return null, 0, err
+        }
+        ct = bytes.get(rec, 0) & 0xFF
+        if ct == 0x14 {
+            bytes.free(rec)
+        } else if ct == 0x15 {
+            // A plaintext Alert where the ServerHello belongs: the server
+            // refused the ClientHello outright, usually because it does not
+            // speak TLS 1.3 (protocol_version from OpenSSL) or shares no
+            // cipher suite (handshake_failure).
+            aerr = server_hello_alert_error(rec, rlen)
+            bytes.free(rec)
+            bytes.free(acc)
+            return null, 0, aerr
+        } else if ct != 0x16 {
+            bytes.free(rec)
+            bytes.free(acc)
+            r.alert = ALERT_UNEXPECTED_MESSAGE
+            return null, 0, "record: a record of type ${ct} where the ServerHello belongs"
+        } else {
+            bytes.copy_from_bytes(acc, alen, rec, 5, rlen - 5)
+            alen = alen + rlen - 5
+            bytes.free(rec)
+            if alen >= 4 {
+                ml = ((bytes.get(acc, 1) & 0xFF) << 16) | ((bytes.get(acc, 2) & 0xFF) << 8) | (bytes.get(acc, 3) & 0xFF)
+                if ml > 65536 {
+                    bytes.free(acc)
+                    r.alert = ALERT_UNEXPECTED_MESSAGE
+                    return null, 0, "handshake: a ServerHello over 2^16 bytes"
                 }
-                looking = 0
+                if alen >= 4 + ml {
+                    if alen != 4 + ml {
+                        bytes.free(acc)
+                        r.alert = ALERT_UNEXPECTED_MESSAGE
+                        return null, 0, "handshake: data after the ServerHello in its record"
+                    }
+                    out = bytes.new(5 + alen)
+                    bytes.set(out, 0, 0x16)
+                    bytes.set(out, 1, 0x03)
+                    bytes.set(out, 2, 0x03)
+                    bytes.set(out, 3, (alen >> 8) & 0xFF)
+                    bytes.set(out, 4, alen & 0xFF)
+                    bytes.copy_from_bytes(out, 5, acc, 0, alen)
+                    bytes.free(acc)
+                    return out, 5 + alen, ""
+                }
             }
         }
     }
-    return rec, rlen, err
 }
 
 // The error for a plaintext Alert record received instead of a ServerHello.
@@ -520,6 +548,8 @@ fn server_hello_alert_error(rec: ptr, rlen: int) -> string {
     return "server refused the handshake with alert ${name} (${desc})"
 }
 
+// Read exactly one complete TLS record. Returns (record_bytes, total_len, "")
+// where record_bytes is a fresh buffer of the whole record (header + payload),
 // or (null, 0, err). Blocks (via recio_fill) until a full record is available.
 fn recio_next(r: *RecordIO) -> (ptr, int, string) {
     loop = 1
@@ -788,6 +818,7 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
 
     shrec, shlen, sherr = recio_next_hs(rio)
     if string.equals(sherr, "") != 1 {
+        if rio.alert != 0 { send_plain_alert(sock, rio.alert) }
         bytes.free(dk); bytes.free(p256_priv)
         cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
         return null, sherr
@@ -1906,6 +1937,7 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
 
     shrec, shlen, sherr = recio_next_hs(rio)
     if string.equals(sherr, "") != 1 {
+        if rio.alert != 0 { send_plain_alert(sock, rio.alert) }
         bytes.free(psk); cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
         return null, sherr
     }

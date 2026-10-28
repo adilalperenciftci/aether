@@ -14,6 +14,8 @@
 //   empty_hs=1      an empty protected handshake record before EE
 //   plain_ee=1      EncryptedExtensions in a plaintext record
 //   fin_trailing=1  bytes after the Finished, in its record
+//   split_sh=N      the ServerHello in records of at most N bytes
+//   pack_sh=1       handshake bytes after the ServerHello in its record
 //   post=WHAT       after the handshake, under the application keys:
 //                   oversize, padded, bigcipher, emptyN, ccs, badtype,
 //                   innertype, badmac, emptyhs; then prints "POST <answer>"
@@ -513,7 +515,33 @@ main() {
 
     srnd, _sr = cryptography.random_buffer(32)
     sh = server_hello(srnd, chp.session_id, chp.session_id_len, chp.cipher_suite, chp.group, ks, bytes.length(ks))
-    send_plain(sock, 22, sh)
+    splitk = knob("split_sh")
+    if splitk != "" {
+        // The ServerHello in records of at most N bytes each (RFC 8446 5.1).
+        step, _se = string.to_int(splitk)
+        off = 0
+        while off < bytes.length(sh) {
+            m = bytes.length(sh) - off
+            if m > step { m = step }
+            frag = bytes.new(m)
+            bytes.copy_from_bytes(frag, 0, sh, off, m)
+            send_plain(sock, 22, frag)
+            bytes.free(frag)
+            off = off + m
+        }
+    } else if knob("pack_sh") != "" {
+        // More handshake bytes after the ServerHello in its record.
+        w = buf_new()
+        put_bytes(w, sh, 0, bytes.length(sh))
+        put8(w, 8)
+        put24(w, 2)
+        put16(w, 0)
+        packed = buf_take(w)
+        send_plain(sock, 22, packed)
+        bytes.free(packed)
+    } else {
+        send_plain(sock, 22, sh)
+    }
     tls13_client.transcript_add(tr, bytes.view(sh)[0..bytes.length(sh)])
 
     // A client that refuses the ServerHello answers now, in the clear.

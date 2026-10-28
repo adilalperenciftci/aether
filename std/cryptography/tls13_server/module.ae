@@ -146,6 +146,73 @@ fn recio_next(r: *RecordIO) -> (ptr, int, string) {
     return null, 0, "unreachable"
 }
 
+// The ClientHello, whatever records it came in, as one record: a 5-byte
+// header, then the message (RFC 8446 5.1: a handshake message may be split
+// across records, #3321). A change_cipher_spec before it, any record type
+// other than handshake, bytes after the message in its last record (only
+// early data, which this server does not take, may follow it) and a
+// message over 2^16 bytes are unexpected_message; an alert record is the
+// client giving up. r.alert says what to send on an error.
+fn recio_next_client_hello(r: *RecordIO) -> (ptr, int, string) {
+    acc = bytes.new(0)
+    alen = 0
+    while 1 == 1 {
+        rec, rlen, err = recio_next(r)
+        if string.equals(err, "") != 1 {
+            bytes.free(acc)
+            return null, 0, err
+        }
+        ct = bytes.get(rec, 0) & 0xFF
+        if ct == 0x14 {
+            bytes.free(rec)
+            bytes.free(acc)
+            r.alert = tls13_record.ALERT_UNEXPECTED_MESSAGE
+            return null, 0, "record: a change_cipher_spec before the ClientHello"
+        } else if ct == 0x15 {
+            // The client sent an alert instead of a ClientHello.
+            aerr = "the client sent an alert instead of a ClientHello"
+            bytes.free(rec)
+            bytes.free(acc)
+            return null, 0, aerr
+        } else if ct != 0x16 {
+            bytes.free(rec)
+            bytes.free(acc)
+            r.alert = tls13_record.ALERT_UNEXPECTED_MESSAGE
+            return null, 0, "record: a record of type ${ct} where the ClientHello belongs"
+        } else {
+            bytes.copy_from_bytes(acc, alen, rec, 5, rlen - 5)
+            alen = alen + rlen - 5
+            bytes.free(rec)
+            if alen >= 4 {
+                ml = ((bytes.get(acc, 1) & 0xFF) << 16) | ((bytes.get(acc, 2) & 0xFF) << 8) | (bytes.get(acc, 3) & 0xFF)
+                if ml > 65536 {
+                    bytes.free(acc)
+                    r.alert = tls13_record.ALERT_UNEXPECTED_MESSAGE
+                    return null, 0, "handshake: a ClientHello over 2^16 bytes"
+                }
+                if alen >= 4 + ml {
+                    if alen != 4 + ml {
+                        bytes.free(acc)
+                        r.alert = tls13_record.ALERT_UNEXPECTED_MESSAGE
+                        return null, 0, "handshake: data after the ClientHello in its record"
+                    }
+                    out = bytes.new(5 + alen)
+                    bytes.set(out, 0, 0x16)
+                    bytes.set(out, 1, 0x03)
+                    bytes.set(out, 2, 0x03)
+                    bytes.set(out, 3, (alen >> 8) & 0xFF)
+                    bytes.set(out, 4, alen & 0xFF)
+                    bytes.copy_from_bytes(out, 5, acc, 0, alen)
+                    bytes.free(acc)
+                    r.hs_seen = 1
+                    return out, 5 + alen, ""
+                }
+            }
+        }
+    }
+}
+
+
 fn recio_next_hs(r: *RecordIO) -> (ptr, int, string) {
     looking = 1
     rec = null
@@ -334,7 +401,7 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
     rio = recio_new(sock)
 
     // 1. Read ClientHello
-    chrec, chlen, cherr = recio_next_hs(rio)
+    chrec, chlen, cherr = recio_next_client_hello(rio)
     if string.equals(cherr, "") != 1 {
         if rio.alert != 0 { send_plaintext_alert(sock, 2, rio.alert) }
         recio_free(rio)

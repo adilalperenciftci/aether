@@ -1,10 +1,15 @@
 // Sends the bytes RAW (hex) to 127.0.0.1 PEER_PORT and prints what came
-// back: "ALERT <description>" for a plaintext alert, "CLOSED", or "OTHER".
+// back: "ALERT <description>" for a plaintext alert, "SERVERHELLO" for a
+// handshake record, "CLOSED", or "OTHER". RAW=split_ch sends a real
+// ClientHello split over two records instead.
 
 import std.os
 import std.tcp
 import std.bytes
 import std.string
+import std.cryptography
+import std.cryptography.x25519
+import std.cryptography.tls13_hs
 
 extern string_char_at(str: string, index: int) -> int
 
@@ -12,6 +17,34 @@ fn hexval(h: int) -> int {
     if h >= 48 && h <= 57 { return h - 48 }
     if h >= 97 && h <= 102 { return h - 87 }
     return h - 55
+}
+
+// A real ClientHello (x25519 only) sent split over two handshake records,
+// to see the server reassemble it (#3321).
+fn split_client_hello() -> ptr {
+    rnd, _r1 = cryptography.random_buffer(32)
+    sid, _r2 = cryptography.random_buffer(32)
+    priv, _r3 = cryptography.random_buffer(32)
+    pub = x25519.base_point(priv)
+    empty = bytes.new(0)
+    ch = tls13_hs.client_hello_full(rnd, bytes.view(sid)[0..32], tls13_hs.GROUP_X25519, bytes.view(pub)[0..32], 0, bytes.view(empty)[0..0], 0, bytes.view(empty)[0..0], "peer.example")
+    n = bytes.length(ch)
+    half = n / 2
+    out = bytes.new(10 + n)
+    bytes.set(out, 0, 0x16)
+    bytes.set(out, 1, 3)
+    bytes.set(out, 2, 3)
+    bytes.set(out, 3, (half >> 8) & 0xFF)
+    bytes.set(out, 4, half & 0xFF)
+    bytes.copy_from_bytes(out, 5, ch, 0, half)
+    bytes.set(out, 5 + half, 0x16)
+    bytes.set(out, 6 + half, 3)
+    bytes.set(out, 7 + half, 3)
+    bytes.set(out, 8 + half, ((n - half) >> 8) & 0xFF)
+    bytes.set(out, 9 + half, (n - half) & 0xFF)
+    bytes.copy_from_bytes(out, 10 + half, ch, half, n - half)
+    bytes.free(rnd); bytes.free(sid); bytes.free(priv); bytes.free(pub); bytes.free(empty); bytes.free(ch)
+    return out
 }
 
 main() {
@@ -22,12 +55,19 @@ main() {
         return
     }
     raw = os.getenv("RAW")
-    n = string.length(raw) / 2
-    b = bytes.new(n)
-    i = 0
-    while i < n {
-        bytes.set(b, i, hexval(string_char_at(raw, 2 * i)) * 16 + hexval(string_char_at(raw, 2 * i + 1)))
-        i = i + 1
+    b = null
+    n = 0
+    if raw == "split_ch" {
+        b = split_client_hello()
+        n = bytes.length(b)
+    } else {
+        n = string.length(raw) / 2
+        b = bytes.new(n)
+        i = 0
+        while i < n {
+            bytes.set(b, i, hexval(string_char_at(raw, 2 * i)) * 16 + hexval(string_char_at(raw, 2 * i + 1)))
+            i = i + 1
+        }
     }
     _s, _werr = tcp.write_all(sock, bytes.view(b)[0..n])
     bytes.free(b)
@@ -36,6 +76,8 @@ main() {
     got, rerr = tcp.read_into(sock, bytes.view(buf)[0..64])
     if rerr != "" || got <= 0 {
         println("CLOSED")
+    } else if (bytes.get(buf, 0) & 0xFF) == 0x16 {
+        println("SERVERHELLO")
     } else if got >= 7 && (bytes.get(buf, 0) & 0xFF) == 0x15 {
         println("ALERT ${bytes.get(buf, 6) & 0xFF}")
     } else {
