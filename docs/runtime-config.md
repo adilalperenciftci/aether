@@ -27,17 +27,12 @@ Multiple threads work simultaneously.
 
 ### What Was Implemented
 
-1. **Lock-Free Message Pools**
-   - TLS pools have no mutex
-   - Zero contention on hot path
-   - Automatic per-thread allocation
-
-2. **Lock-Free Mailboxes**
+1. **Lock-Free Mailboxes**
    - SPSC (Single Producer Single Consumer) atomic queue
    - 64-byte cache line padding
    - Runtime switchable
 
-3. **Runtime Configuration API**
+2. **Runtime Configuration API**
    - Control optimizations via flags
    - Auto-detect CPU features
    - Enabled by default without manual configuration
@@ -62,7 +57,6 @@ int main() {
 
 **Example output on a modern CPU:**
 - Lock-free mailboxes: ENABLED
-- Lock-free pools: ENABLED
 - MWAIT idle: ENABLED
 - AVX2 SIMD: ENABLED
 
@@ -73,7 +67,6 @@ int main() {
 // Explicit flags - full control
 aether_runtime_init(8,
     AETHER_FLAG_LOCKFREE_MAILBOX |  // Use lock-free mailboxes
-    AETHER_FLAG_LOCKFREE_POOLS   |  // Use lock-free TLS pools
     AETHER_FLAG_ENABLE_SIMD      |  // Use AVX2 vectorization
     AETHER_FLAG_ENABLE_MWAIT);      // Use MWAIT for idle
 ```
@@ -102,7 +95,6 @@ aether_runtime_init(0,
 // CPU: <detected processor>
 // Active Optimizations:
 //   Lock-free mailbox: ENABLED
-//   Lock-free pools:   ENABLED
 //   ...
 ```
 
@@ -114,15 +106,15 @@ aether_runtime_init(0,
 |------|-----|-------------|
 | `AETHER_FLAG_AUTO_DETECT` | 0x01 | Auto-detect CPU features (recommended) |
 | `AETHER_FLAG_LOCKFREE_MAILBOX` | 0x02 | Use lock-free SPSC mailboxes |
-| `AETHER_FLAG_LOCKFREE_POOLS` | 0x04 | Use lock-free TLS message pools |
+| `AETHER_FLAG_LOCKFREE_POOLS` | 0x04 | Deprecated: accepted and ignored. There is no message pool (#3374); a typed message's payload is a heap copy |
 | `AETHER_FLAG_ENABLE_SIMD` | 0x08 | Enable AVX2 vectorization |
 | `AETHER_FLAG_ENABLE_MWAIT` | 0x10 | Enable MWAIT idle strategy |
 | `AETHER_FLAG_VERBOSE` | 0x20 | Print configuration on init |
 
 **Combine flags with bitwise OR:**
 ```c
-int flags = AETHER_FLAG_LOCKFREE_MAILBOX | 
-            AETHER_FLAG_LOCKFREE_POOLS;
+int flags = AETHER_FLAG_LOCKFREE_MAILBOX |
+            AETHER_FLAG_ENABLE_MWAIT;
 aether_runtime_init(8, flags);
 ```
 

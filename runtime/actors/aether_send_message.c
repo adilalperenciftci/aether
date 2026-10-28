@@ -13,87 +13,23 @@ extern AETHER_TLS int current_core_id;
 // ActorBase is defined in multicore_scheduler.h
 
 // ==============================================================================
-// TIER 1 OPTIMIZATION: Thread-Local Message Payload Pool
+// Message payloads
 // ==============================================================================
-// Instead of malloc/free for every message payload (one alloc + one free per
-// send/receive cycle on the hot path), draw from a per-thread pool of small
-// buffers. Eliminates the allocator as a bottleneck for small-message traffic.
+// A typed message's payload is a heap copy (payload_message below), freed by
+// whoever handles or drops the message. There is no payload pool (#3374):
+// its acquire side was removed because an actor can move to another core
+// after a message is sent, so a pooled payload would be released by a
+// thread that does not own the pool.
 
-#define MSG_PAYLOAD_POOL_SIZE 256      // 256 buffers per thread
-#define MSG_PAYLOAD_MAX_SIZE 256       // Max pooled message size (Ping/Pong ~16 bytes)
-
-typedef struct {
-    char buffer[MSG_PAYLOAD_MAX_SIZE];
-    int in_use;  // Thread-local: no atomics needed
-} PooledPayload;
-
-typedef struct {
-    PooledPayload payloads[MSG_PAYLOAD_POOL_SIZE];
-    int next_index;  // Thread-local: no atomics needed
-    int initialized;
-} PayloadPool;
-
-// Thread-local payload pool
-static AETHER_TLS PayloadPool* g_payload_pool = NULL;
-
-// Global statistics (atomic, shared across all threads)
-static _Atomic uint64_t g_pool_hits = 0;
-static _Atomic uint64_t g_pool_misses = 0;
-static _Atomic uint64_t g_too_large = 0;
-
-// Get pool statistics (for debugging/profiling)
+/* Deprecated (#3374): there is no pool, so there is nothing to count; kept
+ * for callers built against it, it reports zeros. */
 void aether_message_pool_stats(uint64_t* hits, uint64_t* misses, uint64_t* large) {
-    *hits = atomic_load_explicit(&g_pool_hits, memory_order_relaxed);
-    *misses = atomic_load_explicit(&g_pool_misses, memory_order_relaxed);
-    *large = atomic_load_explicit(&g_too_large, memory_order_relaxed);
+    if (hits) *hits = 0;
+    if (misses) *misses = 0;
+    if (large) *large = 0;
 }
 
-// Initialize thread-local payload pool
-/* The acquire side of this pool was removed: it was unreachable, and the
- * send path below documents why it must stay that way. An actor can be
- * migrated to another core after a message is sent, so a TLS-pooled
- * payload would be released by a thread that does not own that pool.
- * payload_pool_release still runs and simply reports "not mine" for
- * every heap payload. */
-
-
-// Return payload to pool
-static inline int payload_pool_release(void* ptr) {
-    if (!g_payload_pool || !g_payload_pool->initialized) {
-        return 0;  // Not from pool
-    }
-
-    // Check if pointer is within pool memory
-    char* pool_start = (char*)g_payload_pool->payloads;
-    char* pool_end = pool_start + sizeof(g_payload_pool->payloads);
-
-    if ((char*)ptr < pool_start || (char*)ptr >= pool_end) {
-        return 0;  // Not from pool
-    }
-
-    // Find which slot this is
-    size_t offset = (char*)ptr - pool_start;
-    size_t slot_index = offset / sizeof(PooledPayload);
-
-    if (slot_index >= MSG_PAYLOAD_POOL_SIZE) {
-        return 0;  // Invalid
-    }
-
-    // Mark as free (thread-local: plain store)
-    g_payload_pool->payloads[slot_index].in_use = 0;
-    return 1;  // Successfully returned to pool
-}
-
-// Free message payload - try pool first, then fall back to free()
 void aether_free_message(void* msg_data) {
-    if (!msg_data) return;
-
-    // Try to return to pool
-    if (payload_pool_release(msg_data)) {
-        return;  // Returned to pool successfully
-    }
-
-    // Was malloc'd (large message or pool exhausted), use regular free
     free(msg_data);
 }
 

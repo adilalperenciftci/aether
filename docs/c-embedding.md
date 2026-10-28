@@ -261,7 +261,7 @@ void scheduler_send_remote(ActorBase* actor, Message msg, int from_core);
 ```c
 #define AETHER_FLAG_AUTO_DETECT      (1 << 0)  // Detect CPU features
 #define AETHER_FLAG_LOCKFREE_MAILBOX (1 << 1)  // Lock-free mailboxes
-#define AETHER_FLAG_LOCKFREE_POOLS   (1 << 2)  // Lock-free pools
+#define AETHER_FLAG_LOCKFREE_POOLS   (1 << 2)  // Deprecated: accepted and ignored (#3374)
 #define AETHER_FLAG_ENABLE_SIMD      (1 << 3)  // SIMD optimizations
 #define AETHER_FLAG_ENABLE_MWAIT     (1 << 4)  // MWAIT for idle
 #define AETHER_FLAG_VERBOSE          (1 << 5)  // Print config on init

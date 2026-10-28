@@ -37,11 +37,6 @@ a scheduler thread runs the handler, from the first actor on (#3112).
 - Batch dequeue drains multiple messages in a single atomic operation
 - Configurable threshold (SCHEDULER_DRAIN_BATCH = 512)
 
-**Thread-Local Message Pools:**
-- Per-thread pool of 256 pre-allocated buffers (up to 256 bytes each)
-- Eliminates malloc/free on the message hot path
-- Falls back to malloc for oversized messages or pool exhaustion
-
 **Direct Send:**
 - Bypasses incoming queue for same-core actors
 - Writes directly to the actor's mailbox
@@ -52,7 +47,7 @@ a scheduler thread runs the handler, from the first actor on (#3112).
 - Increases under sustained load, decreases when idle
 
 **Inline Single-Int Messages:**
-- Messages with one integer field bypass pool allocation entirely
+- Messages with one integer field need no payload allocation at all
 - Value encoded directly in `Message.payload_int`
 
 ## Actor Model
@@ -144,7 +139,7 @@ if (current_core_id >= 0 && current_core_id == atomic_load_explicit(&actor->assi
 }
 ```
 
-For single-int messages, the code generator emits an inline path that stores the value directly in `msg.payload_int`, bypassing pool allocation.
+For single-int messages, the code generator emits an inline path that stores the value directly in `msg.payload_int`, with no payload allocation.
 
 A `ptr` field (a `std.bytes` handle, a `*T`) crosses as the pointer, with no copy. To hand the buffer over rather than share it, send it with `move`: `r ! Chunk { data: move buf }`. The sender's `buf` is then moved-from, and any later use of it is a compile error naming the line of the move. See [`move`](isolated.md#move-handing-a-buffer-over-2975).
 
@@ -464,13 +459,13 @@ Measured on Windows (i7-13700K, 1,000,000 messages, 10 runs, M msg/s, medians) a
 
 Actor memory is allocated using NUMA-aware allocation (`aether_numa_alloc_aligned`, on a 64-byte boundary) at spawn time. The `scheduler_spawn_actor` function accepts the full derived-struct size to ensure correct allocation for user-defined actor types.
 
-Message payloads are managed by thread-local pools. Payloads are returned to the pool on free via `aether_free_message`, which checks whether the pointer falls within the pool range before falling back to `free`.
+A typed message's payload is a heap copy, freed with `free()` by `aether_free_message` once the message is handled or dropped. There is no payload pool: an actor can move to another core after a message is sent, so a pooled payload would be released by a thread that does not own the pool (#3374).
 
 ## Memory Model
 
 The actor runtime uses several allocation strategies for automatic cleanup:
 - **Actor memory**: one NUMA-aware, 64-byte-aligned allocation per actor at spawn time (`aether_numa_alloc_aligned`), or the kept block of a released actor of the same size. `scheduler_release_actor` takes the actor out of its core's table and retires it; it is reclaimed once every core's scheduler thread and every per-actor thread has passed the top of its loop since, and no other thread is walking the tables. The scheduler threads, per-actor threads and `wait_for_idle`'s scan for armed timeouts read the tables without a lock, so the reclaim has to wait for them; a core blocked in a long step delays it. A reclaimed block is not returned to the allocator while the scheduler runs: it stays marked released, so a send to it is dropped rather than reading freed memory, and the next spawn of that size takes it. The blocks go back with the scheduler's tables. The mailbox is an inline struct member, not a separate allocation.
-- **Message payloads**: thread-local pools with automatic return
+- **Message payloads**: a heap copy per typed message, freed when it is handled or dropped
 - **Arenas**: a general-purpose arena allocator provides bulk deallocation without per-object tracking for opt-in uses (`std.arena`, JSON parsing). The actor path does not use arenas.
 
 See [Memory Management](memory-management.md) for details on arenas, pools, and allocation strategies.

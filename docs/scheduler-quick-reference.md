@@ -140,12 +140,6 @@ sender -> scheduler_send_local -> mailbox (direct) -> actor step
 #define MAILBOX_SIZE 32   // In actor_state_machine.h (must be power of 2)
 ```
 
-### Message Pool
-```c
-#define MSG_PAYLOAD_POOL_SIZE 256  // In aether_send_message.c
-#define MSG_PAYLOAD_MAX_SIZE 256   // Max pooled message size
-```
-
 ### Cross-Core Queue
 ```c
 #define QUEUE_SIZE 1024  // In lockfree_queue.h
@@ -195,7 +189,6 @@ Both migration and work stealing use ascending core-id lock ordering to prevent 
 
 ### Low Throughput
 - Verify compiler flags include `-O3 -march=native -flto`
-- Check that message pool is active (pool stats via `aether_message_pool_stats`)
 - Ensure batch size is appropriate for workload
 - Verify core count matches available hardware
 
@@ -223,7 +216,7 @@ Both migration and work stealing use ascending core-id lock ordering to prevent 
 - `runtime/scheduler/multicore_scheduler.c` - Multi-core scheduler: coalescing, migration, work stealing
 - `runtime/scheduler/aether_scheduler_coop.c` - Cooperative single-threaded scheduler (WASM, embedded)
 - `runtime/config/aether_optimization_config.h` - Platform detection (Tier 0 `AETHER_HAS_*` flags)
-- `runtime/actors/aether_send_message.c` - Message sending, thread-local pools
+- `runtime/actors/aether_send_message.c` - Message sending, payload copies
 - `runtime/actors/aether_actor_thread.c` - Actor-owned thread loop
 - `runtime/utils/aether_thread.h` - Portable thread primitives (POSIX/Win32/no-op stubs)
 - `runtime/aether_numa.c` - NUMA topology detection and allocation

@@ -134,8 +134,7 @@ void aether_print_config(void) {
     printf("TIER 1 - ALWAYS ON:\n");
     printf("  [ON] Direct Send          - Same-core bypass\n");
     printf("  [ON] Adaptive Batching    - Dynamic 4-64 batch size\n");
-    printf("  [ON] Message Coalescing   - Amortises atomics across bursts\n");
-    printf("  [ON] TLS Message Pools    - Eliminates mutex contention\n\n");
+    printf("  [ON] Message Coalescing   - Amortises atomics across bursts\n\n");
 
     printf("TIER 2 - AUTO-DETECTED:\n");
     printf("  [%s] SIMD Processing      - %d-bit vectors%s\n",

@@ -7,7 +7,7 @@ The Aether runtime implements several performance optimizations targeting messag
 The optimizations are tiered by how they activate:
 
 - **Tier 0, platform capabilities (compile-time):** `AETHER_HAS_THREADS`, `AETHER_HAS_ATOMICS`, `AETHER_HAS_FILESYSTEM`, `AETHER_HAS_NETWORKING`, `AETHER_HAS_SIMD`, `AETHER_HAS_NUMA`, `AETHER_HAS_AFFINITY`. Auto-detected from the target; any flag can be forced off with `-DAETHER_NO_<FEATURE>` (e.g. `-DAETHER_NO_THREADING`). See [Platform Detection](architecture.md#platform-detection-tier-0).
-- **Tier 1, always on:** the Active Optimizations below (direct send, adaptive batching, message coalescing, thread-local pools).
+- **Tier 1, always on:** the Active Optimizations below (direct send, adaptive batching, message coalescing).
 - **Tier 2, auto-detected at startup:** SIMD batch processing (AVX2/NEON), MWAIT idle (x86 MONITOR/MWAIT), CPU core pinning (OS-dependent).
 - **Tier 3, opt-in:** lock-free mailboxes and message deduplication, see [Opt-In Features](#opt-in-features).
 
@@ -27,31 +27,11 @@ depended on how many actors it had (#3112). The cooperative (no-threads)
 runtime queues a send the same way and runs it at the next `wait_for_idle`,
 `aether_scheduler_poll` or shutdown.
 
-### Thread-Local Message Payload Pools
+### Message Payloads
 
 **Implementation:** `runtime/actors/aether_send_message.c`
 
-Per-thread pool of pre-allocated buffers eliminates dynamic allocation overhead in the message-passing hot path. Each pool contains 256 buffers of up to 256 bytes. Messages that fit within the pool buffer size are served from the pool; larger messages fall back to `malloc`. Global atomic counters track pool hit/miss rates across threads.
-
-```c
-#define MSG_PAYLOAD_POOL_SIZE 256
-#define MSG_PAYLOAD_MAX_SIZE 256
-
-typedef struct {
-    char buffer[MSG_PAYLOAD_MAX_SIZE];
-    int in_use;  // Thread-local: no atomics needed
-} PooledPayload;
-
-typedef struct {
-    PooledPayload payloads[MSG_PAYLOAD_POOL_SIZE];
-    int next_index;  // Thread-local: plain increment
-    int initialized;
-} PayloadPool;
-
-static __thread PayloadPool* g_payload_pool = NULL;
-```
-
-Because each pool is thread-local, acquisition and release use plain loads and stores rather than atomic operations. The round-robin index uses bitwise AND masking for constant-time slot lookup.
+A typed message's payload is a heap copy, made by the send and freed with `free()` by whoever handles or drops the message (`aether_free_message`). There is no payload pool (#3374): a per-thread pool was tried, but an actor can move to another core after a message is sent, so a pooled payload would be released by a thread that does not own the pool. `AETHER_FLAG_LOCKFREE_POOLS` is accepted and ignored, and `aether_message_pool_stats` reports zeros; both are deprecated.
 
 ### Message Coalescing with Batch Dequeue
 
@@ -242,27 +222,21 @@ All ring buffers use power-of-2 sizes with bitwise AND masking instead of modulo
 #define QUEUE_SIZE 1024
 #define QUEUE_MASK (QUEUE_SIZE - 1)
 int index = (head + 1) & QUEUE_MASK;
-
-// Also used in thread-local pool (plain increment, no atomics)
-int idx = pool->next_index++ & (MSG_PAYLOAD_POOL_SIZE - 1);
 ```
 
 ### Relaxed Atomic Memory Ordering
 
-**Implementation:** `runtime/actors/aether_send_message.c`, `runtime/scheduler/multicore_scheduler.c`
+**Implementation:** `runtime/scheduler/multicore_scheduler.c`
 
 Non-critical atomic operations use `memory_order_relaxed` to avoid unnecessary memory barriers:
 
 ```c
-// Statistics counters
-atomic_fetch_add_explicit(&g_pool_hits, 1, memory_order_relaxed);
-
 // Scheduler idle tracking
 atomic_fetch_add_explicit(&sched->idle_cycles, 1, memory_order_relaxed);
 atomic_store_explicit(&sched->idle_cycles, 0, memory_order_relaxed);
 ```
 
-Statistics counters and approximate work counts do not require sequential consistency. Relaxed ordering provides atomicity without the overhead of full memory barriers.
+Approximate work counts do not require sequential consistency. Relaxed ordering provides atomicity without the overhead of full memory barriers.
 
 ### NUMA-Aware Allocation
 

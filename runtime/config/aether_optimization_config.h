@@ -12,7 +12,6 @@
 //   - Direct Send (same-core bypass)
 //   - Adaptive Batching (4-64 dynamic)
 //   - Message Coalescing (amortises atomics across bursts)
-//   - TLS Message Pools (eliminates mutex contention on the payload allocator)
 //
 // Tier 2 - AUTO-DETECT (hardware-dependent):
 //   - SIMD Batch Processing (requires AVX2/NEON)

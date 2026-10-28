@@ -5829,27 +5829,8 @@ static void emit_main_epilogue(CodeGenerator* gen, int runs_scheduler) {
     print_line(gen, "");
     print_line(gen, "// Wait for quiescence, stop scheduler threads, and join them");
     print_line(gen, "scheduler_shutdown();");
-
-    // Print message pool statistics (only for actor programs)
-    print_line(gen, "");
-    print_line(gen, "// Message pool statistics");
-    print_line(gen, "{");
-    indent(gen);
-    print_line(gen, "uint64_t pool_hits = 0, pool_misses = 0, too_large = 0;");
-    print_line(gen, "aether_message_pool_stats(&pool_hits, &pool_misses, &too_large);");
-    print_line(gen, "if (pool_hits + pool_misses + too_large > 0) {");
-    indent(gen);
-    print_line(gen, "printf(\"\\n=== Message Pool Statistics ===\\n\");");
-    print_line(gen, "printf(\"Pool hits:      %%llu\\n\", (unsigned long long)pool_hits);");
-    print_line(gen, "printf(\"Pool misses:    %%llu (exhausted)\\n\", (unsigned long long)pool_misses);");
-    print_line(gen, "printf(\"Too large:      %%llu (>256 bytes)\\n\", (unsigned long long)too_large);");
-    print_line(gen, "uint64_t total = pool_hits + pool_misses + too_large;");
-    print_line(gen, "double hit_rate = (double)pool_hits / total * 100.0;");
-    print_line(gen, "printf(\"Hit rate:       %%.1f%%%%\\n\", hit_rate);");
-    unindent(gen);
-    print_line(gen, "}");
-    unindent(gen);
-    print_line(gen, "}");
+    /* #3374: no message pool statistics after it. There is no pool; its
+     * counters were never incremented, so the block never printed. */
     print_line(gen, "");
 }
 
