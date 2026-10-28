@@ -295,3 +295,9 @@ tests/integration/https_openssl_policy/
 tests/integration/https_tls_backend_select/
 # #2955: inner.ae and outer.ae are libraries its C host loads one inside the other.
 tests/integration/sandbox_nested_libraries/
+# #3336, #3352: resumepeer.ae is the scripted PSK/0-RTT server resumeclient.ae
+# connects to; the driver runs them together and against openssl s_server.
+tests/integration/crypto_tls13_resume/
+# #2956: frames.ae is a library and app.ae its importer; the driver builds both
+# and its C host loads the library.
+tests/integration/emit_lib_execution_frame/
