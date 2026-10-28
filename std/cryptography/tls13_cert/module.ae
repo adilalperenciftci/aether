@@ -662,8 +662,11 @@ struct CertReaderView {
 }
 
 // Parse the [3] extensions content: SEQUENCE OF Extension, each
-// { extnID OID, critical BOOLEAN OPTIONAL, extnValue OCTET STRING }. When the
-// OID is subjectAltName (2.5.29.17), decode its dNSNames into out.dns_names.
+// { extnID OID, critical BOOLEAN OPTIONAL, extnValue OCTET STRING }. Decodes
+// subjectAltName (2.5.29.17) into out.dns_names / out.ip_addrs, and
+// basicConstraints (2.5.29.19) and keyUsage (2.5.29.15) into out.is_ca,
+// out.has_key_usage and out.key_cert_sign, which chain_verify_path checks on
+// every issuing certificate.
 fn parse_extensions_for_san(ext_wrapper: @keep ptr, out: *LeafCert) {
     wr = asn1.reader_new(ext_wrapper)
     // [3] wraps a single SEQUENCE OF Extension.
@@ -677,59 +680,12 @@ fn parse_extensions_for_san(ext_wrapper: @keep ptr, out: *LeafCert) {
         xr = asn1.reader_new(one)
         oid, oiderr = asn1.read_oid(xr)
         if string.equals(oiderr, "") == 1 {
-            if string.equals(oid, "2.5.29.17") == 1 {
-                // skip optional critical BOOLEAN, then extnValue OCTET STRING
-                nx, nxerr = asn1.read_tlv(xr)
-                ntag = asn1.last_tag(xr)
-                if string.equals(nxerr, "") == 1 {
-                    if ntag == 0x01 {
-                        // was critical BOOLEAN; read the OCTET STRING next
-                        bytes.free(nx)
-                        os2, os2e = asn1.read_tlv(xr)
-                        if string.equals(os2e, "") == 1 {
-                            decode_san_dnsnames(os2, out)
-                            bytes.free(os2)
-                        }
-                    } else {
-                        // nx WAS the OCTET STRING content
-                        decode_san_dnsnames(nx, out)
-                        bytes.free(nx)
-                    }
-                }
-            }
-            if string.equals(oid, "2.5.29.19") == 1 {
-                nx, nxerr = asn1.read_tlv(xr)
-                ntag = asn1.last_tag(xr)
-                if string.equals(nxerr, "") == 1 {
-                    if ntag == 0x01 {
-                        bytes.free(nx)
-                        os2, os2e = asn1.read_tlv(xr)
-                        if string.equals(os2e, "") == 1 {
-                            decode_basic_constraints(os2, out)
-                            bytes.free(os2)
-                        }
-                    } else {
-                        decode_basic_constraints(nx, out)
-                        bytes.free(nx)
-                    }
-                }
-            }
-            if string.equals(oid, "2.5.29.15") == 1 {
-                nx, nxerr = asn1.read_tlv(xr)
-                ntag = asn1.last_tag(xr)
-                if string.equals(nxerr, "") == 1 {
-                    if ntag == 0x01 {
-                        bytes.free(nx)
-                        os2, os2e = asn1.read_tlv(xr)
-                        if string.equals(os2e, "") == 1 {
-                            decode_key_usage(os2, out)
-                            bytes.free(os2)
-                        }
-                    } else {
-                        decode_key_usage(nx, out)
-                        bytes.free(nx)
-                    }
-                }
+            val = read_extn_value(xr)
+            if val != null {
+                if string.equals(oid, "2.5.29.17") == 1 { decode_san_dnsnames(val, out) }
+                if string.equals(oid, "2.5.29.19") == 1 { decode_basic_constraints(val, out) }
+                if string.equals(oid, "2.5.29.15") == 1 { decode_key_usage(val, out) }
+                bytes.free(val)
             }
             string.release(oid)
         }
@@ -740,11 +696,31 @@ fn parse_extensions_for_san(ext_wrapper: @keep ptr, out: *LeafCert) {
     bytes.free(seq_content)
 }
 
+// Read an Extension's extnValue OCTET STRING content, skipping the optional
+// critical BOOLEAN before it. Returns fresh bytes (caller frees), or null.
+fn read_extn_value(xr: ptr) -> ptr {
+    nx, nxerr = asn1.read_tlv(xr)
+    if string.equals(nxerr, "") != 1 { return null }
+    if asn1.last_tag(xr) != 0x01 { return nx }
+    bytes.free(nx)
+    os2, os2e = asn1.read_tlv(xr)
+    if string.equals(os2e, "") != 1 { return null }
+    return os2
+}
+
+// basicConstraints ::= SEQUENCE { cA BOOLEAN DEFAULT FALSE,
+// pathLenConstraint INTEGER OPTIONAL }. An absent or malformed cA leaves
+// out.is_ca at 0, so the certificate cannot issue.
 fn decode_basic_constraints(octet_content: @keep ptr, out: *LeafCert) {
     bcr = asn1.reader_new(octet_content)
     seq_content, serr = asn1.read_tlv(bcr)
+    stag = asn1.last_tag(bcr)
     asn1.reader_free(bcr)
     if string.equals(serr, "") != 1 { return }
+    if stag != 0x30 {
+        bytes.free(seq_content)
+        return
+    }
     sr = asn1.reader_new(seq_content)
     if asn1.reader_eof(sr) != 1 {
         val, verr = asn1.read_tlv(sr)
@@ -764,6 +740,8 @@ fn decode_basic_constraints(octet_content: @keep ptr, out: *LeafCert) {
     bytes.free(seq_content)
 }
 
+// keyUsage ::= BIT STRING. The first content byte counts the unused bits;
+// keyCertSign is bit 5, which is 0x04 of the next byte.
 fn decode_key_usage(octet_content: @keep ptr, out: *LeafCert) {
     kur = asn1.reader_new(octet_content)
     ku_content, kerr = asn1.read_tlv(kur)
@@ -1929,6 +1907,9 @@ const MAX_CHAIN_DEPTH = 8
 
 // Like find_issuer but skips any intermediate already in `used` (pointer
 // identity), preventing a signed-intermediate cycle from looping forever.
+// Only a CA can issue (RFC 5280 §4.2.1.9): basicConstraints cA must be TRUE,
+// and keyUsage, when present, must assert keyCertSign (§4.2.1.3). Without
+// this a leaf a trusted CA issued could sign a certificate for any host.
 fn find_issuer_unused(cert: *LeafCert, intermediates: ptr, used: ptr) -> int {
     n = list_size(intermediates)
     i = 0
