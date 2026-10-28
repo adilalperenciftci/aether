@@ -12,7 +12,7 @@
 // a bare proxy (the event loop on Linux and macOS), through one behind a
 // program's middleware (the worker path), and for a file the server sends
 // with sendfile(2) on Linux and macOS, each with a one second idle timeout.
-// The client reads nothing for three seconds after the first byte arrives,
+// The client reads nothing for five seconds after the first byte arrives,
 // then reads to the end: the responses must have been cut short. Three,
 // because Windows takes a whole send into the kernel when the socket has
 // nothing queued, so the first response never blocks there; the next one
@@ -80,7 +80,7 @@ gateway(up_url: string, worker: int) -> ptr {
     return s
 }
 
-// The responses to three `get`s whose reading starts three seconds late:
+// The responses to three `get`s whose reading starts five seconds late:
 // "whole" when every byte of all three arrived, else "cut short".
 late_reader(port: int, get: string) -> string {
     sock, cerr = tcp.connect("127.0.0.1", port)
@@ -96,7 +96,7 @@ late_reader(port: int, get: string) -> string {
         return berr
     }
     tcp.write(sock, "${get}${get}${get}")
-    // The three seconds of not reading count from the server's first byte,
+    // The five seconds of not reading count from the server's first byte,
     // not from the request: a slow build (a sanitizer's) can take seconds to
     // fetch the body upstream, and a stall that began before the server sent
     // anything was over before it had to wait.
@@ -109,7 +109,11 @@ late_reader(port: int, get: string) -> string {
             waited = waited + 1
         }
     }
-    sleep(3000)
+    // Five, not three: on the worker path the server takes the body in after
+    // its first bytes went (a second or more on a busy macOS runner) before
+    // the send that waits, and a client that read again two seconds after
+    // that wait began was in time.
+    sleep(5000)
     total = 0
     quiet = 0
     closed = 0
