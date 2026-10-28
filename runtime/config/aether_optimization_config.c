@@ -17,8 +17,6 @@ AetherRuntimeConfig g_aether_config = {
     .actor_count = 0,
     .preempt_enabled = false,       // Opt-in: AETHER_PREEMPT=1
     .preempt_threshold_ns = 1000000, // 1ms default
-    .profile = AETHER_PROFILE_MEDIUM,
-    .msg_pool_size = AETHER_PROFILE_MEDIUM_MSG_POOL,
     .actors_malloced = 0,
     .direct_sends = 0,
     .queue_sends = 0,
@@ -101,16 +99,6 @@ void aether_runtime_configure(AetherOptFlags flags) {
 // Called once at scheduler init before any actors spawn
 void aether_init_from_env(void) {
 #if AETHER_HAS_GETENV
-    // Profile from env or default
-    g_aether_config.profile = aether_profile_from_env();
-
-    // Pool size: env override > profile default
-    int env_msg = aether_env_int("AETHER_MSG_POOL_SIZE", 0);
-
-    g_aether_config.msg_pool_size = env_msg > 0
-        ? env_msg
-        : aether_profile_msg_pool_size(g_aether_config.profile);
-
     // Check verbose mode
     if (getenv("AETHER_VERBOSE")) {
         atomic_store(&g_aether_config.verbose, true);
@@ -124,21 +112,7 @@ void aether_init_from_env(void) {
             g_aether_config.preempt_threshold_ns = (uint64_t)threshold * 1000000ULL;
         }
     }
-#else
-    // No getenv: use defaults
-    g_aether_config.profile = AETHER_PROFILE_MEDIUM;
-    g_aether_config.msg_pool_size = aether_profile_msg_pool_size(AETHER_PROFILE_MEDIUM);
 #endif
-}
-
-// Profile name helper
-static const char* aether_profile_name(AetherProfile p) {
-    switch (p) {
-        case AETHER_PROFILE_MICRO:  return "micro";
-        case AETHER_PROFILE_SMALL:  return "small";
-        case AETHER_PROFILE_LARGE:  return "large";
-        default:                    return "medium";
-    }
 }
 
 // Print current configuration
@@ -156,10 +130,6 @@ void aether_print_config(void) {
     printf("  getenv:     %s\n", AETHER_HAS_GETENV     ? "YES" : "NO");
     printf("  malloc:     %s\n", AETHER_HAS_MALLOC     ? "YES" : "NO");
     printf("  shell:      %s\n\n", AETHER_HAS_SHELL    ? "YES" : "NO");
-
-    printf("PROFILE: %s (msg_pool=%d)\n\n",
-           aether_profile_name(g_aether_config.profile),
-           g_aether_config.msg_pool_size);
 
     printf("TIER 1 - ALWAYS ON:\n");
     printf("  [ON] Direct Send          - Same-core bypass\n");

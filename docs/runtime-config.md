@@ -242,18 +242,6 @@ same-core send goes straight into the mailbox unless a message of the actor
 is still in the queues or its overflow, which it then goes behind
 ([`runtime/scheduler/multicore_scheduler.c`](../runtime/scheduler/multicore_scheduler.c)).
 
-### Message Pool Allocation
-```c
-// runtime/actors/aether_message_pool.h, per-thread pool, abridged
-static inline Message* message_pool_alloc(void) {
-    if (!g_msg_pool) message_pool_init_thread();
-    if (atomic_load_explicit(&g_msg_pool->count, memory_order_relaxed) == 0) {
-        return malloc(sizeof(Message));   // pool exhausted: fall back to heap
-    }
-    // pop an index off the thread's free list
-}
-```
-
 ---
 
 ## Environment Variables
@@ -261,8 +249,6 @@ static inline Message* message_pool_alloc(void) {
 | Variable | Effect |
 |----------|--------|
 | `AETHER_SINGLE_CORE` | Pins all actors to core 0 (eliminates cross-core overhead) |
-| `AETHER_PROFILE` | Memory profile: `micro`, `small`, `medium` (default), `large` |
-| `AETHER_MSG_POOL_SIZE` | Override message pool size (default from profile) |
 | `AETHER_VERBOSE` | Print optimization configuration at startup |
 | `AETHER_PREEMPT` | Enable cooperative preemption (time-based drain loop break, default 1ms) |
 | `AETHER_PREEMPT_MS` | Override preemption threshold in milliseconds (default 1) |
