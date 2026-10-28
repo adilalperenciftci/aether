@@ -1546,6 +1546,12 @@ static int order_operands(ASTNode* expr, ASTNode** ops, int cap) {
     switch (expr->type) {
         case AST_FUNCTION_CALL:
             if (expr->value && strcmp(expr->value, "select") == 0) return 0;
+            /* Slice ownership's intrinsics (slice_own.c) take the place
+             * their first argument names, not its value, and order their
+             * own operands: a temporary of the place would be grown, set
+             * or emptied instead of it (`g.push(make(...))` on a module
+             * global grew a copy). */
+            if (expr->value && strncmp(expr->value, "__slice_", 8) == 0) return 0;
             for (int k = 0; k < expr->child_count; k++) {
                 /* Named arguments stand in parameter order and are
                  * evaluated in the order written (#2850). */

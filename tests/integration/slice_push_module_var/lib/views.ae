@@ -1,0 +1,19 @@
+// A module that keeps its state in module-level slices and grows them with
+// `.push`, as a retained view tree does.
+
+exports (add, count, kids_of)
+
+var kind: int[] = []
+var kids: int[][] = []
+
+add(k: int, parent: int) -> int {
+    kind.push(k)
+    kids.push(make([]int, 0))
+    h = kind.len
+    if parent > 0 { kids[parent - 1].push(h) }
+    return h
+}
+
+count() -> int { return kind.len }
+
+kids_of(h: int) -> int { return kids[h - 1].len }
