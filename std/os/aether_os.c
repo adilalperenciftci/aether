@@ -3506,17 +3506,15 @@ typedef struct { int token; HANDLE h; HANDLE job; } WinProc;
 static WinProc  g_winprocs[4096];
 static int      g_winproc_count = 0;
 static int      g_winproc_next_token = WINPROC_TOKEN_BASE;
-static CRITICAL_SECTION g_winproc_cs;
-static int      g_winproc_cs_init = 0;
+/* Initialized statically, so two threads spawning at once cannot both make
+ * it, as they could the critical section made on first use that it replaces
+ * (#3346). It allocates nothing either: the critical section took a debug
+ * record from the heap the first time a spawn had to wait on it. Never taken
+ * while held. */
+static SRWLOCK g_winproc_srw = SRWLOCK_INIT;
 
-static void winproc_lock(void) {
-    /* One-time CS init. Spawns are effectively single-threaded from a build
-     * scheduler, but guard anyway so a threaded caller can't corrupt the
-     * table. The init race is itself benign for the single-threaded case. */
-    if (!g_winproc_cs_init) { InitializeCriticalSection(&g_winproc_cs); g_winproc_cs_init = 1; }
-    EnterCriticalSection(&g_winproc_cs);
-}
-static void winproc_unlock(void) { LeaveCriticalSection(&g_winproc_cs); }
+static void winproc_lock(void) { AcquireSRWLockExclusive(&g_winproc_srw); }
+static void winproc_unlock(void) { ReleaseSRWLockExclusive(&g_winproc_srw); }
 
 /* Register a live handle, and the child's Job Object if it has one; return
  * its token (or -1 if the table is full). */

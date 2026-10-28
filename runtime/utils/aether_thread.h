@@ -345,9 +345,14 @@ static inline int pthread_detach(pthread_t t) {
 
 // ---- Mutex ---------------------------------------------------------------
 
+// Without a debug record (#3346). InitializeCriticalSection attaches one the
+// first time a thread waits on the lock: 48 bytes from the heap at an
+// arbitrary later point, which an exact leak check (heap_in_use counts every
+// block on Windows) reads as growth. The record only serves a debugger's
+// lock listing.
 static inline int pthread_mutex_init(pthread_mutex_t* m, pthread_mutexattr_t* attr) {
     (void)attr;
-    InitializeCriticalSection(AETHER_WIN32_CS(m));
+    InitializeCriticalSectionEx(AETHER_WIN32_CS(m), 0, CRITICAL_SECTION_NO_DEBUG_INFO);
     return 0;
 }
 
