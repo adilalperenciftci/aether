@@ -1,0 +1,161 @@
+// The pure TLS client resuming a session (#3318, #3336, #3339): a full
+// handshake with 127.0.0.1 RESUME_PORT for RESUME_HOST, trusting CAFILE,
+// then the session ticket, then a resumption, with 0-RTT data EARLY when it
+// is set. Prints one line per step:
+//   FULL / ERR: <why>           (not with FIXED_TICKET=1: see fixed_ticket)
+//   TICKET suite=<n> early=<max_early_data_size> / TICKETERR: <why>
+//   RESUMED early=<1 when the server took the 0-RTT data> / RESUMEERR: <why>
+//   SENT                        "AFTER" sent under the new connection's keys
+//   TICKET2 / TICKET2ERR: <why>   a ticket read under the server's keys
+// With RESUME_READ=1 it reads one record after SENT instead of a ticket:
+//   RECV <n> <its first 12 bytes> / RECV-EOF / RECVERR: <why>.
+// EARLY "X" sends X then CR LF; AFTER sets what goes after the handshake.
+
+import std.os
+import std.tcp
+import std.bytes
+import std.string
+import std.cryptography
+import std.cryptography.tls13_client
+
+fn text_bytes(s: string) -> ptr {
+    n = string.length(s)
+    b = bytes.new(n)
+    i = 0
+    while i < n {
+        bytes.set(b, i, string_char_at(s, i))
+        i = i + 1
+    }
+    return b
+}
+
+extern string_char_at(str: string, index: int) -> int
+
+// The ticket resumepeer.ae knows (FIXED_TICKET=1): ticket abcd0001, nonce
+// 00, a resumption secret of the byte 0x11, the suite RESUME_SUITE (hex),
+// max_early_data_size 16384; TICKET_SUITE says another suite (0000 for none).
+fn fixed_ticket() -> ptr {
+    // TICKET_SUITE, when set, is the suite the ticket says (0000: none).
+    suite_hex = os.getenv("RESUME_SUITE")
+    if os.getenv("TICKET_SUITE") != "" { suite_hex = os.getenv("TICKET_SUITE") }
+    suite = 0
+    algo = "sha256"
+    hl = 32
+    if suite_hex == "1301" { suite = 0x1301 }
+    if suite_hex == "1302" {
+        suite = 0x1302
+        algo = "sha384"
+        hl = 48
+    }
+    if suite_hex == "1303" { suite = 0x1303 }
+    st = malloc(sizeof(SessionTicket)) as *SessionTicket
+    tk = bytes.new(4)
+    bytes.set(tk, 0, 0xab)
+    bytes.set(tk, 1, 0xcd)
+    bytes.set(tk, 2, 0x00)
+    bytes.set(tk, 3, 0x01)
+    st.ticket = tk
+    st.ticket_len = 4
+    st.nonce = bytes.new(1)
+    bytes.set(st.nonce, 0, 0)
+    st.nonce_len = 1
+    st.age_add = 0
+    st.lifetime = 300
+    rm = bytes.new(hl)
+    k = 0
+    while k < hl {
+        bytes.set(rm, k, 0x11)
+        k = k + 1
+    }
+    st.res_master = rm
+    st.hash_algo = text_bytes(algo)
+    st.hash_len = hl
+    st.max_early_data = 16384
+    st.cipher_suite = suite
+    return st as ptr
+}
+
+extern malloc(size: int) -> ptr
+
+main() {
+    port, _perr = string.to_int(os.getenv("RESUME_PORT"))
+    host = os.getenv("RESUME_HOST")
+    t = null
+    if os.getenv("FIXED_TICKET") == "1" {
+        t = fixed_ticket()
+    } else {
+        sock, derr = tcp.connect("127.0.0.1", port)
+        if derr != "" {
+            println("ERR: connect: ${derr}")
+            return
+        }
+        conn, herr = tls13_client.connect_socket(sock, host, os.getenv("CAFILE"))
+        if herr != "" {
+            println("ERR: ${herr}")
+            return
+        }
+        println("FULL")
+        t1, terr = tls13_client.conn_get_ticket(conn)
+        tls13_client.close_conn(conn)
+        if terr != "" {
+            println("TICKETERR: ${terr}")
+            return
+        }
+        t = t1
+    }
+    println("TICKET suite=${tls13_client.ticket_cipher_suite(t)} early=${tls13_client.ticket_max_early_data(t)}")
+    priv, _rerr = cryptography.random_buffer(32)
+    early = os.getenv("EARLY")
+    c2 = null
+    rerr2 = ""
+    if early != "" {
+        eb = text_bytes("${early}\r\n")
+        c2, rerr2 = tls13_client.connect_resume_0rtt("127.0.0.1", port, priv, t, bytes.view(eb)[0..bytes.length(eb)])
+        bytes.free(eb)
+    } else {
+        c2, rerr2 = tls13_client.connect_resume("127.0.0.1", port, priv, t)
+    }
+    bytes.free(priv)
+    tls13_client.free_ticket(t)
+    if rerr2 != "" {
+        println("RESUMEERR: ${rerr2}")
+        return
+    }
+    println("RESUMED early=${tls13_client.conn_early_accepted(c2)}")
+    // AFTER: what to send under the new keys ("AFTER" by default); "GET"
+    // sends an HTTP/1.0 request line and the blank line after it.
+    what = os.getenv("AFTER")
+    if what == "" { what = "AFTER\n" }
+    if what == "GET" { what = "GET / HTTP/1.0\r\n\r\n" }
+    after = text_bytes(what)
+    serr = tls13_client.conn_send(c2, bytes.view(after)[0..bytes.length(after)])
+    bytes.free(after)
+    if serr != "" {
+        println("SENDERR: ${serr}")
+    } else {
+        println("SENT")
+    }
+    if os.getenv("RESUME_READ") == "1" {
+        buf, n, rerr = tls13_client.conn_recv(c2)
+        if rerr != "" {
+            println("RECVERR: ${rerr}")
+        } else if buf == null {
+            println("RECV-EOF")
+        } else {
+            // The first line, up to 12 bytes of it: an HTTP status line.
+            head = 12
+            if n < head { head = n }
+            println("RECV ${n} ${bytes.to_string(buf, head)}")
+            bytes.free(buf)
+        }
+    } else {
+        t2, t2err = tls13_client.conn_get_ticket(c2)
+        if t2err != "" {
+            println("TICKET2ERR: ${t2err}")
+        } else {
+            println("TICKET2")
+            tls13_client.free_ticket(t2)
+        }
+    }
+    tls13_client.close_conn(c2)
+}

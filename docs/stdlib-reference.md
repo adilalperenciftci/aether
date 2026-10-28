@@ -2007,6 +2007,8 @@ described in its header comment):
 - `tls13_hs.ShParsed.session_id_off`, `session_id_len`, `selected_identity`, `cookie_off`, `cookie_len` - Where the session id echo and a HelloRetryRequest's cookie are in the message, and the pre_shared_key's selected_identity (-1 without one), for the client to check (#3318, #3325).
 - `tls13_hs.ChParsed.groups`, `retry_group`, `has_early_data`, `has_cookie` - The `GROUPBIT_X25519MLKEM768` and `GROUPBIT_X25519` groups `supported_groups` names, the group a HelloRetryRequest should ask for when no key share is usable (else 0), and whether early_data and cookie were there (#3325).
 - `tls13_client.transcript_retry(tr, ch1, hrr, algo)` → `ptr` - The transcript after a HelloRetryRequest: `tr` (freed) replaced by message_hash of `ch1` and then `hrr` (RFC 8446 4.4.1) (#3325).
+- `tls13_client.conn_early_accepted(conn)` → `int` - 1 when the server took the 0-RTT data `connect_resume_0rtt` sent; 0 when it was not delivered (no 0-RTT offered, refused, or a HelloRetryRequest) and the caller sends it again if it still wants it delivered (#3355).
+- `tls13_client.ticket_cipher_suite(ticket)` → `int` - The cipher suite of the connection a `SessionTicket` came on, which its 0-RTT data uses (RFC 8446 4.2.10); a ticket that names none sends no early data (#3339).
 
 ---
 
