@@ -133,6 +133,75 @@ static void send_down(ActorBase* to, ActorBase* dead, const char* reason, int id
     scheduler_send_remote(to, m, aether_core_id_get());
 }
 
+/* The ends links pass on (#3394). Where a death is finalized as soon as it
+ * is seen (the cooperative scheduler, and the threaded one while it is not
+ * running), ending an actor tells its own links at once, so a chain of
+ * linked actors ended one inside the other: a few frames per actor, and a
+ * chain of thousands overflowed a small stack. An end asked for while this
+ * thread is making one waits in the thread's queue instead, and the
+ * outermost end makes them until none is left: the stack holds one link's
+ * frames whatever the chain's length (a chain queues one end at a time).
+ * The queue is a stack whose entries each end pushed are turned round, so
+ * the ends are made in the order the recursion made them: an actor's links
+ * in their list's order, each one's own links before the next. The queue
+ * goes when it is empty. */
+typedef struct {
+    ActorBase* to;
+    char* reason;
+} AetherLinkEnd;
+
+static AETHER_TLS AetherLinkEnd* t_link_ends = NULL;
+static AETHER_TLS int t_link_end_count = 0;
+static AETHER_TLS int t_link_end_cap = 0;
+static AETHER_TLS int t_link_ending = 0;
+
+/* 1 when the end of `to` is queued; 0 out of memory. */
+static int link_end_queue(ActorBase* to, const char* reason) {
+    if (t_link_end_count == t_link_end_cap) {
+        int cap = t_link_end_cap ? t_link_end_cap * 2 : 16;
+        AetherLinkEnd* q = (AetherLinkEnd*)realloc(t_link_ends, (size_t)cap * sizeof(AetherLinkEnd));
+        if (!q) return 0;
+        t_link_ends = q;
+        t_link_end_cap = cap;
+    }
+    char* copy = strdup(reason);
+    if (!copy) return 0;
+    t_link_ends[t_link_end_count].to = to;
+    t_link_ends[t_link_end_count].reason = copy;
+    t_link_end_count++;
+    return 1;
+}
+
+/* `to` ended, with what its end queued from `base` on turned round, so the
+ * first of them is taken next. */
+static void link_end_make(ActorBase* to, const char* reason, int base) {
+    scheduler_actor_end(to, reason, AETHER_ACTOR_KILLED);
+    for (int lo = base, hi = t_link_end_count - 1; lo < hi; lo++, hi--) {
+        AetherLinkEnd t = t_link_ends[lo];
+        t_link_ends[lo] = t_link_ends[hi];
+        t_link_ends[hi] = t;
+    }
+}
+
+static void link_end(ActorBase* to, const char* reason) {
+    if (t_link_ending) {
+        // No memory to queue it: ended here instead, on the stack.
+        if (!link_end_queue(to, reason)) scheduler_actor_end(to, reason, AETHER_ACTOR_KILLED);
+        return;
+    }
+    t_link_ending = 1;
+    link_end_make(to, reason, 0);
+    while (t_link_end_count > 0) {
+        AetherLinkEnd e = t_link_ends[--t_link_end_count];
+        link_end_make(e.to, e.reason, t_link_end_count);
+        free(e.reason);
+    }
+    free(t_link_ends);
+    t_link_ends = NULL;
+    t_link_end_cap = 0;
+    t_link_ending = 0;
+}
+
 /* `dead` ended with `reason`, and `to` was linked to it: `to` gets a Down
  * when it traps exits, else it ends with the same reason, "killed" by it,
  * unless that reason is "normal", which ends nothing. */
@@ -141,7 +210,7 @@ static void link_effect(ActorBase* to, ActorBase* dead, const char* reason) {
     if (atomic_load_explicit(&to->exit_flags, memory_order_acquire) & AETHER_EXIT_TRAP) {
         send_down(to, dead, r, 0);
     } else if (strcmp(r, "normal") != 0) {
-        scheduler_actor_end(to, r, AETHER_ACTOR_KILLED);
+        link_end(to, r);
     }
 }
 
