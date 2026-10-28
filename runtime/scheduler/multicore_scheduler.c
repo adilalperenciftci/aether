@@ -1422,8 +1422,13 @@ static void reclaim_reader_exit(int slot) {
 // stays marked released, in the bucket for its size, and the next spawn of
 // that size takes it back. A late send to it is dropped, counted and reported
 // once. One made after the block has become another actor reaches that
-// actor: a raw pointer cannot tell the two apart. The buckets never hold
-// more than was once live at the same time, and are freed with the tables.
+// actor: a raw pointer cannot tell the two apart. A block goes back to its
+// bucket once it is reclaimed, and a spawn takes it once no message is on
+// its way to it; a spawn before then takes a fresh block. So a bucket holds
+// at most as many blocks as were once, at the same time, live, released and
+// not yet reclaimed, or awaited by a message: how many depends on the cores'
+// timing as well as on the program (#3385). The buckets are freed with the
+// tables.
 // ---------------------------------------------------------------------------
 
 typedef struct {

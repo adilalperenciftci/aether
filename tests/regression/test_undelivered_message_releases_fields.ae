@@ -10,6 +10,16 @@
 // (mem.steady_growth). Elsewhere the leak gates (valgrind, macOS leaks) cover
 // this program. Strings are built from parameters, because string.concat of
 // two literals folds to a literal.
+//
+// A released actor's block is kept for the next spawn of its size once it
+// is reclaimed and no message is on its way to it (#2517, #3090); a spawn
+// before that takes a fresh block, and the blocks kept stay at the most the
+// cores' timing ever needed at once. Each round therefore ends settled (the
+// released actors' messages dropped, their blocks reclaimed), so the next
+// round's spawns find the blocks the first round made and the number of
+// blocks is the program's, not the timing's. Unsettled, a run grew by one
+// actor's block (1,799 bytes on the Windows heap) per window now and then,
+// in every window of the run (#3385).
 
 import std.mem
 import std.string
@@ -73,6 +83,12 @@ fn notes(a: ptr, p: string, n: int) {
     }
 }
 
+// A released actor's messages dropped and its block kept for reuse.
+fn settle() {
+    wait_for_idle()
+    check(scheduler_reclaim_released() == 0, "a released actor still retired")
+}
+
 fn round(p: string) {
     // Queued behind a panic, and sent after it.
     f = spawn(Fragile())
@@ -105,7 +121,7 @@ fn round(p: string) {
     notes(s, p, 20)
     let sp: ptr = s
     scheduler_release_actor(sp)
-    wait_for_idle()
+    settle()
 }
 
 fn window(p: string, n: int) {
