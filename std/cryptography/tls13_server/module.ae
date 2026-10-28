@@ -50,7 +50,7 @@ extern string_length(s: string) -> int
 extern tcp_socket_from_fd_owned(fd: int) -> ptr
 
 exports(
-    accept, conn_send, conn_recv, close_conn,
+    accept, conn_send, conn_recv, close_conn, conn_key_update,
     ServerConn,
     parse_cert_chain_pem, parse_ec_private_key_pem, load_private_key, free_private_key, ServerKey,
     pure_tls_server_check, pure_tls_server_accept, pure_tls_server_send, pure_tls_server_recv, pure_tls_server_close
@@ -61,6 +61,19 @@ struct ServerConn {
     rio: ptr // *RecordIO
     app_send: ptr // *tls13_record.RecordCtx
     app_recv: ptr // *tls13_record.RecordCtx
+    suite: int // the negotiated cipher suite
+    // The application traffic secrets the record contexts are keyed from;
+    // each KeyUpdate moves one on (RFC 8446 7.2, #3320).
+    send_secret: ptr
+    recv_secret: ptr
+    // Post-handshake handshake bytes of a message not yet whole, or null.
+    hs_pend: ptr
+    hs_pend_len: int
+    empties: int // empty application-data records in a row (#3317)
+    key_updates: int // KeyUpdates since the last application data (#3320)
+    warnings: int // user_canceled alerts since the last application data (#3323)
+    ku_pending: int // 1 when the client asked for a KeyUpdate not yet sent (#3320)
+    closed: int // 0 open, 1 after the client's close_notify, 2 after an error
 }
 
 // RecordIO framing over a raw TCP socket.
@@ -626,14 +639,15 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
 
     app_send = tls13_record.new_aead(rec_aead, bytes.view(sk)[0..rec_key_len], siv)
     app_recv = tls13_record.new_aead(rec_aead, bytes.view(ck)[0..rec_key_len], civ)
-    bytes.free(ck); bytes.free(civ); bytes.free(sk); bytes.free(siv)
-    bytes.free(ms); bytes.free(c_ap); bytes.free(s_ap)
+    tls13_ks.free_secret(ck); tls13_ks.free_secret(civ); tls13_ks.free_secret(sk); tls13_ks.free_secret(siv)
+    tls13_ks.free_secret(ms)
 
     // 7. Read and verify the client Finished.
     cf_alert, cf_err = read_client_finished(rio, cli_hs_ctx, tr, hs_client_secret(keys), th_sf, hash_algo, hash_len)
     if string.equals(cf_err, "") != 1 {
         if cf_alert != 0 { send_hs_alert(sock, app_send as ptr, cf_alert) }
         tls13_record.free_ctx(app_send as ptr); tls13_record.free_ctx(app_recv as ptr)
+        tls13_ks.free_secret(c_ap); tls13_ks.free_secret(s_ap)
         bytes.free(th_sf); bytes.free(srnd); bytes.free(sh)
         tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
         tls13_record.free_ctx(srv_hs_ctx); tls13_record.free_ctx(cli_hs_ctx)
@@ -644,15 +658,27 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
     // Cleanup handshake state
     bytes.free(th_sf)
     bytes.free(srnd); bytes.free(sh)
+    suite = ch_parsed.cipher_suite
     tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr)
     tls13_record.free_ctx(srv_hs_ctx); tls13_record.free_ctx(cli_hs_ctx)
     tls13_client.free_hs_keys(keys); bytes.free(th_chsh)
 
+    // The connection keeps c_ap and s_ap for KeyUpdate (#3320).
     conn = malloc(sizeof(ServerConn)) as *ServerConn
     conn.sock = sock
     conn.rio = rio as ptr
     conn.app_send = app_send as ptr
     conn.app_recv = app_recv as ptr
+    conn.suite = suite
+    conn.send_secret = s_ap
+    conn.recv_secret = c_ap
+    conn.hs_pend = null
+    conn.hs_pend_len = 0
+    conn.empties = 0
+    conn.key_updates = 0
+    conn.warnings = 0
+    conn.ku_pending = 0
+    conn.closed = 0
 
     return conn as ptr, ""
 }
@@ -739,10 +765,16 @@ fn read_client_finished(rio: *RecordIO, cli_hs_ctx: ptr, tr: ptr, client_hs_secr
     return 0, ""
 }
 
-// Send application data as one encrypted record.
+// Send application data as one encrypted record. A KeyUpdate the client
+// asked for goes first (RFC 8446 4.6.3, #3320).
 conn_send(conn: ptr, data: byte[]) -> string {
     if data.len < 0 { panic("tls13_server.conn_send: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     c = conn as *ServerConn
+    if c.closed == 2 { return "send: the connection failed earlier" }
+    if c.ku_pending == 1 {
+        kerr = send_key_update(c, tls13_hs.KEY_UPDATE_NOT_REQUESTED)
+        if kerr != "" { return kerr }
+    }
     rec = tls13_record.seal_record(c.app_send as ptr, tls13_record.CONTENT_APPLICATION_DATA, data)
     n = srv_send_view(c.sock, bytes.view(rec))
     tot = bytes.length(rec)
@@ -751,9 +783,44 @@ conn_send(conn: ptr, data: byte[]) -> string {
     return ""
 }
 
+// Send a KeyUpdate asking (`request` 1) or not (0) for the client's, under
+// the current sending keys, then move them on (RFC 8446 4.6.3, 7.2).
+fn send_key_update(c: *ServerConn, request: int) -> string {
+    m = tls13_hs.key_update_msg(request)
+    rec = tls13_record.seal_record(c.app_send as ptr, tls13_record.CONTENT_HANDSHAKE, bytes.view(m)[0..5])
+    bytes.free(m)
+    if rec == null { return "key update: the record could not be sealed" }
+    n = srv_send_view(c.sock, bytes.view(rec))
+    tot = bytes.length(rec)
+    bytes.free(rec)
+    if n != tot { return "key update: send failed" }
+    _a, _k, algo, _h, _e = suite_params(c.suite)
+    c.send_secret = tls13_ks.key_update(algo, c.app_send, c.send_secret)
+    c.ku_pending = 0
+    return ""
+}
+
+// conn_key_update(conn, request) -> "" or why: update the connection's
+// sending keys now with a KeyUpdate (RFC 8446 4.6.3, #3320); `request`
+// tls13_hs.KEY_UPDATE_REQUESTED (1) asks the client to update its own,
+// which the next conn_recv takes in its stride, KEY_UPDATE_NOT_REQUESTED
+// (0) does not.
+conn_key_update(conn: ptr, request: int) -> string {
+    c = conn as *ServerConn
+    if request != tls13_hs.KEY_UPDATE_NOT_REQUESTED && request != tls13_hs.KEY_UPDATE_REQUESTED {
+        return "key update: request ${request} is neither KEY_UPDATE_NOT_REQUESTED nor KEY_UPDATE_REQUESTED"
+    }
+    if c.closed != 0 { return "key update: the connection is closed" }
+    return send_key_update(c, request)
+}
+
 // Empty application-data records the server reads past in a row before it
 // refuses the stream as a denial of service (#3317), as BoringSSL bounds them.
 const MAX_EMPTY_RECORDS = 32
+
+// KeyUpdates without application data between them the server reads past
+// before it refuses the stream (#3320), as BoringSSL bounds them.
+const MAX_KEY_UPDATES = 32
 
 // decrypt_error (RFC 8446 6.2): a Finished whose MAC does not match.
 const ALERT_DECRYPT_ERROR = 51
@@ -782,64 +849,125 @@ fn send_alert_app(c: *ServerConn, desc: int) {
     bytes.free(rec)
 }
 
+// Send fatal alert `desc`, mark the connection failed, and return (null,
+// 0, why) as conn_recv does.
+fn conn_fail(c: *ServerConn, desc: int, why: string) -> (ptr, int, string) {
+    send_alert_app(c, desc)
+    c.closed = 2
+    return null, 0, why
+}
+
 // Receive the next application-data record's plaintext (fresh bytes; caller
 // frees via bytes.free): (data, len, ""), (null, 0, "") at the client's
-// close_notify, or (null, 0, error). Post-handshake handshake messages
-// are read past. RFC 8446 5 (#3317): a change_cipher_spec
+// close_notify, or (null, 0, error). RFC 8446 5 (#3317): a change_cipher_spec
 // or a plaintext record after the handshake, a record that does not open
 // or is too long, an empty handshake record, and more than
 // MAX_EMPTY_RECORDS empty application-data records in a row are each
-// refused, with their alert sent before the error returns.
+// refused, with their alert sent before the error returns; so is a record
+// of another type inside a handshake message that spans records (5.1).
+// Alerts as tls13_client.alert_event says (#3323). The one handshake
+// message a client sends after the handshake is a KeyUpdate (#3320): it
+// moves the receiving keys on, has the next send update the sending keys
+// first when it asks, must end its record, and comes at most
+// MAX_KEY_UPDATES times without application data; any other is
+// unexpected_message.
 conn_recv(conn: ptr) -> (ptr, int, string) {
     c = conn as *ServerConn
     rio = c.rio as *RecordIO
-    empties = 0
+    if c.closed == 1 { return null, 0, "" }
+    if c.closed == 2 { return null, 0, "recv: the connection failed earlier" }
     while 1 == 1 {
         rec, rlen, e = recio_next(rio)
         if string.equals(e, "") != 1 {
             if rio.alert != 0 { send_alert_app(c, rio.alert) }
+            c.closed = 2
             return null, 0, e
         }
         ct = bytes.get(rec, 0) & 0xFF
         if ct != 0x17 {
             bytes.free(rec)
-            send_alert_app(c, tls13_record.ALERT_UNEXPECTED_MESSAGE)
-            return null, 0, "record: a plaintext record of type ${ct} after the handshake"
+            return conn_fail(c, tls13_record.ALERT_UNEXPECTED_MESSAGE, "record: a plaintext record of type ${ct} after the handshake")
         }
         opened = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0, alert: 0 }
         oerr = tls13_record.open_record(c.app_recv as ptr, bytes.view(rec)[0..rlen], &opened)
         bytes.free(rec)
         if string.equals(oerr, "") != 1 {
-            send_alert_app(c, opened.alert)
-            return null, 0, oerr
+            return conn_fail(c, opened.alert, oerr)
         }
         t = opened.content_type
         n = opened.plaintext_len
-        if t == tls13_record.CONTENT_APPLICATION_DATA {
-            if n > 0 { return opened.plaintext, n, "" }
+        if t != tls13_record.CONTENT_HANDSHAKE && c.hs_pend_len > 0 {
             if opened.plaintext != null { bytes.free(opened.plaintext) }
-            empties = empties + 1
-            if empties > MAX_EMPTY_RECORDS {
-                send_alert_app(c, tls13_record.ALERT_UNEXPECTED_MESSAGE)
-                return null, 0, "record: more than ${MAX_EMPTY_RECORDS} empty records in a row"
+            return conn_fail(c, tls13_record.ALERT_UNEXPECTED_MESSAGE, "record: a record of type ${t} inside a handshake message")
+        }
+        if t == tls13_record.CONTENT_APPLICATION_DATA {
+            if n > 0 {
+                c.empties = 0
+                c.key_updates = 0
+                c.warnings = 0
+                return opened.plaintext, n, ""
+            }
+            if opened.plaintext != null { bytes.free(opened.plaintext) }
+            c.empties = c.empties + 1
+            if c.empties > MAX_EMPTY_RECORDS {
+                return conn_fail(c, tls13_record.ALERT_UNEXPECTED_MESSAGE, "record: more than ${MAX_EMPTY_RECORDS} empty records in a row")
             }
         } else if t == tls13_record.CONTENT_ALERT {
-            // A clean close_notify is EOF; any other alert is an error naming
-            // the description.
+            level = -1
             desc = 0
-            if n >= 2 { desc = bytes.get(opened.plaintext, 1) & 0xFF }
-            if opened.plaintext != null { bytes.free(opened.plaintext) }
-            if desc == tls13_client.ALERT_CLOSE_NOTIFY { return null, 0, "" }
-            return null, 0, string.concat("tls alert: ", tls13_client.alert_name(desc))
-        } else {
-            // A post-handshake handshake message: read
-            // past it. An empty one is no message at all.
-            if opened.plaintext != null { bytes.free(opened.plaintext) }
-            if n == 0 {
-                send_alert_app(c, tls13_record.ALERT_UNEXPECTED_MESSAGE)
-                return null, 0, "record: an empty handshake record after the handshake"
+            if n == 2 {
+                level = bytes.get(opened.plaintext, 0) & 0xFF
+                desc = bytes.get(opened.plaintext, 1) & 0xFF
             }
-            empties = 0
+            if opened.plaintext != null { bytes.free(opened.plaintext) }
+            if level < 0 { return conn_fail(c, tls13_record.ALERT_DECODE_ERROR, "alert: a record that is not two bytes") }
+            ev, a, why = tls13_client.alert_event(level, desc, c.warnings)
+            if ev == tls13_client.EV_CLOSED {
+                c.closed = 1
+                return null, 0, ""
+            }
+            if ev == tls13_client.EV_ERROR {
+                if a != 0 { send_alert_app(c, a) }
+                c.closed = 2
+                return null, 0, why
+            }
+            c.warnings = c.warnings + 1
+        } else {
+            // A handshake record: an empty one is no message at all.
+            if n == 0 {
+                if opened.plaintext != null { bytes.free(opened.plaintext) }
+                return conn_fail(c, tls13_record.ALERT_UNEXPECTED_MESSAGE, "record: an empty handshake record after the handshake")
+            }
+            if c.hs_pend == null {
+                c.hs_pend = bytes.new(n)
+                c.hs_pend_len = 0
+            }
+            bytes.copy_from_bytes(c.hs_pend, c.hs_pend_len, opened.plaintext, 0, n)
+            c.hs_pend_len = c.hs_pend_len + n
+            bytes.free(opened.plaintext)
+            if c.hs_pend_len >= 4 {
+                mt = bytes.get(c.hs_pend, 0) & 0xFF
+                ml = ((bytes.get(c.hs_pend, 1) & 0xFF) << 16) | ((bytes.get(c.hs_pend, 2) & 0xFF) << 8) | (bytes.get(c.hs_pend, 3) & 0xFF)
+                if mt != tls13_hs.HS_KEY_UPDATE {
+                    return conn_fail(c, tls13_record.ALERT_UNEXPECTED_MESSAGE, "handshake: a message of type ${mt} after the handshake")
+                }
+                if ml != 1 { return conn_fail(c, tls13_record.ALERT_DECODE_ERROR, "key update: the body is not one byte") }
+                if c.hs_pend_len >= 5 {
+                    req, ka, kerr = tls13_hs.key_update_request(bytes.view(c.hs_pend)[4..5])
+                    if ka != 0 { return conn_fail(c, ka, kerr) }
+                    if c.hs_pend_len != 5 { return conn_fail(c, tls13_record.ALERT_UNEXPECTED_MESSAGE, "handshake: data after a KeyUpdate in its record") }
+                    bytes.free(c.hs_pend)
+                    c.hs_pend = null
+                    c.hs_pend_len = 0
+                    c.key_updates = c.key_updates + 1
+                    if c.key_updates > MAX_KEY_UPDATES {
+                        return conn_fail(c, tls13_record.ALERT_UNEXPECTED_MESSAGE, "key update: more than ${MAX_KEY_UPDATES} without application data")
+                    }
+                    _sa, _sk, algo, _sh, _se = suite_params(c.suite)
+                    c.recv_secret = tls13_ks.key_update(algo, c.app_recv, c.recv_secret)
+                    if req == tls13_hs.KEY_UPDATE_REQUESTED { c.ku_pending = 1 }
+                }
+            }
         }
     }
 }
@@ -849,6 +977,9 @@ close_conn(conn: ptr) {
     if c == null { return }
     tls13_record.free_ctx(c.app_send as ptr)
     tls13_record.free_ctx(c.app_recv as ptr)
+    tls13_ks.free_secret(c.send_secret)
+    tls13_ks.free_secret(c.recv_secret)
+    if c.hs_pend != null { bytes.free(c.hs_pend) }
     recio_free(c.rio as *RecordIO)
     tcp.close(c.sock)
     libc_free(conn)

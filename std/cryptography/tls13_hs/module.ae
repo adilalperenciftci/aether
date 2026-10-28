@@ -47,7 +47,10 @@ exports(
     GROUP_X25519, GROUP_SECP256R1, GROUP_X25519MLKEM768,
     SIGBIT_ECDSA_P256, SIGBIT_ECDSA_P384, SIGBIT_ECDSA_P521, SIGBIT_RSA_PSS_SHA256, SIGBIT_ED25519,
     HS_ENCRYPTED_EXTENSIONS, HS_CERTIFICATE, HS_CERTIFICATE_VERIFY, HS_FINISHED,
-    encrypted_extensions, certificate_msg, certificate_verify_msg, finished_msg
+    HS_NEW_SESSION_TICKET, HS_KEY_UPDATE, KEY_UPDATE_NOT_REQUESTED, KEY_UPDATE_REQUESTED,
+    encrypted_extensions, certificate_msg, certificate_verify_msg, finished_msg,
+    key_update_msg, key_update_request,
+    NstParsed, parse_new_session_ticket
 )
 
 // Cipher suites (RFC 8446 appendix B.4).
@@ -84,6 +87,12 @@ const HS_ENCRYPTED_EXTENSIONS = 8
 const HS_CERTIFICATE = 11
 const HS_CERTIFICATE_VERIFY = 15
 const HS_FINISHED = 20
+const HS_NEW_SESSION_TICKET = 4
+const HS_KEY_UPDATE = 24
+
+// KeyUpdate's request_update (RFC 8446 4.6.3).
+const KEY_UPDATE_NOT_REQUESTED = 0
+const KEY_UPDATE_REQUESTED = 1
 
 // Result of parsing a ServerHello.
 struct ShParsed {
@@ -912,10 +921,19 @@ fn ext_allowed(kind: int, t: int) -> int {
         return 0
     }
     if kind == MSG_NEW_SESSION_TICKET {
-        if t == 42 { return 1 }
+        if t == 42 || t == 62 { return 1 }
         return 0
     }
     return 1
+}
+
+// 1 when this client knows extension `t`: what it sends or parses, and the
+// ones its peers' messages may carry. A NewSessionTicket ignores every
+// other (RFC 8446 4.6.1).
+fn ext_recognized(t: int) -> int {
+    if t == 0 || t == 5 || t == 10 || t == 13 || t == 16 || t == 18 { return 1 }
+    if t == 41 || t == 42 || t == 43 || t == 44 || t == 45 || t == 51 || t == 62 { return 1 }
+    return 0
 }
 
 // The body rules of the extensions a server may answer with: server_name
@@ -933,7 +951,17 @@ fn ext_body_check(kind: int, t: int, b: byte[], p: int, n: int) -> (int, string)
         }
     }
     if kind == MSG_NEW_SESSION_TICKET && t == 42 && n != 4 {
-        return ALERT_DECODE_ERROR, "new session ticket: early_data must hold max_early_data_size"
+        return ALERT_DECODE_ERROR, "extensions: early_data must hold max_early_data_size"
+    }
+    if kind == MSG_NEW_SESSION_TICKET && t == 62 {
+        // TLS flags (draft-ietf-tls-tlsflags): flags<1..255>, minimally
+        // encoded, so the last byte is never zero (#3319).
+        if n < 2 || get8(b, p) != n - 1 {
+            return ALERT_DECODE_ERROR, "extensions: flags must hold one to 255 bytes"
+        }
+        if get8(b, p + n - 1) == 0 {
+            return ALERT_ILLEGAL_PARAMETER, "extensions: flags end in a zero byte"
+        }
     }
     return 0, ""
 }
@@ -966,7 +994,20 @@ check_extensions(kind: int, exts: byte[], offered: int) -> (int, string) {
         sl = bytes.length(seen)
         bytes.set(seen, sl, (t >> 8) & 0xFF)
         bytes.set(seen, sl + 1, t & 0xFF)
-        if kind != MSG_CERTIFICATE_REQUEST {
+        if kind == MSG_NEW_SESSION_TICKET {
+            // A ticket's extensions answer nothing: the ones this client
+            // does not know are ignored, the ones it knows must belong in a
+            // ticket and parse (RFC 8446 4.6.1, 4.2, #3319).
+            if ext_recognized(t) == 1 && ext_allowed(kind, t) == 0 {
+                bytes.free(seen)
+                return ALERT_ILLEGAL_PARAMETER, "extensions: extension ${t} may not appear in a NewSessionTicket"
+            }
+            na, nerr = ext_body_check(kind, t, exts, p + 4, el)
+            if na != 0 {
+                bytes.free(seen)
+                return na, nerr
+            }
+        } else if kind != MSG_CERTIFICATE_REQUEST {
             cookie = 0
             if kind == MSG_HELLO_RETRY && t == 44 { cookie = 1 }
             if ext_offered(t, offered) == 0 && cookie == 0 {
@@ -1271,4 +1312,96 @@ finished_msg(vd: ptr, vd_len: int) -> ptr {
     put24(m, 1, vd_len)
     bytes.copy_from_bytes(m, 4, vd, 0, vd_len)
     return m
+}
+
+// KeyUpdate handshake message (RFC 8446 4.6.3): `request` is
+// KEY_UPDATE_NOT_REQUESTED or KEY_UPDATE_REQUESTED. Fresh bytes (caller
+// frees).
+key_update_msg(request: int) -> ptr {
+    m = bytes.new(5)
+    bytes.set(m, 0, HS_KEY_UPDATE)
+    put24(m, 1, 1)
+    bytes.set(m, 4, request & 0xFF)
+    return m
+}
+
+// The request_update of a KeyUpdate body (RFC 8446 4.6.3): (request, 0, "")
+// or (-1, alert, why): decode_error for a body that is not one byte,
+// illegal_parameter for a value other than KEY_UPDATE_NOT_REQUESTED and
+// KEY_UPDATE_REQUESTED.
+key_update_request(body: byte[]) -> (int, int, string) {
+    if body.len < 0 { panic("tls13_hs.key_update_request: the `body` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    if body.len != 1 { return -1, ALERT_DECODE_ERROR, "key update: the body is not one byte" }
+    v = body[0] & 0xFF
+    if v > KEY_UPDATE_REQUESTED { return -1, ALERT_ILLEGAL_PARAMETER, "key update: request_update ${v} is neither 0 nor 1" }
+    return v, 0, ""
+}
+
+// ---- NewSessionTicket (RFC 8446 4.6.1) ----
+
+// A NewSessionTicket body, as parse_new_session_ticket reads it: the
+// nonce and the ticket are where they are in the body.
+struct NstParsed {
+    lifetime: int // ticket_lifetime, seconds
+    age_add: int // ticket_age_add
+    nonce_off: int
+    nonce_len: int
+    ticket_off: int
+    ticket_len: int
+    max_early_data: int // early_data's max_early_data_size; 0 without it
+    alert: int // the alert to send when it is refused
+}
+
+// parse_new_session_ticket(body, out) -> "" or why the body of a
+// NewSessionTicket is refused, `out.alert` then saying what to send
+// (#3319): decode_error for a body that does not parse, an empty ticket
+// (ticket<1..2^16-1>) and bytes after the extensions; what check_extensions
+// says about those (a duplicate is illegal_parameter, an early_data that is
+// not four bytes decode_error, TLS flags empty or ending in a zero byte
+// decode_error or illegal_parameter; an extension this client does not
+// know is ignored, as 4.6.1 asks).
+parse_new_session_ticket(body: byte[], out: *NstParsed) -> string {
+    if body.len < 0 { panic("tls13_hs.parse_new_session_ticket: the `body` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int n = body.len
+    out.lifetime = 0
+    out.age_add = 0
+    out.nonce_off = 0
+    out.nonce_len = 0
+    out.ticket_off = 0
+    out.ticket_len = 0
+    out.max_early_data = 0
+    out.alert = ALERT_DECODE_ERROR
+    if n < 9 { return "new session ticket: truncated" }
+    out.lifetime = (get16(body, 0) << 16) | get16(body, 2)
+    out.age_add = (get16(body, 4) << 16) | get16(body, 6)
+    nl = get8(body, 8)
+    p = 9
+    if p + nl + 2 > n { return "new session ticket: truncated nonce" }
+    out.nonce_off = p
+    out.nonce_len = nl
+    p = p + nl
+    tl = get16(body, p)
+    p = p + 2
+    if tl == 0 { return "new session ticket: an empty ticket" }
+    if p + tl + 2 > n { return "new session ticket: truncated ticket" }
+    out.ticket_off = p
+    out.ticket_len = tl
+    p = p + tl
+    el = get16(body, p)
+    p = p + 2
+    if p + el != n { return "new session ticket: the extensions do not fill the message" }
+    a, err = check_extensions(MSG_NEW_SESSION_TICKET, body[p..n], 0)
+    if a != 0 {
+        out.alert = a
+        return "new session ticket: ${err}"
+    }
+    q = p
+    while q + 4 <= n {
+        if get16(body, q) == 42 {
+            out.max_early_data = (get16(body, q + 4) << 16) | get16(body, q + 6)
+        }
+        q = q + 4 + get16(body, q + 2)
+    }
+    out.alert = 0
+    return ""
 }

@@ -13,6 +13,8 @@
 //   ccs=1|2|bad     change_cipher_spec records after the ServerHello
 //   empty_hs=1      an empty protected handshake record before EE
 //   plain_ee=1      EncryptedExtensions in a plaintext record
+//   flight_alerts=HEX  alert records (level, description pairs) before
+//                   EncryptedExtensions
 //   fin_trailing=1  bytes after the Finished, in its record
 //   split_sh=N      the ServerHello in records of at most N bytes
 //   pack_sh=1       handshake bytes after the ServerHello in its record
@@ -43,6 +45,7 @@ import std.cryptography.x25519
 import std.cryptography.mlkem
 import std.cryptography.tls13_hs
 import std.cryptography.tls13_ks
+import std.cryptography.tls13_kdf
 import std.cryptography.tls13_record
 import std.cryptography.tls13_client
 import std.cryptography.tls13_server
@@ -594,6 +597,23 @@ main() {
         answered_early(&r, cli_ctx, "")
         bytes.free(i0)
     }
+    fak = knob("flight_alerts")
+    if fak != "" {
+        // Alert records (level, description pairs) before
+        // EncryptedExtensions, under the handshake keys (#3323).
+        fal = from_hex(fak)
+        fi = 0
+        while fi + 1 < bytes.length(fal) {
+            one = bytes.new(2)
+            bytes.set(one, 0, bytes.get(fal, fi))
+            bytes.set(one, 1, bytes.get(fal, fi + 1))
+            send_sealed(sock, srv_ctx, 21, one)
+            bytes.free(one)
+            fi = fi + 2
+        }
+        bytes.free(fal)
+        answered_early(&r, cli_ctx, "")
+    }
     ee = encrypted_extensions()
     if knob("plain_ee") != "" {
         send_plain(sock, 22, ee)
@@ -704,6 +724,12 @@ main() {
         ms = tls13_ks.master_secret(algo, hsec)
         c_ap = tls13_ks.traffic_secret(algo, ms, "c ap traffic", bytes.view(th_sf)[0..hl])
         s_ap = tls13_ks.traffic_secret(algo, ms, "s ap traffic", bytes.view(th_sf)[0..hl])
+        if is_session_post(post) == 1 {
+            k = Keys { algo: algo, hl: hl, aead: aead, klen: klen, s_sec: s_ap, c_sec: c_ap, s_ctx: ctx_of(algo, hl, aead, klen, s_ap), c_ctx: ctx_of(algo, hl, aead, klen, c_ap) }
+            post_session(sock, &r, &k, post)
+            tcp.close(sock)
+            exit(0)
+        }
         ak = tls13_ks.write_key(algo, bytes.view(s_ap)[0..hl], klen)
         aiv = tls13_ks.write_iv(algo, s_ap)
         bk = tls13_ks.write_key(algo, bytes.view(c_ap)[0..hl], klen)
@@ -715,6 +741,222 @@ main() {
     }
     tcp.close(sock)
     exit(0)
+}
+
+// ---- after the handshake: KeyUpdate, NewSessionTicket, alerts ----
+//
+// post=WHAT for these, under the application keys (the peer computes the
+// KeyUpdate secrets itself, with tls13_kdf, apart from tls13_ks):
+//   kuN           N KeyUpdates (update_not_requested), then 2 bytes of data
+//                 (kuxN without them, for a count the client refuses)
+//   kureqN        N KeyUpdates (update_requested), then data; the client
+//                 echoes it (CLIENT_ECHO=1) after its own KeyUpdate
+//   kubad         a KeyUpdate whose request_update is 2
+//   kulong        a KeyUpdate whose body is two bytes
+//   kutrail       a KeyUpdate and the header of another message, one record
+//   kusplit       a KeyUpdate over two records, then data
+//   nst:HEX       a NewSessionTicket with this body, then data (nstx:HEX
+//                 without the data, for one the client refuses)
+//   nstsplit:HEX  the same over two records
+//   alerts:HEX    alert records (level, description pairs), then data
+//                 (alertsx:HEX without it)
+//   postcr        a CertificateRequest
+//   listen        nothing: what the client sends on its own (kuclient.ae)
+// Then "POST <what the client sent>": each record it sent, read under its
+// keys, which move on at each KeyUpdate: "KU", "DATA <n>", "ALERT <n>",
+// "CLOSED".
+
+// A record context for traffic secret `s`.
+fn ctx_of(algo: string, hl: int, aead: int, klen: int, s: ptr) -> ptr {
+    k = tls13_ks.write_key(algo, bytes.view(s)[0..hl], klen)
+    iv = tls13_ks.write_iv(algo, s)
+    ctx = tls13_record.new_aead(aead, bytes.view(k)[0..klen], iv)
+    bytes.free(k)
+    bytes.free(iv)
+    return ctx
+}
+
+// The traffic secret after `s` (RFC 8446 7.2); `s` is freed.
+fn next_secret(algo: string, hl: int, s: ptr) -> ptr {
+    empty = bytes.new(0)
+    n = tls13_kdf.expand_label(algo, bytes.view(s)[0..hl], "traffic upd", bytes.view(empty)[0..0], hl)
+    bytes.free(empty)
+    bytes.free(s)
+    return n
+}
+
+struct Keys {
+    algo: string
+    hl: int
+    aead: int
+    klen: int
+    s_sec: ptr // the peer's sending secret
+    c_sec: ptr // the client's sending secret
+    s_ctx: ptr
+    c_ctx: ptr
+}
+
+// The peer's sending keys move on.
+fn peer_update(k: *Keys) {
+    k.s_sec = next_secret(k.algo, k.hl, k.s_sec)
+    tls13_record.free_ctx(k.s_ctx)
+    k.s_ctx = ctx_of(k.algo, k.hl, k.aead, k.klen, k.s_sec)
+}
+
+// The client's sending keys move on.
+fn client_update(k: *Keys) {
+    k.c_sec = next_secret(k.algo, k.hl, k.c_sec)
+    tls13_record.free_ctx(k.c_ctx)
+    k.c_ctx = ctx_of(k.algo, k.hl, k.aead, k.klen, k.c_sec)
+}
+
+fn send_ku(sock: ptr, k: *Keys, request: int) {
+    w = buf_new()
+    put8(w, 24)
+    put24(w, 1)
+    put8(w, request)
+    m = buf_take(w)
+    send_sealed(sock, k.s_ctx, 22, m)
+    bytes.free(m)
+    peer_update(k)
+}
+
+fn send_data2(sock: ptr, k: *Keys) {
+    d = from_hex("6869")
+    send_sealed(sock, k.s_ctx, 23, d)
+    bytes.free(d)
+}
+
+// What the client sent from here on, record by record, until it closes or
+// sends data or an alert: "KU" for each KeyUpdate (its keys then move on).
+fn session_answer(r: *Reader, k: *Keys) -> string {
+    out = ""
+    while 1 == 1 {
+        rec = next_record(r)
+        if rec == null { return "${out}CLOSED" }
+        ct = bytes.get(rec, 0) & 0xFF
+        if ct != 0x17 {
+            bytes.free(rec)
+            return "${out}PLAIN ${ct}"
+        }
+        opened = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0 }
+        oerr = tls13_record.open_record(k.c_ctx, bytes.view(rec)[0..bytes.length(rec)], &opened)
+        bytes.free(rec)
+        if oerr != "" { return "${out}UNREADABLE" }
+        t = opened.content_type
+        n = opened.plaintext_len
+        first = 0
+        if n > 0 { first = bytes.get(opened.plaintext, 0) & 0xFF }
+        second = 0
+        if n > 1 { second = bytes.get(opened.plaintext, 1) & 0xFF }
+        if opened.plaintext != null { bytes.free(opened.plaintext) }
+        if t == 22 && first == 24 {
+            out = "${out}KU "
+            client_update(k)
+        } else if t == 21 {
+            return "${out}ALERT ${second}"
+        } else if t == 23 {
+            return "${out}DATA ${n}"
+        } else {
+            return "${out}HANDSHAKE ${first}"
+        }
+    }
+}
+
+fn post_session(sock: ptr, r: *Reader, k: *Keys, what: string) {
+    if string.starts_with(what, "kureq") == 1 {
+        count, _e = string.to_int(string.substring(what, 5, string.length(what)))
+        i = 0
+        while i < count {
+            send_ku(sock, k, 1)
+            i = i + 1
+        }
+        send_data2(sock, k)
+    } else if what == "kubad" {
+        bad = from_hex("1800000102")
+        send_sealed(sock, k.s_ctx, 22, bad)
+        bytes.free(bad)
+    } else if what == "kulong" {
+        bad = from_hex("180000020000")
+        send_sealed(sock, k.s_ctx, 22, bad)
+        bytes.free(bad)
+    } else if what == "kutrail" {
+        bad = from_hex("180000010004000000")
+        send_sealed(sock, k.s_ctx, 22, bad)
+        bytes.free(bad)
+    } else if what == "kusplit" {
+        a = from_hex("180000")
+        b = from_hex("0100")
+        send_sealed(sock, k.s_ctx, 22, a)
+        send_sealed(sock, k.s_ctx, 22, b)
+        bytes.free(a)
+        bytes.free(b)
+        peer_update(k)
+        send_data2(sock, k)
+    } else if string.starts_with(what, "ku") == 1 {
+        // kuN, then data; kuxN, none (the client refuses the last).
+        from = 2
+        if string.starts_with(what, "kux") == 1 { from = 3 }
+        count, _e2 = string.to_int(string.substring(what, from, string.length(what)))
+        i = 0
+        while i < count {
+            send_ku(sock, k, 0)
+            i = i + 1
+        }
+        if from == 2 { send_data2(sock, k) }
+    } else if string.starts_with(what, "nst") == 1 {
+        // nst:HEX, nstsplit:HEX and nstx:HEX (no data after, for a ticket
+        // the client refuses: data it does not read would make its close a
+        // reset, and a reset can drop its alert).
+        at = string.index_of(what, ":") + 1
+        body = from_hex(string.substring(what, at, string.length(what)))
+        m = hs_msg(4, body)
+        bytes.free(body)
+        if string.starts_with(what, "nstsplit:") == 1 {
+            h = bytes.length(m) / 2
+            a = bytes.new(h)
+            bytes.copy_from_bytes(a, 0, m, 0, h)
+            b = bytes.new(bytes.length(m) - h)
+            bytes.copy_from_bytes(b, 0, m, h, bytes.length(m) - h)
+            send_sealed(sock, k.s_ctx, 22, a)
+            send_sealed(sock, k.s_ctx, 22, b)
+            bytes.free(a)
+            bytes.free(b)
+        } else {
+            send_sealed(sock, k.s_ctx, 22, m)
+        }
+        bytes.free(m)
+        if string.starts_with(what, "nstx:") != 1 { send_data2(sock, k) }
+    } else if string.starts_with(what, "alerts") == 1 {
+        // alerts:HEX, then data; alertsx:HEX, none.
+        at = string.index_of(what, ":") + 1
+        al = from_hex(string.substring(what, at, string.length(what)))
+        i = 0
+        while i + 1 < bytes.length(al) {
+            one = bytes.new(2)
+            bytes.set(one, 0, bytes.get(al, i))
+            bytes.set(one, 1, bytes.get(al, i + 1))
+            send_sealed(sock, k.s_ctx, 21, one)
+            bytes.free(one)
+            i = i + 2
+        }
+        bytes.free(al)
+        if string.starts_with(what, "alertsx:") != 1 { send_data2(sock, k) }
+    } else if what == "postcr" {
+        cr = from_hex("0d00000e01aa000a000d000600040403")
+        send_sealed(sock, k.s_ctx, 22, cr)
+        bytes.free(cr)
+    }
+    println("POST ${session_answer(r, k)}")
+}
+
+// 1 when post=WHAT is one post_session drives.
+fn is_session_post(what: string) -> int {
+    if string.starts_with(what, "ku") == 1 { return 1 }
+    if string.starts_with(what, "nst") == 1 { return 1 }
+    if string.starts_with(what, "alerts") == 1 { return 1 }
+    if what == "postcr" || what == "listen" { return 1 }
+    return 0
 }
 
 // The Ed25519 key (key=ed25519): its 32-byte seed, and a self-signed

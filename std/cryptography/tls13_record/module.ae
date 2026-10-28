@@ -44,7 +44,7 @@ extern malloc(size: int) -> ptr
 @extern("free") libc_free(p: ptr)
 
 exports(
-    new, new_aead, free_ctx, seal_record, open_record, nonce_for, check_header,
+    new, new_aead, rekey, free_ctx, seal_record, open_record, nonce_for, check_header,
     ALERT_UNEXPECTED_MESSAGE, ALERT_BAD_RECORD_MAC, ALERT_RECORD_OVERFLOW, ALERT_DECODE_ERROR,
     RecordCtx, OpenedRecord,
     CONTENT_HANDSHAKE, CONTENT_APPLICATION_DATA, CONTENT_ALERT,
@@ -101,30 +101,60 @@ new(key: byte[], iv12: ptr) -> ptr {
 // is built once here (GCM only runs the cipher forward, for seal AND open).
 new_aead(aead_id: int, key: byte[], iv12: ptr) -> ptr {
     if key.len < 0 { panic("tls13_record.new_aead: the `key` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
-    int key_len = key.len
     ctx = malloc(sizeof(RecordCtx)) as *RecordCtx
+    ctx.key = null
+    ctx.key_len = 0
+    ctx.iv = null
+    ctx.seq = 0
+    ctx.aead = aead_id
+    ctx.aes_ctx = null
+    rekey(ctx as ptr, key, iv12)
+    return ctx as ptr
+}
+
+// Key `ctx` afresh with `key` and `iv12`, its AEAD unchanged, and start its
+// sequence number again at 0, as a KeyUpdate does (RFC 8446 4.6.3, 5.3).
+// Both are copied (the ctx owns its copies; the old ones are freed).
+rekey(ctx: ptr, key: byte[], iv12: ptr) {
+    if key.len < 0 { panic("tls13_record.rekey: the `key` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    c = ctx as *RecordCtx
+    int key_len = key.len
     k = bytes.new(key_len)
     if key_len > 0 { bytes.set(k, key_len - 1, 0) }
     bytes.copy_from_slice(k, 0, key[0..key_len])
     iv = bytes.new(NONCE_LEN)
     bytes.set(iv, NONCE_LEN - 1, 0)
     bytes.copy_from_bytes(iv, 0, iv12, 0, NONCE_LEN)
-    ctx.key = k
-    ctx.key_len = key_len
-    ctx.iv = iv
-    ctx.seq = 0
-    ctx.aead = aead_id
-    ctx.aes_ctx = null
-    if aead_id == AEAD_AES_128_GCM || aead_id == AEAD_AES_256_GCM {
-        ctx.aes_ctx = aes.new_encryptor(bytes.view(k)[0..key_len])
+    wipe_free(c.key)
+    wipe_free(c.iv)
+    if c.aes_ctx != null { aes.free(c.aes_ctx) }
+    c.key = k
+    c.key_len = key_len
+    c.iv = iv
+    c.seq = 0
+    c.aes_ctx = null
+    if c.aead == AEAD_AES_128_GCM || c.aead == AEAD_AES_256_GCM {
+        c.aes_ctx = aes.new_encryptor(bytes.view(k)[0..key_len])
     }
-    return ctx as ptr
+}
+
+// Zero a key buffer, then free it: a record key must not outlive its
+// context (RFC 8446 7.2 asks that keys replaced by a KeyUpdate be deleted).
+fn wipe_free(b: @frees ptr) {
+    if b == null { return }
+    int n = bytes.length(b)
+    int i = 0
+    while i < n {
+        bytes.set(b, i, 0)
+        i = i + 1
+    }
+    bytes.free(b)
 }
 
 free_ctx(ctx: ptr) {
     c = ctx as *RecordCtx
-    bytes.free(c.key)
-    bytes.free(c.iv)
+    wipe_free(c.key)
+    wipe_free(c.iv)
     if c.aes_ctx != null { aes.free(c.aes_ctx) }
     libc_free(ctx)
 }

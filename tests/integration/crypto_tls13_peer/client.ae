@@ -1,7 +1,9 @@
 // The pure TLS client against peer.ae: connect_socket to 127.0.0.1
 // PEER_PORT for "peer.example", trusting CAFILE. Prints "OK" after a
 // verified handshake, else "ERR: <why>". With CLIENT_READ=1 it then reads
-// once and prints "RECV <n>", "RECV-EOF" or "RECVERR: <why>".
+// once and prints "RECV <n>", "RECV-EOF" or "RECVERR: <why>"; with
+// CLIENT_TICKET=1 it first waits for a session ticket and prints "TICKET"
+// or "TICKETERR: <why>"; with CLIENT_ECHO=1 it sends back what it read.
 
 import std.os
 import std.tcp
@@ -22,6 +24,15 @@ main() {
         return
     }
     println("OK")
+    if os.getenv("CLIENT_TICKET") == "1" {
+        t, terr = tls13_client.conn_get_ticket(conn)
+        if terr != "" {
+            println("TICKETERR: ${terr}")
+        } else {
+            println("TICKET early=${tls13_client.ticket_max_early_data(t)} len=${tls13_client.ticket_len(t)}")
+            tls13_client.free_ticket(t)
+        }
+    }
     if os.getenv("CLIENT_READ") == "1" {
         buf, n, rerr = tls13_client.conn_recv(conn)
         if rerr != "" {
@@ -30,6 +41,10 @@ main() {
             println("RECV-EOF")
         } else {
             println("RECV ${n}")
+            if os.getenv("CLIENT_ECHO") == "1" {
+                serr = tls13_client.conn_send(conn, bytes.view(buf)[0..n])
+                if serr != "" { println("SENDERR: ${serr}") }
+            }
             bytes.free(buf)
         }
     }

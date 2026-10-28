@@ -37,12 +37,15 @@
 //   traffic_secret(algo, secret, label, th) -> ptr   (Derive-Secret)
 //   write_key(algo, traffic_secret, key_len) -> ptr
 //   write_iv(algo, traffic_secret)                  -> ptr   (12 bytes)
+//   next_traffic_secret(algo, secret)       -> ptr   (KeyUpdate, 7.2)
+//   key_update(algo, ctx, secret)           -> ptr   (rekeys ctx too)
 //
 // All results are freshly allocated std.bytes (caller frees).
 
 import std.bytes
 import std.cryptography.hkdf
 import std.cryptography.tls13_kdf
+import std.cryptography.tls13_record
 
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
@@ -50,7 +53,7 @@ extern free(p: ptr)
 exports(
     early_secret, early_secret_psk, psk_from_resumption, binder_key, early_traffic_secret,
     handshake_secret, master_secret,
-    traffic_secret, write_key, write_iv,
+    traffic_secret, next_traffic_secret, key_update, free_secret, write_key, write_iv,
     IV_LEN
 )
 
@@ -177,6 +180,48 @@ write_key(algo: string, secret: byte[], key_len: int) -> ptr {
     k = tls13_kdf.expand_label(algo, secret[0..hl], "key", bytes.view(empty)[0..0], key_len)
     bytes.free(empty)
     return k
+}
+
+// The next application traffic secret after a KeyUpdate (RFC 8446 7.2):
+// HKDF-Expand-Label(secret, "traffic upd", "", Hash.length). Fresh bytes;
+// `secret` is consumed: zeroed and freed, as 7.2 asks once its successor
+// exists.
+next_traffic_secret(algo: string, secret: @frees ptr) -> ptr {
+    hl = hlen(algo)
+    empty = zeros(0)
+    nxt = tls13_kdf.expand_label(algo, bytes.view(secret)[0..hl], "traffic upd", bytes.view(empty)[0..0], hl)
+    bytes.free(empty)
+    free_secret(secret)
+    return nxt
+}
+
+// Move one direction of a connection on at a KeyUpdate (RFC 8446 4.6.3,
+// 7.2): the next traffic secret from `secret`, which is consumed (zeroed and
+// freed), and the record context `ctx` keyed afresh from it, its AEAD and
+// key length unchanged and its sequence number 0. Returns the new secret
+// (caller owns; hand it to the next key_update or free_secret).
+key_update(algo: string, ctx: ptr, secret: @frees ptr) -> ptr {
+    nxt = next_traffic_secret(algo, secret)
+    rc = ctx as *tls13_record.RecordCtx
+    kl = rc.key_len
+    k = write_key(algo, bytes.view(nxt)[0..hlen(algo)], kl)
+    iv = write_iv(algo, nxt)
+    tls13_record.rekey(ctx, bytes.view(k)[0..kl], iv)
+    free_secret(k)
+    free_secret(iv)
+    return nxt
+}
+
+// Zero a secret, then free it (null is ignored).
+free_secret(secret: @frees ptr) {
+    if secret == null { return }
+    int n = bytes.length(secret)
+    int i = 0
+    while i < n {
+        bytes.set(secret, i, 0)
+        i = i + 1
+    }
+    bytes.free(secret)
 }
 
 // Record write iv = HKDF-Expand-Label(traffic_secret, "iv", "", 12).

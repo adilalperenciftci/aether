@@ -22,6 +22,9 @@
 #          about the client Finished (peerclient.ae), under its
 #          application keys.
 #   #3335  a server with an Ed25519 certificate.
+#   #3320  KeyUpdate, client and server, both ways (kuclient.ae, kuserver.ae).
+#   #3319  NewSessionTicket checks.
+#   #3323  alerts: user_canceled is read past, no other alert is non-fatal.
 #
 # No network beyond loopback, no openssl: the peer's certificate is built in.
 
@@ -45,7 +48,7 @@ cleanup() {
 trap cleanup EXIT
 fail() { echo "  [FAIL] $NAME: $1"; exit 1; }
 
-for p in peer client server rawclient peerclient; do
+for p in peer client server rawclient peerclient kuclient kuserver; do
     "$AE" build "$SCRIPT_DIR/$p.ae" -o "$TMP/$p" >"$TMP/b_$p.log" 2>&1 \
         || { sed -n '1,12p' "$TMP/b_$p.log"; fail "$p did not build"; }
 done
@@ -62,7 +65,8 @@ run_case() {
     [ -s "$TMP/port" ] || { cat "$TMP/peer.out"; fail "$1: the peer never listened"; }
     cr=0
     case "$2" in *post=*) cr=1 ;; esac
-    got=$(CLIENT_READ="$cr" PEER_PORT="$(cat "$TMP/port")" CAFILE="$TMP/peer.pem" "$TMP/client" 2>&1 | grep -v 'warning' || :)
+    # CL names another client program, CENV adds its environment.
+    got=$(env $CENV CLIENT_READ="$cr" PEER_PORT="$(cat "$TMP/port")" CAFILE="$TMP/peer.pem" "$TMP/${CL:-client}" 2>&1 | grep -v 'warning' || :)
     n=0
     while server_alive "$ppid" && [ "$n" -lt 100 ]; do sleep 0.1; n=$((n + 1)); done
     stop_server "$ppid"
@@ -193,16 +197,17 @@ run_case "CertificateRequest: a byte after its extensions" "cr=000008000d0004000
 run_case "CertificateRequest: a certificate_request_context" "cr=01aa0008000d000400020403" "ERR" "ALERT 50"
 run_case "CertificateRequest: no signature_algorithms" "cr=000000" "ERR" "ALERT 109"
 
-# run_cf_case <name> <PEER_CF> <answer expected> <server says>
+# run_cf_case <name> <PEER_CF> <answer expected> <server says>; SV names
+# another server program, SENV adds its environment, POST is PEER_POST.
 run_cf_case() {
     rm -f "$TMP/port" "$TMP/server.out"
-    PEER_PORT_OUT="$TMP/port" "$TMP/server" >"$TMP/server.out" 2>&1 &
+    env $SENV PEER_PORT_OUT="$TMP/port" "$TMP/${SV:-server}" >"$TMP/server.out" 2>&1 &
     spid=$!
     PIDS="$PIDS $spid"
     i=0
     while [ "$i" -lt 100 ] && [ ! -s "$TMP/port" ]; do sleep 0.1; i=$((i + 1)); done
     [ -s "$TMP/port" ] || { cat "$TMP/server.out"; fail "$1: the server never listened"; }
-    got=$(PEER_CF="$2" PEER_PORT="$(cat "$TMP/port")" "$TMP/peerclient" 2>&1 | grep -v 'warning' || :)
+    got=$(PEER_POST="$POST" PEER_CF="$2" PEER_PORT="$(cat "$TMP/port")" "$TMP/peerclient" 2>&1 | grep -v 'warning' || :)
     n=0
     while server_alive "$spid" && [ "$n" -lt 100 ]; do sleep 0.1; n=$((n + 1)); done
     stop_server "$spid"
@@ -230,6 +235,75 @@ run_cf_case "server: a Certificate instead of the Finished" "wrongtype" "ALERT 1
 run_cf_case "server: a record that does not authenticate" "badrecord" "ALERT 20 (app)" "REFUSED"
 run_cf_case "server: the Finished in the clear" "plain" "ALERT 10 (app)" "REFUSED"
 run_cf_case "server: application data before the Finished" "appdata" "ALERT 10 (app)" "REFUSED"
+
+
+# #3320: KeyUpdate (RFC 8446 4.6.3). The client and the server move their
+# receiving keys on at each KeyUpdate, answer update_requested once with
+# their own before their next data however many asked, update their own
+# keys on request (conn_key_update), and refuse a KeyUpdate that is not
+# one byte of 0 or 1 or does not end its record, and more than 32 without
+# data between them.
+run_case "KeyUpdate: one, then data under the new keys" "post=ku1" "RECV 2" "POST ALERT 0"
+run_case "KeyUpdate: 32 in a row" "post=ku32" "RECV 2" "POST ALERT 0"
+run_case "KeyUpdate: 33 in a row" "post=kux33" "RECVERR" "POST ALERT 10"
+run_case "KeyUpdate: split over two records" "post=kusplit" "RECV 2" "POST ALERT 0"
+CENV="CLIENT_ECHO=1" run_case "KeyUpdate: update_requested is answered" "post=kureq1" "RECV 2" "POST KU DATA 2"
+CENV="CLIENT_ECHO=1" run_case "KeyUpdate: five requests, one answer" "post=kureq5" "RECV 2" "POST KU DATA 2"
+run_case "KeyUpdate: request_update 2" "post=kubad" "RECVERR" "POST ALERT 47"
+run_case "KeyUpdate: a two-byte body" "post=kulong" "RECVERR" "POST ALERT 50"
+run_case "KeyUpdate: another message after it in its record" "post=kutrail" "RECVERR" "POST ALERT 10"
+CL=kuclient CENV="CLIENT_KU=0" run_case "KeyUpdate: the client updates its keys" "post=listen" "OK" "POST KU DATA 2"
+CL=kuclient CENV="CLIENT_KU=1" run_case "KeyUpdate: the client asks for the server's" "post=listen" "OK" "POST KU DATA 2"
+CL=kuclient CENV="CLIENT_KU=7" run_case "KeyUpdate: conn_key_update refuses request 7" "post=listen" "KUERR" "POST ALERT 0"
+SENV="SERVER_READ=1" POST=ku1 run_cf_case "server KeyUpdate: one, then data" "ok" "POST DATA 2" "RECV 2"
+SENV="SERVER_READ=1" POST=kux33 run_cf_case "server KeyUpdate: 33 in a row" "ok" "POST ALERT 10" "RECVERR"
+SENV="SERVER_READ=1" POST=kureq5 run_cf_case "server KeyUpdate: five requests, one answer" "ok" "POST KU DATA 2" "RECV 2"
+SENV="SERVER_READ=1" POST=kubad run_cf_case "server KeyUpdate: request_update 2" "ok" "POST ALERT 47" "RECVERR"
+SENV="SERVER_READ=1" POST=kulong run_cf_case "server KeyUpdate: a two-byte body" "ok" "POST ALERT 50" "RECVERR"
+SENV="SERVER_READ=1" POST=kutrail run_cf_case "server KeyUpdate: another message after it" "ok" "POST ALERT 10" "RECVERR"
+SENV="SERVER_READ=1" POST=nstx run_cf_case "server: a NewSessionTicket from the client" "ok" "POST ALERT 10" "RECVERR"
+SV=kuserver SENV="SERVER_KU=0" POST=listen run_cf_case "server KeyUpdate: the server updates its keys" "ok" "POST KU DATA 2" "ACCEPTED"
+SV=kuserver SENV="SERVER_KU=1" POST=listen run_cf_case "server KeyUpdate: the server asks for the client's" "ok" "POST KU DATA 2" "ACCEPTED"
+
+# #3319: NewSessionTicket (RFC 8446 4.6.1): an empty ticket, bytes after
+# the extensions, an early_data that is not four bytes and TLS flags that
+# are empty are decode_error; a duplicate extension, one this client knows
+# that a ticket may not carry, and flags ending in a zero byte are
+# illegal_parameter; an extension it does not know is ignored.
+NST=0000012c0102030401aa0004deadbeef
+CENV="CLIENT_TICKET=1" run_case "ticket: one with early_data" "post=nst:${NST}0008002a000400004000" "TICKET early=16384 len=4" "POST ALERT 0"
+CENV="CLIENT_TICKET=1" run_case "ticket: over two records" "post=nstsplit:${NST}0008002a000400004000" "TICKET early=16384 len=4" "POST ALERT 0"
+run_case "ticket: an unknown extension" "post=nst:${NST}0004fafa0000" "RECV 2" "POST ALERT 0"
+run_case "ticket: TLS flags" "post=nst:${NST}0006003e00020101" "RECV 2" "POST ALERT 0"
+run_case "ticket: an empty ticket" "post=nstx:0000012c0102030401aa00000000" "RECVERR" "POST ALERT 50"
+run_case "ticket: a byte after the extensions" "post=nstx:${NST}000000" "RECVERR" "POST ALERT 50"
+run_case "ticket: early_data twice" "post=nstx:${NST}0010002a000400004000002a000400004000" "RECVERR" "POST ALERT 47"
+run_case "ticket: early_data of three bytes" "post=nstx:${NST}0007002a0003000040" "RECVERR" "POST ALERT 50"
+run_case "ticket: empty TLS flags" "post=nstx:${NST}0005003e000100" "RECVERR" "POST ALERT 50"
+run_case "ticket: TLS flags ending in a zero byte" "post=nstx:${NST}0006003e00020100" "RECVERR" "POST ALERT 47"
+run_case "ticket: a key_share" "post=nstx:${NST}000400330000" "RECVERR" "POST ALERT 47"
+run_case "after: a CertificateRequest (no post-handshake auth offered)" "post=postcr" "RECVERR" "POST ALERT 10"
+
+# #3323: alerts (RFC 8446 6). user_canceled is read past (at most four in
+# a row) and the close_notify after it ends the stream; TLS 1.3 has no
+# other non-fatal alert, so one is answered with decode_error; a level
+# that is neither 1 nor 2 is illegal_parameter; a fatal alert ends the
+# connection unanswered. The same before the server's Finished, and on
+# the pure server.
+run_case "alert: four user_canceled, then data" "post=alerts:015a015a015a015a" "RECV 2" "POST ALERT 0"
+run_case "alert: five user_canceled" "post=alertsx:015a015a015a015a015a" "RECVERR" "POST ALERT 10"
+run_case "alert: user_canceled, then close_notify" "post=alertsx:015a0100" "RECV-EOF" "POST ALERT 0"
+run_case "alert: unexpected_message at level 1" "post=alertsx:010a" "RECVERR" "POST ALERT 50"
+run_case "alert: level 0x42" "post=alertsx:420a" "RECVERR" "POST ALERT 47"
+run_case "alert: a fatal user_canceled" "post=alertsx:025a" "RECVERR" "POST CLOSED"
+run_case "flight: user_canceled before EncryptedExtensions" "flight_alerts=015a" "OK" "FINISHED"
+run_case "flight: unexpected_message at level 1" "flight_alerts=010a" "ERR" "ALERT 50"
+run_case "flight: close_notify" "flight_alerts=0100" "ERR: the server closed the connection during the handshake" "CLOSED"
+SENV="SERVER_READ=1" POST=alerts:015a015a015a015a run_cf_case "server alert: four user_canceled, then data" "ok" "POST DATA 2" "RECV 2"
+SENV="SERVER_READ=1" POST=alertsx:015a015a015a015a015a run_cf_case "server alert: five user_canceled" "ok" "POST ALERT 10" "RECVERR"
+SENV="SERVER_READ=1" POST=alertsx:010a run_cf_case "server alert: unexpected_message at level 1" "ok" "POST ALERT 50" "RECVERR"
+SENV="SERVER_READ=1" POST=alertsx:420a run_cf_case "server alert: level 0x42" "ok" "POST ALERT 47" "RECVERR"
+SENV="SERVER_READ=1" POST=alertsx:0100 run_cf_case "server alert: close_notify" "ok" "POST CLOSED" "EOF"
 
 [ "$fails" = 0 ] || fail "$fails case(s)"
 echo "  [PASS] $NAME"

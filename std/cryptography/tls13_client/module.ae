@@ -139,11 +139,13 @@ exports(
     hs_msg_type, hs_msg_len, hs_msg_total,
     HS_ENCRYPTED_EXTENSIONS, HS_CERTIFICATE, HS_CERTIFICATE_VERIFY, HS_FINISHED,
     connect, connect_mtls, connect_pq, connect_socket, conn_group, connect_resume, connect_resume_0rtt, close_conn, conn_send, conn_recv,
+    conn_key_update,
     conn_get_ticket, free_ticket, SessionTicket,
     ticket_len, ticket_nonce_len, ticket_lifetime, ticket_max_early_data,
     verify_flight_auth,
     // Shared with std.cryptography.tls13_server
-    transcript_hash_algo, finished_verify_data_algo, ALERT_CLOSE_NOTIFY, alert_name
+    transcript_hash_algo, finished_verify_data_algo, ALERT_CLOSE_NOTIFY, alert_name,
+    alert_event, EV_NONE, EV_CLOSED, EV_ERROR
 )
 
 // Handshake message types (RFC 8446 §4) seen in the server's flight.
@@ -597,6 +599,58 @@ struct ClientConn {
     res_hash_algo: ptr // hash name as bytes ("sha256"/"sha384") or null
     res_hash_len: int
     group: int // the key exchange group negotiated (conn_group)
+    suite: int // the negotiated cipher suite, which a ticket from it records (#3339)
+    // The application traffic secrets the record contexts are keyed from;
+    // each KeyUpdate moves one on (RFC 8446 7.2, #3320).
+    send_secret: ptr
+    recv_secret: ptr
+    // Post-handshake handshake bytes of a message not yet whole (a message
+    // may span records, 5.1), or null.
+    hs_pend: ptr
+    hs_pend_len: int
+    ticket: ptr // the latest NewSessionTicket not yet taken (*SessionTicket), or null
+    held: ptr // application data read while conn_get_ticket waited, or null
+    held_len: int
+    empties: int // empty application-data records in a row (#3317)
+    key_updates: int // KeyUpdates since the last application data (#3320)
+    warnings: int // user_canceled alerts since the last application data (#3323)
+    ku_pending: int // 1 when the server asked for a KeyUpdate not yet sent (#3320)
+    closed: int // 0 open, 1 after the server's close_notify, 2 after an error
+}
+
+// A ClientConn over `sock` and `rio` for `suite`, keyed with the
+// application traffic secrets `c_ap` (client write) and `s_ap` (server
+// write); it keeps both secrets, `res_master` and the socket.
+fn new_client_conn(sock: @keep ptr, rio: @keep ptr, suite: int, c_ap: @keep ptr, s_ap: @keep ptr, res_master: @keep ptr, group: int) -> ptr {
+    aead, key_len, hash_algo, hash_len, _serr = suite_params(suite)
+    ck = tls13_ks.write_key(hash_algo, bytes.view(c_ap)[0..hash_len], key_len)
+    civ = tls13_ks.write_iv(hash_algo, c_ap)
+    sk = tls13_ks.write_key(hash_algo, bytes.view(s_ap)[0..hash_len], key_len)
+    siv = tls13_ks.write_iv(hash_algo, s_ap)
+    conn = malloc(sizeof(ClientConn)) as *ClientConn
+    conn.sock = sock
+    conn.rio = rio
+    conn.app_send = tls13_record.new_aead(aead, bytes.view(ck)[0..key_len], civ) as ptr
+    conn.app_recv = tls13_record.new_aead(aead, bytes.view(sk)[0..key_len], siv) as ptr
+    conn.res_master = res_master
+    conn.res_hash_algo = str_to_bytes_local(hash_algo)
+    conn.res_hash_len = hash_len
+    conn.group = group
+    conn.suite = suite
+    conn.send_secret = c_ap
+    conn.recv_secret = s_ap
+    conn.hs_pend = null
+    conn.hs_pend_len = 0
+    conn.ticket = null
+    conn.held = null
+    conn.held_len = 0
+    conn.empties = 0
+    conn.key_updates = 0
+    conn.warnings = 0
+    conn.ku_pending = 0
+    conn.closed = 0
+    tls13_ks.free_secret(ck); tls13_ks.free_secret(civ); tls13_ks.free_secret(sk); tls13_ks.free_secret(siv)
+    return conn as ptr
 }
 
 // Send the record `rec` on `sock`, a borrowed view of its buffer with no
@@ -1127,24 +1181,12 @@ fn run_handshake_tail(sock: @keep ptr, rio: @keep ptr, tr: ptr, host: string, sh
                 th_cf = transcript_hash_algo(tr, hash_algo)
                 res_master = tls13_kdf.derive_secret(hash_algo, bytes.view(ms)[0..hash_len], "res master", bytes.view(th_cf)[0..hash_len])
                 bytes.free(th_cf)
-                ck = tls13_ks.write_key(hash_algo, bytes.view(c_ap)[0..hash_len], rec_key_len)
-                civ = tls13_ks.write_iv(hash_algo, c_ap)
-                sk = tls13_ks.write_key(hash_algo, bytes.view(s_ap)[0..hash_len], rec_key_len)
-                siv = tls13_ks.write_iv(hash_algo, s_ap)
-                conn = malloc(sizeof(ClientConn)) as *ClientConn
-                conn.sock = sock
-                conn.rio = rio as ptr
-                conn.app_send = tls13_record.new_aead(rec_aead, bytes.view(ck)[0..rec_key_len], civ) as ptr
-                conn.app_recv = tls13_record.new_aead(rec_aead, bytes.view(sk)[0..rec_key_len], siv) as ptr
-                conn.res_master = res_master
-                conn.res_hash_algo = str_to_bytes_local(hash_algo)
-                conn.res_hash_len = hash_len
-                conn.group = 0 // connect_full sets it
-                result = conn as ptr
-                bytes.free(ck); bytes.free(civ); bytes.free(sk); bytes.free(siv)
+                // The connection keeps c_ap and s_ap for KeyUpdate (#3320);
+                // connect_full sets its group.
+                result = new_client_conn(sock, rio as ptr, cipher_suite, c_ap, s_ap, res_master, 0)
                 bytes.free(cvd); bytes.free(cfin); bytes.free(cfin_rec)
                 tls13_record.free_ctx(cli_hs_ctx)
-                bytes.free(ms); bytes.free(c_ap); bytes.free(s_ap); bytes.free(th_sf)
+                tls13_ks.free_secret(ms); bytes.free(th_sf)
             }
             bytes.free(expected)
         }
@@ -1392,9 +1434,16 @@ fn hs_handshake_secret(k: ptr) -> ptr { kk = k as *HsKeys; return kk.handshake_s
 //
 // `data` is a std.bytes HANDLE, not bytes.data(b) -- see the module header.
 // Passing the raw data pointer compiles and segfaults inside seal_record.
+//
+// A KeyUpdate the server asked for goes first (RFC 8446 4.6.3, #3320).
 conn_send(conn: ptr, data: byte[]) -> string {
     if data.len < 0 { panic("tls13_client.conn_send: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     c = conn as *ClientConn
+    if c.closed == 2 { return "send: the connection failed earlier" }
+    if c.ku_pending == 1 {
+        kerr = send_key_update(c, tls13_hs.KEY_UPDATE_NOT_REQUESTED)
+        if kerr != "" { return kerr }
+    }
     rec = tls13_record.seal_record(c.app_send as ptr, tls13_record.CONTENT_APPLICATION_DATA, data)
     n = cli_send_view(c.sock, bytes.view(rec))
     tot = bytes.length(rec)
@@ -1415,6 +1464,7 @@ const ALERT_LEVEL_FATAL = 2
 const ALERT_CLOSE_NOTIFY = 0
 const ALERT_UNEXPECTED_MESSAGE = 10
 const ALERT_BAD_RECORD_MAC = 20
+const ALERT_RECORD_OVERFLOW = 22
 const ALERT_HANDSHAKE_FAILURE = 40
 const ALERT_BAD_CERTIFICATE = 42
 const ALERT_CERTIFICATE_EXPIRED = 45
@@ -1426,6 +1476,8 @@ const ALERT_PROTOCOL_VERSION = 70
 const ALERT_INTERNAL_ERROR = 80
 const ALERT_UNSUPPORTED_EXTENSION = 110
 const ALERT_NO_APPLICATION_PROTOCOL = 120
+const ALERT_USER_CANCELED = 90
+const ALERT_MISSING_EXTENSION = 109
 
 // Seal + send an encrypted TLS alert on an established connection (uses the
 // client's application write context). Best-effort: a send failure is ignored
@@ -1468,6 +1520,7 @@ fn send_plain_alert(sock: ptr, desc: int) {
 fn read_flight(rio: *RecordIO, srv_ctx: ptr, fl: ptr) -> (int, string, int) {
     fllen = 0
     ccs = 0
+    warnings = 0
     guard = 0
     while guard < 256 {
         guard = guard + 1
@@ -1499,10 +1552,25 @@ fn read_flight(rio: *RecordIO, srv_ctx: ptr, fl: ptr) -> (int, string, int) {
                     if fin_end != fllen { return 0, "handshake: data after the server Finished in its record", ALERT_UNEXPECTED_MESSAGE }
                     return fllen, "", 0
                 }
-            } else if t == tls13_record.CONTENT_ALERT && n >= 2 {
-                d = bytes.get(opened.plaintext, 1) & 0xFF
-                bytes.free(opened.plaintext)
-                return 0, "the server sent alert ${alert_name(d)}", 0
+            } else if t == tls13_record.CONTENT_ALERT {
+                // As after the handshake (alert_event, #3323): a warning
+                // user_canceled is read past, a close_notify here ends the
+                // handshake unfinished, any other alert is an error.
+                level = -1
+                d = 0
+                if n == 2 {
+                    level = bytes.get(opened.plaintext, 0) & 0xFF
+                    d = bytes.get(opened.plaintext, 1) & 0xFF
+                }
+                if opened.plaintext != null { bytes.free(opened.plaintext) }
+                if level < 0 { return 0, "alert: a record that is not two bytes", ALERT_DECODE_ERROR }
+                aev, aal, awhy = alert_event(level, d, warnings)
+                if aev == EV_CLOSED { return 0, "the server closed the connection during the handshake", 0 }
+                if aev == EV_ERROR {
+                    if aal == 0 { return 0, "the server sent alert ${alert_name(d)}", 0 }
+                    return 0, awhy, aal
+                }
+                warnings = warnings + 1
             } else {
                 if opened.plaintext != null { bytes.free(opened.plaintext) }
                 return 0, "handshake: a record of type ${t} (or an empty one) inside the server's flight", ALERT_UNEXPECTED_MESSAGE
@@ -1653,6 +1721,9 @@ fn alert_name(desc: int) -> string {
     if desc == ALERT_INTERNAL_ERROR { return "internal_error" }
     if desc == ALERT_NO_APPLICATION_PROTOCOL { return "no_application_protocol" }
     if desc == ALERT_UNSUPPORTED_EXTENSION { return "unsupported_extension" }
+    if desc == ALERT_USER_CANCELED { return "user_canceled" }
+    if desc == ALERT_MISSING_EXTENSION { return "missing_extension" }
+    if desc == ALERT_RECORD_OVERFLOW { return "record_overflow" }
     return "unknown_alert"
 }
 
@@ -1660,69 +1731,249 @@ fn alert_name(desc: int) -> string {
 // refuses the stream as a denial of service (#3317), as BoringSSL bounds them.
 const MAX_EMPTY_RECORDS = 32
 
+// KeyUpdates (#3320) and user_canceled alerts (#3323) the client reads
+// past without application data between them before it refuses the stream,
+// the bounds BoringSSL keeps.
+const MAX_KEY_UPDATES = 32
+const MAX_WARNING_ALERTS = 4
+
+// The longest NewSessionTicket body: lifetime, age_add, nonce<0..255>,
+// ticket<1..2^16-1>, extensions<0..2^16-1>.
+const MAX_TICKET_BODY = 131338
+
+// What one record after the handshake brought (conn_next).
+const EV_NONE = 0 // nothing for the caller: an empty record, a KeyUpdate, a user_canceled alert
+const EV_DATA = 1 // application data
+const EV_CLOSED = 2 // the server's close_notify
+const EV_TICKET = 3 // a NewSessionTicket, now in c.ticket
+const EV_ERROR = 4 // the connection failed; its alert, if any, was sent
+
 // A fatal alert under the connection's application-traffic keys.
 fn send_alert_app(c: *ClientConn, desc: int) {
     send_alert_hs(c.sock, c.app_send, ALERT_LEVEL_FATAL, desc)
 }
 
+// Send fatal alert `desc` and fail with `why`, as conn_next returns it.
+fn conn_fail(c: *ClientConn, desc: int, why: string) -> (int, ptr, int, string) {
+    send_alert_app(c, desc)
+    return EV_ERROR, null, 0, why
+}
+
+// What an alert record (level, description) after the handshake means
+// (RFC 8446 6, #3323): (event, alert to send, why). A warning close_notify
+// closes the stream. A warning user_canceled is read past, as BoringSSL,
+// OpenSSL and NSS do (the close_notify that should follow ends the stream),
+// at most MAX_WARNING_ALERTS in a row. Every other alert is an error
+// whatever its level claims, and TLS 1.3 has no other warning: one at
+// warning level is answered with decode_error, as BoringSSL does. A level
+// that is neither is illegal_parameter. A fatal alert ends the connection
+// with its name and no answer.
+alert_event(level: int, desc: int, warnings: int) -> (int, int, string) {
+    if level == ALERT_LEVEL_WARNING {
+        if desc == ALERT_CLOSE_NOTIFY { return EV_CLOSED, 0, "" }
+        if desc == ALERT_USER_CANCELED {
+            if warnings + 1 > MAX_WARNING_ALERTS { return EV_ERROR, ALERT_UNEXPECTED_MESSAGE, "alert: more than ${MAX_WARNING_ALERTS} user_canceled alerts in a row" }
+            return EV_NONE, 0, ""
+        }
+        return EV_ERROR, ALERT_DECODE_ERROR, "alert: ${alert_name(desc)} (${desc}) as a non-fatal alert, which TLS 1.3 does not have"
+    }
+    if level == ALERT_LEVEL_FATAL {
+        return EV_ERROR, 0, string.concat("tls alert: ", alert_name(desc))
+    }
+    return EV_ERROR, ALERT_ILLEGAL_PARAMETER, "alert: level ${level} is neither 1 nor 2"
+}
+
+// Read one record after the handshake and act on it: (event, data, length,
+// why), the data fresh for EV_DATA. RFC 8446 5 (#3317): a change_cipher_spec
+// or a plaintext record, a record that does not open or is too long, an
+// empty handshake record, and more than MAX_EMPTY_RECORDS empty
+// application-data records in a row are refused, and so is a record of
+// another type inside a handshake message that spans records (5.1). Alerts
+// as alert_event says (#3323). Handshake messages as conn_handshake says.
+// Every refusal sends its alert before it returns.
+fn conn_next(c: *ClientConn) -> (int, ptr, int, string) {
+    rio = c.rio as *RecordIO
+    rec, rlen, e = recio_next(rio)
+    if string.equals(e, "") != 1 {
+        if rio.alert != 0 { send_alert_app(c, rio.alert) }
+        return EV_ERROR, null, 0, e
+    }
+    ct = bytes.get(rec, 0) & 0xFF
+    if ct != 0x17 {
+        bytes.free(rec)
+        return conn_fail(c, ALERT_UNEXPECTED_MESSAGE, "record: a plaintext record of type ${ct} after the handshake")
+    }
+    opened = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0, alert: 0 }
+    oerr = tls13_record.open_record(c.app_recv as ptr, bytes.view(rec)[0..rlen], &opened)
+    bytes.free(rec)
+    if string.equals(oerr, "") != 1 {
+        return conn_fail(c, opened.alert, oerr)
+    }
+    t = opened.content_type
+    n = opened.plaintext_len
+    if t != tls13_record.CONTENT_HANDSHAKE && c.hs_pend_len > 0 {
+        if opened.plaintext != null { bytes.free(opened.plaintext) }
+        return conn_fail(c, ALERT_UNEXPECTED_MESSAGE, "record: a record of type ${t} inside a handshake message")
+    }
+    if t == tls13_record.CONTENT_APPLICATION_DATA {
+        if n > 0 {
+            c.empties = 0
+            c.key_updates = 0
+            c.warnings = 0
+            return EV_DATA, opened.plaintext, n, ""
+        }
+        if opened.plaintext != null { bytes.free(opened.plaintext) }
+        c.empties = c.empties + 1
+        if c.empties > MAX_EMPTY_RECORDS {
+            return conn_fail(c, ALERT_UNEXPECTED_MESSAGE, "record: more than ${MAX_EMPTY_RECORDS} empty records in a row")
+        }
+        return EV_NONE, null, 0, ""
+    }
+    if t == tls13_record.CONTENT_ALERT {
+        level = -1
+        desc = 0
+        if n == 2 {
+            level = bytes.get(opened.plaintext, 0) & 0xFF
+            desc = bytes.get(opened.plaintext, 1) & 0xFF
+        }
+        if opened.plaintext != null { bytes.free(opened.plaintext) }
+        if level < 0 { return conn_fail(c, ALERT_DECODE_ERROR, "alert: a record that is not two bytes") }
+        ev, a, why = alert_event(level, desc, c.warnings)
+        if ev == EV_NONE { c.warnings = c.warnings + 1 }
+        if a != 0 { send_alert_app(c, a) }
+        return ev, null, 0, why
+    }
+    // A handshake record: an empty one is no message at all.
+    if n == 0 {
+        if opened.plaintext != null { bytes.free(opened.plaintext) }
+        return conn_fail(c, ALERT_UNEXPECTED_MESSAGE, "record: an empty handshake record after the handshake")
+    }
+    if c.hs_pend == null {
+        c.hs_pend = bytes.new(n)
+        c.hs_pend_len = 0
+    }
+    bytes.copy_from_bytes(c.hs_pend, c.hs_pend_len, opened.plaintext, 0, n)
+    c.hs_pend_len = c.hs_pend_len + n
+    bytes.free(opened.plaintext)
+    return conn_handshake(c)
+}
+
+// Drop the first `k` bytes of the pending handshake bytes.
+fn hs_pend_consume(c: *ClientConn, k: int) {
+    rest = c.hs_pend_len - k
+    if rest <= 0 {
+        bytes.free(c.hs_pend)
+        c.hs_pend = null
+        c.hs_pend_len = 0
+        return
+    }
+    nb = bytes.new(rest)
+    bytes.copy_from_bytes(nb, 0, c.hs_pend, k, rest)
+    bytes.free(c.hs_pend)
+    c.hs_pend = nb
+    c.hs_pend_len = rest
+}
+
+// Act on every whole handshake message in c.hs_pend (RFC 8446 4.6): a
+// NewSessionTicket checked and kept in c.ticket (#3319), a KeyUpdate that
+// moves the receiving keys on and, when it asks, has the next send update
+// the sending keys first (#3320). A KeyUpdate must end its record (5.1),
+// and at most MAX_KEY_UPDATES may come without application data. Any other
+// message is unexpected_message: this client offers no post-handshake
+// authentication. A message is judged by its header as soon as that is
+// in, so a bogus length never grows the buffer past a ticket's.
+fn conn_handshake(c: *ClientConn) -> (int, ptr, int, string) {
+    ev = EV_NONE
+    while c.hs_pend_len >= 4 {
+        mt = bytes.get(c.hs_pend, 0) & 0xFF
+        ml = ((bytes.get(c.hs_pend, 1) & 0xFF) << 16) | ((bytes.get(c.hs_pend, 2) & 0xFF) << 8) | (bytes.get(c.hs_pend, 3) & 0xFF)
+        if mt == tls13_hs.HS_KEY_UPDATE {
+            if ml != 1 { return conn_fail(c, ALERT_DECODE_ERROR, "key update: the body is not one byte") }
+        } else if mt == tls13_hs.HS_NEW_SESSION_TICKET {
+            if ml > MAX_TICKET_BODY { return conn_fail(c, ALERT_DECODE_ERROR, "new session ticket: longer than a ticket can be") }
+        } else {
+            return conn_fail(c, ALERT_UNEXPECTED_MESSAGE, "handshake: a message of type ${mt} after the handshake")
+        }
+        if c.hs_pend_len < 4 + ml { return ev, null, 0, "" }
+        if mt == tls13_hs.HS_KEY_UPDATE {
+            req, ka, kerr = tls13_hs.key_update_request(bytes.view(c.hs_pend)[4..5])
+            if ka != 0 { return conn_fail(c, ka, kerr) }
+            if c.hs_pend_len != 5 { return conn_fail(c, ALERT_UNEXPECTED_MESSAGE, "handshake: data after a KeyUpdate in its record") }
+            c.key_updates = c.key_updates + 1
+            if c.key_updates > MAX_KEY_UPDATES { return conn_fail(c, ALERT_UNEXPECTED_MESSAGE, "key update: more than ${MAX_KEY_UPDATES} without application data") }
+            _a, _k, algo, _h, _e = suite_params(c.suite)
+            c.recv_secret = tls13_ks.key_update(algo, c.app_recv, c.recv_secret)
+            if req == tls13_hs.KEY_UPDATE_REQUESTED { c.ku_pending = 1 }
+        } else {
+            st, na, nerr = ticket_from_nst(c, bytes.view(c.hs_pend)[4..4 + ml])
+            if na != 0 { return conn_fail(c, na, nerr) }
+            if c.ticket != null { free_ticket(c.ticket) }
+            c.ticket = st
+            ev = EV_TICKET
+        }
+        hs_pend_consume(c, 4 + ml)
+    }
+    return ev, null, 0, ""
+}
+
+// Send a KeyUpdate asking (`request` 1) or not (0) for the server's, under
+// the current sending keys, then move them on (RFC 8446 4.6.3, 7.2).
+fn send_key_update(c: *ClientConn, request: int) -> string {
+    m = tls13_hs.key_update_msg(request)
+    rec = tls13_record.seal_record(c.app_send as ptr, tls13_record.CONTENT_HANDSHAKE, bytes.view(m)[0..5])
+    bytes.free(m)
+    if rec == null { return "key update: the record could not be sealed" }
+    n = cli_send_view(c.sock, bytes.view(rec))
+    tot = bytes.length(rec)
+    bytes.free(rec)
+    if n != tot { return "key update: send failed" }
+    _a, _k, algo, _h, _e = suite_params(c.suite)
+    c.send_secret = tls13_ks.key_update(algo, c.app_send, c.send_secret)
+    c.ku_pending = 0
+    return ""
+}
+
+// conn_key_update(conn, request) -> "" or why: update the connection's
+// sending keys now with a KeyUpdate (RFC 8446 4.6.3, #3320); `request`
+// tls13_hs.KEY_UPDATE_REQUESTED (1) asks the server to update its own,
+// which the next conn_recv takes in its stride, KEY_UPDATE_NOT_REQUESTED
+// (0) does not. A long-lived connection calls it before a key has
+// protected too much data (5.5).
+conn_key_update(conn: ptr, request: int) -> string {
+    c = conn as *ClientConn
+    if request != tls13_hs.KEY_UPDATE_NOT_REQUESTED && request != tls13_hs.KEY_UPDATE_REQUESTED {
+        return "key update: request ${request} is neither KEY_UPDATE_NOT_REQUESTED nor KEY_UPDATE_REQUESTED"
+    }
+    if c.closed != 0 { return "key update: the connection is closed" }
+    return send_key_update(c, request)
+}
+
 // Receive the next application-data record's plaintext (fresh bytes; caller
 // frees via bytes.free): (data, len, ""), (null, 0, "") at the server's
-// close_notify, or (null, 0, error). Post-handshake handshake messages
-// (session tickets) are read past. RFC 8446 5 (#3317): a change_cipher_spec
-// or a plaintext record after the handshake, a record that does not open
-// or is too long, an empty handshake record, and more than
-// MAX_EMPTY_RECORDS empty application-data records in a row are each
-// refused, with their alert sent before the error returns.
+// close_notify, or (null, 0, error). Session tickets are kept for
+// conn_get_ticket, KeyUpdates acted on, and what conn_next refuses ends
+// the connection with its alert sent.
 conn_recv(conn: ptr) -> (ptr, int, string) {
     c = conn as *ClientConn
-    rio = c.rio as *RecordIO
-    empties = 0
+    if c.held != null {
+        d = c.held
+        dn = c.held_len
+        c.held = null
+        c.held_len = 0
+        return d, dn, ""
+    }
+    if c.closed == 1 { return null, 0, "" }
+    if c.closed == 2 { return null, 0, "recv: the connection failed earlier" }
     while 1 == 1 {
-        rec, rlen, e = recio_next(rio)
-        if string.equals(e, "") != 1 {
-            if rio.alert != 0 { send_alert_app(c, rio.alert) }
-            return null, 0, e
+        ev, data, n, err = conn_next(c)
+        if ev == EV_DATA { return data, n, "" }
+        if ev == EV_CLOSED {
+            c.closed = 1
+            return null, 0, ""
         }
-        ct = bytes.get(rec, 0) & 0xFF
-        if ct != 0x17 {
-            bytes.free(rec)
-            send_alert_app(c, ALERT_UNEXPECTED_MESSAGE)
-            return null, 0, "record: a plaintext record of type ${ct} after the handshake"
-        }
-        opened = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0, alert: 0 }
-        oerr = tls13_record.open_record(c.app_recv as ptr, bytes.view(rec)[0..rlen], &opened)
-        bytes.free(rec)
-        if string.equals(oerr, "") != 1 {
-            send_alert_app(c, opened.alert)
-            return null, 0, oerr
-        }
-        t = opened.content_type
-        n = opened.plaintext_len
-        if t == tls13_record.CONTENT_APPLICATION_DATA {
-            if n > 0 { return opened.plaintext, n, "" }
-            if opened.plaintext != null { bytes.free(opened.plaintext) }
-            empties = empties + 1
-            if empties > MAX_EMPTY_RECORDS {
-                send_alert_app(c, ALERT_UNEXPECTED_MESSAGE)
-                return null, 0, "record: more than ${MAX_EMPTY_RECORDS} empty records in a row"
-            }
-        } else if t == tls13_record.CONTENT_ALERT {
-            // A clean close_notify is EOF; any other alert is an error naming
-            // the description.
-            desc = 0
-            if n >= 2 { desc = bytes.get(opened.plaintext, 1) & 0xFF }
-            if opened.plaintext != null { bytes.free(opened.plaintext) }
-            if desc == ALERT_CLOSE_NOTIFY { return null, 0, "" }
-            return null, 0, string.concat("tls alert: ", alert_name(desc))
-        } else {
-            // A post-handshake handshake message (a session ticket): read
-            // past it. An empty one is no message at all.
-            if opened.plaintext != null { bytes.free(opened.plaintext) }
-            if n == 0 {
-                send_alert_app(c, ALERT_UNEXPECTED_MESSAGE)
-                return null, 0, "record: an empty handshake record after the handshake"
-            }
-            empties = 0
+        if ev == EV_ERROR {
+            c.closed = 2
+            return null, 0, err
         }
     }
 }
@@ -1731,11 +1982,16 @@ close_conn(conn: ptr) {
     c = conn as *ClientConn
     // Graceful close: send an encrypted close_notify so the peer sees an
     // orderly shutdown rather than a bare TCP RST (RFC 8446 §6.1).
-    send_alert_conn(c, ALERT_LEVEL_WARNING, ALERT_CLOSE_NOTIFY)
+    if c.closed != 2 { send_alert_conn(c, ALERT_LEVEL_WARNING, ALERT_CLOSE_NOTIFY) }
     tls13_record.free_ctx(c.app_send as ptr)
     tls13_record.free_ctx(c.app_recv as ptr)
-    if c.res_master != null { bytes.free(c.res_master) }
+    tls13_ks.free_secret(c.send_secret)
+    tls13_ks.free_secret(c.recv_secret)
+    if c.res_master != null { tls13_ks.free_secret(c.res_master) }
     if c.res_hash_algo != null { bytes.free(c.res_hash_algo) }
+    if c.hs_pend != null { bytes.free(c.hs_pend) }
+    if c.held != null { bytes.free(c.held) }
+    if c.ticket != null { free_ticket(c.ticket) }
     recio_free(c.rio as *RecordIO)
     tcp.close(c.sock)
     libc_free(conn)
@@ -1756,120 +2012,79 @@ struct SessionTicket {
     max_early_data: int // early_data ext's max_early_data_size (0 = no 0-RTT)
 }
 
-// Read post-handshake records until a NewSessionTicket (RFC 8446 §4.6.1)
-// arrives, and parse it into a SessionTicket carrying this connection's
-// resumption secret. Returns (ticket, "") or (null, err). The caller frees the
-// ticket with free_ticket. Servers send tickets right after the handshake, so
-// call this before the first conn_send if you want to capture one.
+// The latest NewSessionTicket (RFC 8446 4.6.1) as a SessionTicket carrying
+// this connection's resumption secret and cipher suite: (ticket, "") or
+// (null, err). One that came already is taken at once; else records are
+// read until one comes, any application data meanwhile kept for the next
+// conn_recv. The caller frees the ticket with free_ticket. Servers send
+// tickets right after the handshake.
 conn_get_ticket(conn: ptr) -> (ptr, string) {
     c = conn as *ClientConn
-    rio = c.rio as *RecordIO
-    looking = 1
-    out = null
-    err = ""
-    while looking == 1 {
-        rec, rlen, e = recio_next(rio)
-        if string.equals(e, "") != 1 { err = e; looking = 0 } else {
-            ct = bytes.get(rec, 0) & 0xFF
-            if ct == 0x14 { bytes.free(rec) } else {
-                opened = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0 }
-                oerr = tls13_record.open_record(c.app_recv as ptr, bytes.view(rec)[0..rlen], &opened)
-                bytes.free(rec)
-                if string.equals(oerr, "") != 1 { err = oerr; looking = 0 } else {
-                    if opened.content_type == tls13_record.CONTENT_HANDSHAKE {
-                        // May contain one or more handshake messages; find a NST (type 4).
-                        t = find_and_parse_nst(bytes.view(opened.plaintext)[0..opened.plaintext_len], c)
-                        if t != null { out = t; looking = 0 }
-                    }
-                    if opened.plaintext != null { bytes.free(opened.plaintext) }
-                }
+    if c.ticket != null {
+        t = c.ticket
+        c.ticket = null
+        return t, ""
+    }
+    if c.closed == 1 { return null, "the server closed the connection before sending a NewSessionTicket" }
+    if c.closed == 2 { return null, "the connection failed earlier" }
+    while 1 == 1 {
+        ev, data, n, err = conn_next(c)
+        if ev == EV_TICKET {
+            t2 = c.ticket
+            c.ticket = null
+            return t2, ""
+        }
+        if ev == EV_DATA {
+            // Kept for the next conn_recv, after what is kept already.
+            if c.held == null {
+                c.held = data
+                c.held_len = n
+            } else {
+                bytes.copy_from_bytes(c.held, c.held_len, data, 0, n)
+                c.held_len = c.held_len + n
+                bytes.free(data)
             }
         }
-    }
-    return out, err
-}
-
-// Scan a decrypted handshake fragment for a NewSessionTicket (msg type 4) and
-// parse the first one into a SessionTicket. Returns null if none present.
-fn find_and_parse_nst(buf: byte[], c: *ClientConn) -> ptr {
-    if buf.len < 0 { panic("tls13_client.find_and_parse_nst: the `buf` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
-    int len = buf.len
-    p = 0
-    while p + 4 <= len {
-        mt = buf[p] & 0xFF
-        ml = ((buf[p + 1] & 0xFF) << 16) | ((buf[p + 2] & 0xFF) << 8) | (buf[p + 3] & 0xFF)
-        if p + 4 + ml > len { return null }
-        if mt == 4 {
-            return parse_nst_body(buf, p + 4, ml, c)
+        if ev == EV_CLOSED {
+            c.closed = 1
+            return null, "the server closed the connection before sending a NewSessionTicket"
         }
-        p = p + 4 + ml
-    }
-    return null
-}
-
-// Parse a NewSessionTicket body (RFC 8446 §4.6.1):
-//   ticket_lifetime(4) ticket_age_add(4) ticket_nonce<1> ticket<2> extensions<2>
-fn parse_nst_body(buf: byte[], off: int, body_len: int, c: *ClientConn) -> ptr {
-    p = off
-    end = off + body_len
-    if p + 8 > end { return null }
-    lifetime = ((buf[p] & 0xFF) << 24) | ((buf[p + 1] & 0xFF) << 16) | ((buf[p + 2] & 0xFF) << 8) | (buf[p + 3] & 0xFF)
-    p = p + 4
-    age_add = ((buf[p] & 0xFF) << 24) | ((buf[p + 1] & 0xFF) << 16) | ((buf[p + 2] & 0xFF) << 8) | (buf[p + 3] & 0xFF)
-    p = p + 4
-    if p + 1 > end { return null }
-    nonce_len = buf[p] & 0xFF
-    p = p + 1
-    if p + nonce_len > end { return null }
-    nonce = bytes.new(nonce_len)
-    if nonce_len > 0 { bytes.set(nonce, nonce_len - 1, 0); bytes.copy_from_slice(nonce, 0, buf[p..p + nonce_len]) }
-    p = p + nonce_len
-    if p + 2 > end { return null }
-    tk_len = ((buf[p] & 0xFF) << 8) | (buf[p + 1] & 0xFF)
-    p = p + 2
-    if p + tk_len > end { bytes.free(nonce); return null }
-    ticket = bytes.new(tk_len)
-    if tk_len > 0 { bytes.set(ticket, tk_len - 1, 0); bytes.copy_from_slice(ticket, 0, buf[p..p + tk_len]) }
-    p = p + tk_len
-    // extensions<2>: scan for early_data (42) -> max_early_data_size (uint32).
-    max_early = 0
-    if p + 2 <= end {
-        ext_total = ((buf[p] & 0xFF) << 8) | (buf[p + 1] & 0xFF)
-        p = p + 2
-        ext_end = p + ext_total
-        if ext_end > end { ext_end = end }
-        while p + 4 <= ext_end {
-            et = ((buf[p] & 0xFF) << 8) | (buf[p + 1] & 0xFF)
-            el = ((buf[p + 2] & 0xFF) << 8) | (buf[p + 3] & 0xFF)
-            p = p + 4
-            if et == 42 {
-                if el >= 4 && p + 4 <= ext_end {
-                    max_early = ((buf[p] & 0xFF) << 24) | ((buf[p + 1] & 0xFF) << 16) | ((buf[p + 2] & 0xFF) << 8) | (buf[p + 3] & 0xFF)
-                }
-            }
-            p = p + el
+        if ev == EV_ERROR {
+            c.closed = 2
+            return null, err
         }
     }
+}
 
+// A NewSessionTicket body checked (tls13_hs.parse_new_session_ticket,
+// #3319) and made a SessionTicket with this connection's resumption secret,
+// hash and cipher suite: (ticket, 0, "") or (null, alert, why).
+fn ticket_from_nst(c: *ClientConn, body: byte[]) -> (ptr, int, string) {
+    np = tls13_hs.NstParsed { lifetime: 0, age_add: 0, nonce_off: 0, nonce_len: 0, ticket_off: 0, ticket_len: 0, max_early_data: 0, alert: 0 }
+    perr = tls13_hs.parse_new_session_ticket(body, &np)
+    if perr != "" { return null, np.alert, perr }
+    nonce = bytes.new(np.nonce_len)
+    if np.nonce_len > 0 { bytes.copy_from_slice(nonce, 0, body[np.nonce_off..np.nonce_off + np.nonce_len]) }
+    ticket = bytes.new(np.ticket_len)
+    bytes.copy_from_slice(ticket, 0, body[np.ticket_off..np.ticket_off + np.ticket_len])
     st = malloc(sizeof(SessionTicket)) as *SessionTicket
     st.ticket = ticket
-    st.ticket_len = tk_len
+    st.ticket_len = np.ticket_len
     st.nonce = nonce
-    st.nonce_len = nonce_len
-    st.age_add = age_add
-    st.lifetime = lifetime
-    // Copy the connection's resumption secret + hash context into the ticket.
+    st.nonce_len = np.nonce_len
+    st.age_add = np.age_add
+    st.lifetime = np.lifetime
     hl = c.res_hash_len
     rm = bytes.new(hl)
-    if hl > 0 { bytes.set(rm, hl - 1, 0); bytes.copy_from_bytes(rm, 0, c.res_master, 0, hl) }
+    if hl > 0 { bytes.copy_from_bytes(rm, 0, c.res_master, 0, hl) }
     st.res_master = rm
     ha_len = bytes.length(c.res_hash_algo)
     ha = bytes.new(ha_len)
-    if ha_len > 0 { bytes.set(ha, ha_len - 1, 0); bytes.copy_from_bytes(ha, 0, c.res_hash_algo, 0, ha_len) }
+    if ha_len > 0 { bytes.copy_from_bytes(ha, 0, c.res_hash_algo, 0, ha_len) }
     st.hash_algo = ha
     st.hash_len = hl
-    st.max_early_data = max_early
-    return st as ptr
+    st.max_early_data = np.max_early_data
+    return st as ptr, 0, ""
 }
 
 // Does this ticket permit 0-RTT early data (server advertised early_data in the
@@ -2122,24 +2337,12 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
             th_cf = transcript_hash_algo(tr, hash_algo)
             res_master2 = tls13_kdf.derive_secret(hash_algo, bytes.view(ms)[0..hash_len], "res master", bytes.view(th_cf)[0..hash_len])
             bytes.free(th_cf)
-            ck = tls13_ks.write_key(hash_algo, bytes.view(c_ap)[0..hash_len], rec_key_len)
-            civ = tls13_ks.write_iv(hash_algo, c_ap)
-            sk = tls13_ks.write_key(hash_algo, bytes.view(s_ap)[0..hash_len], rec_key_len)
-            siv = tls13_ks.write_iv(hash_algo, s_ap)
-            conn = malloc(sizeof(ClientConn)) as *ClientConn
-            conn.sock = sock
-            conn.rio = rio as ptr
-            conn.app_send = tls13_record.new_aead(rec_aead, bytes.view(ck)[0..rec_key_len], civ) as ptr
-            conn.app_recv = tls13_record.new_aead(rec_aead, bytes.view(sk)[0..rec_key_len], siv) as ptr
-            conn.res_master = res_master2
-            conn.res_hash_algo = str_to_bytes_local(hash_algo)
-            conn.res_hash_len = hash_len
-            conn.group = tls13_hs.GROUP_X25519 // psk_dhe_ke over the x25519 share
-            result = conn as ptr
-            bytes.free(ck); bytes.free(civ); bytes.free(sk); bytes.free(siv)
+            // psk_dhe_ke over the x25519 share; the connection keeps c_ap
+            // and s_ap for KeyUpdate (#3320).
+            result = new_client_conn(sock, rio as ptr, parsed.cipher_suite, c_ap, s_ap, res_master2, tls13_hs.GROUP_X25519)
             bytes.free(cvd); bytes.free(cfin); bytes.free(cfin_rec)
             tls13_record.free_ctx(cli_hs_ctx)
-            bytes.free(ms); bytes.free(c_ap); bytes.free(s_ap); bytes.free(th_sf)
+            tls13_ks.free_secret(ms); bytes.free(th_sf)
         }
         bytes.free(expected)
         if th_through_cert != null { bytes.free(th_through_cert) }

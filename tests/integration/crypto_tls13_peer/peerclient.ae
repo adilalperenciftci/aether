@@ -15,6 +15,9 @@
 //   badrecord  the Finished in a record that does not authenticate
 //   plain      the Finished in a plaintext record
 //   appdata    application data under the handshake keys
+//
+// With PEER_CF=ok, PEER_POST says what to send after the handshake (see
+// post_session below).
 
 import std.os
 import std.tcp
@@ -24,6 +27,7 @@ import std.cryptography
 import std.cryptography.x25519
 import std.cryptography.tls13_hs
 import std.cryptography.tls13_ks
+import std.cryptography.tls13_kdf
 import std.cryptography.tls13_record
 import std.cryptography.tls13_client
 
@@ -258,7 +262,162 @@ main() {
     } else {
         send_sealed(sock, cli_ctx, 22, fin, 0, n)
     }
+    post = os.getenv("PEER_POST")
+    if post != "" && how == "ok" {
+        c_ap = tls13_ks.traffic_secret(algo, ms, "c ap traffic", bytes.view(th_sf)[0..hl])
+        k = Keys { algo: algo, hl: hl, aead: aead, klen: klen, c_sec: c_ap, s_sec: s_ap, c_ctx: ctx_for(algo, hl, aead, klen, c_ap), s_ctx: app_ctx }
+        post_session(sock, &r, &k, post)
+        tcp.close(sock)
+        exit(0)
+    }
     println(answer(&r, app_ctx, srv_ctx))
     tcp.close(sock)
     exit(0)
+}
+
+// ---- after the handshake (PEER_POST): KeyUpdate and alerts to the pure
+// server (#3320, #3323), under the client's application keys, which the
+// peer computes itself with tls13_kdf, apart from tls13_ks:
+//   kuN, kuxN     N KeyUpdates (update_not_requested), then 2 bytes of
+//                 data (kuxN without them, for a count the server refuses)
+//   kureqN        N KeyUpdates (update_requested), then data
+//   kubad         a KeyUpdate whose request_update is 2
+//   kulong        a KeyUpdate whose body is two bytes
+//   kutrail       a KeyUpdate and the header of another message, one record
+//   nstx          a NewSessionTicket, which no client sends
+//   alerts:HEX    alert records (level, description pairs), then data
+//                 (alertsx:HEX without it)
+//   listen        nothing: what the server sends on its own
+// Then "POST <what the server sent>", record by record under its keys,
+// which move on at each KeyUpdate: "KU", "DATA <n>", "ALERT <n>", "CLOSED".
+
+struct Keys {
+    algo: string
+    hl: int
+    aead: int
+    klen: int
+    c_sec: ptr // this client's sending secret
+    s_sec: ptr // the server's sending secret
+    c_ctx: ptr
+    s_ctx: ptr
+}
+
+// The traffic secret after `s` (RFC 8446 7.2); `s` is freed.
+fn next_secret(algo: string, hl: int, s: ptr) -> ptr {
+    empty = bytes.new(0)
+    n = tls13_kdf.expand_label(algo, bytes.view(s)[0..hl], "traffic upd", bytes.view(empty)[0..0], hl)
+    bytes.free(empty)
+    bytes.free(s)
+    return n
+}
+
+fn send_ku(sock: ptr, k: *Keys, request: int) {
+    m = bytes.new(5)
+    bytes.set(m, 0, 24)
+    bytes.set(m, 1, 0)
+    bytes.set(m, 2, 0)
+    bytes.set(m, 3, 1)
+    bytes.set(m, 4, request)
+    send_sealed(sock, k.c_ctx, 22, m, 0, 5)
+    bytes.free(m)
+    k.c_sec = next_secret(k.algo, k.hl, k.c_sec)
+    tls13_record.free_ctx(k.c_ctx)
+    k.c_ctx = ctx_for(k.algo, k.hl, k.aead, k.klen, k.c_sec)
+}
+
+fn send_hex(sock: ptr, k: *Keys, ct: int, h: string) {
+    n = string.length(h) / 2
+    b = bytes.new(n)
+    i = 0
+    while i < n {
+        bytes.set(b, i, hexval(string_char_at(h, 2 * i)) * 16 + hexval(string_char_at(h, 2 * i + 1)))
+        i = i + 1
+    }
+    send_sealed(sock, k.c_ctx, ct, b, 0, n)
+    bytes.free(b)
+}
+
+extern string_char_at(str: string, index: int) -> int
+
+fn hexval(h: int) -> int {
+    if h >= 48 && h <= 57 { return h - 48 }
+    if h >= 97 && h <= 102 { return h - 87 }
+    return h - 55
+}
+
+fn post_session(sock: ptr, r: *Reader, k: *Keys, what: string) {
+    if string.starts_with(what, "kureq") == 1 {
+        count, _e = string.to_int(string.substring(what, 5, string.length(what)))
+        i = 0
+        while i < count {
+            send_ku(sock, k, 1)
+            i = i + 1
+        }
+        send_hex(sock, k, 23, "6869")
+    } else if what == "kubad" {
+        send_hex(sock, k, 22, "1800000102")
+    } else if what == "kulong" {
+        send_hex(sock, k, 22, "180000020000")
+    } else if what == "kutrail" {
+        send_hex(sock, k, 22, "180000010004000000")
+    } else if string.starts_with(what, "ku") == 1 {
+        from = 2
+        if string.starts_with(what, "kux") == 1 { from = 3 }
+        count2, _e2 = string.to_int(string.substring(what, from, string.length(what)))
+        j = 0
+        while j < count2 {
+            send_ku(sock, k, 0)
+            j = j + 1
+        }
+        if from == 2 { send_hex(sock, k, 23, "6869") }
+    } else if what == "nstx" {
+        send_hex(sock, k, 22, "0400000f0000012c0102030400000101aa0000")
+    } else if string.starts_with(what, "alerts") == 1 {
+        at = string.index_of(what, ":") + 1
+        al = string.substring(what, at, string.length(what))
+        p = 0
+        while p + 3 < string.length(al) {
+            send_hex(sock, k, 21, string.substring(al, p, p + 4))
+            p = p + 4
+        }
+        if string.starts_with(what, "alertsx:") != 1 { send_hex(sock, k, 23, "6869") }
+    }
+    println("POST ${session_answer(r, k)}")
+}
+
+// What the server sent from here on, record by record, until it closes or
+// sends data or an alert: "KU" for each KeyUpdate (its keys then move on).
+fn session_answer(r: *Reader, k: *Keys) -> string {
+    out = ""
+    while 1 == 1 {
+        rec = next_record(r)
+        if rec == null { return "${out}CLOSED" }
+        if (bytes.get(rec, 0) & 0xFF) != 0x17 {
+            bytes.free(rec)
+            return "${out}PLAIN"
+        }
+        o = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0, alert: 0 }
+        oe = tls13_record.open_record(k.s_ctx, bytes.view(rec)[0..bytes.length(rec)], &o)
+        bytes.free(rec)
+        if oe != "" { return "${out}UNREADABLE" }
+        t = o.content_type
+        n = o.plaintext_len
+        first = 0
+        if n > 0 { first = bytes.get(o.plaintext, 0) & 0xFF }
+        second = 0
+        if n > 1 { second = bytes.get(o.plaintext, 1) & 0xFF }
+        if o.plaintext != null { bytes.free(o.plaintext) }
+        if t == 22 && first == 24 {
+            out = "${out}KU "
+            k.s_sec = next_secret(k.algo, k.hl, k.s_sec)
+            tls13_record.free_ctx(k.s_ctx)
+            k.s_ctx = ctx_for(k.algo, k.hl, k.aead, k.klen, k.s_sec)
+        } else if t == 21 {
+            return "${out}ALERT ${second}"
+        } else if t == 23 {
+            return "${out}DATA ${n}"
+        } else {
+            return "${out}HANDSHAKE ${first}"
+        }
+    }
 }

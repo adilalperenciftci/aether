@@ -1,7 +1,8 @@
 // The pure TLS server (tls13_server.accept) for test_tls13_peer.sh's server
 // cases: it listens on 127.0.0.1, writes its port to PEER_PORT_OUT, serves one
 // connection with peer.ae's certificate, and prints "ACCEPTED" or
-// "REFUSED: <why>".
+// "REFUSED: <why>". With SERVER_READ=1 it then echoes what it reads, printing
+// "RECV <n>" for each record, until "EOF" or "RECVERR: <why>".
 
 import std.os
 import std.fs
@@ -36,6 +37,27 @@ main() {
         exit(0)
     }
     println("ACCEPTED")
+    if os.getenv("SERVER_READ") == "1" {
+        going = 1
+        while going == 1 {
+            buf, n, rerr = tls13_server.conn_recv(conn)
+            if rerr != "" {
+                println("RECVERR: ${rerr}")
+                going = 0
+            } else if buf == null {
+                println("EOF")
+                going = 0
+            } else {
+                println("RECV ${n}")
+                serr = tls13_server.conn_send(conn, bytes.view(buf)[0..n])
+                bytes.free(buf)
+                if serr != "" {
+                    println("SENDERR: ${serr}")
+                    going = 0
+                }
+            }
+        }
+    }
     tls13_server.close_conn(conn)
     exit(0)
 }
