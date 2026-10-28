@@ -2002,6 +2002,11 @@ described in its header comment):
 - `tls13_record.rekey(ctx, key, iv12)` - Key a record context afresh, its AEAD unchanged and its sequence number 0; the old key is zeroed (#3320).
 - `tls13_hs.parse_new_session_ticket(body, out)` → `string` - A NewSessionTicket body into `tls13_hs.NstParsed` (lifetime, age_add, where the nonce and ticket are, max_early_data), or why not with `out.alert` (RFC 8446 4.6.1: an empty ticket, trailing bytes, a duplicate or malformed extension are refused; one this client does not know is ignored) (#3319).
 - `tls13_client.alert_event(level, desc, warnings)` → `(int, int, string)` - What an alert record after the handshake means (`EV_CLOSED`, `EV_NONE`, `EV_ERROR`), the alert to answer with and why: a close_notify closes, a user_canceled is read past (at most four in a row), any other alert is an error, answered with decode_error when it claims the warning level (#3323).
+- `tls13_hs.hello_retry_request(session_id, cipher_suite, group)` → `ptr` - A HelloRetryRequest asking for a share of `group` (RFC 8446 4.1.4) (#3325).
+- `tls13_hs.client_hello_retry(ch1, group, share, cookie, out)` - The second ClientHello: `ch1` with only the changes a HelloRetryRequest allows (one key share for `group` when it is not 0, the `cookie` when it is not empty, no early_data, the PSK binders zeroed for the caller to compute again) into a `PskCh` (#3325).
+- `tls13_hs.ShParsed.session_id_off`, `session_id_len`, `selected_identity`, `cookie_off`, `cookie_len` - Where the session id echo and a HelloRetryRequest's cookie are in the message, and the pre_shared_key's selected_identity (-1 without one), for the client to check (#3318, #3325).
+- `tls13_hs.ChParsed.groups`, `retry_group`, `has_early_data`, `has_cookie` - The `GROUPBIT_X25519MLKEM768` and `GROUPBIT_X25519` groups `supported_groups` names, the group a HelloRetryRequest should ask for when no key share is usable (else 0), and whether early_data and cookie were there (#3325).
+- `tls13_client.transcript_retry(tr, ch1, hrr, algo)` → `ptr` - The transcript after a HelloRetryRequest: `tr` (freed) replaced by message_hash of `ch1` and then `hrr` (RFC 8446 4.4.1) (#3325).
 
 ---
 

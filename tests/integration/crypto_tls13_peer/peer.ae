@@ -17,6 +17,9 @@
 //                   EncryptedExtensions
 //   fin_trailing=1  bytes after the Finished, in its record
 //   split_sh=N      the ServerHello in records of at most N bytes
+//   hrr=MODE        a HelloRetryRequest first (see hrr_msg)
+//   sh_version=HEX  the ServerHello's legacy_version
+//   sh_sid=bad      a ServerHello session id echo one bit off
 //   pack_sh=1       handshake bytes after the ServerHello in its record
 //   extra=HEX       a raw handshake message right after EncryptedExtensions
 //   cr=HEX          a CertificateRequest with this body after it
@@ -225,10 +228,20 @@ fn server_hello(random: ptr, sid: ptr, sid_len: int, suite: int, group: int, ks:
     }
     e = buf_take(exts)
     w = buf_new()
-    put16(w, 0x0303)
+    // sh_version=HEX: another legacy_version (#3318).
+    ver = 0x0303
+    vk = knob("sh_version")
+    if vk != "" {
+        vb = from_hex(vk)
+        ver = ((bytes.get(vb, 0) & 0xFF) << 8) | (bytes.get(vb, 1) & 0xFF)
+        bytes.free(vb)
+    }
+    put16(w, ver)
     put_bytes(w, random, 0, 32)
     put8(w, sid_len)
     put_bytes(w, sid, 0, sid_len)
+    // sh_sid=bad: a session id echo that is not the client's (#3318).
+    if knob("sh_sid") == "bad" && sid_len > 0 { bytes.set(w.b, w.n - 1, (bytes.get(w.b, w.n - 1) ^ 1) & 0xFF) }
     put16(w, suite)
     put8(w, 0)
     put16(w, bytes.length(e))
@@ -495,6 +508,77 @@ main() {
     }
     tr = tls13_client.transcript_new()
     tls13_client.transcript_add(tr, bytes.view(ch)[0..chlen])
+
+    // hrr=...: a HelloRetryRequest first (#3325), and the second
+    // ClientHello in its place.
+    hrrk = knob("hrr")
+    if hrrk != "" {
+        _ha, _hk, halgo, hhl = suite_params(chp.cipher_suite)
+        hrr = hrr_msg(chp.session_id, chp.session_id_len, chp.cipher_suite, hrrk)
+        send_plain(sock, 22, hrr)
+        // Transcript: message_hash(ClientHello1), then the HelloRetryRequest
+        // (RFC 8446 4.4.1), computed here apart from tls13_client.
+        th1 = tls13_client.transcript_hash_algo(tr, halgo)
+        tls13_client.transcript_free(tr)
+        tr = tls13_client.transcript_new()
+        mh = buf_new()
+        put8(mh, 254)
+        put24(mh, hhl)
+        put_bytes(mh, th1, 0, hhl)
+        mhb = buf_take(mh)
+        tls13_client.transcript_add(tr, bytes.view(mhb)[0..bytes.length(mhb)])
+        tls13_client.transcript_add(tr, bytes.view(hrr)[0..bytes.length(hrr)])
+        bytes.free(mhb)
+        bytes.free(th1)
+        bytes.free(hrr)
+        // The client's answer: an alert, or its change_cipher_spec and the
+        // second ClientHello, in a record of version 0x0303 (5.1).
+        rec2 = next_record(&r)
+        if rec2 != null && (bytes.get(rec2, 0) & 0xFF) == 0x14 {
+            bytes.free(rec2)
+            rec2 = next_record(&r)
+        }
+        if rec2 == null {
+            println("CLOSED")
+            exit(0)
+        }
+        if (bytes.get(rec2, 0) & 0xFF) == 0x15 {
+            println("ALERT ${bytes.get(rec2, 6) & 0xFF}")
+            exit(0)
+        }
+        if (bytes.get(rec2, 0) & 0xFF) != 0x16 || (bytes.get(rec2, 2) & 0xFF) != 3 {
+            println("FAIL: the second ClientHello is not a handshake record of version 0x0303")
+            exit(0)
+        }
+        ch2l = bytes.length(rec2) - 5
+        ch2 = bytes.new(ch2l)
+        bytes.copy_from_bytes(ch2, 0, rec2, 5, ch2l)
+        bytes.free(rec2)
+        if string.contains(hrrk, "cookie") == 1 && has_cookie(ch2, HRR_COOKIE) == 0 {
+            println("FAIL: the second ClientHello does not echo the cookie")
+            exit(0)
+        }
+        tls13_hs.free_ch(&chp)
+        perr2 = tls13_hs.parse_client_hello(bytes.view(ch2)[0..ch2l], &chp)
+        if perr2 != "" {
+            println("FAIL: second ClientHello: ${perr2}")
+            exit(1)
+        }
+        tls13_client.transcript_add(tr, bytes.view(ch2)[0..ch2l])
+        bytes.free(ch2)
+        if string.contains(hrrk, "twice") == 1 {
+            // A second HelloRetryRequest: unexpected_message (4.1.4).
+            hrr2 = hrr_msg(chp.session_id, chp.session_id_len, chp.cipher_suite, "cookie")
+            send_plain(sock, 22, hrr2)
+            bytes.free(hrr2)
+            println(client_answer(&r, null))
+            exit(0)
+        }
+        if string.contains(hrrk, "suite") == 1 {
+            // A ServerHello with another suite than the HelloRetryRequest's.
+            if chp.cipher_suite == tls13_hs.TLS_CHACHA20_POLY1305_SHA256 { chp.cipher_suite = tls13_hs.TLS_AES_128_GCM_SHA256 } else { chp.cipher_suite = tls13_hs.TLS_CHACHA20_POLY1305_SHA256 }
+        }
+    }
 
     // The shared secret and our key share for the group the client chose.
     xpriv, rerr = cryptography.random_buffer(32)
@@ -957,6 +1041,87 @@ fn is_session_post(what: string) -> int {
     if string.starts_with(what, "alerts") == 1 { return 1 }
     if what == "postcr" || what == "listen" { return 1 }
     return 0
+}
+
+// ---- HelloRetryRequest (hrr=MODE, #3325) ----
+
+const HRR_RANDOM = "cf21ad74e59a6111be1dfa3a06b44e8c845c7630048b15d5a00d203a15d5b26e"
+const HRR_COOKIE = "c00c1e0f"
+
+// A HelloRetryRequest for MODE: "cookie" (HRR_COOKIE), "group:HEX" (a
+// key_share naming that group), "none" (neither), "emptycookie" (a cookie
+// of no bytes); "twice" and "suite" add to "cookie" (see main).
+fn hrr_msg(sid: ptr, sid_len: int, suite: int, mode: string) -> ptr {
+    exts = buf_new()
+    put16(exts, 0x002b)
+    put16(exts, 2)
+    put16(exts, 0x0304)
+    if string.starts_with(mode, "group:") == 1 {
+        g = from_hex(string.substring(mode, 6, string.length(mode)))
+        put16(exts, 0x0033)
+        put16(exts, 2)
+        put_bytes(exts, g, 0, 2)
+        bytes.free(g)
+    }
+    if string.contains(mode, "cookie") == 1 && mode != "emptycookie" {
+        c = from_hex(HRR_COOKIE)
+        put16(exts, 0x002c)
+        put16(exts, 2 + bytes.length(c))
+        put16(exts, bytes.length(c))
+        put_bytes(exts, c, 0, bytes.length(c))
+        bytes.free(c)
+    }
+    if mode == "emptycookie" {
+        put16(exts, 0x002c)
+        put16(exts, 2)
+        put16(exts, 0)
+    }
+    e = buf_take(exts)
+    w = buf_new()
+    put16(w, 0x0303)
+    rnd = from_hex(HRR_RANDOM)
+    put_bytes(w, rnd, 0, 32)
+    bytes.free(rnd)
+    put8(w, sid_len)
+    put_bytes(w, sid, 0, sid_len)
+    put16(w, suite)
+    put8(w, 0)
+    put16(w, bytes.length(e))
+    put_bytes(w, e, 0, bytes.length(e))
+    bytes.free(e)
+    body = buf_take(w)
+    m = hs_msg(2, body)
+    bytes.free(body)
+    return m
+}
+
+// 1 when the ClientHello `ch` carries a cookie extension holding `hex`.
+fn has_cookie(ch: ptr, hex: string) -> int {
+    want = from_hex(hex)
+    wl = bytes.length(want)
+    n = bytes.length(ch)
+    p = 4 + 2 + 32
+    p = p + 1 + (bytes.get(ch, p) & 0xFF)
+    p = p + 2 + (((bytes.get(ch, p) & 0xFF) << 8) | (bytes.get(ch, p + 1) & 0xFF))
+    p = p + 1 + (bytes.get(ch, p) & 0xFF)
+    p = p + 2
+    found = 0
+    while p + 4 <= n {
+        t = ((bytes.get(ch, p) & 0xFF) << 8) | (bytes.get(ch, p + 1) & 0xFF)
+        el = ((bytes.get(ch, p + 2) & 0xFF) << 8) | (bytes.get(ch, p + 3) & 0xFF)
+        if t == 44 && el == 2 + wl {
+            same = 1
+            i = 0
+            while i < wl {
+                if (bytes.get(ch, p + 6 + i) & 0xFF) != (bytes.get(want, i) & 0xFF) { same = 0 }
+                i = i + 1
+            }
+            if same == 1 { found = 1 }
+        }
+        p = p + 4 + el
+    }
+    bytes.free(want)
+    return found
 }
 
 // The Ed25519 key (key=ed25519): its 32-byte seed, and a self-signed

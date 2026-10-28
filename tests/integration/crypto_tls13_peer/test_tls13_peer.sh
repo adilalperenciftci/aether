@@ -25,6 +25,8 @@
 #   #3320  KeyUpdate, client and server, both ways (kuclient.ae, kuserver.ae).
 #   #3319  NewSessionTicket checks.
 #   #3323  alerts: user_canceled is read past, no other alert is non-fatal.
+#   #3325  HelloRetryRequest, client and server.
+#   #3318  the ServerHello's legacy_version and session id echo.
 #
 # No network beyond loopback, no openssl: the peer's certificate is built in.
 
@@ -198,7 +200,8 @@ run_case "CertificateRequest: a certificate_request_context" "cr=01aa0008000d000
 run_case "CertificateRequest: no signature_algorithms" "cr=000000" "ERR" "ALERT 109"
 
 # run_cf_case <name> <PEER_CF> <answer expected> <server says>; SV names
-# another server program, SENV adds its environment, POST is PEER_POST.
+# another server program, SENV adds its environment, POST is PEER_POST,
+# HRR is PEER_HRR.
 run_cf_case() {
     rm -f "$TMP/port" "$TMP/server.out"
     env $SENV PEER_PORT_OUT="$TMP/port" "$TMP/${SV:-server}" >"$TMP/server.out" 2>&1 &
@@ -207,7 +210,7 @@ run_cf_case() {
     i=0
     while [ "$i" -lt 100 ] && [ ! -s "$TMP/port" ]; do sleep 0.1; i=$((i + 1)); done
     [ -s "$TMP/port" ] || { cat "$TMP/server.out"; fail "$1: the server never listened"; }
-    got=$(PEER_POST="$POST" PEER_CF="$2" PEER_PORT="$(cat "$TMP/port")" "$TMP/peerclient" 2>&1 | grep -v 'warning' || :)
+    got=$(PEER_HRR="$HRR" PEER_POST="$POST" PEER_CF="$2" PEER_PORT="$(cat "$TMP/port")" "$TMP/peerclient" 2>&1 | grep -v 'warning' || :)
     n=0
     while server_alive "$spid" && [ "$n" -lt 100 ]; do sleep 0.1; n=$((n + 1)); done
     stop_server "$spid"
@@ -304,6 +307,38 @@ SENV="SERVER_READ=1" POST=alertsx:015a015a015a015a015a run_cf_case "server alert
 SENV="SERVER_READ=1" POST=alertsx:010a run_cf_case "server alert: unexpected_message at level 1" "ok" "POST ALERT 50" "RECVERR"
 SENV="SERVER_READ=1" POST=alertsx:420a run_cf_case "server alert: level 0x42" "ok" "POST ALERT 47" "RECVERR"
 SENV="SERVER_READ=1" POST=alertsx:0100 run_cf_case "server alert: close_notify" "ok" "POST CLOSED" "EOF"
+
+
+# #3325: HelloRetryRequest (RFC 8446 4.1.4, 4.2.8). The client follows one
+# that asks for a cookie: the change_cipher_spec, then the same ClientHello
+# with the cookie, in a record of version 0x0303, under the message_hash
+# transcript. It refuses one naming a group it has a share for or did not
+# offer, one asking for no change (illegal_parameter), an empty cookie
+# (decode_error), a second one (unexpected_message), and a ServerHello
+# after it with another suite (illegal_parameter). The pure server asks
+# for a group it takes when the shares hold none, sends its
+# change_cipher_spec after the HelloRetryRequest only, and refuses a second
+# ClientHello without that share, with another session id or another
+# suite (illegal_parameter) or after two change_cipher_spec records.
+run_case "HRR: a cookie, followed" "hrr=cookie" "OK" "FINISHED"
+run_case "HRR: x25519, which has a share" "hrr=group:001d" "ERR" "ALERT 47"
+run_case "HRR: secp256r1, which has a share" "hrr=group:0017" "ERR" "ALERT 47"
+run_case "HRR: secp384r1, never offered" "hrr=group:0018" "ERR" "ALERT 47"
+run_case "HRR: asking for no change" "hrr=none" "ERR" "ALERT 47"
+run_case "HRR: an empty cookie" "hrr=emptycookie" "ERR" "ALERT 50"
+run_case "HRR: a second one" "hrr=cookie,twice" "ERR" "ALERT 10"
+run_case "HRR: then a ServerHello with another suite" "hrr=cookie,suite" "ERR" "ALERT 47"
+HRR=ok run_cf_case "server HRR: asks for x25519, then the handshake" "ok" "CLOSED" "ACCEPTED"
+HRR=noshare run_cf_case "server HRR: the second ClientHello without the share" "ok" "HRR ALERT 47" "REFUSED"
+HRR=sid run_cf_case "server HRR: the second ClientHello with another session id" "ok" "HRR ALERT 47" "REFUSED"
+HRR=suite run_cf_case "server HRR: the second ClientHello with another suite" "ok" "HRR ALERT 47" "REFUSED"
+HRR=ccs2 run_cf_case "server HRR: two change_cipher_spec records" "ok" "HRR ALERT 10" "REFUSED"
+
+# #3318: the ServerHello's fixed fields (RFC 8446 4.1.3): legacy_version
+# 0x0303 and the session id echo, else illegal_parameter. (The PSK
+# identity checks need a resumption: crypto_tls13_resume.)
+run_case "SH: legacy_version 0x0302" "sh_version=0302" "ERR" "ALERT 47"
+run_case "SH: a session id echo that is not the client's" "sh_sid=bad" "ERR" "ALERT 47"
 
 [ "$fails" = 0 ] || fail "$fails case(s)"
 echo "  [PASS] $NAME"

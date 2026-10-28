@@ -17,7 +17,8 @@
 //   appdata    application data under the handshake keys
 //
 // With PEER_CF=ok, PEER_POST says what to send after the handshake (see
-// post_session below).
+// post_session below). PEER_HRR has the server send a HelloRetryRequest
+// first (#3325; see the ClientHello it sends).
 
 import std.os
 import std.tcp
@@ -152,6 +153,25 @@ main() {
     pub = x25519.base_point(priv)
     empty = bytes.new(0)
     ch = tls13_hs.client_hello_full(rnd, bytes.view(sid)[0..32], tls13_hs.GROUP_X25519, bytes.view(pub)[0..32], 0, bytes.view(empty)[0..0], 0, bytes.view(empty)[0..0], "peer.example")
+    // PEER_HRR (#3325): a first ClientHello naming secp256r1 and x25519 in
+    // supported_groups with a share for secp256r1 only, which the pure
+    // server does not take: it must ask for x25519 with a HelloRetryRequest.
+    hrr_mode = os.getenv("PEER_HRR")
+    p256pt = bytes.new(65)
+    bytes.set(p256pt, 0, 4)
+    k65 = 1
+    while k65 < 65 {
+        bytes.set(p256pt, k65, 0x11)
+        k65 = k65 + 1
+    }
+    if hrr_mode != "" {
+        bytes.free(ch)
+        both = tls13_hs.client_hello_full(rnd, bytes.view(sid)[0..32], tls13_hs.GROUP_SECP256R1, bytes.view(p256pt)[0..65], tls13_hs.GROUP_X25519, bytes.view(pub)[0..32], 0, bytes.view(empty)[0..0], "peer.example")
+        pch = tls13_hs.PskCh { buf: null, buf_len: 0, binder_off: 0, truncated_len: 0 }
+        tls13_hs.client_hello_retry(bytes.view(both)[0..bytes.length(both)], tls13_hs.GROUP_SECP256R1, bytes.view(p256pt)[0..65], bytes.view(empty)[0..0], &pch)
+        bytes.free(both)
+        ch = pch.buf
+    }
     send_plain(sock, 22, ch, 0, bytes.length(ch))
     tr = tls13_client.transcript_new()
     tls13_client.transcript_add(tr, bytes.view(ch)[0..bytes.length(ch)])
@@ -161,6 +181,79 @@ main() {
     if shrec == null || (bytes.get(shrec, 0) & 0xFF) != 0x16 {
         println("FAIL: no ServerHello")
         exit(1)
+    }
+    if hrr_mode != "" {
+        hl0 = bytes.length(shrec) - 5
+        hrr = bytes.new(hl0)
+        bytes.copy_from_bytes(hrr, 0, shrec, 5, hl0)
+        bytes.free(shrec)
+        hp = tls13_hs.ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null, key_share_len: 0, is_hello_retry: 0, psk_accepted: 0, alert: 0 }
+        herr = tls13_hs.parse_server_hello(bytes.view(hrr)[0..hl0], &hp)
+        if herr != "" || hp.is_hello_retry != 1 || hp.group != tls13_hs.GROUP_X25519 {
+            println("NO HRR: ${herr} retry=${hp.is_hello_retry} group=${hp.group}")
+            exit(0)
+        }
+        // Transcript: message_hash(ClientHello1), the HelloRetryRequest
+        // (RFC 8446 4.4.1), computed here apart from tls13_client.
+        _ha, _hk, halgo, hhl = suite_params(hp.cipher_suite)
+        th1 = tls13_client.transcript_hash_algo(tr, halgo)
+        tls13_client.transcript_free(tr)
+        tr = tls13_client.transcript_new()
+        mh = bytes.new(4 + hhl)
+        bytes.set(mh, 0, 254)
+        bytes.set(mh, 1, 0)
+        bytes.set(mh, 2, 0)
+        bytes.set(mh, 3, hhl)
+        bytes.copy_from_bytes(mh, 4, th1, 0, hhl)
+        tls13_client.transcript_add(tr, bytes.view(mh)[0..4 + hhl])
+        tls13_client.transcript_add(tr, bytes.view(hrr)[0..hl0])
+        bytes.free(mh)
+        bytes.free(th1)
+        bytes.free(hrr)
+        // The server's compatibility change_cipher_spec follows its first
+        // handshake message, the HelloRetryRequest (D.4), and only that one.
+        ccsr = next_record(&r)
+        if ccsr == null || (bytes.get(ccsr, 0) & 0xFF) != 0x14 {
+            println("FAIL: no change_cipher_spec after the HelloRetryRequest")
+            exit(1)
+        }
+        bytes.free(ccsr)
+        // The second ClientHello as PEER_HRR says: "ok" with the x25519
+        // share; "noshare" the first again; "sid" another session id;
+        // "suite" another cipher suite first; "ccs2" two change_cipher_spec
+        // records before it.
+        ch2 = null
+        if hrr_mode == "noshare" {
+            ch2 = bytes.new(bytes.length(ch))
+            bytes.copy_from_bytes(ch2, 0, ch, 0, bytes.length(ch))
+        } else {
+            pch2 = tls13_hs.PskCh { buf: null, buf_len: 0, binder_off: 0, truncated_len: 0 }
+            tls13_hs.client_hello_retry(bytes.view(ch)[0..bytes.length(ch)], tls13_hs.GROUP_X25519, bytes.view(pub)[0..32], bytes.view(empty)[0..0], &pch2)
+            ch2 = pch2.buf
+        }
+        if hrr_mode == "sid" { bytes.set(ch2, 39, (bytes.get(ch2, 39) ^ 1) & 0xFF) }
+        if hrr_mode == "suite" {
+            bytes.set(ch2, 73, 0x13)
+            bytes.set(ch2, 74, 0x02)
+        }
+        one = bytes.new(1)
+        bytes.set(one, 0, 1)
+        send_plain(sock, 20, one, 0, 1)
+        if hrr_mode == "ccs2" { send_plain(sock, 20, one, 0, 1) }
+        bytes.free(one)
+        send_plain(sock, 22, ch2, 0, bytes.length(ch2))
+        tls13_client.transcript_add(tr, bytes.view(ch2)[0..bytes.length(ch2)])
+        bytes.free(ch2)
+        if hrr_mode != "ok" {
+            println("HRR ${answer(&r, null, null)}")
+            tcp.close(sock)
+            exit(0)
+        }
+        shrec = next_record(&r)
+        if shrec == null || (bytes.get(shrec, 0) & 0xFF) != 0x16 {
+            println("FAIL: no ServerHello after the HelloRetryRequest")
+            exit(1)
+        }
     }
     shl = bytes.length(shrec) - 5
     sh = bytes.new(shl)

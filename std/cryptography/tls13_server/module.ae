@@ -171,8 +171,10 @@ fn recio_next(r: *RecordIO) -> (ptr, int, string) {
 // other than handshake, bytes after the message in its last record (only
 // early data, which this server does not take, may follow it) and a
 // message over 2^16 bytes are unexpected_message; an alert record is the
-// client giving up. r.alert says what to send on an error.
-fn recio_next_client_hello(r: *RecordIO) -> (ptr, int, string) {
+// client giving up. r.alert says what to send on an error. `second` is 1
+// for the ClientHello after a HelloRetryRequest, which the client's one
+// compatibility change_cipher_spec may come before (D.4, #3325).
+fn recio_next_client_hello(r: *RecordIO, second: int) -> (ptr, int, string) {
     acc = bytes.new(0)
     alen = 0
     while 1 == 1 {
@@ -182,10 +184,14 @@ fn recio_next_client_hello(r: *RecordIO) -> (ptr, int, string) {
             return null, 0, err
         }
         ct = bytes.get(rec, 0) & 0xFF
-        if ct == 0x14 {
+        if ct == 0x14 && second == 1 && alen == 0 && r.ccs == 0 && rlen == 6 && (bytes.get(rec, 5) & 0xFF) == 1 {
+            bytes.free(rec)
+            r.ccs = 1
+        } else if ct == 0x14 {
             bytes.free(rec)
             bytes.free(acc)
             r.alert = tls13_record.ALERT_UNEXPECTED_MESSAGE
+            if second == 1 { return null, 0, "record: a change_cipher_spec other than the one compatibility mode allows" }
             return null, 0, "record: a change_cipher_spec before the ClientHello"
         } else if ct == 0x15 {
             // The client sent an alert instead of a ClientHello.
@@ -409,6 +415,82 @@ fn transcript_hash_algo(tr: ptr, algo: string) -> ptr {
     return tls13_client.transcript_hash_algo(tr, algo)
 }
 
+// The dummy change_cipher_spec record of middlebox compatibility mode (RFC
+// 8446 D.4): 14 03 03 00 01 01.
+fn send_ccs(sock: ptr) {
+    ccs = bytes.new(6)
+    bytes.set(ccs, 0, 0x14)
+    bytes.set(ccs, 1, 0x03)
+    bytes.set(ccs, 2, 0x03)
+    bytes.set(ccs, 3, 0x00)
+    bytes.set(ccs, 4, 0x01)
+    bytes.set(ccs, 5, 0x01)
+    send_record_raw(sock, ccs)
+    bytes.free(ccs)
+}
+
+// The HelloRetryRequest step (RFC 8446 4.1.4, 4.2.8, #3325) for the first
+// ClientHello `ch1`, parsed in `p`, its transcript `tr`: ask for
+// p.retry_group with the suite already chosen, send the compatibility
+// change_cipher_spec after it when the client sent a session id, read the
+// second ClientHello and hold it to the rules, each illegal_parameter: the
+// same cipher suite, a share for the group asked for (no second
+// HelloRetryRequest is ever sent), no early_data, the same session id.
+// Returns (alert, why, transcript, message): on success the transcript is
+// message_hash(ch1), the HelloRetryRequest and the second ClientHello, the
+// message is that ClientHello and `p` its parse. `tr` and `ch1` are taken
+// either way; what comes back is the caller's to free.
+fn hello_retry(sock: ptr, rio: *RecordIO, tr: @frees ptr, p: *ChParsed, ch1: @frees ptr) -> (int, string, ptr, ptr) {
+    suite = p.cipher_suite
+    group = p.retry_group
+    _a, _k, algo, _h, _e = suite_params(suite)
+    sid_len = p.session_id_len
+    sid = bytes.new(sid_len)
+    if sid_len > 0 { bytes.copy_from_bytes(sid, 0, p.session_id, 0, sid_len) }
+    hrr = tls13_hs.hello_retry_request(bytes.view(sid)[0..sid_len], suite, group)
+    hrr_len = bytes.length(hrr)
+    serr = send_plaintext_handshake(sock, bytes.view(hrr)[0..hrr_len])
+    tr2 = tls13_client.transcript_retry(tr, bytes.view(ch1)[0..bytes.length(ch1)], bytes.view(hrr)[0..hrr_len], algo)
+    bytes.free(hrr)
+    bytes.free(ch1)
+    if serr != "" {
+        bytes.free(sid)
+        return 0, serr, tr2, bytes.new(0)
+    }
+    if sid_len > 0 { send_ccs(sock) }
+    rec, rlen, rerr = recio_next_client_hello(rio, 1)
+    if rerr != "" {
+        bytes.free(sid)
+        return rio.alert, rerr, tr2, bytes.new(0)
+    }
+    ml = rlen - 5
+    ch2 = bytes.new(ml)
+    bytes.copy_from_bytes(ch2, 0, rec, 5, ml)
+    bytes.free(rec)
+    tls13_hs.free_ch(p)
+    perr = tls13_hs.parse_client_hello(bytes.view(ch2)[0..ml], p)
+    alert = 0
+    if perr != "" {
+        alert = ch_error_alert(perr)
+    } else if p.cipher_suite != suite {
+        alert = 47
+        perr = "second client hello: a cipher suite other than the HelloRetryRequest's"
+    } else if p.group != group {
+        alert = 47
+        perr = "second client hello: no key share for group ${group}, which the HelloRetryRequest asked for"
+    } else if p.has_early_data == 1 {
+        alert = 47
+        perr = "second client hello: early_data after a HelloRetryRequest"
+    } else if p.session_id_len != sid_len || (sid_len > 0 && bytes_equal(sid, bytes.view(p.session_id)[0..sid_len]) != 1) {
+        alert = 47
+        perr = "second client hello: a legacy_session_id other than the first's"
+    }
+    bytes.free(sid)
+    if perr != "" { return alert, perr, tr2, ch2 }
+    tls13_client.transcript_add(tr2, bytes.view(ch2)[0..ml])
+    return 0, "", tr2, ch2
+}
+
 // Perform the TLS 1.3 server handshake over `sock`.
 accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_priv: ptr) -> (ptr, string) {
     if sock == null { return null, "socket is null" }
@@ -419,7 +501,7 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
     rio = recio_new(sock)
 
     // 1. Read ClientHello
-    chrec, chlen, cherr = recio_next_client_hello(rio)
+    chrec, chlen, cherr = recio_next_client_hello(rio, 0)
     if string.equals(cherr, "") != 1 {
         if rio.alert != 0 { send_plaintext_alert(sock, 2, rio.alert) }
         recio_free(rio)
@@ -442,6 +524,23 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
 
     tr = tls13_client.transcript_new()
     tls13_client.transcript_add(tr, bytes.view(ch_msg)[0..ch_msg_len])
+
+    // No share for a group the server takes, but supported_groups names
+    // one: a HelloRetryRequest asks for it (RFC 8446 4.2.8, #3325), and the
+    // handshake goes on with the second ClientHello.
+    ccs_sent = 0
+    if ch_parsed.group == 0 {
+        rt_alert, rt_err, tr2, ch2 = hello_retry(sock, rio, tr, &ch_parsed, ch_msg)
+        tr = tr2
+        ch_msg = ch2
+        if rt_err != "" {
+            if rt_alert != 0 { send_plaintext_alert(sock, 2, rt_alert) }
+            tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
+            return null, rt_err
+        }
+        ch_msg_len = bytes.length(ch_msg)
+        if ch_parsed.session_id_len > 0 { ccs_sent = 1 }
+    }
 
     // 2. Compute shared secret & server key share
     shared = null
@@ -532,18 +631,9 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
     tls13_client.transcript_add(tr, bytes.view(sh)[0..sh_len])
     // Middlebox compatibility (RFC 8446 D.4, #3322): a client that sends a
     // legacy_session_id gets a dummy change_cipher_spec right after the
-    // ServerHello, as BoringSSL and OpenSSL send it.
-    if ch_parsed.session_id_len > 0 {
-        ccs = bytes.new(6)
-        bytes.set(ccs, 0, 0x14)
-        bytes.set(ccs, 1, 0x03)
-        bytes.set(ccs, 2, 0x03)
-        bytes.set(ccs, 3, 0x00)
-        bytes.set(ccs, 4, 0x01)
-        bytes.set(ccs, 5, 0x01)
-        send_record_raw(sock, ccs)
-        bytes.free(ccs)
-    }
+    // server's first handshake message, the ServerHello or the
+    // HelloRetryRequest (#3325), as BoringSSL and OpenSSL send it.
+    if ch_parsed.session_id_len > 0 && ccs_sent == 0 { send_ccs(sock) }
 
     // 4. Key Schedule
     rec_aead, rec_key_len, hash_algo, hash_len, suite_err = suite_params(ch_parsed.cipher_suite)

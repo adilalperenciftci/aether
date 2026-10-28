@@ -145,7 +145,7 @@ exports(
     verify_flight_auth,
     // Shared with std.cryptography.tls13_server
     transcript_hash_algo, finished_verify_data_algo, ALERT_CLOSE_NOTIFY, alert_name,
-    alert_event, EV_NONE, EV_CLOSED, EV_ERROR
+    alert_event, transcript_retry, EV_NONE, EV_CLOSED, EV_ERROR
 )
 
 // Handshake message types (RFC 8446 §4) seen in the server's flight.
@@ -686,6 +686,12 @@ fn send_dummy_ccs(sock: ptr) {
 // Send a plaintext handshake record: type 0x16 (handshake), legacy version
 // 0x0301 for the very first flight (RFC 8446 §5.1 allows 0x0301/0x0303).
 fn send_plaintext_handshake(sock: ptr, msg: byte[]) -> string {
+    return send_plaintext_handshake_v(sock, msg, 0x01)
+}
+
+// The same, with legacy_record_version 0x03 `minor`: a ClientHello after a
+// HelloRetryRequest goes at 0x0303 (RFC 8446 5.1, #3325).
+fn send_plaintext_handshake_v(sock: ptr, msg: byte[], minor: int) -> string {
     if msg.len < 0 { panic("tls13_client.send_plaintext_handshake: the `msg` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     int msg_len = msg.len
     total = 5 + msg_len
@@ -693,7 +699,7 @@ fn send_plaintext_handshake(sock: ptr, msg: byte[]) -> string {
     bytes.set(rec, total - 1, 0)
     bytes.set(rec, 0, 0x16) // handshake
     bytes.set(rec, 1, 0x03)
-    bytes.set(rec, 2, 0x01) // legacy_record_version 0x0301
+    bytes.set(rec, 2, minor) // legacy_record_version
     bytes.set(rec, 3, (msg_len >> 8) & 0xFF)
     bytes.set(rec, 4, msg_len & 0xFF)
     bytes.copy_from_slice(rec, 5, msg[0..msg_len])
@@ -889,48 +895,97 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
     }
     rio = recio_new(sock)
 
-    shrec, shlen, sherr = recio_next_hs(rio)
-    if string.equals(sherr, "") != 1 {
-        if rio.alert != 0 { send_plain_alert(sock, rio.alert) }
-        bytes.free(dk); bytes.free(p256_priv)
-        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
-        return null, sherr
-    }
-    sh_msg_len = shlen - 5
-    sh = bytes.new(sh_msg_len)
-    bytes.set(sh, sh_msg_len - 1, 0)
-    bytes.copy_from_bytes(sh, 0, shrec, 5, sh_msg_len)
-    parsed = tls13_hs.ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null, key_share_len: 0, is_hello_retry: 0, psk_accepted: 0 }
-    perr = tls13_hs.parse_server_hello(bytes.view(sh)[0..sh_msg_len], &parsed)
-    if string.equals(perr, "") == 1 && parsed.psk_accepted == 1 {
-        // A full handshake offers no PSK (RFC 8446 4.2, #3315).
-        parsed.alert = ALERT_UNSUPPORTED_EXTENSION
-        perr = "server hello: pre_shared_key answers nothing the client sent"
-    }
-    if string.equals(perr, "") == 1 && parsed.is_hello_retry == 1 {
-        // Every group we implement already has a key share in this
-        // ClientHello, so a HelloRetryRequest names either one of them, which
-        // RFC 8446 §4.1.4 says the client MUST abort on, or a group we cannot
-        // do.
-        perr = "server sent a HelloRetryRequest, but every group we support was already offered"
-    }
-    if string.equals(perr, "") != 1 {
-        // The alert the ServerHello earned, in the clear (#3315).
-        if parsed.alert != 0 { send_plain_alert(sock, parsed.alert) }
-        bytes.free(dk); bytes.free(p256_priv)
-        if parsed.key_share != null { bytes.free(parsed.key_share) }
-        bytes.free(sh); bytes.free(shrec)
-        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
-        return null, perr
+    // The ServerHello, after at most one HelloRetryRequest (RFC 8446 4.1.4,
+    // #3325). Every group has a share here, so a HelloRetryRequest can only
+    // ask for a cookie; the second ClientHello is the first with it.
+    retried = 0
+    hrr_suite = 0
+    ccs_sent = 0
+    sh = null
+    shrec = null
+    sh_msg_len = 0
+    parsed = tls13_hs.ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null, key_share_len: 0, is_hello_retry: 0, psk_accepted: 0, alert: 0 }
+    reading = 1
+    while reading == 1 {
+        shrec2, shlen, sherr = recio_next_hs(rio)
+        if string.equals(sherr, "") != 1 {
+            if rio.alert != 0 { send_plain_alert(sock, rio.alert) }
+            bytes.free(dk); bytes.free(p256_priv)
+            cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
+            return null, sherr
+        }
+        shrec = shrec2
+        sh_msg_len = shlen - 5
+        sh = bytes.new(sh_msg_len)
+        bytes.copy_from_bytes(sh, 0, shrec, 5, sh_msg_len)
+        perr = tls13_hs.parse_server_hello(bytes.view(sh)[0..sh_msg_len], &parsed)
+        if string.equals(perr, "") == 1 {
+            ha, herr = check_hello_fields(&parsed, sh, sid, retried, hrr_suite, GB_ALL, GB_ALL)
+            if ha != 0 {
+                parsed.alert = ha
+                perr = herr
+            }
+        }
+        if string.equals(perr, "") == 1 && parsed.psk_accepted == 1 {
+            // A full handshake offers no PSK (RFC 8446 4.2, #3315).
+            parsed.alert = ALERT_UNSUPPORTED_EXTENSION
+            perr = "server hello: pre_shared_key answers nothing the client sent"
+        }
+        if string.equals(perr, "") != 1 {
+            // The alert the ServerHello earned, in the clear (#3315).
+            if parsed.alert != 0 { send_plain_alert(sock, parsed.alert) }
+            bytes.free(dk); bytes.free(p256_priv)
+            if parsed.key_share != null { bytes.free(parsed.key_share) }
+            bytes.free(sh); bytes.free(shrec)
+            cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
+            return null, perr
+        }
+        if parsed.is_hello_retry == 1 {
+            // Transcript: message_hash(ClientHello1), the HelloRetryRequest,
+            // then the second ClientHello (4.4.1); the change_cipher_spec
+            // goes before it (D.4), and its record says 0x0303 (5.1).
+            _ha, _hk, halgo, _hh, _he = suite_params(parsed.cipher_suite)
+            tr = transcript_retry(tr, bytes.view(ch)[0..ch_len], bytes.view(sh)[0..sh_msg_len], halgo)
+            pch = tls13_hs.PskCh { buf: null, buf_len: 0, binder_off: 0, truncated_len: 0 }
+            empty = bytes.new(0)
+            tls13_hs.client_hello_retry(bytes.view(ch)[0..ch_len], 0, bytes.view(empty)[0..0], bytes.view(sh)[parsed.cookie_off..parsed.cookie_off + parsed.cookie_len], &pch)
+            bytes.free(empty)
+            bytes.free(ch)
+            ch = pch.buf
+            ch_len = pch.buf_len
+            transcript_add(tr, bytes.view(ch)[0..ch_len])
+            send_dummy_ccs(sock)
+            ccs_sent = 1
+            serr2 = send_plaintext_handshake_v(sock, bytes.view(ch)[0..ch_len], 0x03)
+            bytes.free(sh); bytes.free(shrec)
+            sh = null
+            shrec = null
+            if string.equals(serr2, "") != 1 {
+                bytes.free(dk); bytes.free(p256_priv)
+                cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
+                return null, serr2
+            }
+            retried = 1
+            hrr_suite = parsed.cipher_suite
+        } else {
+            reading = 0
+        }
     }
 
     transcript_add(tr, bytes.view(sh)[0..sh_msg_len])
 
-    // The shared secret for the group the server chose.
+    // The shared secret for the group the server chose: the one it names
+    // must be offered (illegal_parameter), its share must be there
+    // (missing_extension) and a valid point (illegal_parameter, RFC 8446
+    // 4.2.8, 7.4.2).
     shared = null
     shared_len = 32
     agerr = ""
-    if parsed.group == tls13_hs.GROUP_X25519MLKEM768 {
+    ag_alert = ALERT_ILLEGAL_PARAMETER
+    if parsed.key_share == null {
+        agerr = "server hello: no key_share"
+        ag_alert = ALERT_MISSING_EXTENSION
+    } else if parsed.group == tls13_hs.GROUP_X25519MLKEM768 {
         shared, agerr = hybrid_shared(dk, x25519_priv, parsed.key_share, parsed.key_share_len)
         shared_len = 64
     } else if parsed.group == tls13_hs.GROUP_X25519 || parsed.group == tls13_hs.GROUP_SECP256R1 {
@@ -943,26 +998,20 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
     bytes.free(dk); bytes.free(p256_priv)
     if string.equals(agerr, "") != 1 || shared == null {
         if string.equals(agerr, "") == 1 { agerr = "key exchange failed" }
+        send_plain_alert(sock, ag_alert)
+        if shared != null { bytes.free(shared) }
         if parsed.key_share != null { bytes.free(parsed.key_share) }
         bytes.free(sh); bytes.free(shrec)
         cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
         return null, agerr
     }
-    // Negotiate the record AEAD + key-schedule hash from the chosen suite.
-    _rec_aead, _rec_key_len, _hash_algo, _hash_len, suite_err = suite_params(parsed.cipher_suite)
-    if string.equals(suite_err, "") != 1 {
-        if parsed.key_share != null { bytes.free(parsed.key_share) }
-        bytes.free(shared); bytes.free(sh); bytes.free(shrec)
-        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
-        return null, suite_err
-    }
 
     // Derive keys from the shared secret (32 bytes classical, 64 hybrid) and
     // run the shared post-ServerHello handshake tail (flight read, auth,
-    // Finished).
+    // Finished). check_hello_fields made sure the suite is one offered.
     offered = tls13_hs.OFFER_ALPN | tls13_hs.OFFER_STATUS
     if string.length(host) > 0 { offered = offered | tls13_hs.OFFER_SNI }
-    result, result_err = run_handshake_tail(sock, rio, tr, host, bytes.view(shared)[0..shared_len], parsed.cipher_suite, client_cert, client_cert_len, client_key, insecure, cafile, offered)
+    result, result_err = run_handshake_tail(sock, rio, tr, host, bytes.view(shared)[0..shared_len], parsed.cipher_suite, client_cert, client_cert_len, client_key, insecure, cafile, offered, ccs_sent)
 
     bytes.free(shared)
     if parsed.key_share != null { bytes.free(parsed.key_share) }
@@ -975,6 +1024,75 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
         rc.group = parsed.group
     }
     return result, result_err
+}
+
+// The groups a ClientHello names in supported_groups, and the ones it
+// carries a key share for, as bits (check_hello_fields).
+const GB_X25519MLKEM768 = 1
+const GB_X25519 = 2
+const GB_SECP256R1 = 4
+const GB_ALL = 7
+
+fn group_bit(g: int) -> int {
+    if g == tls13_hs.GROUP_X25519MLKEM768 { return GB_X25519MLKEM768 }
+    if g == tls13_hs.GROUP_X25519 { return GB_X25519 }
+    if g == tls13_hs.GROUP_SECP256R1 { return GB_SECP256R1 }
+    return 0
+}
+
+// The ServerHello or HelloRetryRequest `p` (parsed from `sh`) against the
+// ClientHello it answers, whose legacy_session_id is the 32 bytes of `sid`,
+// whose supported_groups are the bits `named` and whose shares are the
+// bits `shared`; `retried` 1 after a HelloRetryRequest for suite
+// `hrr_suite`. (0, "") or the alert and why, all illegal_parameter (RFC
+// 8446 4.1.3, 4.1.4; #3318, #3325): a session id echo that is not the one
+// sent; a suite the client did not offer; a second HelloRetryRequest
+// (unexpected_message); a HelloRetryRequest naming a group not offered or
+// one with a share already, or changing nothing; a ServerHello after one
+// with another suite.
+fn check_hello_fields(p: *ShParsed, sh: ptr, sid: ptr, retried: int, hrr_suite: int, named: int, shared: int) -> (int, string) {
+    if p.session_id_len != 32 || bytes_equal(sid, bytes.view(sh)[p.session_id_off..p.session_id_off + 32]) != 1 {
+        return ALERT_ILLEGAL_PARAMETER, "server hello: legacy_session_id_echo is not the session id the client sent"
+    }
+    _a, _k, _h, _hl, serr = suite_params(p.cipher_suite)
+    if serr != "" { return ALERT_ILLEGAL_PARAMETER, "server hello: cipher suite ${p.cipher_suite} was not offered" }
+    if p.is_hello_retry == 1 {
+        if retried == 1 { return ALERT_UNEXPECTED_MESSAGE, "hello retry request: a second one" }
+        if p.group != 0 {
+            gb = group_bit(p.group)
+            if gb == 0 || (named & gb) == 0 { return ALERT_ILLEGAL_PARAMETER, "hello retry request: group ${p.group} was not offered" }
+            if (shared & gb) != 0 { return ALERT_ILLEGAL_PARAMETER, "hello retry request: group ${p.group} has a key share in the ClientHello already" }
+        } else if p.cookie_len == 0 {
+            return ALERT_ILLEGAL_PARAMETER, "hello retry request: it asks for no change to the ClientHello"
+        }
+        return 0, ""
+    }
+    if retried == 1 && p.cipher_suite != hrr_suite {
+        return ALERT_ILLEGAL_PARAMETER, "server hello: cipher suite ${p.cipher_suite}, not the HelloRetryRequest's ${hrr_suite}"
+    }
+    return 0, ""
+}
+
+// The transcript after a HelloRetryRequest (RFC 8446 4.4.1): `tr`, which
+// held the first ClientHello `ch1`, freed, and a new one holding
+// message_hash (254, a 24-bit Hash.length, Hash(ch1)) and then `hrr`,
+// hashed with `algo`, the HelloRetryRequest's suite's.
+transcript_retry(tr: @frees ptr, ch1: byte[], hrr: byte[], algo: string) -> ptr {
+    transcript_free(tr)
+    h = hash_bytes_algo(ch1, algo)
+    hl = bytes.length(h)
+    mh = bytes.new(4 + hl)
+    bytes.set(mh, 0, 254)
+    bytes.set(mh, 1, 0)
+    bytes.set(mh, 2, 0)
+    bytes.set(mh, 3, hl)
+    bytes.copy_from_bytes(mh, 4, h, 0, hl)
+    bytes.free(h)
+    t = transcript_new()
+    transcript_add(t, bytes.view(mh)[0..4 + hl])
+    transcript_add(t, hrr)
+    bytes.free(mh)
+    return t
 }
 
 // X25519MLKEM768 shared secret (RFC 10024): the server share is the ML-KEM
@@ -1038,7 +1156,9 @@ connect_pq(host: string, port: int) -> (ptr, string) {
 // insecure: the verify_mode bits (connect_full): 1 skips server
 // authentication entirely (set_insecure parity), 2 asks for partial chains.
 // cafile:   a PEM bundle to trust instead of the system store, or "".
-fn run_handshake_tail(sock: @keep ptr, rio: @keep ptr, tr: ptr, host: string, shared: byte[], cipher_suite: int, client_cert: ptr, client_cert_len: int, client_key: ptr, insecure: int, cafile: string, offered: int) -> (ptr, string) {
+// ccs_sent: 1 when the dummy change_cipher_spec went already, before a
+//           second ClientHello (#3325).
+fn run_handshake_tail(sock: @keep ptr, rio: @keep ptr, tr: ptr, host: string, shared: byte[], cipher_suite: int, client_cert: ptr, client_cert_len: int, client_key: ptr, insecure: int, cafile: string, offered: int, ccs_sent: int) -> (ptr, string) {
     rec_aead, rec_key_len, hash_algo, hash_len, suite_err = suite_params(cipher_suite)
     if string.equals(suite_err, "") != 1 { return null, suite_err }
 
@@ -1056,8 +1176,9 @@ fn run_handshake_tail(sock: @keep ptr, rio: @keep ptr, tr: ptr, host: string, sh
     ferr = ""
     fllen, ferr, falert = read_flight(rio, srv_ctx, fl)
     // The second flight, an alert or the client's own, starts with the
-    // dummy change_cipher_spec (RFC 8446 D.4, #3322).
-    send_dummy_ccs(sock)
+    // dummy change_cipher_spec (RFC 8446 D.4, #3322), unless it came before
+    // a second ClientHello.
+    if ccs_sent == 0 { send_dummy_ccs(sock) }
     if string.equals(ferr, "") != 1 && falert != 0 {
         fa_ctx = tls13_record.new_aead(rec_aead, bytes.view(hs_client_key(keys))[0..rec_key_len], hs_client_iv(keys))
         send_alert_hs(sock, fa_ctx, ALERT_LEVEL_FATAL, falert)
@@ -2130,6 +2251,12 @@ connect_resume_0rtt(host: string, port: int, x25519_priv: ptr, ticket: ptr, earl
 
 // Core resume, optionally with 0-RTT early data (early_data == null / len 0 for
 // a plain resume).
+//
+// The PSK's checks (RFC 8446 4.2.11, #3318): the server must take the one
+// identity offered, with a suite of the ticket's hash. A HelloRetryRequest
+// (#3325) may ask for a secp256r1 share (the first ClientHello carries only
+// x25519's); the second ClientHello carries no early data, and its binder
+// is computed again over the new transcript.
 fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, early_data: byte[]) -> (ptr, string) {
     if early_data.len < 0 { panic("tls13_client.connect_resume_ed: the `early_data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     int early_len = early_data.len
@@ -2139,24 +2266,26 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
     hl = st.hash_len
     want_0rtt = 0
     if early_data != null && early_len > 0 { want_0rtt = 1 }
+    // The record AEAD for 0-RTT data, from the ticket's hash.
+    ed_aead, ed_key_len = early_aead_params(algo)
 
     // PSK = HKDF-Expand-Label(res_master, "resumption", ticket_nonce, Hash.len)
     psk = tls13_ks.psk_from_resumption(algo, st.res_master, hl, bytes.view(st.nonce)[0..st.nonce_len])
 
     sock, dial_err = tcp.connect(host, port)
-    if string.equals(dial_err, "") != 1 { bytes.free(psk); return null, dial_err }
+    if string.equals(dial_err, "") != 1 { tls13_ks.free_secret(psk); return null, dial_err }
     pub = x25519.base_point(x25519_priv)
     rnd = rand_into(32)
     sid = rand_into(32)
     if rnd == null || sid == null {
         if rnd != null { bytes.free(rnd) }
         if sid != null { bytes.free(sid) }
-        bytes.free(pub); bytes.free(psk); tcp.close(sock)
+        bytes.free(pub); tls13_ks.free_secret(psk); tcp.close(sock)
         return null, "no randomness available for the handshake"
     }
 
-    // Build the PSK ClientHello with a zero binder placeholder (+ early_data ext
-    // when sending 0-RTT).
+    // The PSK ClientHello (+ early_data when sending 0-RTT), its binder
+    // computed over the truncated ClientHello and patched in.
     pch = tls13_hs.PskCh { buf: null, buf_len: 0, binder_off: 0, truncated_len: 0 }
     // obfuscated_ticket_age = 0 is accepted by openssl (it doesn't enforce age
     // for its own tickets in the common config); real freshness needs the
@@ -2164,35 +2293,28 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
     tls13_hs.client_hello_psk(rnd, bytes.view(sid)[0..32], pub, host, bytes.view(st.ticket)[0..st.ticket_len], 0, hl, want_0rtt, &pch)
     ch = pch.buf
     ch_len = pch.buf_len
-
-    // Compute the PSK binder over the truncated ClientHello and patch it in.
-    // binder = HMAC(binder_finished_key, Transcript-Hash(truncated CH)).
     early = tls13_ks.early_secret_psk(algo, bytes.view(psk)[0..hl])
-    bkey = tls13_ks.binder_key(algo, early)
-    bfk = finished_key_algo(bkey, algo, hl)
-    trunc_hash = hash_bytes_algo(bytes.view(ch)[0..pch.truncated_len], algo)
-    binder = hmac.bytes(algo, bytes.view(bfk)[0..hl], bytes.view(trunc_hash)[0..hl])
-    bp = 0
-    while bp < hl { bytes.set(ch, pch.binder_off + bp, bytes.get(binder, bp) & 0xFF); bp = bp + 1 }
-    bytes.free(bkey); bytes.free(bfk); bytes.free(trunc_hash); bytes.free(binder)
-
     tr = transcript_new()
+    patch_binder(ch, pch.binder_off, pch.truncated_len, early, algo, hl, tr)
     transcript_add(tr, bytes.view(ch)[0..ch_len])
     serr = send_plaintext_handshake(sock, bytes.view(ch)[0..ch_len])
     if string.equals(serr, "") != 1 {
-        bytes.free(early); bytes.free(psk); cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); tcp.close(sock)
+        tls13_ks.free_secret(early); tls13_ks.free_secret(psk); cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); tcp.close(sock)
         return null, serr
     }
 
     // Middlebox compatibility (D.4, #3322): with early data, the dummy
     // change_cipher_spec goes right after the ClientHello.
-    if want_0rtt == 1 { send_dummy_ccs(sock) }
+    ccs_sent = 0
+    if want_0rtt == 1 {
+        send_dummy_ccs(sock)
+        ccs_sent = 1
+    }
 
     // 0-RTT: immediately send the early data as application_data records under
     // the client_early_traffic_secret = Derive-Secret(early, "c e traffic",
     // Transcript-Hash(ClientHello)). We need the record AEAD/key-len for the
     // ticket's suite; both 0-RTT suites here use the ticket's hash.
-    ed_aead, ed_key_len = early_aead_params(algo)
     if want_0rtt == 1 {
         ch_hash = hash_bytes_algo(bytes.view(ch)[0..ch_len], algo)
         ets = tls13_ks.early_traffic_secret(algo, early, bytes.view(ch_hash)[0..hl])
@@ -2204,56 +2326,159 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
         bytes.free(ch_hash); bytes.free(ets); bytes.free(ek); bytes.free(eiv)
         tls13_record.free_ctx(ed_ctx); bytes.free(ed_rec)
     }
-    bytes.free(early)
 
     rio = recio_new(sock)
 
-    shrec, shlen, sherr = recio_next_hs(rio)
-    if string.equals(sherr, "") != 1 {
-        if rio.alert != 0 { send_plain_alert(sock, rio.alert) }
-        bytes.free(psk); cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
-        return null, sherr
+    // The ServerHello, after at most one HelloRetryRequest.
+    p256_priv = null
+    retried = 0
+    hrr_suite = 0
+    sh = null
+    shrec = null
+    sh_msg_len = 0
+    err = ""
+    alert = 0
+    parsed = tls13_hs.ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null, key_share_len: 0, is_hello_retry: 0, psk_accepted: 0, alert: 0 }
+    reading = 1
+    while reading == 1 {
+        shrec2, shlen, sherr = recio_next_hs(rio)
+        if string.equals(sherr, "") != 1 {
+            err = sherr
+            alert = rio.alert
+            reading = 0
+        } else {
+            shrec = shrec2
+            sh_msg_len = shlen - 5
+            sh = bytes.new(sh_msg_len)
+            bytes.copy_from_bytes(sh, 0, shrec, 5, sh_msg_len)
+            perr = tls13_hs.parse_server_hello(bytes.view(sh)[0..sh_msg_len], &parsed)
+            if string.equals(perr, "") == 1 {
+                shares = GB_X25519
+                if p256_priv != null { shares = GB_SECP256R1 }
+                ha, herr = check_hello_fields(&parsed, sh, sid, retried, hrr_suite, GB_X25519 | GB_SECP256R1, shares)
+                if ha != 0 {
+                    parsed.alert = ha
+                    perr = herr
+                }
+            }
+            if string.equals(perr, "") != 1 {
+                err = perr
+                alert = parsed.alert
+                reading = 0
+            } else if parsed.is_hello_retry == 1 {
+                _ha, _hk, halgo, _hh, _he = suite_params(parsed.cipher_suite)
+                if halgo != algo {
+                    // The second ClientHello may offer no PSK of another
+                    // hash (4.2.11), and without the PSK there is nothing
+                    // to resume.
+                    err = "resume: the HelloRetryRequest chose a suite of another hash than the ticket's"
+                    alert = ALERT_HANDSHAKE_FAILURE
+                    reading = 0
+                } else {
+                    // A secp256r1 share when asked for; else the same one.
+                    share = bytes.new(0)
+                    share_len = 0
+                    if parsed.group == tls13_hs.GROUP_SECP256R1 {
+                        p256_priv = fresh_p256_priv()
+                        if p256_priv != null {
+                            bytes.free(share)
+                            share, share_len = keyshare_for_group(tls13_hs.GROUP_SECP256R1, p256_priv)
+                        }
+                    }
+                    if parsed.group == tls13_hs.GROUP_SECP256R1 && p256_priv == null {
+                        bytes.free(share)
+                        err = "no randomness available for the handshake"
+                        alert = ALERT_INTERNAL_ERROR
+                        reading = 0
+                    } else {
+                        tr = transcript_retry(tr, bytes.view(ch)[0..ch_len], bytes.view(sh)[0..sh_msg_len], algo)
+                        pch2 = tls13_hs.PskCh { buf: null, buf_len: 0, binder_off: 0, truncated_len: 0 }
+                        tls13_hs.client_hello_retry(bytes.view(ch)[0..ch_len], parsed.group, bytes.view(share)[0..share_len], bytes.view(sh)[parsed.cookie_off..parsed.cookie_off + parsed.cookie_len], &pch2)
+                        bytes.free(share)
+                        bytes.free(ch)
+                        ch = pch2.buf
+                        ch_len = pch2.buf_len
+                        patch_binder(ch, pch2.binder_off, pch2.truncated_len, early, algo, hl, tr)
+                        transcript_add(tr, bytes.view(ch)[0..ch_len])
+                        if ccs_sent == 0 {
+                            send_dummy_ccs(sock)
+                            ccs_sent = 1
+                        }
+                        serr2 = send_plaintext_handshake_v(sock, bytes.view(ch)[0..ch_len], 0x03)
+                        bytes.free(sh); bytes.free(shrec)
+                        sh = null
+                        shrec = null
+                        if string.equals(serr2, "") != 1 {
+                            err = serr2
+                            reading = 0
+                        }
+                        // The early data sent is lost: no 0-RTT after a
+                        // HelloRetryRequest (4.2.10).
+                        want_0rtt = 0
+                        retried = 1
+                        hrr_suite = parsed.cipher_suite
+                    }
+                }
+            } else {
+                reading = 0
+            }
+        }
     }
-    sh_msg_len = shlen - 5
-    sh = bytes.new(sh_msg_len)
-    bytes.set(sh, sh_msg_len - 1, 0)
-    bytes.copy_from_bytes(sh, 0, shrec, 5, sh_msg_len)
-    transcript_add(tr, bytes.view(sh)[0..sh_msg_len])
-    parsed = tls13_hs.ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null, key_share_len: 0, is_hello_retry: 0, psk_accepted: 0 }
-    perr = tls13_hs.parse_server_hello(bytes.view(sh)[0..sh_msg_len], &parsed)
-    if string.equals(perr, "") != 1 {
-        // The alert the ServerHello earned, in the clear (#3315).
-        if parsed.alert != 0 { send_plain_alert(sock, parsed.alert) }
-        bytes.free(psk); bytes.free(sh); bytes.free(shrec)
-        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
-        return null, perr
-    }
-    if parsed.psk_accepted != 1 {
-        if parsed.key_share != null { bytes.free(parsed.key_share) }
-        bytes.free(psk); bytes.free(sh); bytes.free(shrec)
-        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
-        return null, "server rejected the PSK (no resumption)"
-    }
+    tls13_ks.free_secret(early)
 
-    // ECDHE (psk_dhe_ke): the server still sent a key_share.
-    shared, agerr = ecdhe_shared(tls13_hs.GROUP_X25519, x25519_priv, parsed.key_share, parsed.key_share_len)
-    if string.equals(agerr, "") != 1 {
-        if parsed.key_share != null { bytes.free(parsed.key_share) }
-        bytes.free(psk); bytes.free(sh); bytes.free(shrec)
-        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
-        return null, agerr
+    // The PSK checks, then the key share: psk_dhe_ke over the group this
+    // ClientHello has a share for.
+    if err == "" && parsed.psk_accepted != 1 {
+        err = "server rejected the PSK (no resumption)"
     }
-    rec_aead, rec_key_len, hash_algo, hash_len, suite_err = suite_params(parsed.cipher_suite)
-    if string.equals(suite_err, "") != 1 {
-        if parsed.key_share != null { bytes.free(parsed.key_share) }
-        bytes.free(psk); bytes.free(shared); bytes.free(sh); bytes.free(shrec)
-        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
-        return null, suite_err
+    rec_aead, rec_key_len, hash_algo, hash_len, _suite_err = suite_params(parsed.cipher_suite)
+    if err == "" && parsed.selected_identity != 0 {
+        err = "server hello: selected_identity ${parsed.selected_identity}, but the client offered one PSK"
+        alert = ALERT_ILLEGAL_PARAMETER
     }
+    if err == "" && hash_algo != algo {
+        err = "server hello: a cipher suite whose hash is not the PSK's"
+        alert = ALERT_ILLEGAL_PARAMETER
+    }
+    want_group = tls13_hs.GROUP_X25519
+    if p256_priv != null { want_group = tls13_hs.GROUP_SECP256R1 }
+    if err == "" && parsed.key_share == null {
+        err = "server hello: no key_share, but the client offered only psk_dhe_ke"
+        alert = ALERT_MISSING_EXTENSION
+    }
+    if err == "" && parsed.group != want_group {
+        err = "server hello: key_share group ${parsed.group}, not the one the ClientHello has a share for"
+        alert = ALERT_ILLEGAL_PARAMETER
+    }
+    shared = null
+    if err == "" {
+        priv = x25519_priv
+        if p256_priv != null { priv = p256_priv }
+        sh2, agerr = ecdhe_shared(parsed.group, priv, parsed.key_share, parsed.key_share_len)
+        shared = sh2
+        if string.equals(agerr, "") != 1 || shared == null {
+            if string.equals(agerr, "") == 1 { agerr = "key exchange failed" }
+            err = agerr
+            alert = ALERT_ILLEGAL_PARAMETER
+        }
+    }
+    if p256_priv != null { bytes.free(p256_priv) }
+    if err != "" {
+        if alert != 0 { send_plain_alert(sock, alert) }
+        if shared != null { bytes.free(shared) }
+        if parsed.key_share != null { bytes.free(parsed.key_share) }
+        if sh != null { bytes.free(sh) }
+        if shrec != null { bytes.free(shrec) }
+        tls13_ks.free_secret(psk)
+        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
+        return null, err
+    }
+    transcript_add(tr, bytes.view(sh)[0..sh_msg_len])
 
     // Handshake keys keyed off the PSK early secret (RFC 8446 §7.1 resumption).
+    shared_len = bytes.length(shared)
     th_chsh = transcript_hash_algo(tr, hash_algo)
-    keys = derive_handshake_keys_psk(bytes.view(psk)[0..hl], bytes.view(shared)[0..32], bytes.view(th_chsh)[0..hash_len], rec_key_len, hash_algo)
+    keys = derive_handshake_keys_psk(bytes.view(psk)[0..hl], bytes.view(shared)[0..shared_len], bytes.view(th_chsh)[0..hash_len], rec_key_len, hash_algo)
     srv_ctx = tls13_record.new_aead(rec_aead, bytes.view(hs_server_key(keys))[0..rec_key_len], hs_server_iv(keys))
 
     // Read the abbreviated flight (EncryptedExtensions + Finished; NO cert).
@@ -2262,9 +2487,10 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
     fllen = 0
     ferr = ""
     fllen, ferr, falert = read_flight(rio, srv_ctx, fl)
-    // Without early data the second flight starts with the dummy
-    // change_cipher_spec (D.4, #3322); with it, that went after the ClientHello.
-    if want_0rtt != 1 { send_dummy_ccs(sock) }
+    // The second flight starts with the dummy change_cipher_spec (D.4,
+    // #3322) unless it went already, after the first ClientHello with early
+    // data or before the second.
+    if ccs_sent == 0 { send_dummy_ccs(sock) }
     if string.equals(ferr, "") != 1 && falert != 0 {
         fa_ctx = tls13_record.new_aead(rec_aead, bytes.view(hs_client_key(keys))[0..rec_key_len], hs_client_iv(keys))
         send_alert_hs(sock, fa_ctx, ALERT_LEVEL_FATAL, falert)
@@ -2337,9 +2563,8 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
             th_cf = transcript_hash_algo(tr, hash_algo)
             res_master2 = tls13_kdf.derive_secret(hash_algo, bytes.view(ms)[0..hash_len], "res master", bytes.view(th_cf)[0..hash_len])
             bytes.free(th_cf)
-            // psk_dhe_ke over the x25519 share; the connection keeps c_ap
-            // and s_ap for KeyUpdate (#3320).
-            result = new_client_conn(sock, rio as ptr, parsed.cipher_suite, c_ap, s_ap, res_master2, tls13_hs.GROUP_X25519)
+            // The connection keeps c_ap and s_ap for KeyUpdate (#3320).
+            result = new_client_conn(sock, rio as ptr, parsed.cipher_suite, c_ap, s_ap, res_master2, parsed.group)
             bytes.free(cvd); bytes.free(cfin); bytes.free(cfin_rec)
             tls13_record.free_ctx(cli_hs_ctx)
             tls13_ks.free_secret(ms); bytes.free(th_sf)
@@ -2353,7 +2578,7 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
     bytes.free(fl)
     tls13_record.free_ctx(srv_ctx)
     free_hs_keys(keys)
-    bytes.free(th_chsh); bytes.free(shared); bytes.free(psk)
+    bytes.free(th_chsh); bytes.free(shared); tls13_ks.free_secret(psk)
     if parsed.key_share != null { bytes.free(parsed.key_share) }
     bytes.free(sh); bytes.free(shrec)
     cleanup_hello(pub, rnd, sid, ch); transcript_free(tr)
@@ -2361,6 +2586,29 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
         recio_free(rio); tcp.close(sock)
     }
     return result, result_err
+}
+
+// Patch the PSK binder of the ClientHello `ch` at `binder_off`:
+// HMAC(finished key of the binder_key from `early`, Transcript-Hash(what
+// `prefix` holds, then ch's first `truncated_len` bytes)) (RFC 8446
+// 4.2.11.2). `prefix` is empty for a first ClientHello, and holds
+// message_hash and the HelloRetryRequest for a second (#3325).
+fn patch_binder(ch: ptr, binder_off: int, truncated_len: int, early: ptr, algo: string, hl: int, prefix: ptr) {
+    bkey = tls13_ks.binder_key(algo, early)
+    bfk = finished_key_algo(bkey, algo, hl)
+    pt = prefix as *Transcript
+    t = transcript_new()
+    if pt.len > 0 { transcript_add(t, bytes.view(pt.buf)[0..pt.len]) }
+    transcript_add(t, bytes.view(ch)[0..truncated_len])
+    th = transcript_hash_algo(t, algo)
+    transcript_free(t)
+    binder = hmac.bytes(algo, bytes.view(bfk)[0..hl], bytes.view(th)[0..hl])
+    bp = 0
+    while bp < hl {
+        bytes.set(ch, binder_off + bp, bytes.get(binder, bp) & 0xFF)
+        bp = bp + 1
+    }
+    tls13_ks.free_secret(bkey); tls13_ks.free_secret(bfk); bytes.free(th); tls13_ks.free_secret(binder)
 }
 
 // The record AEAD id + key length for the 0-RTT early-data cipher, inferred
