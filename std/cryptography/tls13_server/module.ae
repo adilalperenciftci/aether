@@ -63,6 +63,9 @@ struct RecordIO {
     buf: ptr // std.bytes accumulator
     len: int
     off: int
+    alert: int // the alert recio_next says to send, when it refuses a record
+    ccs: int // dummy change_cipher_spec records read so far
+    hs_seen: int // 1 once the ClientHello has been read
 }
 
 fn recio_new(sock: @keep ptr) -> *RecordIO {
@@ -72,6 +75,9 @@ fn recio_new(sock: @keep ptr) -> *RecordIO {
     bytes.set(r.buf, 0, 0)
     r.len = 0
     r.off = 0
+    r.alert = 0
+    r.ccs = 0
+    r.hs_seen = 0
     return r
 }
 
@@ -116,6 +122,12 @@ fn recio_next(r: *RecordIO) -> (ptr, int, string) {
     while loop == 1 {
         avail = r.len - r.off
         if avail >= 5 {
+            // The header alone says whether to read on (#3317).
+            ha, herr = tls13_record.check_header(bytes.view(r.buf)[r.off..r.off + 5])
+            if ha != 0 {
+                r.alert = ha
+                return null, 0, herr
+            }
             plen = ((bytes.get(r.buf, r.off + 3) & 0xFF) << 8) | (bytes.get(r.buf, r.off + 4) & 0xFF)
             total = 5 + plen
             if avail >= total {
@@ -143,8 +155,19 @@ fn recio_next_hs(r: *RecordIO) -> (ptr, int, string) {
         rec, rlen, err = recio_next(r)
         if string.equals(err, "") != 1 { looking = 0 } else {
             if (bytes.get(rec, 0) & 0xFF) == 0x14 {
-                bytes.free(rec) // skip ChangeCipherSpec
+                // One dummy change_cipher_spec, the single byte 1, between
+                // the ClientHello and the client Finished (RFC 8446 5,
+                // #3317); any other is unexpected_message.
+                r.ccs = r.ccs + 1
+                bad = 0
+                if rlen != 6 || (bytes.get(rec, 5) & 0xFF) != 1 || r.ccs > 1 || r.hs_seen == 0 { bad = 1 }
+                bytes.free(rec)
+                if bad == 1 {
+                    r.alert = tls13_record.ALERT_UNEXPECTED_MESSAGE
+                    return null, 0, "record: a change_cipher_spec other than the one compatibility mode allows"
+                }
             } else {
+                r.hs_seen = 1
                 looking = 0
             }
         }
@@ -313,6 +336,7 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
     // 1. Read ClientHello
     chrec, chlen, cherr = recio_next_hs(rio)
     if string.equals(cherr, "") != 1 {
+        if rio.alert != 0 { send_plaintext_alert(sock, 2, rio.alert) }
         recio_free(rio)
         return null, cherr
     }
@@ -555,44 +579,83 @@ conn_send(conn: ptr, data: byte[]) -> string {
     return ""
 }
 
-// Receive application data record.
+// Empty application-data records the server reads past in a row before it
+// refuses the stream as a denial of service (#3317), as BoringSSL bounds them.
+const MAX_EMPTY_RECORDS = 32
+
+// A fatal alert under the connection's application-traffic keys.
+fn send_alert_app(c: *ServerConn, desc: int) {
+    body = bytes.new(2)
+    bytes.set(body, 0, 2)
+    bytes.set(body, 1, desc & 0xFF)
+    rec = tls13_record.seal_record(c.app_send as ptr, tls13_record.CONTENT_ALERT, bytes.view(body)[0..2])
+    send_record_raw(c.sock, rec)
+    bytes.free(body)
+    bytes.free(rec)
+}
+
+// Receive the next application-data record's plaintext (fresh bytes; caller
+// frees via bytes.free): (data, len, ""), (null, 0, "") at the client's
+// close_notify, or (null, 0, error). Post-handshake handshake messages
+// are read past. RFC 8446 5 (#3317): a change_cipher_spec
+// or a plaintext record after the handshake, a record that does not open
+// or is too long, an empty handshake record, and more than
+// MAX_EMPTY_RECORDS empty application-data records in a row are each
+// refused, with their alert sent before the error returns.
 conn_recv(conn: ptr) -> (ptr, int, string) {
     c = conn as *ServerConn
     rio = c.rio as *RecordIO
-    looking = 1
-    out = null
-    outlen = 0
-    rerr = ""
-    while looking == 1 {
+    empties = 0
+    while 1 == 1 {
         rec, rlen, e = recio_next(rio)
-        if string.equals(e, "") != 1 { rerr = e; looking = 0 } else {
-            ct = bytes.get(rec, 0) & 0xFF
-            if ct == 0x14 { bytes.free(rec) } else {
-                opened = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0 }
-                oerr = tls13_record.open_record(c.app_recv as ptr, bytes.view(rec)[0..rlen], &opened)
-                bytes.free(rec)
-                if string.equals(oerr, "") != 1 { rerr = oerr; looking = 0 } else {
-                    if opened.content_type == tls13_record.CONTENT_APPLICATION_DATA {
-                        out = opened.plaintext
-                        outlen = opened.plaintext_len
-                        looking = 0
-                    } else {
-                        if opened.content_type == tls13_record.CONTENT_ALERT {
-                            desc = 0
-                            if opened.plaintext_len >= 2 { desc = bytes.get(opened.plaintext, 1) & 0xFF }
-                            if desc != tls13_client.ALERT_CLOSE_NOTIFY {
-                                rerr = string.concat("tls alert: ", tls13_client.alert_name(desc))
-                            }
-                            looking = 0
-                        }
-                        if opened.plaintext != null { bytes.free(opened.plaintext) }
-                    }
-                }
+        if string.equals(e, "") != 1 {
+            if rio.alert != 0 { send_alert_app(c, rio.alert) }
+            return null, 0, e
+        }
+        ct = bytes.get(rec, 0) & 0xFF
+        if ct != 0x17 {
+            bytes.free(rec)
+            send_alert_app(c, tls13_record.ALERT_UNEXPECTED_MESSAGE)
+            return null, 0, "record: a plaintext record of type ${ct} after the handshake"
+        }
+        opened = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0, alert: 0 }
+        oerr = tls13_record.open_record(c.app_recv as ptr, bytes.view(rec)[0..rlen], &opened)
+        bytes.free(rec)
+        if string.equals(oerr, "") != 1 {
+            send_alert_app(c, opened.alert)
+            return null, 0, oerr
+        }
+        t = opened.content_type
+        n = opened.plaintext_len
+        if t == tls13_record.CONTENT_APPLICATION_DATA {
+            if n > 0 { return opened.plaintext, n, "" }
+            if opened.plaintext != null { bytes.free(opened.plaintext) }
+            empties = empties + 1
+            if empties > MAX_EMPTY_RECORDS {
+                send_alert_app(c, tls13_record.ALERT_UNEXPECTED_MESSAGE)
+                return null, 0, "record: more than ${MAX_EMPTY_RECORDS} empty records in a row"
             }
+        } else if t == tls13_record.CONTENT_ALERT {
+            // A clean close_notify is EOF; any other alert is an error naming
+            // the description.
+            desc = 0
+            if n >= 2 { desc = bytes.get(opened.plaintext, 1) & 0xFF }
+            if opened.plaintext != null { bytes.free(opened.plaintext) }
+            if desc == tls13_client.ALERT_CLOSE_NOTIFY { return null, 0, "" }
+            return null, 0, string.concat("tls alert: ", tls13_client.alert_name(desc))
+        } else {
+            // A post-handshake handshake message: read
+            // past it. An empty one is no message at all.
+            if opened.plaintext != null { bytes.free(opened.plaintext) }
+            if n == 0 {
+                send_alert_app(c, tls13_record.ALERT_UNEXPECTED_MESSAGE)
+                return null, 0, "record: an empty handshake record after the handshake"
+            }
+            empties = 0
         }
     }
-    return out, outlen, rerr
 }
+
 
 close_conn(conn: ptr) {
     c = conn as *ServerConn

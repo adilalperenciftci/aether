@@ -1,0 +1,46 @@
+// Sends the bytes RAW (hex) to 127.0.0.1 PEER_PORT and prints what came
+// back: "ALERT <description>" for a plaintext alert, "CLOSED", or "OTHER".
+
+import std.os
+import std.tcp
+import std.bytes
+import std.string
+
+extern string_char_at(str: string, index: int) -> int
+
+fn hexval(h: int) -> int {
+    if h >= 48 && h <= 57 { return h - 48 }
+    if h >= 97 && h <= 102 { return h - 87 }
+    return h - 55
+}
+
+main() {
+    port, _perr = string.to_int(os.getenv("PEER_PORT"))
+    sock, derr = tcp.connect("127.0.0.1", port)
+    if derr != "" {
+        println("ERR: connect: ${derr}")
+        return
+    }
+    raw = os.getenv("RAW")
+    n = string.length(raw) / 2
+    b = bytes.new(n)
+    i = 0
+    while i < n {
+        bytes.set(b, i, hexval(string_char_at(raw, 2 * i)) * 16 + hexval(string_char_at(raw, 2 * i + 1)))
+        i = i + 1
+    }
+    _s, _werr = tcp.write_all(sock, bytes.view(b)[0..n])
+    bytes.free(b)
+    buf = bytes.new(64)
+    bytes.set(buf, 63, 0)
+    got, rerr = tcp.read_into(sock, bytes.view(buf)[0..64])
+    if rerr != "" || got <= 0 {
+        println("CLOSED")
+    } else if got >= 7 && (bytes.get(buf, 0) & 0xFF) == 0x15 {
+        println("ALERT ${bytes.get(buf, 6) & 0xFF}")
+    } else {
+        println("OTHER")
+    }
+    bytes.free(buf)
+    tcp.close(sock)
+}

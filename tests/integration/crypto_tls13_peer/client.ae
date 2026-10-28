@@ -1,9 +1,11 @@
 // The pure TLS client against peer.ae: connect_socket to 127.0.0.1
 // PEER_PORT for "peer.example", trusting CAFILE. Prints "OK" after a
-// verified handshake, else "ERR: <why>".
+// verified handshake, else "ERR: <why>". With CLIENT_READ=1 it then reads
+// once and prints "RECV <n>", "RECV-EOF" or "RECVERR: <why>".
 
 import std.os
 import std.tcp
+import std.bytes
 import std.string
 import std.cryptography.tls13_client
 
@@ -20,5 +22,16 @@ main() {
         return
     }
     println("OK")
+    if os.getenv("CLIENT_READ") == "1" {
+        buf, n, rerr = tls13_client.conn_recv(conn)
+        if rerr != "" {
+            println("RECVERR: ${rerr}")
+        } else if buf == null {
+            println("RECV-EOF")
+        } else {
+            println("RECV ${n}")
+            bytes.free(buf)
+        }
+    }
     tls13_client.close_conn(conn)
 }

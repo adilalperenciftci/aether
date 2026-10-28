@@ -1,0 +1,48 @@
+// The pure TLS server (tls13_server.accept) for test_tls13_peer.sh's server
+// cases: it listens on 127.0.0.1, writes its port to PEER_PORT_OUT, serves one
+// connection with peer.ae's certificate, and prints "ACCEPTED" or
+// "REFUSED: <why>".
+
+import std.os
+import std.fs
+import std.tcp
+import std.bytes
+import std.cryptography
+import std.cryptography.tls13_server
+
+extern exit(code: int)
+
+main() {
+    srv, lerr = tcp.listen_on("127.0.0.1", 0)
+    if lerr != "" {
+        println("FAIL: ${lerr}")
+        exit(1)
+    }
+    _pw = fs.write(os.getenv("PEER_PORT_OUT"), "${tcp.server_port(srv)}")
+    sock, aerr = tcp.accept(srv)
+    if aerr != "" {
+        println("FAIL: ${aerr}")
+        exit(1)
+    }
+    chain, lens = tls13_server.parse_cert_chain_pem(peer_pem())
+    key = tls13_server.parse_ec_private_key_pem(peer_key())
+    xpriv, _rerr = cryptography.random_buffer(32)
+    conn, err = tls13_server.accept(sock, chain, lens, key, xpriv)
+    bytes.free(xpriv)
+    if err != "" {
+        println("REFUSED: ${err}")
+        tcp.close(sock)
+        exit(0)
+    }
+    println("ACCEPTED")
+    tls13_server.close_conn(conn)
+    exit(0)
+}
+
+fn peer_pem() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBezCCASGgAwIBAgIFUEVFUgEwCgYIKoZIzj0EAwIwFzEVMBMGA1UEAwwMcGVl\nci5leGFtcGxlMCAXDTI2MDEwMTAwMDAwMFoYDzIxMjYwMTAxMDAwMDAwWjAXMRUw\nEwYDVQQDDAxwZWVyLmV4YW1wbGUwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARv\n7S9eWT57ZTmAOztQD2+5EetBRQ+B+cOtLJCr7BVBQPQExOwo/jrT1ahb6i7ZxObZ\nFrq4KWW801ggO2EZ0SqXo1gwVjAMBgNVHRMBAf8EAjAAMA4GA1UdDwEB/wQEAwIH\ngDAXBgNVHREEEDAOggxwZWVyLmV4YW1wbGUwHQYDVR0OBBYEFH8HRengm5cRK0K4\na6DbxP8afdpfMAoGCCqGSM49BAMCA0gAMEUCIDCIjkFoXJK1RI1twupNRu+WcP5M\nrU1MCAQ84vwQWP4tAiEArDbfJRioR7QSSuE4iKxVCCFaHbJs/7eLq3CNJGUFXoM=\n-----END CERTIFICATE-----\n"
+}
+
+fn peer_key() -> string {
+    return "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgJkV1/PXrot1pb8nd\ndzrI+0SX8Cx63OCppeTS/FARImOhRANCAARv7S9eWT57ZTmAOztQD2+5EetBRQ+B\n+cOtLJCr7BVBQPQExOwo/jrT1ahb6i7ZxObZFrq4KWW801ggO2EZ0SqX\n-----END PRIVATE KEY-----\n"
+}

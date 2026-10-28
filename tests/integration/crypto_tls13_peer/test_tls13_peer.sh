@@ -34,7 +34,7 @@ cleanup() {
 trap cleanup EXIT
 fail() { echo "  [FAIL] $NAME: $1"; exit 1; }
 
-for p in peer client; do
+for p in peer client server rawclient; do
     "$AE" build "$SCRIPT_DIR/$p.ae" -o "$TMP/$p" >"$TMP/b_$p.log" 2>&1 \
         || { sed -n '1,12p' "$TMP/b_$p.log"; fail "$p did not build"; }
 done
@@ -49,7 +49,9 @@ run_case() {
     i=0
     while [ "$i" -lt 100 ] && [ ! -s "$TMP/port" ]; do sleep 0.1; i=$((i + 1)); done
     [ -s "$TMP/port" ] || { cat "$TMP/peer.out"; fail "$1: the peer never listened"; }
-    got=$(PEER_PORT="$(cat "$TMP/port")" CAFILE="$TMP/peer.pem" "$TMP/client" 2>&1 | grep -v 'warning' || :)
+    cr=0
+    case "$2" in *post=*) cr=1 ;; esac
+    got=$(CLIENT_READ="$cr" PEER_PORT="$(cat "$TMP/port")" CAFILE="$TMP/peer.pem" "$TMP/client" 2>&1 | grep -v 'warning' || :)
     n=0
     while server_alive "$ppid" && [ "$n" -lt 100 ]; do sleep 0.1; n=$((n + 1)); done
     stop_server "$ppid"
@@ -97,6 +99,49 @@ run_case "Certificate: server_name, offered but out of place" "cert_ext=00000000
 run_case "Certificate: status_request with no response" "cert_ext=00050000" "ERR" "ALERT 50"
 run_case "Certificate: status_request twice" "cert_ext=0005000501000001000005000501000001ff" "ERR" "ALERT 47"
 run_case "Certificate: one stapled response" "cert_ext=0005000501000001ff" "OK" "FINISHED"
+
+
+# #3317: the record layer (RFC 8446 5).
+run_case "flight: the one compatibility change_cipher_spec" "ccs=1" "OK" "FINISHED"
+run_case "flight: two change_cipher_spec records" "ccs=2" "ERR" "ALERT 10"
+run_case "flight: a change_cipher_spec of value 2" "ccs=bad" "ERR" "ALERT 10"
+run_case "flight: an empty protected handshake record" "empty_hs=1" "ERR" "ALERT 10"
+run_case "flight: EncryptedExtensions in the clear" "plain_ee=1" "ERR" "ALERT 10"
+run_case "flight: bytes after the Finished in its record" "fin_trailing=1" "ERR" "ALERT 10"
+run_case "after: a record of 2^14 + 1 bytes" "post=oversize" "RECVERR" "POST ALERT 22"
+run_case "after: 8193 bytes padded past 2^14 + 1" "post=padded" "RECVERR" "POST ALERT 22"
+run_case "after: a protected record over 2^14 + 256" "post=bigcipher" "RECVERR" "POST ALERT 22"
+run_case "after: 40 empty records" "post=empty40" "RECVERR" "POST ALERT 10"
+run_case "after: 10 empty records, then data" "post=empty10" "RECV 2" "POST"
+run_case "after: a change_cipher_spec" "post=ccs" "RECVERR" "POST ALERT 10"
+run_case "after: a record of unknown type" "post=badtype" "RECVERR" "POST ALERT 10"
+run_case "after: a protected record of unknown inner type" "post=innertype" "RECVERR" "POST ALERT 10"
+run_case "after: a record that does not authenticate" "post=badmac" "RECVERR" "POST ALERT 20"
+run_case "after: an empty handshake record" "post=emptyhs" "RECVERR" "POST ALERT 10"
+
+# run_server_case <name> <RAW hex the client sends> <answer expected>
+run_server_case() {
+    rm -f "$TMP/port" "$TMP/server.out"
+    PEER_PORT_OUT="$TMP/port" "$TMP/server" >"$TMP/server.out" 2>&1 &
+    spid=$!
+    PIDS="$PIDS $spid"
+    i=0
+    while [ "$i" -lt 100 ] && [ ! -s "$TMP/port" ]; do sleep 0.1; i=$((i + 1)); done
+    [ -s "$TMP/port" ] || { cat "$TMP/server.out"; fail "$1: the server never listened"; }
+    got=$(RAW="$2" PEER_PORT="$(cat "$TMP/port")" "$TMP/rawclient" 2>&1 | grep -v 'warning' || :)
+    n=0
+    while server_alive "$spid" && [ "$n" -lt 100 ]; do sleep 0.1; n=$((n + 1)); done
+    stop_server "$spid"
+    case "$got" in
+        *"$3"*) echo "    ok: $1" ;;
+        *) echo "    FAIL: $1: the server answered [$got], server said [$(cat "$TMP/server.out")]; want [$3]"; fails=$((fails + 1)) ;;
+    esac
+}
+
+# #3317, the pure server's record layer: refused from the header alone.
+run_server_case "server: a record of unknown type first" "180303000100" "ALERT 10"
+run_server_case "server: a plaintext record over 2^14" "1603034001" "ALERT 22"
+run_server_case "server: a change_cipher_spec before the ClientHello" "140303000101" "ALERT 10"
 
 [ "$fails" = 0 ] || fail "$fails case(s)"
 echo "  [PASS] $NAME"
