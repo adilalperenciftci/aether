@@ -347,6 +347,15 @@ const char* http_request_header_value(HttpRequest* r, int i) { (void)r; (void)i;
 /* x509v3.h for X509_VERIFY_PARAM_set1_host / the hostflags used when the
  * WebSocket client pins a wss:// certificate to its host. */
 #include <openssl/x509v3.h>
+/* The hostname check: no partial-label wildcards ("f*.example.com"), and
+ * never the subject CN (#3313), only the SANs, as the pure-Aether backend
+ * reads them (RFC 9525), so both backends accept the same servers. Every
+ * OpenSSL from 1.1.0 has the flag. */
+#ifdef X509_CHECK_FLAG_NEVER_CHECK_SUBJECT
+#define AETHER_HOSTFLAGS (X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS | X509_CHECK_FLAG_NEVER_CHECK_SUBJECT)
+#else
+#define AETHER_HOSTFLAGS X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS
+#endif
 
 /* The HTTP client's shared SSL_CTX (aether_http.c). wss:// reuses it so the
  * trust store and TLS floor are decided in exactly one place. Do not free. */
@@ -4574,7 +4583,7 @@ HttpWsConn* http_ws_connect(const char* url) {
          * set1_ip_asc: older OpenSSL's set1_host does not detect IPs, and
          * silently pinning nothing is exactly the failure this prevents. */
         X509_VERIFY_PARAM* vpm = SSL_get0_param(s);
-        X509_VERIFY_PARAM_set_hostflags(vpm, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+        X509_VERIFY_PARAM_set_hostflags(vpm, AETHER_HOSTFLAGS);
         struct in_addr  in4;
         struct in6_addr in6;
         if (inet_pton(AF_INET, host, &in4) == 1 ||

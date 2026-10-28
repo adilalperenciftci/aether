@@ -304,6 +304,15 @@ static int http_client_use_pure_tls(const HttpClientRequest* req);
     #include <openssl/ssl.h>
     #include <openssl/err.h>
     #include <openssl/x509v3.h>
+/* The hostname check: no partial-label wildcards ("f*.example.com"), and
+ * never the subject CN (#3313), only the SANs, as the pure-Aether backend
+ * reads them (RFC 9525), so both backends accept the same servers. Every
+ * OpenSSL from 1.1.0 has the flag. */
+#ifdef X509_CHECK_FLAG_NEVER_CHECK_SUBJECT
+#define AETHER_HOSTFLAGS (X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS | X509_CHECK_FLAG_NEVER_CHECK_SUBJECT)
+#else
+#define AETHER_HOSTFLAGS X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS
+#endif
 #endif
 
 static int http_initialized = 0;
@@ -2627,10 +2636,13 @@ static int http_dial(HttpClientRequest* req, AetherAddrList* addrs,
             // still verifies. Mirrors curl -k / wget --no-check-certificate.
             SSL_set_verify(ssl, SSL_VERIFY_NONE, NULL);
         } else {
-            // Verify the cert's CN/SAN matches the host we connected to. For an
-            // IP literal (e.g. a Proxmox API at https://192.168.0.204:8006),
+            // Verify the cert's SAN matches the host we connected to (never the
+            // subject CN, #3313: the pure-Aether backend reads SANs only, as
+            // RFC 9525 and browsers do, and the backends must accept the same
+            // servers). For an IP literal (e.g. a Proxmox API at
+            // https://192.168.0.204:8006),
             // set1_ip_asc pins the IP SAN; for a DNS name, set1_host pins the
-            // DNS SAN/CN. Using the IP-specific call for IP literals is correct
+            // DNS SAN. Using the IP-specific call for IP literals is correct
             // across OpenSSL versions (older set1_host did not auto-detect IPs).
             // The trust anchor for THIS connection is either the shared system
             // store or, when set_cafile was called, the couriered CA loaded onto
@@ -2639,7 +2651,7 @@ static int http_dial(HttpClientRequest* req, AetherAddrList* addrs,
             // stronger than set_insecure and fails closed if the CA doesn't
             // cover the presented cert.
             X509_VERIFY_PARAM* vpm = SSL_get0_param(ssl);
-            X509_VERIFY_PARAM_set_hostflags(vpm, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+            X509_VERIFY_PARAM_set_hostflags(vpm, AETHER_HOSTFLAGS);
             struct in_addr in4;
             struct in6_addr in6;
             if (inet_pton(AF_INET, host, &in4) == 1 ||

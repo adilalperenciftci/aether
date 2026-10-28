@@ -155,8 +155,9 @@ file with no bundle at all, then `/etc/ssl/certs`. If nothing loads, the
 handshake fails closed.
 
 **What it validates.** The server's certificate must name the host
-(subjectAltName only: DNS names, with a whole-label leading wildcard over at
-least two labels, and IP addresses), and there must be a path from it
+(subjectAltName only, on the OpenSSL backend too since #3313: DNS names, with
+a whole-label leading wildcard over at least two labels, and IP
+addresses), and there must be a path from it
 through the certificates the server sent to one of those anchors, which
 must be a self-signed root, on this backend as on OpenSSL's (a trusted
 intermediate ends no path; pinning one is #3311)
