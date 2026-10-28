@@ -1,0 +1,149 @@
+#!/bin/sh
+# The pure-Aether TLS server signs with every key kind a certificate can
+# carry (#3326), and refuses a certificate and key it cannot serve when the
+# server is set up, as the OpenSSL backend does (#3328).
+#
+#   1. a P-256 key (SEC1, after an EC PARAMETERS block), P-384 and P-521
+#      (PKCS#8), Ed25519, and RSA-2048 (PKCS#8 and PKCS#1): the server starts,
+#      and the "aether" and "openssl" clients fetch from it (each verifies the
+#      CertificateVerify the key's scheme signs);
+#   2. server_set_tls refuses, with the reason: an RSA-1024 key, another
+#      certificate's key of the same type, a key of another type, an
+#      encrypted key, a missing key file;
+#   3. a client that offers no scheme the key signs with (openssl s_client
+#      with only ECDSA-P256 against the RSA server) gets handshake_failure.
+#
+# In a build without OpenSSL only the "aether" client cases run.
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/wait_port.sh"
+. "$ROOT/tests/lib/server_jobs.sh"
+AE="$ROOT/build/ae"
+NAME=https_pure_server_keys
+
+[ -x "$AE" ] || { echo "  [SKIP] $NAME: ae not built"; exit 0; }
+command -v openssl >/dev/null 2>&1 || { echo "  [SKIP] $NAME: no openssl to make keys"; exit 0; }
+
+unset SSL_CERT_FILE SSL_CERT_DIR AETHER_PURE_TLS || :
+
+TMP="$(mktemp -d)"
+. "$ROOT/tests/lib/test_openssl_conf.sh"
+test_openssl_conf "$TMP"
+PIDS=""
+cleanup() {
+    for p in $PIDS; do stop_server "$p"; done
+    rm -rf "$TMP" || :
+    return 0
+}
+trap cleanup EXIT
+fail() { echo "  [FAIL] $NAME: $1"; exit 1; }
+ssl() { "$@" >"$TMP/ssl.log" 2>&1 || { sed -n '1,10p' "$TMP/ssl.log"; fail "openssl: $*"; }; }
+
+# A self-signed certificate for localhost over the key $1.key -> $1.pem.
+cert() {
+    MSYS2_ARG_CONV_EXCL='/CN=' ssl openssl req -x509 -new -key "$TMP/$1.key" -out "$TMP/$1.pem" \
+        -days 2 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost"
+}
+ssl openssl ecparam -name prime256v1 -genkey -out "$TMP/p256.key"
+grep -q "BEGIN EC PARAMETERS" "$TMP/p256.key" || fail "the P-256 fixture has no EC PARAMETERS block"
+ssl openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384 -out "$TMP/p384.key"
+ssl openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-521 -out "$TMP/p521.key"
+ssl openssl genpkey -algorithm ed25519 -out "$TMP/ed25519.key"
+ssl openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$TMP/rsa.key"
+ssl openssl rsa -in "$TMP/rsa.key" -traditional -out "$TMP/rsa1.key"
+grep -q "BEGIN RSA PRIVATE KEY" "$TMP/rsa1.key" || fail "the PKCS#1 fixture is not PKCS#1"
+for k in p256 p384 p521 ed25519 rsa; do cert "$k"; done
+cp "$TMP/rsa.pem" "$TMP/rsa1.pem"
+# The refusals.
+ssl openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:1024 -out "$TMP/weak.key"
+cert weak
+ssl openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$TMP/other.key"
+ssl openssl pkey -in "$TMP/p256.key" -aes256 -passout pass:secret -out "$TMP/enc.key"
+
+for p in server client; do
+    "$AE" build "$SCRIPT_DIR/$p.ae" -o "$TMP/$p" >"$TMP/b_$p.log" 2>&1 \
+        || { sed -n '1,12p' "$TMP/b_$p.log"; fail "$p did not build"; }
+done
+
+# Run a client with a watchdog; its output (warnings dropped) lands in $OUT.
+run() {
+    "$@" >"$TMP/out" 2>&1 &
+    cpid=$!
+    n=0
+    while kill -0 "$cpid" 2>/dev/null; do
+        n=$((n + 1))
+        if [ "$n" -gt 300 ]; then
+            kill_server "$cpid"
+            OUT="HUNG (no result after 30 s)"
+            return 0
+        fi
+        sleep 0.1
+    done
+    wait "$cpid" 2>/dev/null || :
+    OUT=$(grep -vE 'warning: unresolved|-->' "$TMP/out" || :)
+}
+
+run env URL="https://localhost:1/" CAFILE="$TMP/p256.pem" BACKEND=openssl "$TMP/client"
+BACKENDS="aether"
+case "$OUT" in *"has no OpenSSL"*) ;; *) BACKENDS="aether openssl" ;; esac
+
+# Start the pure server with certificate $1 and key $2; READY -> S_PORT,
+# else the server's output in $OUT and S_PORT empty.
+start_server() {
+    S_PORT=""
+    CERT_PATH="$TMP/$1.pem" KEY_PATH="$TMP/$2.key" "$TMP/server" >"$TMP/srv_$1_$2.log" 2>&1 &
+    spid=$!
+    PIDS="$PIDS $spid"
+    i=0
+    while [ "$i" -lt 300 ]; do
+        grep -q 'READY\|FAIL' "$TMP/srv_$1_$2.log" 2>/dev/null && break
+        sleep 0.1
+        i=$((i + 1))
+    done
+    OUT=$(cat "$TMP/srv_$1_$2.log")
+    case "$OUT" in
+        *"READY "*) S_PORT=$(sed -n 's/^READY \([0-9]*\).*/\1/p' "$TMP/srv_$1_$2.log" | head -1) ;;
+    esac
+}
+
+# 1. Every key kind serves both clients.
+for k in p256 p384 p521 ed25519 rsa rsa1; do
+    start_server "$k" "$k"
+    [ -n "$S_PORT" ] || { echo "    got: $OUT"; fail "the $k server did not start"; }
+    for b in $BACKENDS; do
+        run env URL="https://localhost:$S_PORT/" CAFILE="$TMP/$k.pem" BACKEND="$b" "$TMP/client"
+        case "$OUT" in
+            *"STATUS 200 BODY keys-ok"*) echo "    ok: $k key, client \"$b\"" ;;
+            *) echo "    got: $OUT"; fail "$k key, client \"$b\": not fetched" ;;
+        esac
+    done
+done
+
+# 2. What server_set_tls refuses, and says why.
+refused_at_setup() { # cert key reason-pattern case-name
+    start_server "$1" "$2"
+    [ -z "$S_PORT" ] || fail "$4: the server started"
+    case "$OUT" in
+        *"FAIL: server_set_tls: "*"$3"*) echo "    ok: $4 (refused)" ;;
+        *) echo "    got: $OUT"; fail "$4: expected a refusal containing '$3'" ;;
+    esac
+}
+refused_at_setup weak weak "2048 bits" "an RSA-1024 key"
+refused_at_setup p256 other "does not match" "another certificate's P-256 key"
+refused_at_setup p256 p384 "key type" "a P-384 key for a P-256 certificate"
+refused_at_setup p256 enc "encrypted" "an encrypted key"
+refused_at_setup p256 missing "cannot read the TLS private key" "a missing key file"
+
+# 3. No scheme in common: the RSA server and a client that offers ECDSA-P256 only.
+start_server rsa rsa
+[ -n "$S_PORT" ] || { echo "    got: $OUT"; fail "the RSA server did not start"; }
+openssl s_client -connect "127.0.0.1:$S_PORT" -servername localhost -tls1_3 \
+    -sigalgs ecdsa_secp256r1_sha256 </dev/null >"$TMP/sclient.log" 2>&1 || :
+grep -qi "handshake failure\|alert number 40" "$TMP/sclient.log" \
+    || { sed -n '1,15p' "$TMP/sclient.log"; fail "no handshake_failure for a client without the key's scheme"; }
+echo "    ok: a client without the key's scheme gets handshake_failure"
+
+echo "  [PASS] $NAME"

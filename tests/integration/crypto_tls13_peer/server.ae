@@ -25,10 +25,11 @@ main() {
         exit(1)
     }
     chain, lens = tls13_server.parse_cert_chain_pem(peer_pem())
-    key = tls13_server.parse_ec_private_key_pem(peer_key())
+    key, _kerr = tls13_server.load_private_key(peer_key())
     xpriv, _rerr = cryptography.random_buffer(32)
     conn, err = tls13_server.accept(sock, chain, lens, key, xpriv)
     bytes.free(xpriv)
+    tls13_server.free_private_key(key)
     if err != "" {
         println("REFUSED: ${err}")
         tcp.close(sock)

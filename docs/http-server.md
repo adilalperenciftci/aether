@@ -125,9 +125,14 @@ It returns an error string when the named backend cannot serve: `"openssl"`
 in a build without OpenSSL, `"aether"` in a program that does not import
 `std.cryptography.tls13_server`, or an unknown name. Call it before
 `server_start`; it may come before or after `server_set_tls` (it re-applies
-the certificate and key). The pure server speaks TLS 1.3 only and signs with
-an ECDSA P-256 key, in constant time (see
-[writing-security-sensitive-code.md](writing-security-sensitive-code.md)).
+the certificate and key). The pure server speaks TLS 1.3 only. It signs with
+an ECDSA P-256, P-384 or P-521, Ed25519 or RSA (2048 to 16384 bits) key, the
+key's own scheme when the client offers it, in constant time (see
+[writing-security-sensitive-code.md](writing-security-sensitive-code.md))
+(#3326). `server_set_tls` loads the certificate and key on this backend as on
+OpenSSL's, and returns why when it cannot serve them: an unreadable file, an
+encrypted or too-short key, a key that does not match the certificate
+(#3328).
 
 The client has the same choice per request, `client.set_tls_backend(req,
 backend)` (see the client section of `std/http/README.md`).

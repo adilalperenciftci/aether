@@ -393,6 +393,25 @@ AETHER_WEAK void aether_pure_tls_server_close(void* pure_conn) {
     (void)pure_conn;
 }
 
+/* Why the pure server's check refused a certificate and key (#3328), on the
+ * thread that asked. Set through aether_pure_tls_server_set_error, which
+ * std.cryptography.tls13_server calls. */
+static _Thread_local char pt_server_check_err[512];
+void aether_pure_tls_server_set_error(const char* msg) {
+    if (!msg) { pt_server_check_err[0] = '\0'; return; }
+    size_t n = strlen(msg);
+    if (n >= sizeof(pt_server_check_err)) n = sizeof(pt_server_check_err) - 1;
+    memcpy(pt_server_check_err, msg, n);
+    pt_server_check_err[n] = '\0';
+}
+/* 1 when the pure server can use the chain and key (they load and are a
+ * pair), 0 when not, the reason set; -1 when no pure server is linked.
+ * std.cryptography.tls13_server overrides this (#3328). */
+AETHER_WEAK int aether_pure_tls_server_check(const char* cert_path, const char* key_path) {
+    (void)cert_path; (void)key_path;
+    return -1;
+}
+
 /* #2297: the registered implementation (aether_callback_lookup), else the
  * symbol above; see the client side in aether_http.c. */
 #include "../../runtime/aether_callbacks.h"
@@ -420,6 +439,23 @@ static int pt_server_recv(void* c, void* buf, int len) {
 static void pt_server_close(void* c) {
     pt_server_close_fn f = (pt_server_close_fn)aether_callback_lookup("aether_pure_tls_server_close");
     if (f) f(c); else aether_pure_tls_server_close(c);
+}
+typedef int   (*pt_server_check_fn)(const char*, const char*);
+/* NULL when the pure server can serve with this chain and key, else why not
+ * (#3328): what the OpenSSL path learns from loading the files and
+ * SSL_CTX_check_private_key, so both backends refuse the same setups when
+ * the server is configured. */
+static const char* pt_server_check(const char* cert_path, const char* key_path) {
+    pt_server_check_fn f = (pt_server_check_fn)aether_callback_lookup("aether_pure_tls_server_check");
+    pt_server_check_err[0] = '\0';
+    int rc = f ? f(cert_path, key_path) : aether_pure_tls_server_check(cert_path, key_path);
+    if (rc == 1) return NULL;
+    if (rc < 0) {
+        return "the pure-Aether TLS server is not linked: add "
+               "`import std.cryptography.tls13_server` to the program";
+    }
+    return pt_server_check_err[0] ? pt_server_check_err
+                                  : "the pure-Aether TLS server cannot use this certificate and key";
 }
 
 /* Per-connection read buffer. Persists across requests on a
@@ -2026,11 +2062,6 @@ const char* http_server_set_tls_raw(HttpServer* server,
     if (!cert_path || !*cert_path) return "cert_path is empty";
     if (!key_path  || !*key_path)  return "key_path is empty";
 
-    if (server->cert_path) free(server->cert_path);
-    if (server->key_path) free(server->key_path);
-    server->cert_path = strdup(cert_path);
-    server->key_path = strdup(key_path);
-
     /* The backend: the program's choice (server_set_tls_backend, #1298),
      * else AETHER_PURE_TLS, else OpenSSL where it is built in. */
     int pure = 0;
@@ -2040,6 +2071,19 @@ const char* http_server_set_tls_raw(HttpServer* server,
         const char* env_pure = getenv("AETHER_PURE_TLS");
         pure = env_pure && (strcmp(env_pure, "1") == 0 || strcasecmp(env_pure, "true") == 0);
     }
+    /* The pure server is refused now, as the OpenSSL path refuses, rather
+     * than at every handshake; a refusal leaves the earlier setup, paths
+     * included, as it was (#3328). */
+    if (pure) {
+        const char* why = pt_server_check(cert_path, key_path);
+        if (why) return why;
+    }
+
+    if (server->cert_path) free(server->cert_path);
+    if (server->key_path) free(server->key_path);
+    server->cert_path = strdup(cert_path);
+    server->key_path = strdup(key_path);
+
     if (pure) {
 #ifdef AETHER_HAS_OPENSSL
         /* Re-applied after an OpenSSL setup: the pure stack takes over. */
@@ -2132,6 +2176,7 @@ const char* http_server_set_tls_backend_raw(HttpServer* server, const char* name
     } else {
         return "unknown TLS backend (use \"aether\", \"openssl\" or \"\")";
     }
+    int previous = server->tls_backend;
     server->tls_backend = b;
     if (server->tls_enabled && server->cert_path && server->key_path) {
         char* cert = strdup(server->cert_path);
@@ -2140,6 +2185,9 @@ const char* http_server_set_tls_backend_raw(HttpServer* server, const char* name
                                         : "out of memory";
         free(cert);
         free(key);
+        /* A backend that cannot serve this certificate and key is not
+         * chosen: the server keeps the one it had (#3328). */
+        if (err && *err) server->tls_backend = previous;
         return err;
     }
     return "";

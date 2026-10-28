@@ -14,10 +14,10 @@
 //
 //   -port N -shim-id N -ipv6          where to connect, and the id to send
 //   -server                           be the server (else the client)
-//   -cert-file P -key-file P          the server's chain and key; only a
-//                                     P-256 key (the pure server signs with
-//                                     ECDSA P-256 alone). A client
-//                                     certificate is unimplemented.
+//   -cert-file P -key-file P          the server's chain and key (ECDSA
+//                                     P-256, P-384, P-521, Ed25519 or RSA,
+//                                     #3326). A client certificate is
+//                                     unimplemented.
 //   -trust-cert P                     the client's trust anchor; the runner's
 //                                     certificates name "test", which is the
 //                                     host the client verifies
@@ -32,7 +32,6 @@
 
 import std.os
 import std.io
-import std.list
 import std.fs
 import std.tcp
 import std.bytes
@@ -40,7 +39,6 @@ import std.string
 import std.cryptography
 import std.cryptography.tls13_client
 import std.cryptography.tls13_server
-import std.cryptography.tls13_cert
 
 extern exit(code: int)
 
@@ -97,25 +95,16 @@ fn shim_id_bytes(s: string) -> ptr {
     return b
 }
 
-// The pure server's credentials: a chain whose leaf has a P-256 key, and
-// that key.
+// The pure server's credentials: a chain, and its key of any kind the
+// server signs with (tls13_server.load_private_key, #3326).
 fn server_creds(cert_file: string, key_file: string) -> (ptr, ptr, ptr) {
     cert_pem, cerr = fs.read(cert_file)
     if cerr != "" { fail("cannot read ${cert_file}: ${cerr}") }
     key_pem, kerr = fs.read(key_file)
     if kerr != "" { fail("cannot read ${key_file}: ${kerr}") }
-    leaves = list_new()
-    tls13_cert.trust_store_add_pem(leaves, cert_pem)
-    p256 = 0
-    if list_size(leaves) > 0 {
-        leaf = list.at(leaves, 0) as *LeafCert
-        if leaf.spki_key_len == 65 { p256 = 1 }
-    }
-    tls13_cert.free_anchors(leaves)
-    if p256 == 0 { unimplemented("the server key is not P-256") }
     chain, lens = tls13_server.parse_cert_chain_pem(cert_pem)
-    key = tls13_server.parse_ec_private_key_pem(key_pem)
-    if chain == null || key == null { unimplemented("cannot load the server credentials") }
+    key, lerr = tls13_server.load_private_key(key_pem)
+    if chain == null || key == null { unimplemented("cannot load the server credentials: ${lerr}") }
     return chain, lens, key
 }
 

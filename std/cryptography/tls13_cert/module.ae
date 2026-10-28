@@ -56,6 +56,8 @@ exports(
     init_leaf,
     LEAFCERT_SIZE,
     cert_verify_content, client_cert_verify_content, sign_client_cert_verify_ecdsa_p256, sign_server_cert_verify_ecdsa_p256,
+    sign_server_cert_verify_ecdsa, sign_server_cert_verify_ed25519, sign_server_cert_verify_rsa_pss,
+    KEY_NONE, KEY_RSA, KEY_P256, KEY_P384, KEY_P521, KEY_ED25519,
     verify_cert_verify, verify_cert_verify_rsa_pss, parse_certificate, free_leaf,
     split_ecdsa_sig,
     LeafCert,
@@ -63,7 +65,7 @@ exports(
     leaf_dns_count, leaf_dns_name,
     leaf_tbs_len, leaf_subject_len, leaf_issuer_len,
     leaf_is_ca, leaf_key_cert_sign,
-    SCHEME_ECDSA_P256_SHA256, SCHEME_ECDSA_P384_SHA384, SCHEME_ED25519, SCHEME_RSA_PSS_RSAE_SHA256,
+    SCHEME_ECDSA_P256_SHA256, SCHEME_ECDSA_P384_SHA384, SCHEME_ECDSA_P521_SHA512, SCHEME_ED25519, SCHEME_RSA_PSS_RSAE_SHA256,
     check_validity, time_to_key, check_hostname,
     chain_verify, chain_verify_path, verify_cert_signature, find_issuer_cert,
     validate_chain, check_validity_at, PURPOSE_SERVER, PURPOSE_CLIENT, TRUST_PARTIAL_CHAIN,
@@ -74,6 +76,7 @@ exports(
 // SignatureScheme code points (RFC 8446 §4.2.3).
 const SCHEME_ECDSA_P256_SHA256 = 0x0403
 const SCHEME_ECDSA_P384_SHA384 = 0x0503
+const SCHEME_ECDSA_P521_SHA512 = 0x0603
 const SCHEME_RSA_PSS_RSAE_SHA256 = 0x0804
 const SCHEME_ED25519 = 0x0807
 
@@ -132,18 +135,78 @@ sign_server_cert_verify_ecdsa_p256(priv: ptr, transcript_hash: byte[]) -> ptr {
     return sig
 }
 
+// Sign a server CertificateVerify (RFC 8446 §4.4.3) with an ECDSA key of
+// `kind` (KEY_P256 with SHA-256, KEY_P384 with SHA-384, KEY_P521 with
+// SHA-512: the schemes 0x0403, 0x0503, 0x0603, which tie the hash to the
+// curve). `priv` is the scalar, its curve's size; the nonce is RFC 6979's.
+// Returns the DER ECDSA-Sig-Value (caller frees), or null for a key outside
+// [1, n-1] or another kind (#3326).
+sign_server_cert_verify_ecdsa(kind: int, priv: ptr, transcript_hash: byte[]) -> ptr {
+    content, clen = cert_verify_content(transcript_hash)
+    sig = sign_content_ecdsa(kind, priv, content, clen)
+    bytes.free(content)
+    return sig
+}
+
+// Sign a server CertificateVerify with an Ed25519 key (scheme 0x0807): the
+// 32-byte seed signs the §4.4.3 content itself (Ed25519 hashes inside).
+// Returns the 64-byte signature (caller frees), or null (#3326).
+sign_server_cert_verify_ed25519(seed: ptr, transcript_hash: byte[]) -> ptr {
+    if seed == null || bytes.length(seed) != 32 { return null }
+    content, clen = cert_verify_content(transcript_hash)
+    sig = ed25519.sign(seed, bytes.view(content)[0..clen])
+    bytes.free(content)
+    return sig
+}
+
+// Sign a server CertificateVerify with an RSA key as rsa_pss_rsae_sha256
+// (0x0804; RFC 8446 forbids PKCS#1 v1.5 in TLS 1.3): SHA-256, MGF1 with
+// SHA-256, and a fresh 32-byte salt (the hash's length, §4.2.3). The
+// private-key operation is std.cryptography.rsa's, constant time and blinded.
+// Returns the signature (caller frees), or null without randomness (#3326).
+sign_server_cert_verify_rsa_pss(key: ptr, transcript_hash: byte[]) -> ptr {
+    if key == null { return null }
+    salt, serr = cryptography.random_buffer(32)
+    if serr != "" || salt == null { return null }
+    content, clen = cert_verify_content(transcript_hash)
+    digest = sha256_of_bytes(bytes.view(content)[0..clen])
+    sig = rsa.sign_pss(key, digest, bytes.view(salt)[0..32])
+    bytes.free(digest)
+    bytes.free(content)
+    bytes.free(salt)
+    return sig
+}
+
 // SHA-256 the first clen bytes of content, sign the digest with p256 and
 // DER-encode (r, s); null when the key is refused.
 fn sign_content_ecdsa_p256(priv: ptr, content: ptr, clen: int) -> ptr {
-    digest = sha256_of_bytes(bytes.view(content)[0..clen])
-    r32, s32 = p256.ecdsa_sign(priv, digest)
+    return sign_content_ecdsa(KEY_P256, priv, content, clen)
+}
+
+// Hash the first clen bytes of content with the hash `kind`'s scheme ties to
+// its curve, sign the digest and DER-encode (r, s); null when the key is
+// refused or `kind` is not an ECDSA curve.
+fn sign_content_ecdsa(kind: int, priv: ptr, content: ptr, clen: int) -> ptr {
+    hid = 0
+    size = 0
+    if kind == KEY_P256 { hid = 1 size = 32 }
+    if kind == KEY_P384 { hid = 2 size = 48 }
+    if kind == KEY_P521 { hid = 3 size = 66 }
+    if hid == 0 || priv == null || bytes.length(priv) != size { return null }
+    digest = digest_of(bytes.view(content)[0..clen], hid)
+    var r32: ptr = null
+    var s32: ptr = null
+    if kind == KEY_P256 { r32, s32 = p256.ecdsa_sign(priv, digest) }
+    if kind == KEY_P384 { r32, s32 = p384.ecdsa_sign(priv, digest) }
+    if kind == KEY_P521 { r32, s32 = p521.ecdsa_sign(priv, digest) }
     bytes.free(digest)
     if r32 == null {
+        if s32 != null { bytes.free(s32) }
         return null
     }
     // DER-encode as SEQUENCE { INTEGER r, INTEGER s }.
-    rbn = bignum.from_bytes_unsigned(r32, 32)
-    sbn = bignum.from_bytes_unsigned(s32, 32)
+    rbn = bignum.from_bytes_unsigned(r32, bytes.length(r32))
+    sbn = bignum.from_bytes_unsigned(s32, bytes.length(s32))
     rder = asn1.encode_integer(rbn)
     sder = asn1.encode_integer(sbn)
     body = bytes.new(bytes.length(rder) + bytes.length(sder))
@@ -362,6 +425,18 @@ verify_cert_verify(scheme: int, pubx: ptr, puby: ptr, transcript_hash: byte[], s
             result = p384.ecdsa_verify(pubx, puby, digest, r48, s48)
             bytes.free(r48)
             bytes.free(s48)
+        }
+        bytes.free(digest)
+    }
+    if scheme == SCHEME_ECDSA_P521_SHA512 {
+        // ECDSA over SHA-512(content) on a P-521 leaf key; pubx/puby are the
+        // 66-byte affine coordinates. DER sig -> (r,s), each 66 bytes.
+        digest = digest_of(bytes.view(content)[0..clen], 3)
+        r66, s66, serr = split_ecdsa_sig(sig, 66)
+        if string.equals(serr, "") == 1 {
+            result = p521.ecdsa_verify(pubx, puby, digest, r66, s66)
+            bytes.free(r66)
+            bytes.free(s66)
         }
         bytes.free(digest)
     }
@@ -2332,6 +2407,7 @@ fn eku_octets_have_ocsp_signing(buf: ptr, start: int, end: int) -> int {
 //   rsaEncryption            1.2.840.113549.1.1.1
 //   id-ecPublicKey           1.2.840.10045.2.1
 
+import std.cryptography
 import std.cryptography.rsa
 
 // Compare a bytes-stored OID (ASCII dotted string) against a literal.
@@ -2611,6 +2687,12 @@ const MAX_CHAIN_DEPTH = 8
 //     refused;
 //   - (a self-signed leaf that is itself an anchor, a pinned certificate,
 //     is trusted as it stands, as OpenSSL trusts it);
+//   - only a self-signed root ends a path (#3310), unless `purpose` has
+//     TRUST_PARTIAL_CHAIN or'd in (#3311, OpenSSL's
+//     X509_V_FLAG_PARTIAL_CHAIN): then any anchor ends one, an anchor that
+//     is not a self-signed root held to the rules of an intermediate (a v3
+//     CA with keyCertSign), and a leaf that is itself an anchor is trusted
+//     as it stands whether self-signed or not;
 //   - there are at most max_depth intermediates that are not self-issued
 //     (a negative max_depth means MAX_CHAIN_DEPTH).
 // The search spends at most CHAIN_SIG_BUDGET signature checks and
@@ -2621,12 +2703,13 @@ const MAX_CHAIN_DEPTH = 8
 
 const PURPOSE_SERVER = 1
 const PURPOSE_CLIENT = 2
-
 // OR'd into validate_chain's `purpose`: any trusted certificate may end a
 // path, not only a self-signed root, as with OpenSSL's
 // X509_V_FLAG_PARTIAL_CHAIN (set_partial_chain, #3311). Off by default on
 // both backends.
 const TRUST_PARTIAL_CHAIN = 256
+// The purpose bits of `purpose`, without the options or'd in.
+const PURPOSE_MASK = 3
 
 const CHAIN_NO_PATH = 1
 const CHAIN_TOO_LONG = 2
@@ -2690,12 +2773,6 @@ fn chain_error(code: int) -> string {
 
 fn chain_note(cx: *ChainCtx, code: int) {
     if cx.err == CHAIN_NO_PATH || cx.err == CHAIN_TOO_LONG { cx.err = code }
-//   - only a self-signed root ends a path (#3310), unless `purpose` has
-//     TRUST_PARTIAL_CHAIN or'd in (#3311, OpenSSL's
-//     X509_V_FLAG_PARTIAL_CHAIN): then any anchor ends one, an anchor that
-//     is not a self-signed root held to the rules of an intermediate (a v3
-//     CA with keyCertSign), and a leaf that is itself an anchor is trusted
-//     as it stands whether self-signed or not;
 }
 
 // 1 if `at` is within c's validity period (both times well formed).
@@ -2708,9 +2785,8 @@ fn cert_time_ok(c: *LeafCert, at: string) -> int {
     if string_compare(at, na) > 0 { return 0 }
     return 1
 }
+
 fn ext_code(c: *LeafCert) -> int {
-// The purpose bits of `purpose`, without the options or'd in.
-const PURPOSE_MASK = 3
     if (c.ext_bits & EXT_UNKNOWN_CRITICAL) != 0 { return CHAIN_CRITICAL }
     if (c.ext_bits & (EXT_DUPLICATE | EXT_MALFORMED | EXT_SAN_EMPTY)) != 0 { return CHAIN_BAD_EXT }
     if c.key_kind == KEY_NONE { return CHAIN_BAD_KEY }
@@ -3137,6 +3213,9 @@ fn pinned_anchor(anchors: ptr, c: *LeafCert) -> int {
 // above PURPOSE_SERVER.
 validate_chain(leaf: *LeafCert, intermediates: ptr, anchors: ptr, at: string, purpose: int, max_depth: int) -> string {
     if anchors == null || list_size(anchors) == 0 { return "no trust anchors" }
+    want = purpose & PURPOSE_MASK
+    partial = 0
+    if (purpose & TRUST_PARTIAL_CHAIN) != 0 { partial = 1 }
     at_key = at
     if string.equals(at_key, "") == 1 { at_key = now_key() }
     e = ext_code(leaf)
@@ -3214,9 +3293,6 @@ import std.cryptography.pem
 // carry an `openssl x509 -text` dump after the PEM).
 //
 // Returns (list, "") when at least one certificate loaded, or (null, err) when
-    want = purpose & PURPOSE_MASK
-    partial = 0
-    if (purpose & TRUST_PARTIAL_CHAIN) != 0 { partial = 1 }
 // the path cannot be read or yields no certificate at all -- an empty store
 // would only fail later, at chain building, with a message about the server's
 // certificate rather than about the missing store.

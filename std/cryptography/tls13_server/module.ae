@@ -6,11 +6,14 @@
 //
 // CONSTRAINTS, so they are found here rather than in a failed handshake:
 //
-//   - The server key must be ECDSA P-256. CertificateVerify is signed with
-//     sign_server_cert_verify_ecdsa_p256 and there is no RSA path, so an RSA
-//     key fails at the signature step and the peer just sees the connection
-//     drop. Generate with:
-//       openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1
+//   - The server key (load_private_key: PKCS#8, SEC1 or PKCS#1 PEM) is
+//     ECDSA P-256, P-384 or P-521, Ed25519, or RSA of 2048 to 16384 bits
+//     (#3326). CertificateVerify is signed with the key's scheme (0x0403,
+//     0x0503, 0x0603, 0x0807, or rsa_pss_rsae_sha256 0x0804) when the
+//     client offers it; a client that offers none gets handshake_failure.
+//     An encrypted key is refused. std.http's server_set_tls checks that
+//     the key and the certificate are a pair when the server is set up
+//     (#3328).
 //   - Key exchange: X25519MLKEM768 (post-quantum hybrid) and X25519.
 //   - Buffer arguments are std.bytes HANDLES, never bytes.data(b) -- see the
 //     header of tls13_client for why that distinction bites.
@@ -27,6 +30,9 @@ import std.cryptography.hmac
 import std.cryptography.x25519
 import std.cryptography.mlkem
 import std.cryptography.p256
+import std.cryptography.p384
+import std.cryptography.p521
+import std.cryptography.rsa
 import std.cryptography.tls13_kdf
 import std.cryptography.tls13_client
 import std.cryptography.tls13_ks
@@ -46,8 +52,8 @@ extern tcp_socket_from_fd_owned(fd: int) -> ptr
 exports(
     accept, conn_send, conn_recv, close_conn,
     ServerConn,
-    parse_cert_chain_pem, parse_ec_private_key_pem,
-    pure_tls_server_accept, pure_tls_server_send, pure_tls_server_recv, pure_tls_server_close
+    parse_cert_chain_pem, parse_ec_private_key_pem, load_private_key, free_private_key, ServerKey,
+    pure_tls_server_check, pure_tls_server_accept, pure_tls_server_send, pure_tls_server_recv, pure_tls_server_close
 )
 
 struct ServerConn {
@@ -556,16 +562,39 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
     tls13_client.transcript_add(tr, bytes.view(cert_msg))
     bytes.free(cert_msg); bytes.free(cert_rec)
 
-    // c. CertificateVerify
+    // c. CertificateVerify, with the scheme of the server's key when the
+    // client's signature_algorithms offers it (RFC 8446 4.4.3, #3326). An
+    // ECDSA nonce is RFC 6979's (no randomness to fail, none to leak the
+    // key); an RSA-PSS signature is constant time and blinded.
+    skey = priv_key as *ServerKey
+    scheme = key_scheme(skey, ch_parsed.sig_algs)
     th_cert = transcript_hash_algo(tr, hash_algo)
-    // The signing nonce is RFC 6979's, derived from the key and the digest
-    // inside p256.ecdsa_sign: no randomness to fail, none to leak the key.
-    sig = tls13_cert.sign_server_cert_verify_ecdsa_p256(priv_key, bytes.view(th_cert)[0..hash_len])
-    if sig == null {
-        bytes.free(th_cert)
-        return null, "the server's private key is not a P-256 scalar in [1, n-1]"
+    var sig: ptr = null
+    cv_alert = 0
+    cv_err = ""
+    if scheme == 0 {
+        // RFC 8446 9.2: missing_extension when the client sent no
+        // signature_algorithms; handshake_failure when nothing it offers is
+        // the key's scheme.
+        cv_alert = 40
+        if ch_parsed.saw_sig_algs == 0 { cv_alert = 109 }
+        cv_err = "the client offers no signature scheme the server's key signs with"
+    } else {
+        sig = sign_cert_verify(skey, bytes.view(th_cert)[0..hash_len])
+        if sig == null {
+            cv_alert = 80
+            cv_err = "the server's private key could not sign (a scalar out of range, or no randomness)"
+        }
     }
-    cv_msg = tls13_hs.certificate_verify_msg(0x0403, bytes.view(sig))
+    if cv_alert != 0 {
+        send_hs_alert(sock, srv_hs_ctx, cv_alert)
+        bytes.free(th_cert); bytes.free(srnd); bytes.free(sh)
+        tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
+        tls13_record.free_ctx(srv_hs_ctx); tls13_record.free_ctx(cli_hs_ctx)
+        tls13_client.free_hs_keys(keys); bytes.free(th_chsh)
+        return null, cv_err
+    }
+    cv_msg = tls13_hs.certificate_verify_msg(scheme, bytes.view(sig))
     cv_rec = tls13_record.seal_record(srv_hs_ctx, tls13_record.CONTENT_HANDSHAKE, bytes.view(cv_msg))
     send_record_raw(sock, cv_rec)
     tls13_client.transcript_add(tr, bytes.view(cv_msg))
@@ -662,6 +691,18 @@ conn_send(conn: ptr, data: byte[]) -> string {
 // Empty application-data records the server reads past in a row before it
 // refuses the stream as a denial of service (#3317), as BoringSSL bounds them.
 const MAX_EMPTY_RECORDS = 32
+
+// A fatal alert under the server's handshake-traffic keys, after
+// ServerHello (#3326). Best effort, as send_plaintext_alert.
+fn send_hs_alert(sock: ptr, ctx: ptr, desc: int) {
+    a = bytes.new(2)
+    bytes.set(a, 0, 2)
+    bytes.set(a, 1, desc)
+    rec = tls13_record.seal_record(ctx, tls13_record.CONTENT_ALERT, bytes.view(a))
+    send_record_raw(sock, rec)
+    bytes.free(a)
+    bytes.free(rec)
+}
 
 // A fatal alert under the connection's application-traffic keys.
 fn send_alert_app(c: *ServerConn, desc: int) {
@@ -830,6 +871,346 @@ parse_ec_private_key_pem(pem_text: string) -> ptr {
     return priv
 }
 
+// ---- the server's private key (#3326) ----
+
+// A server private key, of any kind the server signs a CertificateVerify
+// with: ECDSA P-256, P-384 or P-521 (0x0403, 0x0503, 0x0603), Ed25519
+// (0x0807) or RSA (rsa_pss_rsae_sha256, 0x0804). load_private_key makes
+// one, free_private_key frees it (wiping the secret).
+struct ServerKey {
+    kind: int // tls13_cert.KEY_P256, KEY_P384, KEY_P521, KEY_ED25519 or KEY_RSA
+    secret: ptr // the EC scalar (its curve's size) or the Ed25519 seed (32 bytes); null for RSA
+    rsa: ptr // the std.cryptography.rsa key for KEY_RSA, else null
+}
+
+// The PEM labels a private key can have, in the order looked for.
+const KEY_LABEL_PKCS8 = "-----BEGIN PRIVATE KEY-----"
+const KEY_LABEL_SEC1 = "-----BEGIN EC PRIVATE KEY-----"
+const KEY_LABEL_PKCS1 = "-----BEGIN RSA PRIVATE KEY-----"
+const KEY_LABEL_ENCRYPTED = "-----BEGIN ENCRYPTED PRIVATE KEY-----"
+
+// Zero a secret before giving it back.
+fn wipe_free(b: @frees ptr) {
+    if b == null { return }
+    n = bytes.length(b)
+    i = 0
+    while i < n {
+        bytes.set(b, i, 0)
+        i = i + 1
+    }
+    bytes.free(b)
+}
+
+// The KEY_* a namedCurve OID names; KEY_NONE for any other.
+fn curve_kind(oid: string) -> int {
+    if string.equals(oid, "1.2.840.10045.3.1.7") == 1 { return tls13_cert.KEY_P256 }
+    if string.equals(oid, "1.3.132.0.34") == 1 { return tls13_cert.KEY_P384 }
+    if string.equals(oid, "1.3.132.0.35") == 1 { return tls13_cert.KEY_P521 }
+    return tls13_cert.KEY_NONE
+}
+
+// The scalar size of a curve KEY_*, 0 for another kind.
+fn curve_size(kind: int) -> int {
+    if kind == tls13_cert.KEY_P256 { return 32 }
+    if kind == tls13_cert.KEY_P384 { return 48 }
+    if kind == tls13_cert.KEY_P521 { return 66 }
+    return 0
+}
+
+// The curve an unnamed scalar's size implies, KEY_NONE for none.
+fn kind_of_size(n: int) -> int {
+    if n == 32 { return tls13_cert.KEY_P256 }
+    if n == 48 { return tls13_cert.KEY_P384 }
+    if n == 66 { return tls13_cert.KEY_P521 }
+    return tls13_cert.KEY_NONE
+}
+
+// An ECPrivateKey (RFC 5915), for the curve `want` names, or (KEY_NONE)
+// the curve its own parameters name, else the one its scalar's size implies:
+// (kind, scalar of the curve's size) or (KEY_NONE, null).
+fn parse_sec1(der: @keep ptr, want: int) -> (int, ptr) {
+    r = asn1.reader_new(der)
+    sub, body, serr = asn1.read_sequence(r)
+    if string.equals(serr, "") != 1 {
+        asn1.reader_free(r)
+        return tls13_cert.KEY_NONE, null
+    }
+    ver, verr = asn1.read_integer(sub)
+    if string.equals(verr, "") == 1 { bignum.free(ver) }
+    oct, oerr = asn1.read_octet_string(sub)
+    kind = want
+    if string.equals(oerr, "") == 1 && kind == tls13_cert.KEY_NONE && asn1.reader_eof(sub) == 0 {
+        // parameters [0] EXPLICIT ECParameters: a namedCurve OID.
+        params, perr = asn1.read_tagged_ext(sub, 1, 0x80, 0)
+        if string.equals(perr, "") == 1 {
+            pr = asn1.reader_new(params)
+            curve, cerr = asn1.read_oid(pr)
+            if string.equals(cerr, "") == 1 {
+                kind = curve_kind(curve)
+                string.release(curve)
+            }
+            asn1.reader_free(pr)
+            bytes.free(params)
+        }
+    }
+    asn1.reader_free(sub); bytes.free(body); asn1.reader_free(r)
+    if string.equals(oerr, "") != 1 || oct == null { return tls13_cert.KEY_NONE, null }
+    olen = bytes.length(oct)
+    if kind == tls13_cert.KEY_NONE { kind = kind_of_size(olen) }
+    size = curve_size(kind)
+    if size == 0 || olen > size || olen == 0 {
+        wipe_free(oct)
+        return tls13_cert.KEY_NONE, null
+    }
+    // RFC 5915 fixes the length; an encoder that dropped leading zeros is
+    // padded back.
+    scalar = bytes.new(size)
+    bytes.set(scalar, size - 1, 0)
+    bytes.copy_from_bytes(scalar, size - olen, oct, 0, olen)
+    wipe_free(oct)
+    return kind, scalar
+}
+
+// 1 when `scalar` is a valid private key of curve `kind`.
+fn scalar_ok(kind: int, scalar: ptr) -> int {
+    if kind == tls13_cert.KEY_P256 { return p256.private_key_valid(scalar) }
+    if kind == tls13_cert.KEY_P384 { return p384.private_key_valid(scalar) }
+    if kind == tls13_cert.KEY_P521 { return p521.private_key_valid(scalar) }
+    return 0
+}
+
+// Why an RSA key cannot be the server's, "" when it can: under 2048 bits
+// (the OpenSSL backend refuses it too, #3312) or over 16384.
+fn rsa_key_problem(k: ptr) -> string {
+    bits = rsa.modulus_bits(k)
+    if bits < 2048 || bits > 16384 { return "an RSA key needs 2048 bits or more (16384 at most)" }
+    return ""
+}
+
+// Why an EC scalar of curve `kind` cannot be the server's key, "" when it
+// can: it must be in [1, n-1] for its curve.
+fn ec_key_problem(kind: int, scalar: ptr) -> string {
+    if scalar == null { return "not an EC private key of P-256, P-384 or P-521" }
+    if scalar_ok(kind, scalar) != 1 { return "the EC private key is not in [1, n-1]" }
+    return ""
+}
+
+// A PKCS#8 PrivateKeyInfo (RFC 5208 / 5958): an EC, Ed25519 or RSA key.
+fn parse_pkcs8(der: @keep ptr) -> (ptr, string) {
+    r = asn1.reader_new(der)
+    sub, body, serr = asn1.read_sequence(r)
+    if string.equals(serr, "") != 1 {
+        asn1.reader_free(r)
+        return null, "not a PKCS#8 private key"
+    }
+    ver, verr = asn1.read_integer(sub)
+    if string.equals(verr, "") == 1 { bignum.free(ver) }
+    alg, abody, aerr = asn1.read_sequence(sub)
+    oid = ""
+    curve = tls13_cert.KEY_NONE
+    if string.equals(aerr, "") == 1 {
+        o, oerr = asn1.read_oid(alg)
+        if string.equals(oerr, "") == 1 {
+            oid = string.concat(o, "")
+            string.release(o)
+            if string.equals(oid, "1.2.840.10045.2.1") == 1 {
+                c, cerr = asn1.read_oid(alg)
+                if string.equals(cerr, "") == 1 {
+                    curve = curve_kind(c)
+                    string.release(c)
+                }
+            }
+        }
+        asn1.reader_free(alg); bytes.free(abody)
+    }
+    inner, ierr = asn1.read_octet_string(sub)
+    asn1.reader_free(sub); bytes.free(body); asn1.reader_free(r)
+    if string.equals(ierr, "") != 1 || inner == null { return null, "not a PKCS#8 private key" }
+
+    if string.equals(oid, "1.2.840.10045.2.1") == 1 {
+        if curve == tls13_cert.KEY_NONE {
+            wipe_free(inner)
+            return null, "an EC key on a curve other than P-256, P-384 or P-521"
+        }
+        kind, scalar = parse_sec1(inner, curve)
+        wipe_free(inner)
+        why = ec_key_problem(kind, scalar)
+        if string.equals(why, "") != 1 {
+            if scalar != null { wipe_free(scalar) }
+            return null, why
+        }
+        ek = heap.new(ServerKey)
+        ek.kind = kind
+        ek.secret = scalar
+        ek.rsa = null
+        return ek as ptr, ""
+    }
+    if string.equals(oid, "1.3.101.112") == 1 {
+        // CurvePrivateKey ::= OCTET STRING, the 32-byte seed (RFC 8410).
+        ir = asn1.reader_new(inner)
+        seed, serr2 = asn1.read_octet_string(ir)
+        asn1.reader_free(ir)
+        wipe_free(inner)
+        if string.equals(serr2, "") != 1 || seed == null || bytes.length(seed) != 32 {
+            if seed != null { wipe_free(seed) }
+            return null, "not an Ed25519 private key"
+        }
+        sk = heap.new(ServerKey)
+        sk.kind = tls13_cert.KEY_ED25519
+        sk.secret = seed
+        sk.rsa = null
+        return sk as ptr, ""
+    }
+    if string.equals(oid, "1.2.840.113549.1.1.1") == 1 {
+        k, kerr = rsa.key_from_pkcs1_der(inner)
+        wipe_free(inner)
+        if string.equals(kerr, "") != 1 || k == null { return null, "not an RSA private key" }
+        rwhy = rsa_key_problem(k)
+        if string.equals(rwhy, "") != 1 {
+            rsa.key_free(k)
+            return null, rwhy
+        }
+        rk = heap.new(ServerKey)
+        rk.kind = tls13_cert.KEY_RSA
+        rk.secret = null
+        rk.rsa = k
+        return rk as ptr, ""
+    }
+    wipe_free(inner)
+    return null, "a private key of an algorithm the server cannot sign with (${oid})"
+}
+
+// The server's private key from PEM text (#3326): a PKCS#8 "PRIVATE KEY"
+// (EC P-256, P-384, P-521, Ed25519 or RSA), a SEC1 "EC PRIVATE KEY" (an
+// `openssl ecparam -genkey` file's EC PARAMETERS block before it is
+// skipped) or a PKCS#1 "RSA PRIVATE KEY". An encrypted key is refused with
+// how to decrypt it. (key, "") or (null, why); free_private_key frees it.
+load_private_key(pem_text: string) -> (ptr, string) {
+    if string.index_of(pem_text, KEY_LABEL_ENCRYPTED) >= 0 {
+        return null, "the private key is encrypted; decrypt it first (openssl pkey -in key.pem -out plain.pem)"
+    }
+    at = string.index_of(pem_text, KEY_LABEL_PKCS8)
+    if at < 0 { at = string.index_of(pem_text, KEY_LABEL_SEC1) }
+    if at < 0 { at = string.index_of(pem_text, KEY_LABEL_PKCS1) }
+    if at < 0 { return null, "no private key in the PEM text" }
+    block = string.substring(pem_text, at, string.length(pem_text))
+    der, label, err = pem.parse(block)
+    if string.equals(err, "") != 1 || der == null {
+        if der != null { wipe_free(der) }
+        return null, "the private key's PEM does not decode: ${err}"
+    }
+    if string.equals(label, "PRIVATE KEY") == 1 {
+        k, kerr = parse_pkcs8(der)
+        wipe_free(der)
+        return k, kerr
+    }
+    if string.equals(label, "EC PRIVATE KEY") == 1 {
+        kind, scalar = parse_sec1(der, tls13_cert.KEY_NONE)
+        wipe_free(der)
+        why = ec_key_problem(kind, scalar)
+        if string.equals(why, "") != 1 {
+            if scalar != null { wipe_free(scalar) }
+            return null, why
+        }
+        ek = heap.new(ServerKey)
+        ek.kind = kind
+        ek.secret = scalar
+        ek.rsa = null
+        return ek as ptr, ""
+    }
+    k, kerr = rsa.key_from_pkcs1_der(der)
+    wipe_free(der)
+    if string.equals(kerr, "") != 1 || k == null { return null, "not an RSA private key" }
+    rwhy = rsa_key_problem(k)
+    if string.equals(rwhy, "") != 1 {
+        rsa.key_free(k)
+        return null, rwhy
+    }
+    rk = heap.new(ServerKey)
+    rk.kind = tls13_cert.KEY_RSA
+    rk.secret = null
+    rk.rsa = k
+    return rk as ptr, ""
+}
+
+// Free a key load_private_key made, its secret wiped first.
+free_private_key(key: @frees ptr) {
+    if key == null { return }
+    k = key as *ServerKey
+    if k.secret != null { wipe_free(k.secret) }
+    if k.rsa != null { rsa.key_free(k.rsa) }
+    heap.free(k)
+}
+
+// The SignatureScheme the server signs CertificateVerify with: its key's
+// own, when the client offered it in signature_algorithms (`offered`,
+// tls13_hs.SIGBIT_*); 0 when it did not.
+fn key_scheme(k: *ServerKey, offered: int) -> int {
+    if k.kind == tls13_cert.KEY_P256 && (offered & tls13_hs.SIGBIT_ECDSA_P256) != 0 { return tls13_cert.SCHEME_ECDSA_P256_SHA256 }
+    if k.kind == tls13_cert.KEY_P384 && (offered & tls13_hs.SIGBIT_ECDSA_P384) != 0 { return tls13_cert.SCHEME_ECDSA_P384_SHA384 }
+    if k.kind == tls13_cert.KEY_P521 && (offered & tls13_hs.SIGBIT_ECDSA_P521) != 0 { return tls13_cert.SCHEME_ECDSA_P521_SHA512 }
+    if k.kind == tls13_cert.KEY_ED25519 && (offered & tls13_hs.SIGBIT_ED25519) != 0 { return tls13_cert.SCHEME_ED25519 }
+    if k.kind == tls13_cert.KEY_RSA && (offered & tls13_hs.SIGBIT_RSA_PSS_SHA256) != 0 { return tls13_cert.SCHEME_RSA_PSS_RSAE_SHA256 }
+    return 0
+}
+
+// The CertificateVerify signature with the key's scheme over
+// `transcript_hash`, or null when the key cannot sign.
+fn sign_cert_verify(k: *ServerKey, transcript_hash: byte[]) -> ptr {
+    if k.kind == tls13_cert.KEY_ED25519 { return tls13_cert.sign_server_cert_verify_ed25519(k.secret, transcript_hash) }
+    if k.kind == tls13_cert.KEY_RSA { return tls13_cert.sign_server_cert_verify_rsa_pss(k.rsa, transcript_hash) }
+    return tls13_cert.sign_server_cert_verify_ecdsa(k.kind, k.secret, transcript_hash)
+}
+
+// "" when `key` and the certificate `leaf_der` are a pair, else why not:
+// the key signs a test CertificateVerify that the certificate's public key
+// verifies, with the functions a handshake uses (OpenSSL's
+// SSL_CTX_check_private_key does the same check another way).
+fn key_matches_cert(k: *ServerKey, leaf_der: ptr) -> string {
+    leaf = tls13_cert.LeafCert { tbs: null }
+    tls13_cert.init_leaf(&leaf)
+    perr = tls13_cert.parse_certificate(bytes.view(leaf_der)[0..bytes.length(leaf_der)], &leaf)
+    if string.equals(perr, "") != 1 {
+        tls13_cert.free_leaf(&leaf)
+        return "the certificate does not parse: ${perr}"
+    }
+    if leaf.key_kind != k.kind {
+        tls13_cert.free_leaf(&leaf)
+        return "the private key is not of the certificate's key type"
+    }
+    th = bytes.new(32)
+    i = 0
+    while i < 32 {
+        bytes.set(th, i, 0x5a)
+        i = i + 1
+    }
+    sig = sign_cert_verify(k, bytes.view(th)[0..32])
+    ok = 0
+    if sig != null {
+        sl = bytes.length(sig)
+        if k.kind == tls13_cert.KEY_RSA {
+            ok = tls13_cert.verify_cert_verify_rsa_pss(bytes.view(leaf.spki_key)[0..leaf.spki_key_len], bytes.view(th)[0..32], bytes.view(sig)[0..sl])
+        } else if k.kind == tls13_cert.KEY_ED25519 {
+            ok = tls13_cert.verify_cert_verify(tls13_cert.SCHEME_ED25519, leaf.spki_key, null, bytes.view(th)[0..32], bytes.view(sig)[0..sl])
+        } else {
+            // An uncompressed point, 0x04 || X || Y.
+            size = curve_size(k.kind)
+            x = bytes.new(size)
+            y = bytes.new(size)
+            bytes.copy_from_bytes(x, 0, leaf.spki_key, 1, size)
+            bytes.copy_from_bytes(y, 0, leaf.spki_key, 1 + size, size)
+            ok = tls13_cert.verify_cert_verify(key_scheme(k, 31), x, y, bytes.view(th)[0..32], bytes.view(sig)[0..sl])
+            bytes.free(x)
+            bytes.free(y)
+        }
+        bytes.free(sig)
+    }
+    bytes.free(th)
+    tls13_cert.free_leaf(&leaf)
+    if ok != 1 { return "the private key does not match the certificate" }
+    return ""
+}
+
 fn free_cert_chain(chain: ptr) {
     if chain == null { return }
     n = list_size(chain)
@@ -852,6 +1233,48 @@ pure_tls_server_available() -> int {
     return 1
 }
 
+extern aether_pure_tls_server_set_error(msg: string)
+
+// What std.http's server_set_tls asks when the pure server is chosen
+// (#3328): the certificate chain and the private key load, and they are a
+// pair. 1, or 0 with why in aether_pure_tls_server_set_error, so a server
+// that cannot complete a handshake is refused when it is configured, as the
+// OpenSSL backend refuses it, instead of dropping every connection.
+@c_callback("aether_pure_tls_server_check")
+pure_tls_server_check(cert_path: string, key_path: string) -> int {
+    cert_text, cerr = fs.read(cert_path)
+    if string.equals(cerr, "") != 1 {
+        aether_pure_tls_server_set_error("cannot read the TLS certificate: ${cerr}")
+        return 0
+    }
+    key_text, kerr = fs.read(key_path)
+    if string.equals(kerr, "") != 1 {
+        aether_pure_tls_server_set_error("cannot read the TLS private key: ${kerr}")
+        return 0
+    }
+    chain_list, lens_list = parse_cert_chain_pem(cert_text)
+    if chain_list == null {
+        aether_pure_tls_server_set_error("no certificate in the TLS certificate file (PEM)")
+        return 0
+    }
+    key, perr = load_private_key(key_text)
+    if key == null {
+        free_cert_chain(chain_list)
+        list_free(lens_list)
+        aether_pure_tls_server_set_error("the TLS private key cannot be used: ${perr}")
+        return 0
+    }
+    merr = key_matches_cert(key as *ServerKey, list.at(chain_list, 0) as ptr)
+    free_private_key(key)
+    free_cert_chain(chain_list)
+    list_free(lens_list)
+    if string.equals(merr, "") != 1 {
+        aether_pure_tls_server_set_error(merr)
+        return 0
+    }
+    return 1
+}
+
 // Consumes fd on every path; a successful connection owns it until close_conn.
 @c_callback("aether_pure_tls_server_accept")
 pure_tls_server_accept(fd: int, cert_path: string, key_path: string) -> ptr {
@@ -869,13 +1292,9 @@ pure_tls_server_accept(fd: int, cert_path: string, key_path: string) -> ptr {
         return null
     }
 
-    // EC P-256 keys only. The handshake signs CertificateVerify with
-    // sign_server_cert_verify_ecdsa_p256, so an RSA key cannot be used even
-    // though the certificate would otherwise be valid -- the handshake fails
-    // at the signature step and the peer sees a dropped connection. Generate
-    // the pair with:
-    //   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1
-    priv_key = parse_ec_private_key_pem(key_text)
+    // Any key load_private_key reads (#3326); server_set_tls checked it
+    // against the certificate when the server was configured (#3328).
+    priv_key, _perr = load_private_key(key_text)
     if priv_key == null {
         free_cert_chain(chain_list)
         list_free(lens_list)
@@ -887,7 +1306,7 @@ pure_tls_server_accept(fd: int, cert_path: string, key_path: string) -> ptr {
     if x25519_priv == null {
         // An all-zeros X25519 private key would make the shared secret
         // trivially recoverable, so refuse rather than fall back.
-        bytes.free(priv_key)
+        free_private_key(priv_key)
         free_cert_chain(chain_list)
         list_free(lens_list)
         tcp.close(sock)
@@ -896,7 +1315,7 @@ pure_tls_server_accept(fd: int, cert_path: string, key_path: string) -> ptr {
 
     sconn, err = accept(sock, chain_list, lens_list, priv_key, x25519_priv)
 
-    bytes.free(priv_key)
+    free_private_key(priv_key)
     bytes.free(x25519_priv)
     free_cert_chain(chain_list)
     list_free(lens_list)

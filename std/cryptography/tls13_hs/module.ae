@@ -14,8 +14,8 @@
 //   - supported_groups: x25519 (0x001d), secp256r1 (0x0017)
 //   - key_share: x25519 and/or secp256r1 KeyShareEntry(s); SNI + ALPN http/1.1
 //   - signature_algorithms: ecdsa_secp256r1_sha256 (0x0403),
-//     ecdsa_secp384r1_sha384 (0x0503), rsa_pss_rsae_sha256 (0x0804),
-//     ed25519 (0x0807)
+//     ecdsa_secp384r1_sha384 (0x0503), ecdsa_secp521r1_sha512 (0x0603),
+//     rsa_pss_rsae_sha256 (0x0804), ed25519 (0x0807)
 //
 // Import with:  import std.cryptography.tls13_hs
 //
@@ -45,6 +45,7 @@ exports(
     OFFER_SNI, OFFER_ALPN, OFFER_STATUS, OFFER_PSK, OFFER_EARLY,
     TLS_CHACHA20_POLY1305_SHA256, TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384,
     GROUP_X25519, GROUP_SECP256R1, GROUP_X25519MLKEM768,
+    SIGBIT_ECDSA_P256, SIGBIT_ECDSA_P384, SIGBIT_ECDSA_P521, SIGBIT_RSA_PSS_SHA256, SIGBIT_ED25519,
     HS_ENCRYPTED_EXTENSIONS, HS_CERTIFICATE, HS_CERTIFICATE_VERIFY, HS_FINISHED,
     encrypted_extensions, certificate_msg, certificate_verify_msg, finished_msg
 )
@@ -65,8 +66,16 @@ const GROUP_X25519MLKEM768 = 0x11EC
 // Signature schemes (RFC 8446 §4.2.3).
 const SIG_ECDSA_P256_SHA256 = 0x0403
 const SIG_ECDSA_P384_SHA384 = 0x0503
+const SIG_ECDSA_P521_SHA512 = 0x0603
 const SIG_RSA_PSS_RSAE_SHA256 = 0x0804
 const SIG_ED25519 = 0x0807
+
+// The offered schemes a ChParsed records (sig_algs), one bit each.
+const SIGBIT_ECDSA_P256 = 1
+const SIGBIT_ECDSA_P384 = 2
+const SIGBIT_ECDSA_P521 = 4
+const SIGBIT_RSA_PSS_SHA256 = 8
+const SIGBIT_ED25519 = 16
 
 // Handshake message types (RFC 8446 §4).
 const HS_CLIENT_HELLO = 1
@@ -150,6 +159,21 @@ fn get24(b: byte[], off: int) -> int {
 // 4-byte handshake header (msg_type + uint24 length). random must be 32
 // bytes; session_id 0..32 bytes (TLS 1.3 middlebox-compat: usually a 32-byte
 // echo value); x25519_pub is our 32-byte ephemeral public key.
+// The signature_algorithms extension (13) every ClientHello sends: each
+// scheme the client verifies a CertificateVerify with (RFC 8446 4.2.3).
+// Returns the offset past it.
+fn put_sig_algs(buf: ptr, at: int) -> int {
+    off = put16(buf, at, 13)
+    off = put16(buf, off, 12) // ext body len
+    off = put16(buf, off, 10) // list len
+    off = put16(buf, off, SIG_ECDSA_P256_SHA256)
+    off = put16(buf, off, SIG_ECDSA_P384_SHA384)
+    off = put16(buf, off, SIG_ECDSA_P521_SHA512)
+    off = put16(buf, off, SIG_RSA_PSS_RSAE_SHA256)
+    off = put16(buf, off, SIG_ED25519)
+    return off
+}
+
 client_hello(random: ptr, session_id: byte[], x25519_pub: ptr) -> ptr {
     return client_hello_sni(random, session_id, x25519_pub, "")
 }
@@ -248,15 +272,8 @@ client_hello_full(random: ptr, session_id: byte[], group: int, pubkey: byte[], g
     if group2 != 0 { off = put16(buf, off, group2) }
     if group3 != 0 { off = put16(buf, off, group3) }
 
-    // signature_algorithms (13):
-    //   { ecdsa_p256_sha256, ecdsa_p384_sha384, rsa_pss_rsae_sha256, ed25519 }
-    off = put16(buf, off, 13)
-    off = put16(buf, off, 10) // ext body len
-    off = put16(buf, off, 8) // list len
-    off = put16(buf, off, SIG_ECDSA_P256_SHA256)
-    off = put16(buf, off, SIG_ECDSA_P384_SHA384)
-    off = put16(buf, off, SIG_RSA_PSS_RSAE_SHA256)
-    off = put16(buf, off, SIG_ED25519)
+    // signature_algorithms (13): every scheme the client verifies.
+    off = put_sig_algs(buf, off)
 
     // status_request (5): request OCSP stapling (RFC 6066 §8). Body =
     // CertificateStatusRequest { status_type=ocsp(1), responder_id_list<2>=empty,
@@ -368,13 +385,7 @@ client_hello_pq(random: ptr, session_id: byte[], hybrid_share: ptr, hybrid_len: 
     off = put16(buf, off, GROUP_X25519MLKEM768)
     off = put16(buf, off, GROUP_X25519)
     // signature_algorithms
-    off = put16(buf, off, 13)
-    off = put16(buf, off, 10)
-    off = put16(buf, off, 8)
-    off = put16(buf, off, SIG_ECDSA_P256_SHA256)
-    off = put16(buf, off, SIG_ECDSA_P384_SHA384)
-    off = put16(buf, off, SIG_RSA_PSS_RSAE_SHA256)
-    off = put16(buf, off, SIG_ED25519)
+    off = put_sig_algs(buf, off)
     // ALPN http/1.1
     off = put16(buf, off, 16)
     off = put16(buf, off, 11)
@@ -473,13 +484,7 @@ client_hello_psk(random: ptr, session_id: byte[], x25519_pub: ptr, host: string,
     off = put16(buf, off, GROUP_X25519)
     off = put16(buf, off, GROUP_SECP256R1)
     // signature_algorithms
-    off = put16(buf, off, 13)
-    off = put16(buf, off, 10)
-    off = put16(buf, off, 8)
-    off = put16(buf, off, SIG_ECDSA_P256_SHA256)
-    off = put16(buf, off, SIG_ECDSA_P384_SHA384)
-    off = put16(buf, off, SIG_RSA_PSS_RSAE_SHA256)
-    off = put16(buf, off, SIG_ED25519)
+    off = put_sig_algs(buf, off)
     // ALPN http/1.1
     off = put16(buf, off, 16)
     off = put16(buf, off, 11)
@@ -636,6 +641,8 @@ struct ChParsed {
     key_share_len: int
     has_sni: int // 1 if a server_name extension was present
     saw_supported_versions: int // 1 if the client offered TLS 1.3
+    sig_algs: int // SIGBIT_* of the signature_algorithms schemes offered that a server can sign with
+    saw_sig_algs: int // 1 if a signature_algorithms extension was present
 }
 
 // Free the buffers a ChParsed owns. Idempotent.
@@ -662,6 +669,8 @@ parse_client_hello(msg: byte[], out: *ChParsed) -> string {
     out.key_share_len = 0
     out.has_sni = 0
     out.saw_supported_versions = 0
+    out.sig_algs = 0
+    out.saw_sig_algs = 0
 
     if len < 4 { return "client hello: truncated header" }
     if get8(msg, 0) != HS_CLIENT_HELLO { return "client hello: wrong msg type" }
@@ -739,6 +748,26 @@ parse_client_hello(msg: byte[], out: *ChParsed) -> string {
             // server_name: presence is all a server needs here; the name
             // itself only matters once there is more than one certificate.
             out.has_sni = 1
+        }
+        if ext_type == 0x000d {
+            // signature_algorithms: supported_signature_algorithms<2..2^16-2>,
+            // 2-byte schemes. Recorded as SIGBIT_* for the ones a server key
+            // can sign with, so the server picks one the client verifies
+            // (RFC 8446 4.4.3, #3326).
+            if ext_len < 2 { return "client hello: malformed signature_algorithms" }
+            sa_len = get16(msg, d)
+            if sa_len < 2 || sa_len % 2 != 0 || sa_len + 2 != ext_len { return "client hello: malformed signature_algorithms" }
+            out.saw_sig_algs = 1
+            q = d + 2
+            while q + 1 < d + 2 + sa_len {
+                sch = get16(msg, q)
+                if sch == SIG_ECDSA_P256_SHA256 { out.sig_algs = out.sig_algs | SIGBIT_ECDSA_P256 }
+                if sch == SIG_ECDSA_P384_SHA384 { out.sig_algs = out.sig_algs | SIGBIT_ECDSA_P384 }
+                if sch == SIG_ECDSA_P521_SHA512 { out.sig_algs = out.sig_algs | SIGBIT_ECDSA_P521 }
+                if sch == SIG_RSA_PSS_RSAE_SHA256 { out.sig_algs = out.sig_algs | SIGBIT_RSA_PSS_SHA256 }
+                if sch == SIG_ED25519 { out.sig_algs = out.sig_algs | SIGBIT_ED25519 }
+                q = q + 2
+            }
         }
         if ext_type == 0x002b {
             // supported_versions<2..254>: list of 2-byte versions, preceded

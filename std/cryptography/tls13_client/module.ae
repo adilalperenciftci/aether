@@ -2531,7 +2531,7 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host:
                 is_ecdsa = 0
                 if cv_scheme == tls13_cert.SCHEME_ECDSA_P256_SHA256 { is_ecdsa = 1 }
                 if cv_scheme == tls13_cert.SCHEME_ECDSA_P384_SHA384 { is_ecdsa = 1 }
-                if cv_scheme == 0x0603 { is_ecdsa = 1 } // ecdsa_secp521r1_sha512
+                if cv_scheme == tls13_cert.SCHEME_ECDSA_P521_SHA512 { is_ecdsa = 1 }
                 if is_ecdsa == 1 {
                     if leaf_px == null {
                         err = "ECDSA CertificateVerify but leaf is not an EC cert"

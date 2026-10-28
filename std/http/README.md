@@ -83,13 +83,16 @@ import std.http
 import std.cryptography.tls13_server   // pure TLS server; needs --with=fs
 ```
 
-The pure backend has constraints the OpenSSL one does not, and most fail as a
-**dropped connection rather than a message**, so they are worth knowing before
-debugging one:
+The pure backend has constraints the OpenSSL one does not; they are worth
+knowing before debugging a handshake:
 
-- the server key must be **ECDSA P-256**: there is no RSA signing path, so an
-  RSA certificate produces a server that fails at the signature step
-  (`openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1`)
+- the server key is **ECDSA P-256, P-384 or P-521, Ed25519, or RSA** of 2048
+  to 16384 bits (PKCS#8, SEC1 or PKCS#1 PEM, not encrypted), and
+  CertificateVerify is signed with the key's own scheme (RSA as
+  rsa_pss_rsae_sha256): a client that offers none of the key's schemes gets
+  `handshake_failure` (#3326). `server_set_tls` checks the certificate and key
+  when the server is set up and says why it cannot serve them, as the OpenSSL
+  backend does (#3328)
 - key exchange is **X25519MLKEM768** (the post-quantum hybrid, preferred
   when the client offers it) **or X25519**
 - **HelloRetryRequest is not implemented**, so a client offering only other
