@@ -246,15 +246,21 @@ TEST_CATEGORY(caps_fs_read_denied_past_cap, TEST_CATEGORY_STDLIB) {
     File* f = file_open_raw(tp, "rb");
     ASSERT_TRUE(f != NULL);
 
-    /* Cap at current usage + 64 KiB — below the 128 KiB read buffer. */
+    /* Cap at current usage + 64 KiB, below the 128 KiB read buffer. The
+     * read returns a counted string (#3329: this held it in a char*, which
+     * GCC 15 refuses), released here if the cap let it through, and the cap
+     * and the file are put back before anything is asserted. */
     uint64_t headroom = aether_caps_used_bytes();
     aether_caps_set_memory_cap(headroom + 64 * 1024);
-    char* data = file_read_all_raw(f);
-    ASSERT_TRUE(data == NULL);                     /* read refused */
-    ASSERT_EQ(headroom, aether_caps_used_bytes()); /* counter not drifted */
-
+    struct AetherString* data = file_read_all_raw(f);
+    int refused = data == NULL;
+    uint64_t used_after = aether_caps_used_bytes();
     aether_caps_set_memory_cap(0);
+    if (data) string_release(data);
     file_close_raw(f);
     remove(tp);
+
+    ASSERT_TRUE(refused);                   /* read refused */
+    ASSERT_EQ(headroom, used_after);        /* counter not drifted */
 }
 #endif
