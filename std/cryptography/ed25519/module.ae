@@ -12,6 +12,7 @@
 //
 //   publickey(seed32)            -> public32
 //   sign(seed32, msg)            -> sig64
+//   sign_hedged(seed32, msg, extra) -> sig64  (fresh bytes mixed into r)
 //   verify(public32, msg, sig64) -> int   (1 = valid, 0 = invalid)
 //
 // 32-byte keys, 64-byte signatures, all little-endian per RFC 8032.
@@ -33,7 +34,7 @@ import std.cryptography.ecc
 import std.cryptography.sha2
 
 exports(
-    publickey, sign, verify
+    publickey, sign, sign_hedged, verify
 )
 
 // SHA-512 of a byte slice -> 64-byte std.bytes, or null.
@@ -75,17 +76,46 @@ publickey(seed: ptr) -> ptr {
 // Sign msg with the 32-byte seed; returns a 64-byte signature.
 sign(seed: ptr, msg: byte[]) -> ptr {
     if msg.len < 0 { panic("ed25519.sign: the `msg` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    return sign_with(seed, msg, null)
+}
+
+// The same with a hedged nonce (#3376): `extra`, fresh random bytes (32 is
+// plenty), is mixed into r, so no two signings of one message share it. A
+// fault in one of two signatures of one message under RFC 8032's
+// deterministic r gives the key away. r = SHA-512(Z || 0..0 || prefix || M)
+// mod L, Z being `extra` zero-padded to a SHA-512 block (128 bytes), so the
+// secret prefix starts a block whose input state is random. Verification is
+// unchanged, so a verifier cannot tell; whatever `extra` holds, r is no
+// weaker than RFC 8032's, the secret prefix still being hashed in. Null or
+// empty: RFC 8032 exactly. At most 128 bytes are used.
+sign_hedged(seed: ptr, msg: byte[], extra: ptr) -> ptr {
+    if msg.len < 0 { panic("ed25519.sign_hedged: the `msg` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    return sign_with(seed, msg, extra)
+}
+
+fn sign_with(seed: ptr, msg: byte[], extra: ptr) -> ptr {
     int msg_len = msg.len
     a_le = bytes.new(32)
     prefix = bytes.new(32)
     expand_seed(seed, a_le, prefix)
     aenc = ecc.ed_scalar_mult_base(ecc.ED25519, a_le)
 
-    // r = SHA-512(prefix || M) mod L; R = r B
-    rin_len = 32 + msg_len
+    // r = SHA-512([Z || pad ||] prefix || M) mod L; R = r B
+    int zl = 0
+    if extra != null {
+        zl = bytes.length(extra)
+    }
+    if zl > 128 { zl = 128 }
+    int zpad = 0
+    if zl > 0 { zpad = 128 }
+    rin_len = zpad + 32 + msg_len
     rin = bytes.new(rin_len)
-    bytes.copy_from_bytes(rin, 0, prefix, 0, 32)
-    if msg_len > 0 { bytes.copy_from_slice(rin, 32, msg[0..msg_len]) }
+    if zpad > 0 {
+        bytes.set(rin, zpad - 1, 0)
+        bytes.copy_from_bytes(rin, 0, extra, 0, zl)
+    }
+    bytes.copy_from_bytes(rin, zpad, prefix, 0, 32)
+    if msg_len > 0 { bytes.copy_from_slice(rin, zpad + 32, msg[0..msg_len]) }
     rh = sha512(bytes.view(rin)[0..rin_len])
     r = ecc.ed_reduce(ecc.ED25519, rh)
     renc = ecc.ed_scalar_mult_base(ecc.ED25519, r)

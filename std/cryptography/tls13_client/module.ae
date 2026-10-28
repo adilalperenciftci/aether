@@ -1388,22 +1388,32 @@ fn run_handshake_tail(sock: @keep ptr, rio: @keep ptr, tr: ptr, host: string, sh
                 // as many records as it takes; `sent` says whether all went
                 // (#3380).
                 sent = 1
+                cv_refused = ""
                 if flight_has_cert_request(fl, fllen) == 1 {
                     if client_cert != null && client_key != null {
                         ccert = build_client_certificate(bytes.view(client_cert)[0..client_cert_len])
                         sent = sent & cli_send_sealed(sock, cli_hs_ctx, tls13_record.CONTENT_HANDSHAKE, bytes.view(ccert))
                         transcript_add(tr, bytes.view(ccert))
                         // CertificateVerify: sign the transcript-through-client-
-                        // Certificate. ECDSA-P256 only in this cut.
-                        // The nonce is RFC 6979's; client_key was checked to
-                        // be a P-256 scalar before dialling, so this signs.
+                        // Certificate. ECDSA-P256 only in this cut, the
+                        // nonce RFC 6979's hedged with fresh bytes, and the
+                        // signature checked against the client's own
+                        // certificate before it is sent (#3376): one that
+                        // does not verify ends the handshake with
+                        // internal_error, and no Finished follows.
                         th_ccv = transcript_hash_algo(tr, hash_algo)
-                        cvsig = tls13_cert.sign_client_cert_verify_ecdsa_p256(client_key, bytes.view(th_ccv)[0..hash_len])
-                        ccv = build_cert_verify_msg(0x0403, bytes.view(cvsig))
-                        sent = sent & cli_send_sealed(sock, cli_hs_ctx, tls13_record.CONTENT_HANDSHAKE, bytes.view(ccv))
-                        transcript_add(tr, bytes.view(ccv))
-                        bytes.free(th_ccv); bytes.free(cvsig)
-                        bytes.free(ccert); bytes.free(ccv)
+                        cvsig, cv_why = sign_client_cert_verify_checked(client_cert, client_cert_len, client_key, bytes.view(th_ccv)[0..hash_len])
+                        if cvsig == null {
+                            send_alert_hs(sock, cli_hs_ctx, ALERT_LEVEL_FATAL, ALERT_INTERNAL_ERROR)
+                            cv_refused = cv_why
+                            sent = 0
+                        } else {
+                            ccv = build_cert_verify_msg(0x0403, bytes.view(cvsig))
+                            sent = sent & cli_send_sealed(sock, cli_hs_ctx, tls13_record.CONTENT_HANDSHAKE, bytes.view(ccv))
+                            transcript_add(tr, bytes.view(ccv))
+                            bytes.free(cvsig); bytes.free(ccv)
+                        }
+                        bytes.free(th_ccv); bytes.free(ccert)
                     } else {
                         ccert = build_empty_certificate()
                         sent = sent & cli_send_sealed(sock, cli_hs_ctx, tls13_record.CONTENT_HANDSHAKE, bytes.view(ccert))
@@ -1417,7 +1427,9 @@ fn run_handshake_tail(sock: @keep ptr, rio: @keep ptr, tr: ptr, host: string, sh
                 cvd = finished_verify_data_algo(hs_client_secret(keys), bytes.view(th_cvd)[0..hash_len], hash_algo, hash_len)
                 bytes.free(th_cvd)
                 cfin = build_finished_msg(cvd)
-                sent = sent & cli_send_sealed(sock, cli_hs_ctx, tls13_record.CONTENT_HANDSHAKE, bytes.view(cfin))
+                if cv_refused == "" {
+                    sent = sent & cli_send_sealed(sock, cli_hs_ctx, tls13_record.CONTENT_HANDSHAKE, bytes.view(cfin))
+                }
                 transcript_add(tr, bytes.view(cfin))
                 th_cf = transcript_hash_algo(tr, hash_algo)
                 res_master = tls13_kdf.derive_secret(hash_algo, bytes.view(ms)[0..hash_len], "res master", bytes.view(th_cf)[0..hash_len])
@@ -1429,6 +1441,7 @@ fn run_handshake_tail(sock: @keep ptr, rio: @keep ptr, tr: ptr, host: string, sh
                 } else {
                     tls13_ks.free_secret(c_ap); tls13_ks.free_secret(s_ap); tls13_ks.free_secret(res_master)
                     result_err = "handshake: the client's flight could not be sent"
+                    if cv_refused != "" { result_err = "handshake: ${cv_refused}" }
                 }
                 bytes.free(cvd); bytes.free(cfin)
                 tls13_record.free_ctx(cli_hs_ctx)
@@ -1619,6 +1632,30 @@ fn build_client_certificate(cert_der: byte[]) -> ptr {
     bytes.set(m, p, 0) // extensions<2> empty
     bytes.set(m, p + 1, 0)
     return m
+}
+
+// The client CertificateVerify signature with `key` (a P-256 scalar) over
+// `transcript_hash`, checked against the key of the client's own certificate
+// (`cert`, DER) before it is given back (#3376): a signature computed wrongly
+// can disclose the key, so one that does not verify is wiped and never sent.
+// The signature and "", or null and why.
+fn sign_client_cert_verify_checked(cert: ptr, cert_len: int, key: ptr, transcript_hash: byte[]) -> (ptr, string) {
+    sig = tls13_cert.sign_client_cert_verify_ecdsa_p256(key, transcript_hash)
+    if sig == null { return null, "the client's private key could not sign (not a P-256 scalar, or no randomness)" }
+    leaf = tls13_cert.LeafCert { tbs: null }
+    tls13_cert.init_leaf(&leaf)
+    perr = tls13_cert.parse_certificate(bytes.view(cert)[0..cert_len], &leaf)
+    ok = 0
+    if string.equals(perr, "") == 1 {
+        ok = tls13_cert.client_cert_verify_holds(&leaf, transcript_hash, bytes.view(sig))
+    }
+    tls13_cert.free_leaf(&leaf)
+    if ok != 1 {
+        bytes.wipe_free(sig)
+        if string.equals(perr, "") != 1 { return null, "the client's certificate does not parse: ${perr}" }
+        return null, "the client's signature does not verify with its certificate's key, so it was not sent (a fault while signing, or a key that is not the certificate's)"
+    }
+    return sig, ""
 }
 
 // A client CertificateVerify message (RFC 8446 §4.4.3): type 15, body =

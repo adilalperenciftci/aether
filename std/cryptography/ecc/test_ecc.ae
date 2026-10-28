@@ -145,6 +145,22 @@ fn curve_cases(name: string, curve: int, nb: int, gx: string, gy: string, g2x: s
     h = small(32, 9)
     r, s = ecc.ecdsa_sign(curve, k, h)
     fails = fails + ck(ecc.ecdsa_verify(curve, kx, ky, h, r, s) == 1, "${name} sign/verify")
+    // Hedged (RFC 6979 3.6, #3376): fresh bytes give another nonce, and a
+    // signature that verifies; the same bytes give the same signature;
+    // none at all is RFC 6979 exactly.
+    z1 = small(32, 1)
+    z2 = small(32, 2)
+    hr1, hs1 = ecc.ecdsa_sign_hedged(curve, k, h, z1)
+    hr1b, hs1b = ecc.ecdsa_sign_hedged(curve, k, h, z1)
+    hr2, hs2 = ecc.ecdsa_sign_hedged(curve, k, h, z2)
+    hrn, hsn = ecc.ecdsa_sign_hedged(curve, k, h, null)
+    fails = fails + ck(ecc.ecdsa_verify(curve, kx, ky, h, hr1, hs1) == 1 && ecc.ecdsa_verify(curve, kx, ky, h, hr2, hs2) == 1, "${name} hedged signatures verify")
+    fails = fails + ck(bh(hr1) != bh(r) && bh(hr1) != bh(hr2), "${name} hedged nonces differ from RFC 6979's and from each other")
+    fails = fails + ck(bh(hr1) == bh(hr1b) && bh(hs1) == bh(hs1b), "${name} hedged with the same bytes: the same signature")
+    fails = fails + ck(bh(hrn) == bh(r) && bh(hsn) == bh(s), "${name} hedged with none: RFC 6979's signature")
+    bytes.free(z1); bytes.free(z2)
+    bytes.free(hr1); bytes.free(hs1); bytes.free(hr1b); bytes.free(hs1b)
+    bytes.free(hr2); bytes.free(hs2); bytes.free(hrn); bytes.free(hsn)
     bytes.set(h, 0, 1)
     fails = fails + ck(ecc.ecdsa_verify(curve, kx, ky, h, r, s) == 0, "${name} tampered digest rejected")
     fails = fails + ck(ecc.public_key_valid(curve, kx, ky) == 1 && ecc.public_key_valid(curve, kx, kx) == 0, "${name} public_key_valid")

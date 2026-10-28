@@ -60,6 +60,7 @@ exports(
     sign_server_cert_verify_rsa_pss_scheme, SCHEME_RSA_PSS_RSAE_SHA384, SCHEME_RSA_PSS_RSAE_SHA512,
     KEY_NONE, KEY_RSA, KEY_P256, KEY_P384, KEY_P521, KEY_ED25519,
     verify_cert_verify, verify_cert_verify_rsa_pss, verify_cert_verify_rsa_pss_scheme, leaf_signature_holds,
+    client_cert_verify_holds,
     parse_certificate, free_leaf,
     split_ecdsa_sig,
     LeafCert,
@@ -117,8 +118,9 @@ client_cert_verify_content(transcript_hash: byte[]) -> (ptr, int) {
 // Sign a client CertificateVerify with an ECDSA-P256 client key (mTLS). Builds
 // the §4.4.3 client content, SHA-256-hashes it, ECDSA-signs it with `priv`
 // (32-byte scalar; the nonce is RFC 6979's, derived from the key and the
-// digest), and returns the DER ECDSA-Sig-Value SEQUENCE { r INTEGER, s INTEGER }
-// (caller frees), or null for a private key outside [1, n-1]. This is the
+// digest and hedged with fresh random bytes, #3376), and returns the DER
+// ECDSA-Sig-Value SEQUENCE { r INTEGER, s INTEGER } (caller frees), or null
+// for a private key outside [1, n-1] or without randomness. This is the
 // signature that goes in the client CertificateVerify handshake message under
 // SignatureScheme ecdsa_secp256r1_sha256 (0x0403).
 sign_client_cert_verify_ecdsa_p256(priv: ptr, transcript_hash: byte[]) -> ptr {
@@ -130,9 +132,10 @@ sign_client_cert_verify_ecdsa_p256(priv: ptr, transcript_hash: byte[]) -> ptr {
 
 // Sign a server CertificateVerify with an ECDSA-P256 server key. Builds the
 // §4.4.3 server content ("TLS 1.3, server CertificateVerify"), SHA-256 hashes
-// it, ECDSA-signs it with `priv` (32-byte scalar, RFC 6979 nonce), and returns
-// the DER ECDSA-Sig-Value SEQUENCE { r INTEGER, s INTEGER } (caller frees), or
-// null for a private key outside [1, n-1].
+// it, ECDSA-signs it with `priv` (32-byte scalar, an RFC 6979 nonce hedged
+// with fresh random bytes, #3376), and returns the DER ECDSA-Sig-Value
+// SEQUENCE { r INTEGER, s INTEGER } (caller frees), or null for a private key
+// outside [1, n-1] or without randomness.
 sign_server_cert_verify_ecdsa_p256(priv: ptr, transcript_hash: byte[]) -> ptr {
     content, clen = cert_verify_content(transcript_hash)
     sig = sign_content_ecdsa_p256(priv, content, clen)
@@ -143,9 +146,10 @@ sign_server_cert_verify_ecdsa_p256(priv: ptr, transcript_hash: byte[]) -> ptr {
 // Sign a server CertificateVerify (RFC 8446 §4.4.3) with an ECDSA key of
 // `kind` (KEY_P256 with SHA-256, KEY_P384 with SHA-384, KEY_P521 with
 // SHA-512: the schemes 0x0403, 0x0503, 0x0603, which tie the hash to the
-// curve). `priv` is the scalar, its curve's size; the nonce is RFC 6979's.
-// Returns the DER ECDSA-Sig-Value (caller frees), or null for a key outside
-// [1, n-1] or another kind (#3326).
+// curve). `priv` is the scalar, its curve's size; the nonce is RFC 6979's,
+// hedged with fresh random bytes (#3376). Returns the DER ECDSA-Sig-Value
+// (caller frees), or null for a key outside [1, n-1], another kind or no
+// randomness (#3326).
 sign_server_cert_verify_ecdsa(kind: int, priv: ptr, transcript_hash: byte[]) -> ptr {
     content, clen = cert_verify_content(transcript_hash)
     sig = sign_content_ecdsa(kind, priv, content, clen)
@@ -154,12 +158,17 @@ sign_server_cert_verify_ecdsa(kind: int, priv: ptr, transcript_hash: byte[]) -> 
 }
 
 // Sign a server CertificateVerify with an Ed25519 key (scheme 0x0807): the
-// 32-byte seed signs the §4.4.3 content itself (Ed25519 hashes inside).
-// Returns the 64-byte signature (caller frees), or null (#3326).
+// 32-byte seed signs the §4.4.3 content itself (Ed25519 hashes inside), r
+// hedged with 32 fresh random bytes (ed25519.sign_hedged, #3376). Returns
+// the 64-byte signature (caller frees), or null for a bad seed or without
+// randomness (#3326).
 sign_server_cert_verify_ed25519(seed: ptr, transcript_hash: byte[]) -> ptr {
     if seed == null || bytes.length(seed) != 32 { return null }
+    extra, rerr = cryptography.random_buffer(32)
+    if rerr != "" || extra == null { return null }
     content, clen = cert_verify_content(transcript_hash)
-    sig = ed25519.sign(seed, bytes.view(content)[0..clen])
+    sig = ed25519.sign_hedged(seed, bytes.view(content)[0..clen], extra)
+    bytes.wipe_free(extra)
     bytes.free(content)
     return sig
 }
@@ -213,7 +222,9 @@ fn sign_content_ecdsa_p256(priv: ptr, content: ptr, clen: int) -> ptr {
 
 // Hash the first clen bytes of content with the hash `kind`'s scheme ties to
 // its curve, sign the digest and DER-encode (r, s); null when the key is
-// refused or `kind` is not an ECDSA curve.
+// refused, `kind` is not an ECDSA curve, or there is no randomness. The
+// nonce is hedged (#3376): RFC 6979's, with 32 fresh random bytes mixed in
+// (RFC 6979 3.6), so no two signatures of one content share a nonce.
 fn sign_content_ecdsa(kind: int, priv: ptr, content: ptr, clen: int) -> ptr {
     hid = 0
     size = 0
@@ -221,12 +232,15 @@ fn sign_content_ecdsa(kind: int, priv: ptr, content: ptr, clen: int) -> ptr {
     if kind == KEY_P384 { hid = 2 size = 48 }
     if kind == KEY_P521 { hid = 3 size = 66 }
     if hid == 0 || priv == null || bytes.length(priv) != size { return null }
+    extra, rerr = cryptography.random_buffer(32)
+    if rerr != "" || extra == null { return null }
     digest = digest_of(bytes.view(content)[0..clen], hid)
     var r32: ptr = null
     var s32: ptr = null
-    if kind == KEY_P256 { r32, s32 = p256.ecdsa_sign(priv, digest) }
-    if kind == KEY_P384 { r32, s32 = p384.ecdsa_sign(priv, digest) }
-    if kind == KEY_P521 { r32, s32 = p521.ecdsa_sign(priv, digest) }
+    if kind == KEY_P256 { r32, s32 = p256.ecdsa_sign_hedged(priv, digest, extra) }
+    if kind == KEY_P384 { r32, s32 = p384.ecdsa_sign_hedged(priv, digest, extra) }
+    if kind == KEY_P521 { r32, s32 = p521.ecdsa_sign_hedged(priv, digest, extra) }
+    bytes.wipe_free(extra)
     bytes.free(digest)
     if r32 == null {
         if s32 != null { bytes.free(s32) }
@@ -557,6 +571,35 @@ leaf_signature_holds(leaf: *LeafCert, scheme: int, transcript_hash: byte[], sig:
     ok = verify_cert_verify(scheme, px, py, transcript_hash, sig)
     bytes.free(px)
     bytes.free(py)
+    return ok
+}
+
+// 1 when `sig` is a valid client CertificateVerify signature (RFC 8446
+// 4.4.3, the "client" context) under ecdsa_secp256r1_sha256 by the key of
+// the parsed certificate `leaf`, over `transcript_hash`; 0 otherwise,
+// another key included. The mTLS client checks its own signature with it
+// before sending it (#3376); it signs with P-256 only.
+client_cert_verify_holds(leaf: *LeafCert, transcript_hash: byte[], sig: byte[]) -> int {
+    if transcript_hash.len < 0 { panic("tls13_cert.client_cert_verify_holds: the `transcript_hash` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    if sig.len < 0 { panic("tls13_cert.client_cert_verify_holds: the `sig` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    if leaf.key_kind != KEY_P256 { return 0 }
+    content, clen = client_cert_verify_content(transcript_hash)
+    digest = sha256_of_bytes(bytes.view(content)[0..clen])
+    bytes.free(content)
+    px = bytes.new(32)
+    py = bytes.new(32)
+    bytes.copy_from_bytes(px, 0, leaf.spki_key, 1, 32)
+    bytes.copy_from_bytes(py, 0, leaf.spki_key, 33, 32)
+    ok = 0
+    r32, s32, serr = split_ecdsa_sig(sig, 32)
+    if string.equals(serr, "") == 1 {
+        ok = p256.ecdsa_verify(px, py, digest, r32, s32)
+        bytes.free(r32)
+        bytes.free(s32)
+    }
+    bytes.free(px)
+    bytes.free(py)
+    bytes.free(digest)
     return ok
 }
 

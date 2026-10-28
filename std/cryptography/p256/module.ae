@@ -15,6 +15,7 @@
 //   scalar_mult(k32, px32, py32)     -> (x32, y32)     k*P
 //   ecdh(priv32, pubx32, puby32)     -> shared_x32     priv * pub, x only
 //   ecdsa_sign(priv32, hash)         -> (r32, s32)     RFC 6979 nonce
+//   ecdsa_sign_hedged(priv32, hash, extra) -> (r32, s32) RFC 6979 3.6, extra mixed in
 //   ecdsa_verify(pubx, puby, hash, r32, s32) -> int    1 = valid
 //   public_key_valid(pubx32, puby32) -> int            1 = a point of the curve
 //   private_key_valid(priv32)        -> int            1 = in [1, n-1]
@@ -44,7 +45,7 @@ import std.bytes
 import std.cryptography.ecc
 
 exports(
-    scalar_mult_base, scalar_mult, ecdh, ecdsa_sign, ecdsa_verify,
+    scalar_mult_base, scalar_mult, ecdh, ecdsa_sign, ecdsa_sign_hedged, ecdsa_verify,
     public_key_valid, private_key_valid
 )
 
@@ -68,6 +69,12 @@ ecdh(priv: ptr, pubx: ptr, puby: ptr) -> ptr {
 // ECDSA signature (r, s), 32 bytes each, of the digest `hash` under `priv`.
 ecdsa_sign(priv: ptr, hash: ptr) -> (ptr, ptr) {
     return ecc.ecdsa_sign(ecc.P256, priv, hash)
+}
+
+// The same with a hedged nonce: `extra` (fresh random bytes) mixed into the
+// RFC 6979 seed, as ecc.ecdsa_sign_hedged describes (#3376).
+ecdsa_sign_hedged(priv: ptr, hash: ptr, extra: ptr) -> (ptr, ptr) {
+    return ecc.ecdsa_sign_hedged(ecc.P256, priv, hash, extra)
 }
 
 // 1 if (r, s) is a valid signature of `hash` under (pubx, puby), else 0.

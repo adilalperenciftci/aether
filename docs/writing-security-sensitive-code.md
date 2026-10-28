@@ -142,6 +142,14 @@ Where you must write something new:
   to take the nonce as a parameter, and the TLS server and the mTLS client
   each had to draw one; an API that makes every caller get this right is an
   API that will be called wrong.
+- **Hedge a deterministic nonce where the key lives long.** A deterministic
+  nonce makes two signatures of one message share it, and a fault in one of
+  them then gives the key away. `ecdsa_sign_hedged` (RFC 6979 section 3.6)
+  and `ed25519.sign_hedged` mix fresh random bytes into the derivation. The
+  bytes are not a nonce: whatever they hold (repeated, zero, an attacker's),
+  the nonce is no weaker than the deterministic one, so taking them from
+  the caller is safe where taking the nonce is not. The TLS CertificateVerify
+  signatures, server and client, are hedged (#3376).
 - Do not derive a nonce from something the peer controls.
 - Where a counter is the nonce, the overflow case is a failure, not a wrap.
 
@@ -166,9 +174,11 @@ fault makes it compute (#3376).
   or clock glitch, or from Rowhammer, from software. The pure TLS server
   checks every CertificateVerify against its certificate's key
   (`tls13_cert.leaf_signature_holds`), and a signature that fails is wiped
-  and never sent: the handshake ends with internal_error. Verify against
-  the key the peer will use (the certificate's), not the private key's own
-  public half, so a fault in the key's memory is caught too.
+  and never sent: the handshake ends with internal_error. The mTLS client
+  checks its own the same way (`tls13_cert.client_cert_verify_holds`).
+  Verify against the key the peer will use (the certificate's), not the
+  private key's own public half, so a fault in the key's memory is caught
+  too.
 
 ## Constant time, checked by a tool
 

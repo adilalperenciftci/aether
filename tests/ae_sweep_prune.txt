@@ -320,3 +320,5 @@ tests/integration/https_server_tls_pem/
 tests/integration/https_tls_reload/
 # #3293: rngfail.ae (with rng_fail_shim.c) and listener.ae dial each other; test_random_failure.sh pairs them.
 tests/integration/crypto_random_failure/
+# #3376: mtls.ae takes its certificate, key and server port from its driver.
+tests/integration/crypto_tls13_mtls_signature/

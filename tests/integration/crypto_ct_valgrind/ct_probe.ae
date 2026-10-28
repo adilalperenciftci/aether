@@ -126,6 +126,19 @@ fn p256_cases() -> int {
     px, py = p256.scalar_mult_base(d)
     fails = fails + check("p256 scalar_mult_base x", px, "60FED4BA255A9D31C961EB74C6356D68C049B8923B61FA6CE669622E60F29FB6")
     fails = fails + check("p256 scalar_mult_base y", py, "7903FE1008B8BC99A41AE9E95628BC64F2F1B20C2D7E9F5177A3C294D4462299")
+    // The hedged nonce (#3376): the key and the extra bytes secret. No
+    // vector exists for it, so the signature must verify.
+    z = hb("0101010101010101010101010101010101010101010101010101010101010101")
+    secret(z)
+    hr, hs = p256.ecdsa_sign_hedged(d, h, z)
+    public(hr)
+    public(hs)
+    if p256.ecdsa_verify(px, py, h, hr, hs) == 1 {
+        println("ok   p256 ecdsa_sign_hedged verifies")
+    } else {
+        println("FAIL p256 ecdsa_sign_hedged does not verify")
+        fails = fails + 1
+    }
     // NIST CAVP ECDH vector: the private scalar secret.
     priv = hb("7d7dc5f71eb29ddaf80d6214632eeae03d9058af1fb6d22ed80badb62bc1a534")
     secret(priv)
@@ -291,6 +304,18 @@ fn eddsa_xdh_cases() -> int {
     fails = fails + check("ed25519 sign", sig1, "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00")
     p1 = ed25519.publickey(s1)
     fails = fails + check("ed25519 publickey", p1, "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c")
+    // The hedged r (#3376): the seed and the extra bytes secret; the
+    // signature must verify.
+    z1 = hb("0202020202020202020202020202020202020202020202020202020202020202")
+    secret(z1)
+    hsig = ed25519.sign_hedged(s1, bytes.view(m1), z1)
+    public(hsig)
+    if ed25519.verify(p1, bytes.view(m1), bytes.view(hsig)) == 1 {
+        println("ok   ed25519 sign_hedged verifies")
+    } else {
+        println("FAIL ed25519 sign_hedged does not verify")
+        fails = fails + 1
+    }
     // RFC 8032 7.4 "Blank": Ed448 signature of the empty message.
     s2 = hb("6c82a562cb808d10d632be89c8513ebf6c929f34ddfa8c9f63c9960ef6e348a3528c8a3fcc2f044e39a3fc5b94492f8f032e7549a20098f95b")
     secret(s2)

@@ -13,6 +13,7 @@
 //   scalar_mult(k48, px48, py48)     -> (x48, y48)     k*P
 //   ecdh(priv48, pubx48, puby48)     -> shared_x48     priv * pub, x only
 //   ecdsa_sign(priv48, hash)         -> (r48, s48)     RFC 6979 nonce
+//   ecdsa_sign_hedged(priv48, hash, extra) -> (r48, s48) RFC 6979 3.6, extra mixed in
 //   ecdsa_verify(pubx, puby, hash, r48, s48) -> int    1 = valid
 //   public_key_valid(pubx48, puby48) -> int            1 = a point of the curve
 //   private_key_valid(priv48)        -> int            1 = in [1, n-1]
@@ -36,7 +37,7 @@ import std.bytes
 import std.cryptography.ecc
 
 exports(
-    scalar_mult_base, scalar_mult, ecdh, ecdsa_sign, ecdsa_verify,
+    scalar_mult_base, scalar_mult, ecdh, ecdsa_sign, ecdsa_sign_hedged, ecdsa_verify,
     public_key_valid, private_key_valid
 )
 
@@ -54,6 +55,12 @@ ecdh(priv: ptr, pubx: ptr, puby: ptr) -> ptr {
 
 ecdsa_sign(priv: ptr, hash: ptr) -> (ptr, ptr) {
     return ecc.ecdsa_sign(ecc.P384, priv, hash)
+}
+
+// The same with a hedged nonce: `extra` (fresh random bytes) mixed into the
+// RFC 6979 seed, as ecc.ecdsa_sign_hedged describes (#3376).
+ecdsa_sign_hedged(priv: ptr, hash: ptr, extra: ptr) -> (ptr, ptr) {
+    return ecc.ecdsa_sign_hedged(ecc.P384, priv, hash, extra)
 }
 
 ecdsa_verify(pubx: ptr, puby: ptr, hash: ptr, r: ptr, s: ptr) -> int {

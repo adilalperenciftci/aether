@@ -28,7 +28,8 @@
 //    a mask. Verification (public inputs only) computes u1*G + u2*Q in one
 //    interleaved pass and may take shortcuts.
 //
-// 4. ECDSA with RFC 6979 deterministic nonces (HMAC-DRBG over SHA-2), and
+// 4. ECDSA with RFC 6979 deterministic nonces (HMAC-DRBG over SHA-2), or
+//    hedged ones (RFC 6979 3.6: fresh randomness mixed into the seed), and
 //    ECDH with full public-key validation (coordinates below p, point on the
 //    curve), for P-256, P-384, P-521 and secp256k1.
 //
@@ -52,6 +53,7 @@
 //   scalar_mult(curve, k, px, py)            -> (x, y)   k*P, null on a bad P
 //   ecdh(curve, priv, pubx, puby)            -> x        null on a bad key or point
 //   ecdsa_sign(curve, priv, hash)            -> (r, s)   (null, null) on a bad key
+//   ecdsa_sign_hedged(curve, priv, hash, extra) -> (r, s) the same, extra mixed in
 //   ecdsa_verify(curve, pubx, puby, hash, r, s) -> 1 valid, 0 not
 //   public_key_valid(curve, pubx, puby)      -> 1 if (x, y) is a point of the curve
 //   private_key_valid(curve, priv)           -> 1 if priv is in [1, n-1]
@@ -75,7 +77,7 @@ exports(
     fe_to_mont, fe_from_mont,
     fe_from_be, fe_to_be, fe_from_le, fe_to_le, fe_reduce_be, fe_reduce_le,
     fe_from_hex, fe_shr,
-    scalar_mult_base, scalar_mult, ecdh, ecdsa_sign, ecdsa_verify,
+    scalar_mult_base, scalar_mult, ecdh, ecdsa_sign, ecdsa_sign_hedged, ecdsa_verify,
     public_key_valid, private_key_valid,
     ED25519, ED448, ed_scalar_mult_base, ed_reduce, ed_sign_s, ed_verify
 )
@@ -1201,6 +1203,22 @@ fn drbg_step(algo: string, k: ptr, v: ptr, sep: int, x: ptr, h: ptr) -> (ptr, pt
 // qlen bits are used) under the L-byte private key `priv`, with the nonce of
 // RFC 6979. Constant time in the key and the nonce.
 ecdsa_sign(curve: int, priv: ptr, hash: ptr) -> (ptr, ptr) {
+    return ecdsa_sign_extra(curve, priv, hash, null)
+}
+
+// The same with a hedged nonce (#3376): `extra`, fresh random bytes (32 is
+// plenty), joins the key and the digest in seeding RFC 6979's HMAC-DRBG,
+// the variant RFC 6979 section 3.6 defines (k'). A fault in one of two
+// signatures of one digest under a deterministic nonce gives the key away;
+// with fresh bytes each time, no two signings share a nonce. Whatever
+// `extra` holds (repeated, zero, chosen by an attacker), the nonce is no
+// weaker than RFC 6979's: the key is still in the seed. A null or empty
+// `extra` is RFC 6979 exactly.
+ecdsa_sign_hedged(curve: int, priv: ptr, hash: ptr, extra: ptr) -> (ptr, ptr) {
+    return ecdsa_sign_extra(curve, priv, hash, extra)
+}
+
+fn ecdsa_sign_extra(curve: int, priv: ptr, hash: ptr, extra: ptr) -> (ptr, ptr) {
     c = Curve {}
     if curve_init(&c, curve) == 0 || priv == null || hash == null {
         return null, null
@@ -1222,13 +1240,21 @@ ecdsa_sign(curve: int, priv: ptr, hash: ptr) -> (ptr, ptr) {
     fe_cond_sub(Q, &e)
 
     // RFC 6979 section 3.2: V = 0x01.., K = 0x00..; two seeding rounds over
-    // int2octets(d) || bits2octets(hash).
+    // int2octets(d) || bits2octets(hash), and k' after them for a hedged
+    // nonce (section 3.6).
     algo = drbg_hash(hlen, c.hlen)
     int hl = drbg_hash_len(algo)
     xo = bytes.new(nb)
     fe_to_be(&d, xo, 0, nb)
-    ho = bytes.new(nb)
+    int el = 0
+    if extra != null {
+        el = bytes.length(extra)
+    }
+    ho = bytes.new(nb + el)
     fe_to_be(&e, ho, 0, nb)
+    if el > 0 {
+        bytes.copy_from_bytes(ho, nb, extra, 0, el)
+    }
     kk = bytes.new(hl)
     vv = bytes.new(hl)
     int i = 0
