@@ -1,7 +1,7 @@
 // A module that keeps its state in module-level slices and grows them with
 // `.push`, as a retained view tree does.
 
-exports (add, count, kids_of)
+exports(add, count, kids_of)
 
 var kind: int[] = []
 var kids: int[][] = []

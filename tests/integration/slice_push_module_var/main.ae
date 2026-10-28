@@ -8,7 +8,7 @@ main() {
     root = views.add(1, 0)
     _a = views.add(2, root)
     _b = views.add(3, root)
-    println("${views.count()} ${views.kids_of(root)}")   // 3 2
+    println("${views.count()} ${views.kids_of(root)}") // 3 2
 
     // This module's globals, pushed with values a call makes: the call
     // may write them, and the push still grows the global itself.
@@ -16,5 +16,5 @@ main() {
     rows.push(make([]int, 0))
     rows[0].push(log.len)
     rows.push(make([]int, 0))
-    println("${log.len} ${rows.len} ${rows[0].len}")     // 1 2 1
+    println("${log.len} ${rows.len} ${rows[0].len}") // 1 2 1
 }
