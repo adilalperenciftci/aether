@@ -42,7 +42,9 @@
 //   fin_type=HEX    the Finished sent as this message type
 //   post=WHAT       after the handshake, under the application keys:
 //                   oversize, padded, bigcipher, emptyN, ccs, badtype,
-//                   innertype, badmac, emptyhs; then prints "POST <answer>"
+//                   innertype, badmac, emptyhs, and post_session's (kuN,
+//                   nst:HEX, alerts:HEX, postcr, stream:N); then prints
+//                   "POST <answer>"
 // Writes its port to PEER_PORT_OUT and its certificate to PEER_CERT_OUT, serves one
 // connection, and prints what the client answered to its flight:
 // "ALERT <description>" (plaintext or under the client's handshake keys),
@@ -1125,6 +1127,20 @@ fn post_session(sock: ptr, r: *Reader, k: *Keys, what: string) {
         cr = from_hex("0d00000e01aa000a000d000600040403")
         send_sealed(sock, k.s_ctx, 22, cr)
         bytes.free(cr)
+    } else if string.starts_with(what, "stream:") == 1 {
+        // stream:N: N bytes of application data and no ticket; main then
+        // closes the connection without waiting for an answer (#3356).
+        total, _te = string.to_int(string.substring(what, 7, string.length(what)))
+        chunk = bytes.new(16384)
+        bytes.set(chunk, 16383, 0)
+        sent = 0
+        while sent < total {
+            send_sealed(sock, k.s_ctx, 23, chunk)
+            sent = sent + 16384
+        }
+        bytes.free(chunk)
+        println("POST STREAMED")
+        return
     }
     println("POST ${session_answer(r, k)}")
 }
@@ -1134,6 +1150,7 @@ fn is_session_post(what: string) -> int {
     if string.starts_with(what, "ku") == 1 { return 1 }
     if string.starts_with(what, "nst") == 1 { return 1 }
     if string.starts_with(what, "alerts") == 1 { return 1 }
+    if string.starts_with(what, "stream:") == 1 { return 1 }
     if what == "postcr" || what == "listen" { return 1 }
     return 0
 }

@@ -2370,12 +2370,19 @@ struct SessionTicket {
     cipher_suite: int // the suite of the connection that got it, which 0-RTT data must use (#3339)
 }
 
+// The application data conn_get_ticket keeps for conn_recv while it waits
+// for a ticket, at most (#3356): a server sends its tickets right after the
+// handshake.
+const MAX_HELD_FOR_TICKET = 262144
+
 // The latest NewSessionTicket (RFC 8446 4.6.1) as a SessionTicket carrying
 // this connection's resumption secret and cipher suite: (ticket, "") or
 // (null, err). One that came already is taken at once; else records are
 // read until one comes, any application data meanwhile kept for the next
 // conn_recv. The caller frees the ticket with free_ticket. Servers send
 // tickets right after the handshake.
+// Past MAX_HELD_FOR_TICKET bytes of data it gives up, the connection still
+// open and the data still for conn_recv.
 conn_get_ticket(conn: ptr) -> (ptr, string) {
     c = conn as *ClientConn
     if c.ticket != null {
@@ -2402,6 +2409,9 @@ conn_get_ticket(conn: ptr) -> (ptr, string) {
                 c.held_len = c.held_len + n
                 bytes.free(data)
             }
+            // A server that streams this much first is not sending a
+            // ticket now; keeping more would grow without bound.
+            if c.held_len >= MAX_HELD_FOR_TICKET { return null, "no NewSessionTicket within the first ${MAX_HELD_FOR_TICKET} bytes of application data (kept for conn_recv)" }
         }
         if ev == EV_CLOSED {
             c.closed = 1

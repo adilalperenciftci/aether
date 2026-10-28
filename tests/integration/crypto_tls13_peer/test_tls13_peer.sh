@@ -305,6 +305,7 @@ SV=kuserver SENV="SERVER_KU=1" POST=listen run_cf_case "server KeyUpdate: the se
 NST=0000012c0102030401aa0004deadbeef
 CENV="CLIENT_TICKET=1" run_case "ticket: one with early_data" "post=nst:${NST}0008002a000400004000" "TICKET early=16384 len=4" "POST ALERT 0"
 CENV="CLIENT_TICKET=1" run_case "ticket: over two records" "post=nstsplit:${NST}0008002a000400004000" "TICKET early=16384 len=4" "POST ALERT 0"
+CENV="CLIENT_TICKET=1" run_case "ticket: none behind 512 KiB of data, the wait bounded (#3356)" "post=stream:524288" "TICKETERR: no NewSessionTicket within the first 262144 bytes" "POST STREAMED"
 run_case "ticket: an unknown extension" "post=nst:${NST}0004fafa0000" "RECV 2" "POST ALERT 0"
 run_case "ticket: TLS flags" "post=nst:${NST}0006003e00020101" "RECV 2" "POST ALERT 0"
 run_case "ticket: an empty ticket" "post=nstx:0000012c0102030401aa00000000" "RECVERR" "POST ALERT 50"
