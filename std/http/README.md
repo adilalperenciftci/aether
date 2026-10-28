@@ -154,6 +154,23 @@ certificate directory that loads) Android's `/apex/com.android.conscrypt/cacerts
 file with no bundle at all, then `/etc/ssl/certs`. If nothing loads, the
 handshake fails closed.
 
+**What it validates.** The server's certificate must name the host
+(subjectAltName only: DNS names with a whole-label leading wildcard, IP
+addresses), and there must be a path from it through the certificates the
+server sent to one of those anchors (`tls13_cert.validate_chain`, RFC 5280
+section 6 as the Web PKI profiles it) on which every signature verifies,
+every certificate is inside its validity period, every issuer below the
+anchor is a version 3 CA (basicConstraints cA) allowed to sign certificates
+(keyUsage keyCertSign when keyUsage is present) within its pathLenConstraint,
+the leaf and every issuer that lists extendedKeyUsage allow serverAuth, the
+DNS and IP name constraints of every issuer hold, and no certificate has a
+critical extension the client does not process. Every candidate path is
+tried, so an extra or cross-signed certificate in the server's list does not
+hide a good one. Before #3303 only the names and the signatures were
+checked, and a certificate a CA issued to any site could sign one for any
+other. A stapled OCSP response saying revoked fails the handshake; there is
+no CRL or online revocation check.
+
 **Scope and errors.** The pure client speaks TLS 1.3 only. A server that does
 not is refused with an error that says so (`server does not support TLS 1.3`),
 not a hang. Handshake failures carry the real cause (an untrusted chain, a

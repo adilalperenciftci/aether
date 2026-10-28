@@ -27,9 +27,13 @@
 //   2. the leaf is within its validity window (not expired / not-yet-valid);
 //   3. the requested hostname matches a leaf SAN dNSName (exact or a single
 //      leftmost-label wildcard; SAN-only, no CN fallback);
-//   4. the leaf chains to a trusted anchor — walking any server-sent
-//      intermediate CAs (leaf→intermediate→…→root), each hop verified by
-//      issuer/subject DN match + signature, terminating at a trust-store root.
+//   4. there is a valid path from the leaf through the server-sent
+//      certificates to a trusted anchor (tls13_cert.validate_chain): every
+//      hop's DN match and signature, every certificate's validity, every
+//      issuer a v3 CA allowed to sign certificates within its path length,
+//      extendedKeyUsage serverAuth wherever it is listed, name constraints,
+//      no unknown critical extension; every candidate path is tried. Before
+//      #3303 only the DNs and signatures were checked.
 // A self-signed, expired, wrong-host, or untrusted cert is rejected. The trust
 // store is the system CA bundle (SSL_CERT_FILE, else the OS default path); if
 // it cannot be loaded, connect() fails closed rather than proceeding unauthed.
@@ -2303,7 +2307,8 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host:
     // it claims to be", each failing closed:
     //   1. validity window (reject expired / not-yet-valid)
     //   2. hostname / SAN match (reject wrong host)
-    //   3. chain to a trusted anchor (reject self-signed / untrusted)
+    //   3. a valid path to a trusted anchor (reject self-signed / untrusted,
+    //      a non-CA issuer, a constraint the path breaks)
     // Skipped only when anchors == null: that is the signature-only entry used
     // by verify_flight_auth's recorded-transcript tests, which have no trust
     // store. connect() always passes a loaded store, so it always enforces.
@@ -2315,7 +2320,11 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host:
                 herr = tls13_cert.check_hostname(&leaf, host)
                 if string.equals(herr, "") != 1 { err = herr }
                 else {
-                    cerr = tls13_cert.chain_verify_path(&leaf, intermediates, anchors)
+                    // The whole path (#1298): signatures, every certificate's
+                    // validity, basicConstraints / keyUsage / pathLen on the
+                    // issuers, extendedKeyUsage, critical extensions and name
+                    // constraints, searching every candidate path.
+                    cerr = tls13_cert.validate_chain(&leaf, intermediates, anchors, "", tls13_cert.PURPOSE_SERVER, 0)
                     if string.equals(cerr, "") != 1 { err = cerr }
                     else {
                         // Revocation (RFC 6960): now that the chain is trusted,

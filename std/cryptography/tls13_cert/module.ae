@@ -63,6 +63,7 @@ exports(
     SCHEME_ECDSA_P256_SHA256, SCHEME_ECDSA_P384_SHA384, SCHEME_ED25519, SCHEME_RSA_PSS_RSAE_SHA256,
     check_validity, time_to_key, check_hostname,
     chain_verify, chain_verify_path, verify_cert_signature, find_issuer_cert,
+    validate_chain, check_validity_at, PURPOSE_SERVER, PURPOSE_CLIENT,
     trust_store_load, trust_store_add, trust_store_add_pem, free_anchors,
     parse_ocsp_status, verify_ocsp_signature, verify_ocsp_signature_at, OCSP_GOOD, OCSP_REVOKED, OCSP_UNKNOWN, OCSP_ERROR
 )
@@ -422,7 +423,7 @@ verify_cert_verify_rsa_pss(spki_key: byte[], transcript_hash: byte[], sig: byte[
 // 144, and the slack absorbs the next field or two without another silent
 // overflow. A few spare bytes per certificate is the right trade against
 // corrupting the heap.
-const LEAFCERT_SIZE = 192
+const LEAFCERT_SIZE = 256
 
 struct LeafCert {
     tbs: ptr // full tbsCertificate DER (tag+len+content)
@@ -446,6 +447,13 @@ struct LeafCert {
     is_ca: int
     has_key_usage: int
     key_cert_sign: int
+    version: int // the encoded version: 0 = v1, 1 = v2, 2 = v3
+    ext_bits: int // EXT_* flags: which extensions were seen, and how
+    path_len: int // basicConstraints pathLenConstraint (when EXT_PATHLEN)
+    key_usage: int // KeyUsage, bit i of the BIT STRING as (1 << i) (when has_key_usage)
+    eku_bits: int // EKU_* purposes listed (when EXT_EKU)
+    nc_permitted: ptr // std.list of permitted name-constraint subtrees (tag byte, then value), or null
+    nc_excluded: ptr // std.list of excluded subtrees, or null
 }
 
 // Parse a DER Certificate into `out`. Returns "" on success or an error.
@@ -477,6 +485,13 @@ parse_certificate(der: byte[], out: *LeafCert) -> string {
     out.is_ca = 0
     out.has_key_usage = 0
     out.key_cert_sign = 0
+    out.version = 0
+    out.ext_bits = 0
+    out.path_len = 0
+    out.key_usage = 0
+    out.eku_bits = 0
+    out.nc_permitted = null
+    out.nc_excluded = null
 
     view = bytes.new(len)
     if len > 0 { bytes.set(view, len - 1, 0) }
@@ -543,6 +558,18 @@ fn parse_tbs_fields(tbsr: ptr, out: *LeafCert) -> string {
     // [0] version (context tag 0xA0) — optional; skip if present.
     v, verr = asn1.read_tlv(tbsr)
     vtag = asn1.last_tag(tbsr)
+    if string.equals(verr, "") == 1 && vtag == 0xA0 {
+        // [0] EXPLICIT Version INTEGER: one content byte, 0..2.
+        vr0 = asn1.reader_new(v)
+        vi, vierr = asn1.read_tlv(vr0)
+        if string.equals(vierr, "") == 1 && asn1.last_tag(vr0) == 0x02 && bytes.length(vi) == 1 {
+            out.version = bytes.get(vi, 0) & 0xFF
+        } else {
+            out.version = -1
+        }
+        if vi != null { bytes.free(vi) }
+        asn1.reader_free(vr0)
+    }
     bytes.free(v)
     // Every read below used to drop its error, so a truncated or malformed
     // certificate parsed "successfully" into a LeafCert whose fields came
@@ -620,7 +647,8 @@ fn parse_tbs_fields(tbsr: ptr, out: *LeafCert) -> string {
         if string.equals(eerr, "") != 1 { break }
         etag = asn1.last_tag(tbsr)
         if etag == 0xA3 {
-            parse_extensions_for_san(ext_content, out)
+            if out.version != 2 { out.ext_bits = out.ext_bits | EXT_MALFORMED }
+            parse_extensions(ext_content, out)
         }
         bytes.free(ext_content)
     }
@@ -661,118 +689,367 @@ struct CertReaderView {
     last_tag: int
 }
 
-// Parse the [3] extensions content: SEQUENCE OF Extension, each
-// { extnID OID, critical BOOLEAN OPTIONAL, extnValue OCTET STRING }. Decodes
-// subjectAltName (2.5.29.17) into out.dns_names / out.ip_addrs, and
-// basicConstraints (2.5.29.19) and keyUsage (2.5.29.15) into out.is_ca,
-// out.has_key_usage and out.key_cert_sign, which chain_verify_path checks on
-// every issuing certificate.
-fn parse_extensions_for_san(ext_wrapper: @keep ptr, out: *LeafCert) {
+// ---- extensions (RFC 5280 4.2) ----
+//
+// What path validation needs from each certificate: basicConstraints,
+// keyUsage, extKeyUsage and nameConstraints (#1298, the x509-limbo corpus),
+// the SAN names, and whether anything was critical but unknown, repeated, or
+// malformed. A certificate with such an extension is refused wherever it
+// appears in a path.
+const EXT_BC = 1 // basicConstraints present
+const EXT_PATHLEN = 4 // basicConstraints pathLenConstraint present
+const EXT_EKU = 16 // extKeyUsage present
+const EXT_NC = 32 // nameConstraints present
+const EXT_UNKNOWN_CRITICAL = 64 // a critical extension this code does not process
+const EXT_DUPLICATE = 128 // an extension OID appears twice
+const EXT_MALFORMED = 256 // an extension this code processes did not parse
+const EXT_SAN = 512 // subjectAltName present
+const EXT_SAN_EMPTY = 1024 // subjectAltName with no names
+
+const EKU_SERVER = 1 // id-kp-serverAuth
+const EKU_CLIENT = 2 // id-kp-clientAuth
+const EKU_ANY = 4 // anyExtendedKeyUsage
+const EKU_OTHER = 8 // anything else
+
+const KU_DIGITAL_SIGNATURE = 1 // bit 0
+const KU_KEY_CERT_SIGN = 32 // bit 5
+
+// The extnValue of every Extension in the [3] wrapper, dispatched on extnID.
+fn parse_extensions(ext_wrapper: @keep ptr, out: *LeafCert) {
     wr = asn1.reader_new(ext_wrapper)
     // [3] wraps a single SEQUENCE OF Extension.
     seq_content, serr = asn1.read_tlv(wr)
+    seq_tag = asn1.last_tag(wr)
     asn1.reader_free(wr)
-    if string.equals(serr, "") != 1 { return }
+    if string.equals(serr, "") != 1 || seq_tag != 0x30 {
+        out.ext_bits = out.ext_bits | EXT_MALFORMED
+        if seq_content != null { bytes.free(seq_content) }
+        return
+    }
+    seen = list_new()
     er = asn1.reader_new(seq_content)
     while asn1.reader_eof(er) != 1 {
         one, oerr = asn1.read_tlv(er) // one Extension SEQUENCE content
-        if string.equals(oerr, "") != 1 { break }
+        if string.equals(oerr, "") != 1 {
+            out.ext_bits = out.ext_bits | EXT_MALFORMED
+            break
+        }
         xr = asn1.reader_new(one)
         oid, oiderr = asn1.read_oid(xr)
         if string.equals(oiderr, "") == 1 {
-            val = read_extn_value(xr)
-            if val != null {
-                if string.equals(oid, "2.5.29.17") == 1 { decode_san_dnsnames(val, out) }
-                if string.equals(oid, "2.5.29.19") == 1 { decode_basic_constraints(val, out) }
-                if string.equals(oid, "2.5.29.15") == 1 { decode_key_usage(val, out) }
-                bytes.free(val)
+            ob = oid_to_bytes(oid)
+            if bytes_list_has(seen, ob) == 1 {
+                out.ext_bits = out.ext_bits | EXT_DUPLICATE
+                bytes.free(ob)
+            } else {
+                list.add(seen, ob)
+            }
+            value, critical = read_extn_value(xr)
+            if value == null {
+                out.ext_bits = out.ext_bits | EXT_MALFORMED
+            } else {
+                parse_one_extension(oid, critical, value, out)
+                bytes.free(value)
             }
             string.release(oid)
+        } else {
+            out.ext_bits = out.ext_bits | EXT_MALFORMED
         }
         asn1.reader_free(xr)
         bytes.free(one)
     }
     asn1.reader_free(er)
     bytes.free(seq_content)
+    free_bytes_list(seen)
 }
 
-// Read an Extension's extnValue OCTET STRING content, skipping the optional
-// critical BOOLEAN before it. Returns fresh bytes (caller frees), or null.
-fn read_extn_value(xr: ptr) -> ptr {
+// 1 if the std.list of std.bytes `l` holds a buffer equal to `b`.
+fn bytes_list_has(l: ptr, b: ptr) -> int {
+    n = list_size(l)
+    bl = bytes.length(b)
+    i = 0
+    while i < n {
+        e = list.at(l, i) as ptr
+        if e != null && bytes.length(e) == bl {
+            same = 1
+            k = 0
+            while k < bl {
+                if bytes.get(e, k) != bytes.get(b, k) { same = 0 }
+                k = k + 1
+            }
+            if same == 1 { return 1 }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn parse_one_extension(oid: string, critical: int, value: @keep ptr, out: *LeafCert) {
+    if string.equals(oid, "2.5.29.17") == 1 {
+        out.ext_bits = out.ext_bits | EXT_SAN
+        n_any = decode_san_dnsnames(value, out)
+        if n_any == 0 { out.ext_bits = out.ext_bits | EXT_SAN_EMPTY }
+        return
+    }
+    if string.equals(oid, "2.5.29.19") == 1 {
+        out.ext_bits = out.ext_bits | EXT_BC
+        decode_basic_constraints(value, out)
+        return
+    }
+    if string.equals(oid, "2.5.29.15") == 1 {
+        decode_key_usage(value, out)
+        return
+    }
+    if string.equals(oid, "2.5.29.37") == 1 {
+        out.ext_bits = out.ext_bits | EXT_EKU
+        parse_ext_key_usage(value, out)
+        return
+    }
+    if string.equals(oid, "2.5.29.30") == 1 {
+        out.ext_bits = out.ext_bits | EXT_NC
+        parse_name_constraints(value, out)
+        return
+    }
+    // Recognised and not acted on: subject/authority key identifiers, CRL
+    // distribution points, authority information access, certificate
+    // policies, SCTs. Anything else that is critical cannot be honoured.
+    if string.equals(oid, "2.5.29.14") == 1 || string.equals(oid, "2.5.29.35") == 1 { return }
+    if string.equals(oid, "2.5.29.31") == 1 || string.equals(oid, "1.3.6.1.5.5.7.1.1") == 1 { return }
+    if string.equals(oid, "2.5.29.32") == 1 || string.equals(oid, "1.3.6.1.4.1.11129.2.4.2") == 1 { return }
+    if critical == 1 { out.ext_bits = out.ext_bits | EXT_UNKNOWN_CRITICAL }
+}
+
+// ExtKeyUsageSyntax ::= SEQUENCE SIZE (1..MAX) OF KeyPurposeId
+fn parse_ext_key_usage(value: @keep ptr, out: *LeafCert) {
+    r = asn1.reader_new(value)
+    body, berr = asn1.read_tlv(r)
+    btag = asn1.last_tag(r)
+    asn1.reader_free(r)
+    if string.equals(berr, "") != 1 || btag != 0x30 {
+        out.ext_bits = out.ext_bits | EXT_MALFORMED
+        if body != null { bytes.free(body) }
+        return
+    }
+    br = asn1.reader_new(body)
+    count = 0
+    while asn1.reader_eof(br) != 1 {
+        kp, kperr = asn1.read_oid(br)
+        if string.equals(kperr, "") != 1 {
+            out.ext_bits = out.ext_bits | EXT_MALFORMED
+            break
+        }
+        count = count + 1
+        if string.equals(kp, "1.3.6.1.5.5.7.3.1") == 1 {
+            out.eku_bits = out.eku_bits | EKU_SERVER
+        } else if string.equals(kp, "1.3.6.1.5.5.7.3.2") == 1 {
+            out.eku_bits = out.eku_bits | EKU_CLIENT
+        } else if string.equals(kp, "2.5.29.37.0") == 1 {
+            out.eku_bits = out.eku_bits | EKU_ANY
+        } else {
+            out.eku_bits = out.eku_bits | EKU_OTHER
+        }
+        string.release(kp)
+    }
+    if count == 0 { out.ext_bits = out.ext_bits | EXT_MALFORMED }
+    asn1.reader_free(br)
+    bytes.free(body)
+}
+
+// NameConstraints ::= SEQUENCE { permittedSubtrees [0] GeneralSubtrees OPTIONAL,
+//                                excludedSubtrees  [1] GeneralSubtrees OPTIONAL }
+// GeneralSubtree ::= SEQUENCE { base GeneralName, minimum [0] DEFAULT 0,
+//                               maximum [1] OPTIONAL }
+// Each base is kept as its tag byte followed by its content.
+fn parse_name_constraints(value: @keep ptr, out: *LeafCert) {
+    r = asn1.reader_new(value)
+    body, berr = asn1.read_tlv(r)
+    btag = asn1.last_tag(r)
+    asn1.reader_free(r)
+    if string.equals(berr, "") != 1 || btag != 0x30 {
+        out.ext_bits = out.ext_bits | EXT_MALFORMED
+        if body != null { bytes.free(body) }
+        return
+    }
+    br = asn1.reader_new(body)
+    while asn1.reader_eof(br) != 1 {
+        trees, terr = asn1.read_tlv(br)
+        ttag = asn1.last_tag(br)
+        if string.equals(terr, "") != 1 {
+            out.ext_bits = out.ext_bits | EXT_MALFORMED
+            break
+        }
+        if ttag == 0xA0 || ttag == 0xA1 {
+            dest = list_new()
+            tr = asn1.reader_new(trees)
+            while asn1.reader_eof(tr) != 1 {
+                sub, suberr = asn1.read_tlv(tr)
+                if string.equals(suberr, "") != 1 || asn1.last_tag(tr) != 0x30 {
+                    out.ext_bits = out.ext_bits | EXT_MALFORMED
+                    if sub != null { bytes.free(sub) }
+                    break
+                }
+                sr = asn1.reader_new(sub)
+                base, baseerr = asn1.read_tlv(sr)
+                btag2 = asn1.last_tag(sr)
+                if string.equals(baseerr, "") == 1 {
+                    bl = bytes.length(base)
+                    e = bytes.new(bl + 1)
+                    bytes.set(e, bl, 0)
+                    bytes.set(e, 0, btag2)
+                    if bl > 0 { bytes.copy_from_bytes(e, 1, base, 0, bl) }
+                    list.add(dest, e)
+                    bytes.free(base)
+                    // minimum other than 0, or any maximum, is not used by the
+                    // Web PKI (RFC 5280 4.2.1.10 says MUST be absent).
+                    if asn1.reader_eof(sr) != 1 { out.ext_bits = out.ext_bits | EXT_MALFORMED }
+                } else {
+                    out.ext_bits = out.ext_bits | EXT_MALFORMED
+                }
+                asn1.reader_free(sr)
+                bytes.free(sub)
+            }
+            asn1.reader_free(tr)
+            if ttag == 0xA0 {
+                free_bytes_list(out.nc_permitted)
+                out.nc_permitted = dest
+            } else {
+                free_bytes_list(out.nc_excluded)
+                out.nc_excluded = dest
+            }
+        } else {
+            out.ext_bits = out.ext_bits | EXT_MALFORMED
+        }
+        bytes.free(trees)
+    }
+    asn1.reader_free(br)
+    bytes.free(body)
+}
+
+// Read an Extension's extnValue OCTET STRING content, after the optional
+// critical BOOLEAN: (fresh bytes, critical), or (null, 0) when the
+// Extension does not parse: a BOOLEAN that is not one byte of 0x00 or 0xFF
+// (X.690 8.2, 11.1), an extnValue that is not an OCTET STRING, or anything
+// after it. The caller refuses the certificate then (EXT_MALFORMED).
+fn read_extn_value(xr: ptr) -> (ptr, int) {
     nx, nxerr = asn1.read_tlv(xr)
-    if string.equals(nxerr, "") != 1 { return null }
-    if asn1.last_tag(xr) != 0x01 { return nx }
+    if string.equals(nxerr, "") != 1 { return null, 0 }
+    if asn1.last_tag(xr) != 0x01 {
+        if asn1.last_tag(xr) != 0x04 || asn1.reader_eof(xr) != 1 {
+            bytes.free(nx)
+            return null, 0
+        }
+        return nx, 0
+    }
+    critical = -1
+    if bytes.length(nx) == 1 && (bytes.get(nx, 0) & 0xFF) == 0xFF { critical = 1 }
+    if bytes.length(nx) == 1 && (bytes.get(nx, 0) & 0xFF) == 0 { critical = 0 }
     bytes.free(nx)
+    if critical < 0 { return null, 0 }
     os2, os2e = asn1.read_tlv(xr)
-    if string.equals(os2e, "") != 1 { return null }
-    return os2
+    if string.equals(os2e, "") != 1 { return null, 0 }
+    if asn1.last_tag(xr) != 0x04 || asn1.reader_eof(xr) != 1 {
+        bytes.free(os2)
+        return null, 0
+    }
+    return os2, critical
 }
 
 // basicConstraints ::= SEQUENCE { cA BOOLEAN DEFAULT FALSE,
-// pathLenConstraint INTEGER OPTIONAL }. An absent or malformed cA leaves
-// out.is_ca at 0, so the certificate cannot issue.
+// pathLenConstraint INTEGER (0..MAX) OPTIONAL }. A cA of TRUE sets
+// out.is_ca; a pathLenConstraint goes to out.path_len (EXT_PATHLEN). A
+// BOOLEAN that is not one byte of 0x00 or 0xFF, a pathLenConstraint that is
+// negative or over three bytes, and anything else make the extension
+// malformed (EXT_MALFORMED), so the certificate is refused rather than read
+// as not a CA.
 fn decode_basic_constraints(octet_content: @keep ptr, out: *LeafCert) {
-    bcr = asn1.reader_new(octet_content)
-    seq_content, serr = asn1.read_tlv(bcr)
-    stag = asn1.last_tag(bcr)
-    asn1.reader_free(bcr)
-    if string.equals(serr, "") != 1 { return }
-    if stag != 0x30 {
-        bytes.free(seq_content)
+    r = asn1.reader_new(octet_content)
+    body, berr = asn1.read_tlv(r)
+    btag = asn1.last_tag(r)
+    asn1.reader_free(r)
+    if string.equals(berr, "") != 1 || btag != 0x30 {
+        out.ext_bits = out.ext_bits | EXT_MALFORMED
+        if body != null { bytes.free(body) }
         return
     }
-    sr = asn1.reader_new(seq_content)
-    if asn1.reader_eof(sr) != 1 {
-        val, verr = asn1.read_tlv(sr)
-        tag = asn1.last_tag(sr)
-        if string.equals(verr, "") == 1 {
-            if tag == 0x01 {
-                if bytes.length(val) > 0 {
-                    if bytes.get(val, 0) != 0 {
-                        out.is_ca = 1
-                    }
-                }
-            }
-            bytes.free(val)
+    br = asn1.reader_new(body)
+    while asn1.reader_eof(br) != 1 {
+        f, ferr = asn1.read_tlv(br)
+        ftag = asn1.last_tag(br)
+        if string.equals(ferr, "") != 1 {
+            out.ext_bits = out.ext_bits | EXT_MALFORMED
+            break
         }
+        if ftag == 0x01 {
+            if bytes.length(f) == 1 && (bytes.get(f, 0) & 0xFF) == 0xFF {
+                out.is_ca = 1
+            } else if bytes.length(f) != 1 || (bytes.get(f, 0) & 0xFF) != 0 {
+                out.ext_bits = out.ext_bits | EXT_MALFORMED
+            }
+        } else if ftag == 0x02 {
+            fl = bytes.length(f)
+            if fl < 1 || fl > 3 || (bytes.get(f, 0) & 0x80) != 0 {
+                out.ext_bits = out.ext_bits | EXT_MALFORMED
+            } else {
+                v = 0
+                k = 0
+                while k < fl {
+                    v = (v << 8) | (bytes.get(f, k) & 0xFF)
+                    k = k + 1
+                }
+                out.path_len = v
+                out.ext_bits = out.ext_bits | EXT_PATHLEN
+            }
+        } else {
+            out.ext_bits = out.ext_bits | EXT_MALFORMED
+        }
+        bytes.free(f)
     }
-    asn1.reader_free(sr)
-    bytes.free(seq_content)
+    asn1.reader_free(br)
+    bytes.free(body)
 }
 
-// keyUsage ::= BIT STRING. The first content byte counts the unused bits;
-// keyCertSign is bit 5, which is 0x04 of the next byte.
+// keyUsage ::= BIT STRING. The extension sets out.has_key_usage; bit i
+// (counting from the first byte's top bit) becomes (1 << i) in
+// out.key_usage, and keyCertSign, bit 5, sets out.key_cert_sign. A value
+// that is not a BIT STRING makes the extension malformed (EXT_MALFORMED),
+// so the certificate is refused rather than read as having no keyUsage.
 fn decode_key_usage(octet_content: @keep ptr, out: *LeafCert) {
-    kur = asn1.reader_new(octet_content)
-    ku_content, kerr = asn1.read_tlv(kur)
-    tag = asn1.last_tag(kur)
-    asn1.reader_free(kur)
-    if string.equals(kerr, "") != 1 { return }
-    if tag == 0x03 {
-        out.has_key_usage = 1
-        if bytes.length(ku_content) >= 2 {
-            b = bytes.get(ku_content, 1)
-            if (b & 0x04) != 0 {
-                out.key_cert_sign = 1
-            }
-        }
+    out.has_key_usage = 1
+    r = asn1.reader_new(octet_content)
+    bits, _unused, berr = asn1.read_bit_string(r)
+    asn1.reader_free(r)
+    if string.equals(berr, "") != 1 || bits == null {
+        out.ext_bits = out.ext_bits | EXT_MALFORMED
+        return
     }
-    bytes.free(ku_content)
+    n = bytes.length(bits)
+    ku = 0
+    i = 0
+    while i < n * 8 && i < 16 {
+        if ((bytes.get(bits, i / 8) >> (7 - (i % 8))) & 1) == 1 { ku = ku | (1 << i) }
+        i = i + 1
+    }
+    out.key_usage = ku
+    if (ku & KU_KEY_CERT_SIGN) != 0 { out.key_cert_sign = 1 }
+    bytes.free(bits)
 }
 
 // The SAN extnValue OCTET STRING wraps GeneralNames ::= SEQUENCE OF GeneralName.
 // dNSName is [2] IMPLICIT IA5String (context tag 0x82). Add each to dns_names,
+// (and each iPAddress to ip_addrs), and return how many GeneralNames there were,
 // rejecting any with an embedded NUL.
-fn decode_san_dnsnames(octet_content: @keep ptr, out: *LeafCert) {
+fn decode_san_dnsnames(octet_content: @keep ptr, out: *LeafCert) -> int {
     or = asn1.reader_new(octet_content)
     gn_content, gerr = asn1.read_tlv(or) // the GeneralNames SEQUENCE content
     asn1.reader_free(or)
-    if string.equals(gerr, "") != 1 { return }
+    if string.equals(gerr, "") != 1 { return 0 }
+    int count = 0
     gr = asn1.reader_new(gn_content)
     while asn1.reader_eof(gr) != 1 {
         name_content, nerr = asn1.read_tlv(gr)
         if string.equals(nerr, "") != 1 { break }
         tag = asn1.last_tag(gr)
+        count = count + 1
         if tag == 0x87 {
             // iPAddress [7] IMPLICIT OCTET STRING -- 4 bytes for IPv4, 16 for
             // IPv6, raw network order (RFC 5280 s4.2.1.6). Any other length is
@@ -804,6 +1081,7 @@ fn decode_san_dnsnames(octet_content: @keep ptr, out: *LeafCert) {
     }
     asn1.reader_free(gr)
     bytes.free(gn_content)
+    return count
 }
 
 // ---- LeafCert accessors + cleanup ----
@@ -876,6 +1154,23 @@ free_leaf(c: *LeafCert) {
         }
         list_free(c.ip_addrs)
     }
+    free_bytes_list(c.nc_permitted)
+    free_bytes_list(c.nc_excluded)
+    c.nc_permitted = null
+    c.nc_excluded = null
+}
+
+// Free a std.list of std.bytes buffers (null-safe).
+fn free_bytes_list(l: ptr) {
+    if l == null { return }
+    n = list_size(l)
+    i = 0
+    while i < n {
+        e = list.at(l, i) as ptr
+        if e != null { bytes.free(e) }
+        i = i + 1
+    }
+    list_free(l)
 }
 
 // ---- validity-period check (RFC 5280 §4.1.2.5) ----
@@ -1838,99 +2133,344 @@ chain_verify(leaf: *LeafCert, anchors: ptr) -> string {
     return "certificate does not chain to a trusted anchor"
 }
 
-// Does `cert` chain DIRECTLY to any trusted anchor (issuer DN == anchor subject
-// DN and cert signature verifies under that anchor)? Returns 1 if so.
-fn chains_to_anchor(cert: *LeafCert, anchors: ptr) -> int {
-    n = list_size(anchors)
+// Verify a certificate PATH from `leaf` through the server-sent
+// `intermediates` (a std.list of *LeafCert, possibly empty or null) to one of
+// the trusted `anchors`, now, for a TLS server: validate_chain with
+// PURPOSE_SERVER at the current time. "" on a valid path, else why not.
+//
+// This used to accept any path whose DNs matched and whose signatures
+// verified, never asking whether an issuer was a CA: a certificate a CA
+// issued to any web site could sign one for any other host (#3303).
+chain_verify_path(leaf: *LeafCert, intermediates: ptr, anchors: ptr) -> string {
+    return validate_chain(leaf, intermediates, anchors, "", PURPOSE_SERVER, 0)
+}
+
+const MAX_CHAIN_DEPTH = 8
+
+// ---- path validation (RFC 5280 section 6, as the Web PKI profiles it) ----
+//
+// validate_chain(leaf, intermediates, anchors, at, purpose, max_depth) -> ""
+// or why no path is acceptable. It searches every path from the leaf
+// through the intermediates (each used at most once) to a trust anchor,
+// backtracking when a candidate fails, and accepts the first where:
+//   - every signature verifies and every issuer DN matches its child's;
+//   - every certificate is within its validity period at `at` (a
+//     "YYYYMMDDHHMMSS" key, "" for now);
+//   - every issuer is a v3 CA (basicConstraints cA), may sign certificates
+//     (keyUsage keyCertSign, when keyUsage is present), and its
+//     pathLenConstraint covers the CAs below it;
+//   - no certificate has an unknown critical, repeated or malformed
+//     extension;
+//   - the leaf, and every issuer that restricts it, allows `purpose`
+//     (PURPOSE_SERVER: id-kp-serverAuth, PURPOSE_CLIENT: id-kp-clientAuth)
+//     in extendedKeyUsage;
+//   - every name constraint (DNS and IP subtrees) of an issuer permits, and
+//     does not exclude, the SAN names of the certificates below it.
+// max_depth bounds the number of intermediates (0: MAX_CHAIN_DEPTH).
+// The hostname is checked separately (check_hostname). #1298 (x509-limbo).
+
+const PURPOSE_SERVER = 1
+const PURPOSE_CLIENT = 2
+
+const CHAIN_NO_PATH = 1
+const CHAIN_TOO_LONG = 2
+const CHAIN_NOT_CA = 3
+const CHAIN_NO_CERT_SIGN = 4
+const CHAIN_PATH_LEN = 5
+const CHAIN_VALIDITY = 6
+const CHAIN_CRITICAL = 7
+const CHAIN_BAD_EXT = 8
+const CHAIN_PURPOSE = 9
+const CHAIN_NAME_CONSTRAINT = 10
+const CHAIN_NOT_V3 = 11
+const CHAIN_BUDGET = 12
+
+// Signature checks one path search may spend: a set of cross-signed
+// intermediates can otherwise make the search exponential (x509-limbo's
+// pathological cases). The same bound as rustls-webpki.
+const CHAIN_SIG_BUDGET = 100
+
+struct ChainCtx {
+    intermediates: ptr // std.list of *LeafCert, or null
+    anchors: ptr // std.list of *LeafCert
+    path: ptr // std.list of *LeafCert: leaf, intermediates, anchor
+    purpose: int
+    max_depth: int
+    err: int // the most specific CHAIN_* failure seen
+    budget: int // signature verifications left (path building is bounded)
+}
+
+fn chain_error(code: int) -> string {
+    if code == CHAIN_TOO_LONG { return "certificate chain too long" }
+    if code == CHAIN_NOT_CA { return "an issuing certificate is not a CA (basicConstraints)" }
+    if code == CHAIN_NO_CERT_SIGN { return "an issuing certificate may not sign certificates (keyUsage)" }
+    if code == CHAIN_PATH_LEN { return "a CA's path length constraint is exceeded" }
+    if code == CHAIN_VALIDITY { return "a certificate in the chain has expired or is not yet valid" }
+    if code == CHAIN_CRITICAL { return "a certificate in the chain has an unknown critical extension" }
+    if code == CHAIN_BAD_EXT { return "a certificate in the chain has a malformed or repeated extension" }
+    if code == CHAIN_PURPOSE { return "a certificate in the chain is not valid for this purpose (extendedKeyUsage)" }
+    if code == CHAIN_NAME_CONSTRAINT { return "a name in the chain violates a CA's name constraints" }
+    if code == CHAIN_NOT_V3 { return "an issuing certificate is not version 3" }
+    if code == CHAIN_BUDGET { return "too many candidate paths: path building gave up" }
+    return "certificate does not chain to a trusted anchor"
+}
+
+fn chain_note(cx: *ChainCtx, code: int) {
+    if cx.err == CHAIN_NO_PATH || cx.err == CHAIN_TOO_LONG { cx.err = code }
+}
+
+// 1 if `at` is within c's validity period (both times well formed).
+fn cert_time_ok(c: *LeafCert, at: string) -> int {
+    if c.not_before == null || c.not_after == null { return 0 }
+    nb = time_to_key(c.not_before, c.not_before_len)
+    na = time_to_key(c.not_after, c.not_after_len)
+    if string.equals(nb, "") == 1 || string.equals(na, "") == 1 { return 0 }
+    if string_compare(at, nb) < 0 { return 0 }
+    if string_compare(at, na) > 0 { return 0 }
+    return 1
+}
+
+fn ext_code(c: *LeafCert) -> int {
+    if (c.ext_bits & EXT_UNKNOWN_CRITICAL) != 0 { return CHAIN_CRITICAL }
+    if (c.ext_bits & (EXT_DUPLICATE | EXT_MALFORMED | EXT_SAN_EMPTY)) != 0 { return CHAIN_BAD_EXT }
+    return 0
+}
+
+fn purpose_ok(c: *LeafCert, purpose: int) -> int {
+    if (c.ext_bits & EXT_EKU) == 0 { return 1 }
+    if purpose == PURPOSE_SERVER && (c.eku_bits & EKU_SERVER) != 0 { return 1 }
+    if purpose == PURPOSE_CLIENT && (c.eku_bits & EKU_CLIENT) != 0 { return 1 }
+    return 0
+}
+
+// Why `ca` cannot issue (0 if it can), its own properties only.
+fn issuer_code(ca: *LeafCert, at: string, purpose: int, is_anchor: int) -> int {
+    e = ext_code(ca)
+    if e != 0 { return e }
+    if is_anchor == 0 && ca.version != 2 { return CHAIN_NOT_V3 }
+    if is_anchor == 0 && ca.is_ca == 0 { return CHAIN_NOT_CA }
+    if is_anchor == 1 && (ca.ext_bits & EXT_BC) != 0 && ca.is_ca == 0 { return CHAIN_NOT_CA }
+    if ca.has_key_usage == 1 && ca.key_cert_sign == 0 { return CHAIN_NO_CERT_SIGN }
+    if purpose_ok(ca, purpose) == 0 { return CHAIN_PURPOSE }
+    if cert_time_ok(ca, at) == 0 { return CHAIN_VALIDITY }
+    return 0
+}
+
+fn is_self_issued(c: *LeafCert) -> int {
+    return dn_equal(bytes.view(c.issuer)[0..c.issuer_len], bytes.view(c.subject)[0..c.subject_len])
+}
+
+fn issued_by(cx: *ChainCtx, child: *LeafCert, parent: *LeafCert) -> int {
+    if dn_equal(bytes.view(child.issuer)[0..child.issuer_len], bytes.view(parent.subject)[0..parent.subject_len]) != 1 { return 0 }
+    if cx.budget <= 0 {
+        cx.err = CHAIN_BUDGET
+        return 0
+    }
+    cx.budget = cx.budget - 1
+    return verify_cert_signature(child, parent)
+}
+
+// ASCII-lower-cased byte.
+fn lc(c: int) -> int {
+    if c >= 65 && c <= 90 { return c + 32 }
+    return c
+}
+
+// RFC 5280 4.2.1.10 for dNSName: "example.com" matches it and every name
+// under it, ".example.com" only the names under it, "" everything.
+fn dns_constraint_match(name: ptr, cons: ptr, coff: int) -> int {
+    nl = bytes.length(name)
+    cl = bytes.length(cons) - coff
+    if cl <= 0 { return 1 }
+    if nl < cl { return 0 }
+    dot = 0
+    if (bytes.get(cons, coff) & 0xFF) == 46 { dot = 1 }
+    if dot == 1 && nl == cl { return 0 }
+    if dot == 0 && nl > cl {
+        if (bytes.get(name, nl - cl - 1) & 0xFF) != 46 { return 0 }
+    }
+    k = 0
+    while k < cl {
+        if lc(bytes.get(name, nl - cl + k) & 0xFF) != lc(bytes.get(cons, coff + k) & 0xFF) { return 0 }
+        k = k + 1
+    }
+    return 1
+}
+
+// iPAddress constraint: address || mask (8 or 32 bytes).
+fn ip_constraint_match(ip: ptr, cons: ptr, coff: int) -> int {
+    il = bytes.length(ip)
+    cl = bytes.length(cons) - coff
+    if cl != 2 * il { return 0 }
+    k = 0
+    while k < il {
+        m = bytes.get(cons, coff + il + k) & 0xFF
+        if ((bytes.get(ip, k) & 0xFF) & m) != ((bytes.get(cons, coff + k) & 0xFF) & m) { return 0 }
+        k = k + 1
+    }
+    return 1
+}
+
+// The subtrees of name type `tag` (0x82 DNS, 0x87 IP) in `trees` against
+// `name`: 0 when there are none of that type, 1 when there are and none
+// matches, 2 when one matches.
+fn subtrees_match(trees: ptr, tag: int, name: ptr) -> int {
+    if trees == null { return 0 }
+    res = 0
+    n = list_size(trees)
     i = 0
     while i < n {
-        a = list.at(anchors, i) as *LeafCert
-        if a != null {
-            if dn_equal(bytes.view(cert.issuer)[0..cert.issuer_len], bytes.view(a.subject)[0..a.subject_len]) == 1 {
-                if verify_cert_signature(cert, a) == 1 {
-                    return 1
+        t = list.at(trees, i) as ptr
+        if t != null && bytes.length(t) >= 1 && (bytes.get(t, 0) & 0xFF) == tag {
+            if res == 0 { res = 1 }
+            if tag == 0x82 && dns_constraint_match(name, t, 1) == 1 { return 2 }
+            if tag == 0x87 && ip_constraint_match(name, t, 1) == 1 { return 2 }
+        }
+        i = i + 1
+    }
+    return res
+}
+
+// 1 if the names of `c` (SAN dNSNames and iPAddresses) satisfy `ca`'s
+// name constraints.
+fn names_allowed(ca: *LeafCert, c: *LeafCert) -> int {
+    if (ca.ext_bits & EXT_NC) == 0 { return 1 }
+    if names_allowed_list(ca, c.dns_names, 0x82) == 0 { return 0 }
+    if names_allowed_list(ca, c.ip_addrs, 0x87) == 0 { return 0 }
+    return 1
+}
+
+fn names_allowed_list(ca: *LeafCert, names: ptr, tag: int) -> int {
+    if names == null { return 1 }
+    n = list_size(names)
+    i = 0
+    while i < n {
+        nm = list.at(names, i) as ptr
+        if nm != null {
+            if subtrees_match(ca.nc_excluded, tag, nm) == 2 { return 0 }
+            if subtrees_match(ca.nc_permitted, tag, nm) == 1 { return 0 }
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+// The checks over the whole candidate path (leaf at 0, anchor last): path
+// length constraints and name constraints. 0 if they hold.
+fn path_code(cx: *ChainCtx) -> int {
+    n = list_size(cx.path)
+    j = 1
+    while j < n {
+        ca = list.at(cx.path, j) as *LeafCert
+        if (ca.ext_bits & EXT_PATHLEN) != 0 {
+            below = 0
+            k = 1
+            while k < j {
+                if is_self_issued(list.at(cx.path, k) as *LeafCert) == 0 { below = below + 1 }
+                k = k + 1
+            }
+            if below > ca.path_len { return CHAIN_PATH_LEN }
+        }
+        if (ca.ext_bits & EXT_NC) != 0 {
+            k = 0
+            while k < j {
+                c = list.at(cx.path, k) as *LeafCert
+                if k == 0 || is_self_issued(c) == 0 {
+                    if names_allowed(ca, c) == 0 { return CHAIN_NAME_CONSTRAINT }
                 }
+                k = k + 1
             }
         }
+        j = j + 1
+    }
+    return 0
+}
+
+fn path_pop(cx: *ChainCtx) {
+    list_remove(cx.path, list_size(cx.path) - 1)
+}
+
+fn in_path(cx: *ChainCtx, c: ptr) -> int {
+    n = list_size(cx.path)
+    i = 0
+    while i < n {
+        if list.at(cx.path, i) == c { return 1 }
         i = i + 1
     }
     return 0
 }
 
-// Verify a certificate PATH: `leaf` may chain through server-sent
-// `intermediates` (a std.list of *LeafCert, possibly empty/null) up to a
-// trusted anchor in `anchors`. At each hop the child's signature must verify
-// under the parent's key and the DNs must match; the path terminates when a
-// cert chains directly to a trusted anchor. A self-signed / untrusted leaf with
-// no such path is REJECTED. Bounded to MAX_CHAIN_DEPTH hops to stop cycles.
-// Returns "" on a valid path, else an error.
-chain_verify_path(leaf: *LeafCert, intermediates: ptr, anchors: ptr) -> string {
-    if anchors == null { return "no trust anchors" }
-    if list_size(anchors) == 0 { return "no trust anchors" }
-
-    current = leaf
-    // Track which intermediates we've consumed so a malicious server can't loop
-    // us with a cycle of mutually-signed intermediates.
-    used = list_new()
-    depth = 0
-    result = "certificate does not chain to a trusted anchor"
-    walking = 1
-    while walking == 1 {
-        if chains_to_anchor(current, anchors) == 1 {
-            result = ""
-            walking = 0
-        } else {
-            if depth >= MAX_CHAIN_DEPTH {
-                result = "certificate chain too long"
-                walking = 0
-            } else {
-                if intermediates == null {
-                    walking = 0
-                } else {
-                    idx = find_issuer_unused(current, intermediates, used)
-                    if idx < 0 {
-                        walking = 0
-                    } else {
-                        list.add(used, list.at(intermediates, idx))
-                        current = list.at(intermediates, idx) as *LeafCert
-                        depth = depth + 1
-                    }
-                }
-            }
-        }
-    }
-    list_free(used)
-    return result
-}
-
-const MAX_CHAIN_DEPTH = 8
-
-// Like find_issuer but skips any intermediate already in `used` (pointer
-// identity), preventing a signed-intermediate cycle from looping forever.
-// Only a CA can issue (RFC 5280 §4.2.1.9): basicConstraints cA must be TRUE,
-// and keyUsage, when present, must assert keyCertSign (§4.2.1.3). Without
-// this a leaf a trusted CA issued could sign a certificate for any host.
-fn find_issuer_unused(cert: *LeafCert, intermediates: ptr, used: ptr) -> int {
-    n = list_size(intermediates)
+// Extend the path above `cert`; 1 when an acceptable path is found.
+fn chain_dfs(cx: *ChainCtx, cert: *LeafCert, at: string, depth: int) -> int {
+    na = list_size(cx.anchors)
     i = 0
-    while i < n {
-        m = list.at(intermediates, i) as *LeafCert
-        if m != null {
-            if is_in_list(intermediates, i, used) == 0 {
-                if m.is_ca == 1 {
-                    if m.has_key_usage == 0 || m.key_cert_sign == 1 {
-                        if dn_equal(bytes.view(cert.issuer)[0..cert.issuer_len], bytes.view(m.subject)[0..m.subject_len]) == 1 {
-                            if verify_cert_signature(cert, m) == 1 {
-                                return i
-                            }
-                        }
-                    }
-                }
+    while i < na {
+        a = list.at(cx.anchors, i) as *LeafCert
+        if a != null && issued_by(cx, cert, a) == 1 {
+            code = issuer_code(a, at, cx.purpose, 1)
+            if code == 0 {
+                list.add(cx.path, a)
+                code = path_code(cx)
+                path_pop(cx)
+                if code == 0 { return 1 }
             }
+            chain_note(cx, code)
         }
         i = i + 1
     }
-    return -1
+    if cx.intermediates == null { return 0 }
+    if depth >= cx.max_depth {
+        chain_note(cx, CHAIN_TOO_LONG)
+        return 0
+    }
+    ni = list_size(cx.intermediates)
+    j = 0
+    while j < ni {
+        m = list.at(cx.intermediates, j) as *LeafCert
+        if m != null && in_path(cx, m as ptr) == 0 && issued_by(cx, cert, m) == 1 {
+            code = issuer_code(m, at, cx.purpose, 0)
+            if code == 0 {
+                list.add(cx.path, m)
+                found = chain_dfs(cx, m, at, depth + 1)
+                path_pop(cx)
+                if found == 1 { return 1 }
+            } else {
+                chain_note(cx, code)
+            }
+        }
+        j = j + 1
+    }
+    return 0
+}
+
+// "" when there is a valid path from `leaf` through `intermediates` (a
+// std.list of *LeafCert, or null) to one of `anchors` at `at` (a
+// "YYYYMMDDHHMMSS" key, "" for now) for `purpose` (PURPOSE_SERVER or
+// PURPOSE_CLIENT), with at most `max_depth` intermediates (0 for
+// MAX_CHAIN_DEPTH); else why not. The rules are in the comment above
+// PURPOSE_SERVER.
+validate_chain(leaf: *LeafCert, intermediates: ptr, anchors: ptr, at: string, purpose: int, max_depth: int) -> string {
+    if anchors == null || list_size(anchors) == 0 { return "no trust anchors" }
+    at_key = at
+    if string.equals(at_key, "") == 1 { at_key = now_key() }
+    e = ext_code(leaf)
+    if e != 0 { return chain_error(e) }
+    if purpose_ok(leaf, purpose) == 0 { return chain_error(CHAIN_PURPOSE) }
+    if cert_time_ok(leaf, at_key) == 0 { return chain_error(CHAIN_VALIDITY) }
+    md = max_depth
+    if md <= 0 { md = MAX_CHAIN_DEPTH }
+    cx = ChainCtx { intermediates: intermediates, anchors: anchors, path: list_new(), purpose: purpose, max_depth: md, err: CHAIN_NO_PATH, budget: CHAIN_SIG_BUDGET }
+    list.add(cx.path, leaf)
+    found = chain_dfs(&cx, leaf, at_key, 0)
+    list_free(cx.path)
+    if found == 1 { return "" }
+    return chain_error(cx.err)
+}
+
+// Validity at a given "YYYYMMDDHHMMSS" key: "" or why not.
+check_validity_at(c: *LeafCert, at: string) -> string {
+    if cert_time_ok(c, at) == 1 { return "" }
+    return "certificate expired, not yet valid, or with an invalid validity period"
 }
 
 // Find the certificate that issued `leaf` — search `intermediates` then
@@ -1965,18 +2505,6 @@ find_issuer_cert(leaf: *LeafCert, intermediates: ptr, anchors: ptr) -> ptr {
         }
     }
     return null
-}
-
-// Is the intermediate at index `idx` (by stored pointer) already in `used`?
-fn is_in_list(intermediates: ptr, idx: int, used: ptr) -> int {
-    target = list.at(intermediates, idx)
-    un = list_size(used)
-    j = 0
-    while j < un {
-        if list.at(used, j) == target { return 1 }
-        j = j + 1
-    }
-    return 0
 }
 
 // ---- system trust store (PEM bundle) ----
@@ -2122,6 +2650,8 @@ init_leaf(l: *LeafCert) {
     l.is_ca = 0
     l.has_key_usage = 0
     l.key_cert_sign = 0
+    l.version = 0; l.ext_bits = 0; l.path_len = 0; l.key_usage = 0; l.eku_bits = 0
+    l.nc_permitted = null; l.nc_excluded = null
 }
 
 // Free a trust-anchor list built by trust_store_load: each *LeafCert's buffers,
