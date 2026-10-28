@@ -1751,8 +1751,9 @@ fn check_flight_ee(fl: ptr, flen: int, offered: int) -> (int, string) {
 // then the Finished, which read_flight made sure ends the flight. (0, "")
 // or the alert and why: unexpected_message for a message out of its place
 // (#3324); decode_error for one that does not fill its body exactly, a
-// CertificateVerify whose signature leaves bytes over, a Finished whose
-// verify_data is not `hash_len` long (#3324); and what each message's own
+// CertificateVerify whose signature leaves bytes over (#3324);
+// decrypt_error for a Finished whose verify_data is not `hash_len` long
+// (RFC 8446 4.4.4: the Finished is wrong, #3357); and what each message's own
 // checks say: the extensions answer only what the ClientHello `offered`
 // (#3315), and so do the Certificate's entries (#3316).
 fn check_flight(fl: ptr, flen: int, offered: int, full: int, hash_len: int) -> (int, string) {
@@ -1780,7 +1781,7 @@ fn check_flight(fl: ptr, flen: int, offered: int, full: int, hash_len: int) -> (
             }
             last = 3
         } else if mt == HS_FINISHED && (last == 3 || (full == 0 && last == 0)) {
-            if ml != hash_len { return ALERT_DECODE_ERROR, "finished: verify_data is ${ml} bytes, not ${hash_len}" }
+            if ml != hash_len { return ALERT_DECRYPT_ERROR, "finished: verify_data is ${ml} bytes, not ${hash_len}" }
             last = 4
         } else {
             return ALERT_UNEXPECTED_MESSAGE, "handshake: a message of type ${mt} out of its place in the server's flight"

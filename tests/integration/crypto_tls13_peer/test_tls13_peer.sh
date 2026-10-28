@@ -27,6 +27,7 @@
 #   #3323  alerts: user_canceled is read past, no other alert is non-fatal.
 #   #3325  HelloRetryRequest, client and server.
 #   #3318  the ServerHello's legacy_version and session id echo.
+#   #3357  the pure server's ClientHello checks, secp256r1, skipped 0-RTT data.
 #
 # No network beyond loopback, no openssl: the peer's certificate is built in.
 
@@ -189,7 +190,7 @@ run_case "CV: an Ed25519 signature that does not verify" "key=ed25519;cv_bad=1" 
 # #3324: trailing data is decode_error (RFC 8446 6.2), a message out of
 # its place unexpected_message.
 run_case "trailing: a byte after the CertificateVerify's signature" "cv_trailing=1" "ERR" "ALERT 50"
-run_case "trailing: a Finished one byte long" "fin_long=1" "ERR" "ALERT 50"
+run_case "trailing: a Finished one byte long (4.4.4, #3357)" "fin_long=1" "ERR" "ALERT 51"
 run_case "trailing: a byte after EncryptedExtensions' extensions" "ee_body=000000" "ERR" "ALERT 50"
 run_case "order: no CertificateVerify" "skip_cv=1" "ERR" "ALERT 10"
 run_case "order: a NewSessionTicket inside the flight" "extra=0400000d0000012c000000000000000000" "ERR" "ALERT 10"
@@ -201,7 +202,7 @@ run_case "CertificateRequest: no signature_algorithms" "cr=000000" "ERR" "ALERT 
 
 # run_cf_case <name> <PEER_CF> <answer expected> <server says>; SV names
 # another server program, SENV adds its environment, POST is PEER_POST,
-# HRR is PEER_HRR.
+# HRR is PEER_HRR, GROUP PEER_GROUP, EARLY PEER_EARLY.
 run_cf_case() {
     rm -f "$TMP/port" "$TMP/server.out"
     env $SENV PEER_PORT_OUT="$TMP/port" "$TMP/${SV:-server}" >"$TMP/server.out" 2>&1 &
@@ -210,7 +211,7 @@ run_cf_case() {
     i=0
     while [ "$i" -lt 100 ] && [ ! -s "$TMP/port" ]; do sleep 0.1; i=$((i + 1)); done
     [ -s "$TMP/port" ] || { cat "$TMP/server.out"; fail "$1: the server never listened"; }
-    got=$(PEER_HRR="$HRR" PEER_POST="$POST" PEER_CF="$2" PEER_PORT="$(cat "$TMP/port")" "$TMP/peerclient" 2>&1 | grep -v 'warning' || :)
+    got=$(PEER_GROUP="$GROUP" PEER_EARLY="$EARLY" PEER_HRR="$HRR" PEER_POST="$POST" PEER_CF="$2" PEER_PORT="$(cat "$TMP/port")" "$TMP/peerclient" 2>&1 | grep -v 'warning' || :)
     n=0
     while server_alive "$spid" && [ "$n" -lt 100 ]; do sleep 0.1; n=$((n + 1)); done
     stop_server "$spid"
@@ -231,8 +232,8 @@ run_cf_case() {
 run_cf_case "server: the right Finished" "ok" "CLOSED" "ACCEPTED"
 run_cf_case "server: the Finished over two records" "split" "CLOSED" "ACCEPTED"
 run_cf_case "server: a Finished MAC that does not match" "badmac" "ALERT 51 (app)" "REFUSED"
-run_cf_case "server: verify_data one byte short" "short" "ALERT 50 (app)" "REFUSED"
-run_cf_case "server: verify_data one byte long" "long" "ALERT 50 (app)" "REFUSED"
+run_cf_case "server: verify_data one byte short (4.4.4, #3357)" "short" "ALERT 51 (app)" "REFUSED"
+run_cf_case "server: verify_data one byte long (4.4.4, #3357)" "long" "ALERT 51 (app)" "REFUSED"
 run_cf_case "server: a byte after the Finished in its record" "trailing" "ALERT 10 (app)" "REFUSED"
 run_cf_case "server: a Certificate instead of the Finished" "wrongtype" "ALERT 10 (app)" "REFUSED"
 run_cf_case "server: a record that does not authenticate" "badrecord" "ALERT 20 (app)" "REFUSED"
@@ -339,6 +340,32 @@ HRR=ccs2 run_cf_case "server HRR: two change_cipher_spec records" "ok" "HRR ALER
 # identity checks need a resumption: crypto_tls13_resume.)
 run_case "SH: legacy_version 0x0302" "sh_version=0302" "ERR" "ALERT 47"
 run_case "SH: a session id echo that is not the client's" "sh_sid=bad" "ERR" "ALERT 47"
+
+
+# #3357: the pure server's ClientHello checks (RFC 8446 4.1.2, 4.2, 9.2),
+# BoGo's server tests among them: compression other than null alone and
+# a pre_shared_key not last are illegal_parameter, so are two key shares
+# for one group; a duplicate extension, a server_name, key_share or
+# certificate_authorities that does not parse, and bytes after the
+# extensions are decode_error; no supported_groups or no key_share is
+# missing_extension; another handshake type is unexpected_message. It
+# takes a secp256r1 share (9.1 says it MUST), skips 0-RTT data it does not
+# take (4.2.10), and sends its change_cipher_spec whatever the session id.
+run_server_case "server CH: compression { 1, 0 }" "ch:comp_extra" "ALERT 47"
+run_server_case "server CH: compression { 1 }" "ch:comp_nonull" "ALERT 47"
+run_server_case "server CH: ALPN twice" "ch:dup_ext" "ALERT 50"
+run_server_case "server CH: a byte after the server_name list" "ch:sni_trailing" "ALERT 50"
+run_server_case "server CH: certificate_authorities empty" "ch:ca_empty" "ALERT 50"
+run_server_case "server CH: two x25519 shares" "ch:ks_dup" "ALERT 47"
+run_server_case "server CH: a byte after the key shares" "ch:ks_trailing" "ALERT 50"
+run_server_case "server CH: no supported_groups" "ch:no_groups" "ALERT 109"
+run_server_case "server CH: no key_share" "ch:no_keyshare" "ALERT 109"
+run_server_case "server CH: pre_shared_key not last" "ch:psk_not_last" "ALERT 47"
+run_server_case "server CH: handshake type 3" "ch:wrong_type" "ALERT 10"
+run_server_case "server CH: a byte after the extensions" "ch:msg_trailing" "ALERT 50"
+run_server_case "server CH: no session id, still a change_cipher_spec" "ch:empty_sid" "SERVERHELLO+CCS"
+GROUP=p256 run_cf_case "server: a secp256r1 share alone" "ok" "CLOSED" "ACCEPTED"
+EARLY=1 run_cf_case "server: 0-RTT data it does not take is skipped" "ok" "CLOSED" "ACCEPTED"
 
 [ "$fails" = 0 ] || fail "$fails case(s)"
 echo "  [PASS] $NAME"

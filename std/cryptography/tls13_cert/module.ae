@@ -57,6 +57,7 @@ exports(
     LEAFCERT_SIZE,
     cert_verify_content, client_cert_verify_content, sign_client_cert_verify_ecdsa_p256, sign_server_cert_verify_ecdsa_p256,
     sign_server_cert_verify_ecdsa, sign_server_cert_verify_ed25519, sign_server_cert_verify_rsa_pss,
+    sign_server_cert_verify_rsa_pss_scheme, SCHEME_RSA_PSS_RSAE_SHA384, SCHEME_RSA_PSS_RSAE_SHA512,
     KEY_NONE, KEY_RSA, KEY_P256, KEY_P384, KEY_P521, KEY_ED25519,
     verify_cert_verify, verify_cert_verify_rsa_pss, parse_certificate, free_leaf,
     split_ecdsa_sig,
@@ -79,6 +80,8 @@ const SCHEME_ECDSA_P256_SHA256 = 0x0403
 const SCHEME_ECDSA_P384_SHA384 = 0x0503
 const SCHEME_ECDSA_P521_SHA512 = 0x0603
 const SCHEME_RSA_PSS_RSAE_SHA256 = 0x0804
+const SCHEME_RSA_PSS_RSAE_SHA384 = 0x0805
+const SCHEME_RSA_PSS_RSAE_SHA512 = 0x0806
 const SCHEME_ED25519 = 0x0807
 
 // The CertificateVerify context string for a server's signature
@@ -166,13 +169,36 @@ sign_server_cert_verify_ed25519(seed: ptr, transcript_hash: byte[]) -> ptr {
 // private-key operation is std.cryptography.rsa's, constant time and blinded.
 // Returns the signature (caller frees), or null without randomness (#3326).
 sign_server_cert_verify_rsa_pss(key: ptr, transcript_hash: byte[]) -> ptr {
+    return sign_server_cert_verify_rsa_pss_scheme(key, SCHEME_RSA_PSS_RSAE_SHA256, transcript_hash)
+}
+
+// The same for `scheme` rsa_pss_rsae_sha256, _sha384 or _sha512 (0x0804,
+// 0x0805, 0x0806): the content hashed with that hash, MGF1 with it, a salt
+// of its length (#3357). Null for another scheme or without randomness.
+sign_server_cert_verify_rsa_pss_scheme(key: ptr, scheme: int, transcript_hash: byte[]) -> ptr {
     if key == null { return null }
-    salt, serr = cryptography.random_buffer(32)
+    algo = "sha256"
+    hl = 32
+    if scheme == SCHEME_RSA_PSS_RSAE_SHA384 {
+        algo = "sha384"
+        hl = 48
+    } else if scheme == SCHEME_RSA_PSS_RSAE_SHA512 {
+        algo = "sha512"
+        hl = 64
+    } else if scheme != SCHEME_RSA_PSS_RSAE_SHA256 {
+        return null
+    }
+    salt, serr = cryptography.random_buffer(hl)
     if serr != "" || salt == null { return null }
     content, clen = cert_verify_content(transcript_hash)
-    digest = sha256_of_bytes(bytes.view(content)[0..clen])
-    sig = rsa.sign_pss(key, digest, bytes.view(salt)[0..32])
-    bytes.free(digest)
+    ctx, herr = sha2.new(algo)
+    sig = null
+    if herr == "" {
+        sha2.update(ctx, bytes.view(content)[0..clen])
+        digest = sha2.final_bytes(ctx)
+        sig = rsa.sign_pss_hash(key, algo, digest, bytes.view(salt)[0..hl])
+        bytes.free(digest)
+    }
     bytes.free(content)
     bytes.free(salt)
     return sig

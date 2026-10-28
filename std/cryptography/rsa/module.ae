@@ -51,7 +51,7 @@ exports(
     encrypt_pkcs1, decrypt_pkcs1,
     sign_pkcs1, verify_pkcs1,
     encrypt_oaep, decrypt_oaep,
-    sign_pss, verify_pss
+    sign_pss, verify_pss, sign_pss_hash, verify_pss_hash
 )
 
 extern malloc(size: int) -> ptr
@@ -828,47 +828,14 @@ build_emsa(di: ptr, klen: int) -> ptr {
 // hLen for SHA-256.
 oaep_hlen() -> int { return 32 }
 sha256b(data: byte[]) -> ptr {
-    ctx, err = sha2.new("sha256")
-    // Same shape as ed25519.sha512 was: sha2.new answers
-    // (null, "allocation failed") and update_bytes cannot take a null
-    // context (#1942).
-    if err != "" {
-        return null
-    }
-    sha2.update(ctx, data)
-    return sha2.final_bytes(ctx)
+    return hashb("sha256", data)
 }
 
 // ---- MGF1 (RFC 8017 B.2.1) with SHA-256 ----
 // mask = MGF1(seed, mask_len): for counter = 0,1,...: T ||= SHA256(seed || I2OSP(counter,4)).
 mgf1(seed: byte[], mask_len: int) -> ptr {
     if seed.len < 0 { panic("rsa.mgf1: the `seed` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
-    int seed_len = seed.len
-    out = bytes.new(mask_len)
-    produced = 0
-    counter = 0
-    while produced < mask_len {
-        // input = seed || counter (4-byte BE)
-        inlen = seed_len + 4
-        inb = bytes.new(inlen)
-        bytes.copy_from_slice(inb, 0, seed[0..seed_len])
-        bytes.set(inb, seed_len + 0, (counter >> 24) & 0xFF)
-        bytes.set(inb, seed_len + 1, (counter >> 16) & 0xFF)
-        bytes.set(inb, seed_len + 2, (counter >> 8) & 0xFF)
-        bytes.set(inb, seed_len + 3, counter & 0xFF)
-        h = sha256b(bytes.view(inb)[0..inlen])
-        bytes.free(inb)
-        // copy min(hLen, remaining) into out
-        hl = bytes.length(h)
-        remaining = mask_len - produced
-        take = hl
-        if remaining < take { take = remaining }
-        bytes.copy_from_bytes(out, produced, h, 0, take)
-        bytes.free(h)
-        produced = produced + take
-        counter = counter + 1
-    }
-    return out
+    return mgf1_hash("sha256", seed, mask_len)
 }
 
 // XOR src into dst over `len` bytes (dst modified in place).
@@ -1018,27 +985,82 @@ decrypt_oaep(k: ptr, ct_bytes: ptr) -> {
     return out, ""
 }
 
-// ---- RSASSA-PSS (RFC 8017 §8.1 / §9.1), SHA-256 ----
+// ---- RSASSA-PSS (RFC 8017 §8.1 / §9.1) ----
 // Sign the SHA-256 `mhash` (32 bytes) with `salt` (slen bytes, caller-
 // supplied for determinism). Returns the k-byte signature, or null on error.
 sign_pss(k: ptr, mhash: ptr, salt: byte[]) -> ptr {
     if salt.len < 0 { panic("rsa.sign_pss: the `salt` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    return sign_pss_hash(k, "sha256", mhash, salt)
+}
+
+// Verify a SHA-256 PSS signature (verify_pss_hash with "sha256").
+verify_pss(k: ptr, mhash: ptr, sig: byte[], slen: int) -> int {
+    if sig.len < 0 { panic("rsa.verify_pss: the `sig` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    return verify_pss_hash(k, "sha256", mhash, sig, slen)
+}
+
+// The digest length of `algo` ("sha256", "sha384", "sha512"; 32 otherwise).
+fn pss_hlen(algo: string) -> int {
+    if algo == "sha384" { return 48 }
+    if algo == "sha512" { return 64 }
+    return 32
+}
+
+// The `algo` digest of `data` (fresh bytes), or null.
+fn hashb(algo: string, data: byte[]) -> ptr {
+    ctx, err = sha2.new(algo)
+    if err != "" { return null }
+    sha2.update(ctx, data)
+    return sha2.final_bytes(ctx)
+}
+
+// MGF1 (RFC 8017 B.2.1) with `algo`.
+fn mgf1_hash(algo: string, seed: byte[], mask_len: int) -> ptr {
+    int seed_len = seed.len
+    out = bytes.new(mask_len)
+    produced = 0
+    counter = 0
+    while produced < mask_len {
+        inb = bytes.new(seed_len + 4)
+        bytes.copy_from_slice(inb, 0, seed[0..seed_len])
+        bytes.set(inb, seed_len + 0, (counter >> 24) & 0xFF)
+        bytes.set(inb, seed_len + 1, (counter >> 16) & 0xFF)
+        bytes.set(inb, seed_len + 2, (counter >> 8) & 0xFF)
+        bytes.set(inb, seed_len + 3, counter & 0xFF)
+        h = hashb(algo, bytes.view(inb)[0..seed_len + 4])
+        bytes.free(inb)
+        take = bytes.length(h)
+        if mask_len - produced < take { take = mask_len - produced }
+        bytes.copy_from_bytes(out, produced, h, 0, take)
+        bytes.free(h)
+        produced = produced + take
+        counter = counter + 1
+    }
+    return out
+}
+
+// Sign the `algo` digest `mhash` ("sha256", "sha384" or "sha512"; MGF1
+// with the same hash) with `salt` (slen bytes, caller-supplied for
+// determinism). Returns the k-byte signature, or null on error. TLS 1.3's
+// rsa_pss_rsae_sha384 and _sha512 use it (#3357).
+sign_pss_hash(k: ptr, algo: string, mhash: ptr, salt: byte[]) -> ptr {
+    if salt.len < 0 { panic("rsa.sign_pss_hash: the `salt` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     int slen = salt.len
     klen = modulus_bytes(k)
-    hlen = oaep_hlen()
+    hlen = pss_hlen(algo)
     embits = modulus_bits(k) - 1
     emlen = (embits + 7) / 8
     if emlen < hlen + slen + 2 {
         return null
     }
-    // M' = 0x00*8 || mHash || salt ; H = SHA256(M')
+    // M' = 0x00*8 || mHash || salt ; H = Hash(M')
     mp_len = 8 + hlen + slen
     mp = bytes.new(mp_len)
     z = 0
     while z < 8 { bytes.set(mp, z, 0); z = z + 1 }
     bytes.copy_from_bytes(mp, 8, mhash, 0, hlen)
     if slen > 0 { bytes.copy_from_slice(mp, 8 + hlen, salt[0..slen]) }
-    h = sha256b(bytes.view(mp)[0..mp_len])
+    h = hashb(algo, bytes.view(mp)[0..mp_len])
     bytes.free(mp)
 
     // DB = PS(0x00) || 0x01 || salt   (length emLen - hLen - 1)
@@ -1050,7 +1072,7 @@ sign_pss(k: ptr, mhash: ptr, salt: byte[]) -> ptr {
     if slen > 0 { bytes.copy_from_slice(db, dblen - slen, salt[0..slen]) }
 
     // maskedDB = DB ^ MGF1(H, dblen)
-    dbmask = mgf1(bytes.view(h)[0..hlen], dblen)
+    dbmask = mgf1_hash(algo, bytes.view(h)[0..hlen], dblen)
     xor_into(db, bytes.view(dbmask)[0..dblen])
     bytes.free(dbmask)
     // clear the leftmost (8*emLen - embits) bits of maskedDB
@@ -1078,12 +1100,13 @@ sign_pss(k: ptr, mhash: ptr, salt: byte[]) -> ptr {
     return sig
 }
 
-// Verify a PSS signature `sig` (k bytes) over `mhash` (32 bytes) with the
+// Verify a PSS signature `sig` (k bytes) over `mhash` (the `algo` digest:
+// "sha256", "sha384" or "sha512"; MGF1 with the same hash) with the
 // expected salt length `slen`. Returns 1 if valid, 0 otherwise.
-verify_pss(k: ptr, mhash: ptr, sig: byte[], slen: int) -> int {
-    if sig.len < 0 { panic("rsa.verify_pss: the `sig` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+verify_pss_hash(k: ptr, algo: string, mhash: ptr, sig: byte[], slen: int) -> int {
+    if sig.len < 0 { panic("rsa.verify_pss_hash: the `sig` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     klen = modulus_bytes(k)
-    hlen = oaep_hlen()
+    hlen = pss_hlen(algo)
     embits = modulus_bits(k) - 1
     emlen = (embits + 7) / 8
     if sig.len != klen { return 0 }
@@ -1114,7 +1137,7 @@ verify_pss(k: ptr, mhash: ptr, sig: byte[], slen: int) -> int {
     }
 
     // DB = maskedDB ^ MGF1(H, dblen)
-    dbmask = mgf1(bytes.view(h)[0..hlen], dblen)
+    dbmask = mgf1_hash(algo, bytes.view(h)[0..hlen], dblen)
     xor_into(maskeddb, bytes.view(dbmask)[0..dblen])
     bytes.free(dbmask)
     if clear_bits > 0 {
@@ -1130,14 +1153,14 @@ verify_pss(k: ptr, mhash: ptr, sig: byte[], slen: int) -> int {
     }
     if (bytes.get(maskeddb, dblen - slen - 1) & 0xFF) != 0x01 { ok = 0 }
 
-    // salt = last slen bytes of DB; recompute H' = SHA256(0^8 || mHash || salt)
+    // salt = last slen bytes of DB; recompute H' = Hash(0^8 || mHash || salt)
     mp_len = 8 + hlen + slen
     mp = bytes.new(mp_len)
     z = 0
     while z < 8 { bytes.set(mp, z, 0); z = z + 1 }
     bytes.copy_from_bytes(mp, 8, mhash, 0, hlen)
     if slen > 0 { bytes.copy_from_bytes(mp, 8 + hlen, maskeddb, dblen - slen, slen) }
-    hp = sha256b(bytes.view(mp)[0..mp_len])
+    hp = hashb(algo, bytes.view(mp)[0..mp_len])
     bytes.free(mp)
     i = 0
     while i < hlen {

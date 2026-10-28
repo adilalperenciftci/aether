@@ -317,6 +317,9 @@ open_record(ctx: ptr, record: byte[], out: *OpenedRecord) -> string {
         return "record: sequence number overflow"
     }
     if rec_len < RECORD_HEADER_LEN + TAG_LEN {
+        // Shorter than its tag: it cannot be decrypted, which RFC 8446 5.2
+        // answers with bad_record_mac (#3357).
+        out.alert = ALERT_BAD_RECORD_MAC
         return "record: too short"
     }
     // header: opaque_type must be 0x17 for a protected record

@@ -18,7 +18,9 @@
 //
 // With PEER_CF=ok, PEER_POST says what to send after the handshake (see
 // post_session below). PEER_HRR has the server send a HelloRetryRequest
-// first (#3325; see the ClientHello it sends).
+// first (#3325; see the ClientHello it sends); PEER_GROUP=p256 offers
+// secp256r1 alone and PEER_EARLY=1 sends 0-RTT data the server must skip
+// (#3357).
 
 import std.os
 import std.tcp
@@ -26,6 +28,7 @@ import std.bytes
 import std.string
 import std.cryptography
 import std.cryptography.x25519
+import std.cryptography.p256
 import std.cryptography.tls13_hs
 import std.cryptography.tls13_ks
 import std.cryptography.tls13_kdf
@@ -153,26 +156,60 @@ main() {
     pub = x25519.base_point(priv)
     empty = bytes.new(0)
     ch = tls13_hs.client_hello_full(rnd, bytes.view(sid)[0..32], tls13_hs.GROUP_X25519, bytes.view(pub)[0..32], 0, bytes.view(empty)[0..0], 0, bytes.view(empty)[0..0], "peer.example")
-    // PEER_HRR (#3325): a first ClientHello naming secp256r1 and x25519 in
-    // supported_groups with a share for secp256r1 only, which the pure
+    // PEER_HRR (#3325): a first ClientHello naming secp384r1 and x25519 in
+    // supported_groups with a share for secp384r1 only, which the pure
     // server does not take: it must ask for x25519 with a HelloRetryRequest.
     hrr_mode = os.getenv("PEER_HRR")
-    p256pt = bytes.new(65)
-    bytes.set(p256pt, 0, 4)
-    k65 = 1
-    while k65 < 65 {
-        bytes.set(p256pt, k65, 0x11)
-        k65 = k65 + 1
+    p384pt = bytes.new(97)
+    bytes.set(p384pt, 0, 4)
+    k97 = 1
+    while k97 < 97 {
+        bytes.set(p384pt, k97, 0x11)
+        k97 = k97 + 1
     }
     if hrr_mode != "" {
         bytes.free(ch)
-        both = tls13_hs.client_hello_full(rnd, bytes.view(sid)[0..32], tls13_hs.GROUP_SECP256R1, bytes.view(p256pt)[0..65], tls13_hs.GROUP_X25519, bytes.view(pub)[0..32], 0, bytes.view(empty)[0..0], "peer.example")
+        both = tls13_hs.client_hello_full(rnd, bytes.view(sid)[0..32], 0x0018, bytes.view(p384pt)[0..97], tls13_hs.GROUP_X25519, bytes.view(pub)[0..32], 0, bytes.view(empty)[0..0], "peer.example")
         pch = tls13_hs.PskCh { buf: null, buf_len: 0, binder_off: 0, truncated_len: 0 }
-        tls13_hs.client_hello_retry(bytes.view(both)[0..bytes.length(both)], tls13_hs.GROUP_SECP256R1, bytes.view(p256pt)[0..65], bytes.view(empty)[0..0], &pch)
+        tls13_hs.client_hello_retry(bytes.view(both)[0..bytes.length(both)], 0x0018, bytes.view(p384pt)[0..97], bytes.view(empty)[0..0], &pch)
         bytes.free(both)
         ch = pch.buf
     }
+    // PEER_GROUP=p256 (#3357): a share for secp256r1 alone, which the pure
+    // server must take (RFC 8446 9.1). PEER_EARLY=1: an early_data
+    // extension and a record of 0-RTT data the server cannot read, which it
+    // must skip (4.2.10).
+    p256_priv = null
+    if os.getenv("PEER_GROUP") == "p256" {
+        bytes.free(ch)
+        p256_priv, _r4 = cryptography.random_buffer(32)
+        bytes.set(p256_priv, 0, 1)
+        qx, qy = p256.scalar_mult_base(p256_priv)
+        qpt = bytes.new(65)
+        bytes.set(qpt, 0, 4)
+        bytes.copy_from_bytes(qpt, 1, qx, 0, 32)
+        bytes.copy_from_bytes(qpt, 33, qy, 0, 32)
+        bytes.free(qx)
+        bytes.free(qy)
+        ch = tls13_hs.client_hello_full(rnd, bytes.view(sid)[0..32], tls13_hs.GROUP_SECP256R1, bytes.view(qpt)[0..65], 0, bytes.view(empty)[0..0], 0, bytes.view(empty)[0..0], "peer.example")
+        bytes.free(qpt)
+    }
+    peer_early = os.getenv("PEER_EARLY") == "1"
+    if peer_early {
+        ch2 = with_early_data(ch)
+        bytes.free(ch)
+        ch = ch2
+    }
     send_plain(sock, 22, ch, 0, bytes.length(ch))
+    if peer_early {
+        one = bytes.new(1)
+        bytes.set(one, 0, 1)
+        send_plain(sock, 20, one, 0, 1)
+        bytes.free(one)
+        junk, _r5 = cryptography.random_buffer(40)
+        send_plain(sock, 23, junk, 0, 40)
+        bytes.free(junk)
+    }
     tr = tls13_client.transcript_new()
     tls13_client.transcript_add(tr, bytes.view(ch)[0..bytes.length(ch)])
 
@@ -260,13 +297,27 @@ main() {
     bytes.copy_from_bytes(sh, 0, shrec, 5, shl)
     shp = tls13_hs.ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null, key_share_len: 0, is_hello_retry: 0, psk_accepted: 0, alert: 0 }
     serr = tls13_hs.parse_server_hello(bytes.view(sh)[0..shl], &shp)
-    if serr != "" || shp.key_share_len != 32 {
+    want_ks = 32
+    if p256_priv != null { want_ks = 65 }
+    if serr != "" || shp.key_share_len != want_ks {
         println("FAIL: ServerHello: ${serr}")
         exit(1)
     }
     tls13_client.transcript_add(tr, bytes.view(sh)[0..shl])
     aead, klen, algo, hl = suite_params(shp.cipher_suite)
-    shared, _aerr = x25519.agree(priv, shp.key_share)
+    shared = null
+    if p256_priv != null {
+        sx = bytes.new(32)
+        sy = bytes.new(32)
+        bytes.copy_from_bytes(sx, 0, shp.key_share, 1, 32)
+        bytes.copy_from_bytes(sy, 0, shp.key_share, 33, 32)
+        shared = p256.ecdh(p256_priv, sx, sy)
+        bytes.free(sx)
+        bytes.free(sy)
+    } else {
+        xs, _aerr = x25519.agree(priv, shp.key_share)
+        shared = xs
+    }
     th = tls13_client.transcript_hash_algo(tr, algo)
     early = tls13_ks.early_secret(algo)
     hsec = tls13_ks.handshake_secret(algo, early, bytes.view(shared)[0..32])
@@ -513,4 +564,28 @@ fn session_answer(r: *Reader, k: *Keys) -> string {
             return "${out}HANDSHAKE ${first}"
         }
     }
+}
+
+// The ClientHello `ch` with an empty early_data extension added at the
+// end of its extensions (#3357).
+fn with_early_data(ch: ptr) -> ptr {
+    n = bytes.length(ch)
+    out = bytes.new(n + 4)
+    bytes.copy_from_bytes(out, 0, ch, 0, n)
+    bytes.set(out, n, 0)
+    bytes.set(out, n + 1, 0x2a)
+    bytes.set(out, n + 2, 0)
+    bytes.set(out, n + 3, 0)
+    bl = n + 4 - 4
+    bytes.set(out, 1, (bl >> 16) & 0xFF)
+    bytes.set(out, 2, (bl >> 8) & 0xFF)
+    bytes.set(out, 3, bl & 0xFF)
+    p = 4 + 2 + 32
+    p = p + 1 + (bytes.get(ch, p) & 0xFF)
+    p = p + 2 + (((bytes.get(ch, p) & 0xFF) << 8) | (bytes.get(ch, p + 1) & 0xFF))
+    p = p + 1 + (bytes.get(ch, p) & 0xFF)
+    el = (((bytes.get(ch, p) & 0xFF) << 8) | (bytes.get(ch, p + 1) & 0xFF)) + 4
+    bytes.set(out, p, (el >> 8) & 0xFF)
+    bytes.set(out, p + 1, el & 0xFF)
+    return out
 }

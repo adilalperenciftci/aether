@@ -12,7 +12,7 @@
   ServerHello after it with another cipher suite or group. The server asks
   for X25519MLKEM768 or X25519 when `supported_groups` names it but no share
   is for it (4.2.8), sends its compatibility change_cipher_spec after the
-  HelloRetryRequest, and refuses a second ClientHello without that share,
-  with another session id or suite, or with early data (illegal_parameter).
+  HelloRetryRequest, and refuses a second ClientHello without that share
+  or with another session id or suite (illegal_parameter).
   New `tls13_hs.hello_retry_request(session_id, cipher_suite, group)` and
   `tls13_hs.client_hello_retry(ch1, group, share, cookie, out)`.

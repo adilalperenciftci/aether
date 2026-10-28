@@ -47,12 +47,13 @@ exports(
     TLS_CHACHA20_POLY1305_SHA256, TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384,
     GROUP_X25519, GROUP_SECP256R1, GROUP_X25519MLKEM768,
     SIGBIT_ECDSA_P256, SIGBIT_ECDSA_P384, SIGBIT_ECDSA_P521, SIGBIT_RSA_PSS_SHA256, SIGBIT_ED25519,
+    SIGBIT_RSA_PSS_SHA384, SIGBIT_RSA_PSS_SHA512,
     HS_ENCRYPTED_EXTENSIONS, HS_CERTIFICATE, HS_CERTIFICATE_VERIFY, HS_FINISHED,
     HS_NEW_SESSION_TICKET, HS_KEY_UPDATE, KEY_UPDATE_NOT_REQUESTED, KEY_UPDATE_REQUESTED,
     encrypted_extensions, certificate_msg, certificate_verify_msg, finished_msg,
     key_update_msg, key_update_request,
     NstParsed, parse_new_session_ticket,
-    hello_retry_request, client_hello_retry, GROUPBIT_X25519MLKEM768, GROUPBIT_X25519
+    hello_retry_request, client_hello_retry, GROUPBIT_X25519MLKEM768, GROUPBIT_X25519, GROUPBIT_SECP256R1
 )
 
 // Cipher suites (RFC 8446 appendix B.4).
@@ -73,6 +74,8 @@ const SIG_ECDSA_P256_SHA256 = 0x0403
 const SIG_ECDSA_P384_SHA384 = 0x0503
 const SIG_ECDSA_P521_SHA512 = 0x0603
 const SIG_RSA_PSS_RSAE_SHA256 = 0x0804
+const SIG_RSA_PSS_RSAE_SHA384 = 0x0805
+const SIG_RSA_PSS_RSAE_SHA512 = 0x0806
 const SIG_ED25519 = 0x0807
 
 // The offered schemes a ChParsed records (sig_algs), one bit each.
@@ -81,6 +84,8 @@ const SIGBIT_ECDSA_P384 = 2
 const SIGBIT_ECDSA_P521 = 4
 const SIGBIT_RSA_PSS_SHA256 = 8
 const SIGBIT_ED25519 = 16
+const SIGBIT_RSA_PSS_SHA384 = 32
+const SIGBIT_RSA_PSS_SHA512 = 64
 
 // Handshake message types (RFC 8446 §4).
 const HS_CLIENT_HELLO = 1
@@ -679,11 +684,13 @@ struct ChParsed {
     retry_group: int
     has_early_data: int // 1 if an early_data extension was present
     has_cookie: int // 1 if a cookie extension was present
+    alert: int // the alert parse_client_hello says to send, when it refuses (#3357)
 }
 
 // The groups a ChParsed's `groups` records, one bit each.
 const GROUPBIT_X25519MLKEM768 = 1
 const GROUPBIT_X25519 = 2
+const GROUPBIT_SECP256R1 = 4
 
 // Free the buffers a ChParsed owns. Idempotent.
 free_ch(c: *ChParsed) {
@@ -715,14 +722,18 @@ parse_client_hello(msg: byte[], out: *ChParsed) -> string {
     out.retry_group = 0
     out.has_early_data = 0
     out.has_cookie = 0
+    out.alert = ALERT_DECODE_ERROR
 
     if len < 4 { return "client hello: truncated header" }
-    if get8(msg, 0) != HS_CLIENT_HELLO { return "client hello: wrong msg type" }
+    if get8(msg, 0) != HS_CLIENT_HELLO {
+        out.alert = ALERT_UNEXPECTED_MESSAGE
+        return "client hello: wrong msg type"
+    }
     body_len = get24(msg, 1)
-    if body_len + 4 > len { return "client hello: length overruns buffer" }
+    if body_len + 4 != len { return "client hello: the message length is not its body's" }
 
     p = 4
-    // legacy_version (2) -- always 0x0303 in TLS 1.3; the real version is in
+    // legacy_version (2) -- 0x0303 in TLS 1.3; the real version is in
     // the supported_versions extension.
     if p + 2 > len { return "client hello: truncated version" }
     p = p + 2
@@ -754,7 +765,7 @@ parse_client_hello(msg: byte[], out: *ChParsed) -> string {
     if p + 2 > len { return "client hello: truncated cipher suites length" }
     cs_len = get16(msg, p)
     p = p + 2
-    if p + cs_len > len { return "client hello: cipher suites overrun" }
+    if cs_len < 2 || cs_len % 2 != 0 || p + cs_len > len { return "client hello: malformed cipher suites" }
     cs_end = p + cs_len
     while p + 1 < cs_end {
         cs = get16(msg, p)
@@ -765,143 +776,281 @@ parse_client_hello(msg: byte[], out: *ChParsed) -> string {
         }
         p = p + 2
     }
-    p = cs_end
-    if out.cipher_suite == 0 { return "client hello: no mutually supported cipher suite" }
 
-    // legacy_compression_methods<1..2^8-1> -- must contain only null(0).
+    // legacy_compression_methods<1..2^8-1>: null(0) must be among them
+    // (RFC 5246 7.4.1.2), and TLS 1.3 wants it alone (checked below).
     if p + 1 > len { return "client hello: truncated compression" }
     comp_len = get8(msg, p)
     p = p + 1
-    if p + comp_len > len { return "client hello: compression overrun" }
+    if comp_len < 1 || p + comp_len > len { return "client hello: malformed compression methods" }
+    comp_null = 0
+    k = 0
+    while k < comp_len {
+        if get8(msg, p + k) == 0 { comp_null = 1 }
+        k = k + 1
+    }
+    comp_only_null = 0
+    if comp_len == 1 && comp_null == 1 { comp_only_null = 1 }
     p = p + comp_len
+    if comp_null == 0 {
+        out.alert = ALERT_ILLEGAL_PARAMETER
+        return "client hello: the compression methods do not include null"
+    }
 
-    // extensions<8..2^16-1>
-    if p + 2 > len { return "client hello: truncated extensions length" }
+    // extensions<8..2^16-1>, which fill the message (#3357).
+    if p + 2 > len { return "client hello: no extensions" }
     ext_total = get16(msg, p)
     p = p + 2
     ext_end = p + ext_total
-    if ext_end > len { return "client hello: extensions overrun" }
+    if ext_end != len { return "client hello: the extensions do not fill the message" }
 
-    while p + 4 <= ext_end {
-        ext_type = get16(msg, p)
-        ext_len = get16(msg, p + 2)
-        d = p + 4
-        if d + ext_len > ext_end { return "client hello: extension overruns" }
-
-        if ext_type == 0x0000 {
-            // server_name: presence is all a server needs here; the name
-            // itself only matters once there is more than one certificate.
-            out.has_sni = 1
-        }
-        if ext_type == 0x000a {
-            // supported_groups: named_group_list<2..2^16-1> of 2-byte groups;
-            // the ones a server takes, for a HelloRetryRequest (#3325).
-            if ext_len < 2 || get16(msg, d) < 2 || get16(msg, d) % 2 != 0 || get16(msg, d) + 2 != ext_len {
-                return "client hello: malformed supported_groups"
-            }
-            q = d + 2
-            while q + 1 < d + ext_len {
-                sg = get16(msg, q)
-                if sg == GROUP_X25519MLKEM768 { out.groups = out.groups | GROUPBIT_X25519MLKEM768 }
-                if sg == GROUP_X25519 { out.groups = out.groups | GROUPBIT_X25519 }
-                q = q + 2
-            }
-        }
-        if ext_type == 0x002a { out.has_early_data = 1 }
-        if ext_type == 0x002c { out.has_cookie = 1 }
-        if ext_type == 0x000d {
-            // signature_algorithms: supported_signature_algorithms<2..2^16-2>,
-            // 2-byte schemes. Recorded as SIGBIT_* for the ones a server key
-            // can sign with, so the server picks one the client verifies
-            // (RFC 8446 4.4.3, #3326).
-            if ext_len < 2 { return "client hello: malformed signature_algorithms" }
-            sa_len = get16(msg, d)
-            if sa_len < 2 || sa_len % 2 != 0 || sa_len + 2 != ext_len { return "client hello: malformed signature_algorithms" }
-            out.saw_sig_algs = 1
-            q = d + 2
-            while q + 1 < d + 2 + sa_len {
-                sch = get16(msg, q)
-                if sch == SIG_ECDSA_P256_SHA256 { out.sig_algs = out.sig_algs | SIGBIT_ECDSA_P256 }
-                if sch == SIG_ECDSA_P384_SHA384 { out.sig_algs = out.sig_algs | SIGBIT_ECDSA_P384 }
-                if sch == SIG_ECDSA_P521_SHA512 { out.sig_algs = out.sig_algs | SIGBIT_ECDSA_P521 }
-                if sch == SIG_RSA_PSS_RSAE_SHA256 { out.sig_algs = out.sig_algs | SIGBIT_RSA_PSS_SHA256 }
-                if sch == SIG_ED25519 { out.sig_algs = out.sig_algs | SIGBIT_ED25519 }
-                q = q + 2
-            }
-        }
-        if ext_type == 0x002b {
-            // supported_versions<2..254>: list of 2-byte versions, preceded
-            // by a 1-byte length. 0x0304 is TLS 1.3.
-            if ext_len >= 1 {
-                sv_len = get8(msg, d)
-                q = d + 1
-                sv_end = q + sv_len
-                if sv_end > d + ext_len { sv_end = d + ext_len }
-                while q + 1 < sv_end {
-                    if get16(msg, q) == 0x0304 { out.saw_supported_versions = 1 }
-                    q = q + 2
-                }
-            }
-        }
-        if ext_type == 0x0033 {
-            // key_share: client_shares<0..2^16-1> of { group(2), len(2), key }.
-            // Prefer post-quantum X25519MLKEM768 (1216 bytes) if offered,
-            // otherwise fallback to classical X25519 (32 bytes).
-            if ext_len >= 2 {
-                ks_total = get16(msg, d)
-                q = d + 2
-                ks_end = q + ks_total
-                if ks_end > d + ext_len { ks_end = d + ext_len }
-                while q + 4 <= ks_end {
-                    g = get16(msg, q)
-                    klen = get16(msg, q + 2)
-                    kstart = q + 4
-                    if kstart + klen > ks_end { q = ks_end } else {
-                        if g == GROUP_X25519MLKEM768 {
-                            if klen != 1216 {
-                                return "client hello: invalid X25519MLKEM768 key share length"
-                            }
-                            if out.key_share != null {
-                                bytes.free(out.key_share)
-                                out.key_share = null
-                            }
-                            kb = bytes.new(klen)
-                            bytes.copy_from_slice(kb, 0, msg[kstart..kstart + klen])
-                            out.group = g
-                            out.key_share = kb
-                            out.key_share_len = klen
-                        } else if g == GROUP_X25519 && out.group == 0 {
-                            if klen == 32 {
-                                kb = bytes.new(klen)
-                                bytes.copy_from_slice(kb, 0, msg[kstart..kstart + klen])
-                                out.group = g
-                                out.key_share = kb
-                                out.key_share_len = klen
-                            }
-                        }
-                        q = kstart + klen
+    seen = bytes.new(0)
+    saw_groups = 0
+    saw_key_share = 0
+    share_groups = bytes.new(0)
+    err = ""
+    while p < ext_end && err == "" {
+        if p + 4 > ext_end {
+            err = "client hello: truncated extension"
+        } else {
+            ext_type = get16(msg, p)
+            ext_len = get16(msg, p + 2)
+            d = p + 4
+            if d + ext_len > ext_end {
+                err = "client hello: extension overruns"
+            } else {
+                // One of each (RFC 8446 4.2).
+                if list16_has(seen, ext_type) == 1 {
+                    err = "client hello: extension ${ext_type} appears twice"
+                } else {
+                    list16_add(seen, ext_type)
+                    if ext_type == 0x0029 && d + ext_len != ext_end {
+                        // pre_shared_key must be the last extension (4.2.11).
+                        out.alert = ALERT_ILLEGAL_PARAMETER
+                        err = "client hello: pre_shared_key is not the last extension"
+                    } else {
+                        err = ch_extension(msg, ext_type, d, ext_len, out, share_groups)
+                        if ext_type == 0x000a { saw_groups = 1 }
+                        if ext_type == 0x0033 { saw_key_share = 1 }
                     }
                 }
             }
+            p = d + ext_len
         }
-        p = d + ext_len
     }
+    bytes.free(seen)
+    bytes.free(share_groups)
+    if err != "" { return err }
 
+    // What every TLS 1.3 ClientHello carries (RFC 8446 4.1.2, 9.2).
     if out.saw_supported_versions == 0 {
+        out.alert = ALERT_PROTOCOL_VERSION
         return "client hello: no supported_versions offering TLS 1.3"
+    }
+    if comp_only_null == 0 {
+        out.alert = ALERT_ILLEGAL_PARAMETER
+        return "client hello: a TLS 1.3 ClientHello has compression methods other than null alone"
+    }
+    if out.cipher_suite == 0 {
+        out.alert = ALERT_HANDSHAKE_FAILURE
+        return "client hello: no mutually supported cipher suite"
+    }
+    if saw_groups == 0 {
+        out.alert = ALERT_MISSING_EXTENSION
+        return "client hello: no supported_groups"
+    }
+    if saw_key_share == 0 {
+        out.alert = ALERT_MISSING_EXTENSION
+        return "client hello: no key_share"
     }
     if out.group == 0 {
         // No share the server can use. A group supported_groups names that
         // it takes is asked for with a HelloRetryRequest (RFC 8446 4.2.8,
-        // #3325): out.retry_group says which. Without one, nothing can be
-        // agreed.
+        // #3325): out.retry_group says which, the server's preference
+        // first. Without one, nothing can be agreed.
         if (out.groups & GROUPBIT_X25519MLKEM768) != 0 {
             out.retry_group = GROUP_X25519MLKEM768
         } else if (out.groups & GROUPBIT_X25519) != 0 {
             out.retry_group = GROUP_X25519
+        } else if (out.groups & GROUPBIT_SECP256R1) != 0 {
+            out.retry_group = GROUP_SECP256R1
         } else {
+            out.alert = ALERT_HANDSHAKE_FAILURE
             return "client hello: no key_share for a supported group, and supported_groups names none the server takes"
         }
+    }
+    out.alert = 0
+    return ""
+}
+
+// 1 when the 2-byte list `l` holds `v`.
+fn list16_has(l: ptr, v: int) -> int {
+    k = 0
+    while k + 1 < bytes.length(l) {
+        if (((bytes.get(l, k) & 0xFF) << 8) | (bytes.get(l, k + 1) & 0xFF)) == v { return 1 }
+        k = k + 2
+    }
+    return 0
+}
+
+fn list16_add(l: ptr, v: int) {
+    n = bytes.length(l)
+    bytes.set(l, n, (v >> 8) & 0xFF)
+    bytes.set(l, n + 1, v & 0xFF)
+}
+
+// One ClientHello extension, `t` with its body at msg[d, d + n), into
+// `out`: "" or why it is refused, out.alert saying with what (decode_error
+// unless set). Each body must parse and fill the extension exactly
+// (#3357). `share_groups` collects the key_share groups, which may not
+// repeat (illegal_parameter, 4.2.8).
+fn ch_extension(msg: byte[], t: int, d: int, n: int, out: *ChParsed, share_groups: ptr) -> string {
+    if t == 0x0000 {
+        // server_name: ServerNameList<1..2^16-1> of { name_type, HostName<1..2^16-1> }.
+        if n < 2 || get16(msg, d) + 2 != n || n == 2 { return "client hello: malformed server_name" }
+        q = d + 2
+        while q < d + n {
+            if q + 3 > d + n { return "client hello: malformed server_name" }
+            hn = get16(msg, q + 1)
+            if hn == 0 || q + 3 + hn > d + n { return "client hello: malformed server_name" }
+            q = q + 3 + hn
+        }
+        out.has_sni = 1
+        return ""
+    }
+    if t == 0x000a {
+        // supported_groups: named_group_list<2..2^16-1> of 2-byte groups;
+        // the ones a server takes, for a HelloRetryRequest (#3325).
+        if n < 2 || get16(msg, d) < 2 || get16(msg, d) % 2 != 0 || get16(msg, d) + 2 != n {
+            return "client hello: malformed supported_groups"
+        }
+        q = d + 2
+        while q + 1 < d + n {
+            sg = get16(msg, q)
+            if sg == GROUP_X25519MLKEM768 { out.groups = out.groups | GROUPBIT_X25519MLKEM768 }
+            if sg == GROUP_X25519 { out.groups = out.groups | GROUPBIT_X25519 }
+            if sg == GROUP_SECP256R1 { out.groups = out.groups | GROUPBIT_SECP256R1 }
+            q = q + 2
+        }
+        return ""
+    }
+    if t == 0x000d {
+        // signature_algorithms: supported_signature_algorithms<2..2^16-2>,
+        // 2-byte schemes. Recorded as SIGBIT_* for the ones a server key
+        // can sign with, so the server picks one the client verifies
+        // (RFC 8446 4.4.3, #3326).
+        if n < 2 { return "client hello: malformed signature_algorithms" }
+        sa_len = get16(msg, d)
+        if sa_len < 2 || sa_len % 2 != 0 || sa_len + 2 != n { return "client hello: malformed signature_algorithms" }
+        out.saw_sig_algs = 1
+        q = d + 2
+        while q + 1 < d + 2 + sa_len {
+            sch = get16(msg, q)
+            if sch == SIG_ECDSA_P256_SHA256 { out.sig_algs = out.sig_algs | SIGBIT_ECDSA_P256 }
+            if sch == SIG_ECDSA_P384_SHA384 { out.sig_algs = out.sig_algs | SIGBIT_ECDSA_P384 }
+            if sch == SIG_ECDSA_P521_SHA512 { out.sig_algs = out.sig_algs | SIGBIT_ECDSA_P521 }
+            if sch == SIG_RSA_PSS_RSAE_SHA256 { out.sig_algs = out.sig_algs | SIGBIT_RSA_PSS_SHA256 }
+            if sch == SIG_RSA_PSS_RSAE_SHA384 { out.sig_algs = out.sig_algs | SIGBIT_RSA_PSS_SHA384 }
+            if sch == SIG_RSA_PSS_RSAE_SHA512 { out.sig_algs = out.sig_algs | SIGBIT_RSA_PSS_SHA512 }
+            if sch == SIG_ED25519 { out.sig_algs = out.sig_algs | SIGBIT_ED25519 }
+            q = q + 2
+        }
+        return ""
+    }
+    if t == 0x002b {
+        // supported_versions<2..254>: 2-byte versions after a 1-byte
+        // length. 0x0304 is TLS 1.3.
+        if n < 1 || get8(msg, d) + 1 != n || get8(msg, d) < 2 || get8(msg, d) % 2 != 0 {
+            return "client hello: malformed supported_versions"
+        }
+        q = d + 1
+        while q + 1 < d + n {
+            if get16(msg, q) == 0x0304 { out.saw_supported_versions = 1 }
+            q = q + 2
+        }
+        return ""
+    }
+    if t == 0x0033 {
+        // key_share: client_shares<0..2^16-1> of { group, key_exchange<1..2^16-1> },
+        // filling the extension, each group once (4.2.8). The share of the
+        // group the server prefers, X25519MLKEM768, X25519, secp256r1, is
+        // taken; one of those of the wrong size is illegal_parameter.
+        if n < 2 || get16(msg, d) + 2 != n { return "client hello: malformed key_share" }
+        q = d + 2
+        best = 0
+        while q < d + n {
+            if q + 4 > d + n { return "client hello: malformed key_share" }
+            g = get16(msg, q)
+            klen = get16(msg, q + 2)
+            kstart = q + 4
+            if klen == 0 || kstart + klen > d + n { return "client hello: malformed key_share" }
+            if list16_has(share_groups, g) == 1 {
+                out.alert = ALERT_ILLEGAL_PARAMETER
+                return "client hello: two key shares for group ${g}"
+            }
+            list16_add(share_groups, g)
+            rank = 0
+            if g == GROUP_X25519MLKEM768 {
+                rank = 3
+                if klen != 1216 {
+                    out.alert = ALERT_ILLEGAL_PARAMETER
+                    return "client hello: invalid X25519MLKEM768 key share length"
+                }
+            } else if g == GROUP_X25519 {
+                rank = 2
+                if klen != 32 {
+                    out.alert = ALERT_ILLEGAL_PARAMETER
+                    return "client hello: an X25519 key share that is not 32 bytes"
+                }
+            } else if g == GROUP_SECP256R1 {
+                rank = 1
+                if klen != 65 || get8(msg, kstart) != 4 {
+                    out.alert = ALERT_ILLEGAL_PARAMETER
+                    return "client hello: a secp256r1 key share that is not an uncompressed point"
+                }
+            }
+            if rank > best {
+                best = rank
+                if out.key_share != null { bytes.free(out.key_share) }
+                kb = bytes.new(klen)
+                bytes.copy_from_slice(kb, 0, msg[kstart..kstart + klen])
+                out.group = g
+                out.key_share = kb
+                out.key_share_len = klen
+            }
+            q = kstart + klen
+        }
+        return ""
+    }
+    if t == 0x002f {
+        // certificate_authorities: DistinguishedName authorities<3..2^16-1>,
+        // each DistinguishedName<1..2^16-1> (4.2.4).
+        if n < 2 || get16(msg, d) + 2 != n || get16(msg, d) < 3 { return "client hello: malformed certificate_authorities" }
+        q = d + 2
+        while q < d + n {
+            if q + 2 > d + n { return "client hello: malformed certificate_authorities" }
+            dl = get16(msg, q)
+            if dl == 0 || q + 2 + dl > d + n { return "client hello: malformed certificate_authorities" }
+            q = q + 2 + dl
+        }
+        return ""
+    }
+    if t == 0x002a {
+        // early_data is empty in a ClientHello (4.2.10).
+        if n != 0 { return "client hello: early_data with a body" }
+        out.has_early_data = 1
+        return ""
+    }
+    if t == 0x002c {
+        // cookie<1..2^16-1> (4.2.2).
+        if n < 3 || get16(msg, d) + 2 != n { return "client hello: malformed cookie" }
+        out.has_cookie = 1
+        return ""
+    }
+    if t == 0x002d {
+        // psk_key_exchange_modes<1..255> of 1-byte modes (4.2.9).
+        if n < 2 || get8(msg, d) + 1 != n { return "client hello: malformed psk_key_exchange_modes" }
+        return ""
     }
     return ""
 }
@@ -938,6 +1087,9 @@ const ALERT_DECODE_ERROR = 50
 const ALERT_ILLEGAL_PARAMETER = 47
 const ALERT_MISSING_EXTENSION = 109
 const ALERT_UNSUPPORTED_EXTENSION = 110
+const ALERT_UNEXPECTED_MESSAGE = 10
+const ALERT_HANDSHAKE_FAILURE = 40
+const ALERT_PROTOCOL_VERSION = 70
 
 // 1 when the ClientHello (with `offered`) carried extension `t`.
 fn ext_offered(t: int, offered: int) -> int {

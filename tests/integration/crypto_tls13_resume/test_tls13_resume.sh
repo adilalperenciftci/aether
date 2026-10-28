@@ -15,6 +15,8 @@
 #          of the ticket's hash (illegal_parameter).
 #   #3353  a ServerHello without key_share (missing_extension) or naming a
 #          group the ClientHello has no share for (illegal_parameter).
+#   #3357  the pure server signs rsa_pss_rsae_sha384/512 and takes a
+#          secp256r1 share (openssl s_client checks both).
 #   #3325  a HelloRetryRequest asking for secp256r1 (also from s_server
 #          -groups P-256, and the pure server's to s_client): the second ClientHello
 #          carries its share, no early data, and a binder over the new
@@ -194,6 +196,41 @@ if command -v openssl >/dev/null 2>&1 && openssl s_server -help 2>&1 | grep -q -
         echo "    FAIL: openssl s_client -groups P-384:X25519: $hellos ClientHellos, server said [$(tr '\n' '|' <"$TMP/server.out")]"
         fails=$((fails + 1))
     fi
+
+    # The pure server to s_client (#3357): an RSA key signing
+    # rsa_pss_rsae_sha384 and _sha512 when the client offers only those,
+    # and a secp256r1 share alone (RFC 8446 9.1: a TLS 1.3 implementation
+    # MUST support it). OpenSSL checks the signature and the key exchange.
+    MSYS2_ARG_CONV_EXCL='/CN=' openssl req -x509 -newkey rsa:2048 -keyout "$TMP/rk.pem" -out "$TMP/rc.pem" -days 2 -nodes \
+        -subj "/CN=peer.example" -addext "subjectAltName=DNS:peer.example" >"$TMP/ssl.log" 2>&1 \
+        || { sed -n '1,12p' "$TMP/ssl.log"; fail "openssl could not make the RSA certificate"; }
+    # s_client_case <name> <want in s_client's output> <s_client flags...>;
+    # SCERT/SKEY name the server's PEM files.
+    s_client_case() {
+        sc_name="$1"
+        sc_want="$2"
+        shift 2
+        rm -f "$TMP/port" "$TMP/server.out"
+        SERVER_CERT="$SCERT" SERVER_KEY="$SKEY" PEER_PORT_OUT="$TMP/port" "$TMP/server" >"$TMP/server.out" 2>&1 &
+        spid=$!
+        PIDS="$PIDS $spid"
+        i=0
+        while [ "$i" -lt 100 ] && [ ! -s "$TMP/port" ]; do sleep 0.1; i=$((i + 1)); done
+        [ -s "$TMP/port" ] || fail "$sc_name: the pure server never listened"
+        openssl s_client -connect "127.0.0.1:$(cat "$TMP/port")" -servername peer.example "$@" </dev/null >"$TMP/c.log" 2>&1 || :
+        n=0
+        while server_alive "$spid" && [ "$n" -lt 100 ]; do sleep 0.1; n=$((n + 1)); done
+        stop_server "$spid"
+        if grep -q "$sc_want" "$TMP/c.log" && grep -q ACCEPTED "$TMP/server.out"; then
+            echo "    ok: $sc_name"
+        else
+            echo "    FAIL: $sc_name: server said [$(tr '\n' '|' <"$TMP/server.out")], s_client [$(grep -i 'peer sig\|temp key\|alert\|error' "$TMP/c.log" | tr '\n' '|')]"
+            fails=$((fails + 1))
+        fi
+    }
+    SCERT="$TMP/rc.pem" SKEY="$TMP/rk.pem" s_client_case "openssl s_client -sigalgs rsa_pss_rsae_sha384" "Peer signature type: rsa_pss_rsae_sha384" -sigalgs rsa_pss_rsae_sha384
+    SCERT="$TMP/rc.pem" SKEY="$TMP/rk.pem" s_client_case "openssl s_client -sigalgs rsa_pss_rsae_sha512" "Peer signature type: rsa_pss_rsae_sha512" -sigalgs rsa_pss_rsae_sha512
+    SCERT="" SKEY="" s_client_case "openssl s_client -groups P-256" "Temp Key: ECDH, prime256v1" -groups P-256
 else
     echo "    skip: openssl s_server -early_data (no openssl, or no -early_data)"
 fi

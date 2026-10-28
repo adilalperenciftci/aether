@@ -2,7 +2,8 @@
 // cases: it listens on 127.0.0.1, writes its port to PEER_PORT_OUT, serves one
 // connection with peer.ae's certificate, and prints "ACCEPTED" or
 // "REFUSED: <why>". With SERVER_READ=1 it then echoes what it reads, printing
-// "RECV <n>" for each record, until "EOF" or "RECVERR: <why>".
+// "RECV <n>" for each record, until "EOF" or "RECVERR: <why>". SERVER_CERT
+// and SERVER_KEY name PEM files to serve instead of the built-in pair.
 
 import std.os
 import std.fs
@@ -25,8 +26,17 @@ main() {
         println("FAIL: ${aerr}")
         exit(1)
     }
-    chain, lens = tls13_server.parse_cert_chain_pem(peer_pem())
-    key, _kerr = tls13_server.load_private_key(peer_key())
+    // SERVER_CERT and SERVER_KEY name PEM files to serve instead (#3357).
+    cert_pem = peer_pem()
+    key_pem = peer_key()
+    if os.getenv("SERVER_CERT") != "" {
+        cp, _ce = fs.read(os.getenv("SERVER_CERT"))
+        kp, _ke = fs.read(os.getenv("SERVER_KEY"))
+        cert_pem = cp
+        key_pem = kp
+    }
+    chain, lens = tls13_server.parse_cert_chain_pem(cert_pem)
+    key, _kerr = tls13_server.load_private_key(key_pem)
     xpriv, _rerr = cryptography.random_buffer(32)
     conn, err = tls13_server.accept(sock, chain, lens, key, xpriv)
     bytes.free(xpriv)
