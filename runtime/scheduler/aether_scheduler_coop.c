@@ -31,7 +31,6 @@ Scheduler schedulers[MAX_CORES];  // Only [0] is used
 int num_cores = 1;
 atomic_int next_actor_id = 0;
 AETHER_TLS int current_core_id = 0;  // Always core 0
-AETHER_TLS void* g_pending_reply_slot = NULL;
 AETHER_TLS void* g_current_reply_slot = NULL;
 AETHER_TLS void* g_current_step_actor = NULL;
 
@@ -779,31 +778,16 @@ void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg
     // threads, where the asker stops waiting at the deadline.
     slot.deadline_ns = timeout_ms > 0 ? aether_now_ns() + (uint64_t)timeout_ms * 1000000ULL : 0;
 
-    // Set pending reply slot
-    g_pending_reply_slot = &slot;
-
-    // Queued as any send is, and processed by the polls below
-    void* msg_copy = malloc(msg_size);
-    if (!msg_copy) {
-        g_pending_reply_slot = NULL;
+    // Its message, with the slot in it (#3395), queued as any send is and
+    // processed by the polls below. No memory for the copy fails the ask, and
+    // what the message owns is released (#3387).
+    Message msg;
+    if (!aether_ask_message(target, msg_data, msg_size, &slot, &msg)) {
         aether_alloc_failed(AETHER_STOP_OUT_OF_MEMORY);   /* a library call ends (#2956) */
         *status = AETHER_ASK_NO_MEMORY;
         return NULL;
     }
-    memcpy(msg_copy, msg_data, msg_size);
-
-    Message msg;
-    msg.type = *(int*)msg_data;
-    msg.sender_id = 0;
-    msg.payload_int = 0;
-    msg.payload_ptr = msg_copy;
-    msg.zerocopy.data = NULL;
-    msg.zerocopy.size = 0;
-    msg.zerocopy.owned = 0;
-    msg._reply_slot = &slot;
-
     coop_send(target, msg);
-    g_pending_reply_slot = NULL;
 
     // Process messages until the reply is ready, the deadline passes, or none
     // can come: a poll that handled nothing, with no countdown armed, leaves

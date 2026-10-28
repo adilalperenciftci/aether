@@ -55,13 +55,34 @@ void aether_message_drop(ActorBase* target, Message* msg) {
     }
 }
 
+// The heap copy of a typed message's payload, or NULL when there was no
+// memory for it.
+// Always use heap allocation for type-safe messages.
+// TLS pools have thread affinity issues: a same-core actor may be migrated
+// to another core after the message is sent, causing the receiver to call
+// free() on pool memory (heap-use-after-free / free-on-non-malloc).
+static void* payload_copy(void* message_data, size_t message_size) {
+    void* msg_copy = aether_alloc_test_refuses() ? NULL : malloc(message_size);
+    if (msg_copy) memcpy(msg_copy, message_data, message_size);
+    return msg_copy;
+}
+
+static Message message_of(void* payload, int type, void* reply_slot) {
+    Message msg;
+    msg.type = type;
+    msg.sender_id = 0;
+    msg.payload_int = 0;
+    msg.payload_ptr = payload;
+    msg.zerocopy.data = NULL;
+    msg.zerocopy.size = 0;
+    msg.zerocopy.owned = 0;
+    msg._reply_slot = reply_slot;
+    return msg;
+}
+
 // The heap copy of a typed message's payload, as the Message a send carries.
 static Message payload_message(ActorBase* actor, void* message_data, size_t message_size) {
-    // Always use heap allocation for type-safe messages.
-    // TLS pools have thread affinity issues: a same-core actor may be migrated
-    // to another core after the message is sent, causing the receiver to call
-    // free() on pool memory (heap-use-after-free / free-on-non-malloc).
-    void* msg_copy = aether_alloc_test_refuses() ? NULL : malloc(message_size);
+    void* msg_copy = payload_copy(message_data, message_size);
     if (!msg_copy) {
         /* Inside a library call (#2956): nothing is queued yet, so the
          * message's own values are released (they moved into it) and the
@@ -75,18 +96,25 @@ static Message payload_message(ActorBase* actor, void* message_data, size_t mess
                 message_size, *(int*)message_data, actor->id);
         abort();
     }
-    memcpy(msg_copy, message_data, message_size);
+    return message_of(msg_copy, *(int*)message_data, NULL);
+}
 
-    Message msg;
-    msg.type = *(int*)message_data;
-    msg.sender_id = 0;
-    msg.payload_int = 0;
-    msg.payload_ptr = msg_copy;
-    msg.zerocopy.data = NULL;
-    msg.zerocopy.size = 0;
-    msg.zerocopy.owned = 0;
-    msg._reply_slot = g_pending_reply_slot;
-    return msg;
+// An ask's message (#3387): the payload copied, the asker's reply slot in it.
+// An ask can fail, so a copy that finds no memory is its failure, not an
+// unwind: 0, with what the message owns released (its values moved into it)
+// and nothing sent. The slot is passed here rather than through a
+// thread-local the send reads: the send can step its target inline, and
+// every payload send that handler made read the asker's slot too.
+int aether_ask_message(void* actor_ptr, void* message_data, size_t message_size,
+                       void* reply_slot, Message* out) {
+    ActorBase* actor = (ActorBase*)actor_ptr;
+    void* msg_copy = payload_copy(message_data, message_size);
+    if (!msg_copy) {
+        if (actor && actor->release_message) actor->release_message(*(int*)message_data, message_data);
+        return 0;
+    }
+    *out = message_of(msg_copy, *(int*)message_data, reply_slot);
+    return 1;
 }
 
 // Send a typed message to an actor. The payload is copied to the heap and
@@ -96,8 +124,12 @@ static Message payload_message(ActorBase* actor, void* message_data, size_t mess
 // aether_scheduler_poll.
 void aether_send_message(void* actor_ptr, void* message_data, size_t message_size) {
     ActorBase* actor = (ActorBase*)actor_ptr;
-    Message msg = payload_message(actor, message_data, message_size);
+    aether_send_built(actor, payload_message(actor, message_data, message_size));
+}
 
+// A message built already (an ask's), to its actor: through this core when
+// the actor is this core's, else through its own.
+void aether_send_built(ActorBase* actor, Message msg) {
 #if AETHER_HAS_THREADS
     // Cache TLS once — avoids repeated tlv_get_addr calls on macOS
     const int my_core = current_core_id;

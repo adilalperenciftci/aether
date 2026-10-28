@@ -725,10 +725,18 @@ int aether_scheduler_poll(int max_per_actor);
 int scheduler_io_register(int core_id, int fd, void* actor, uint32_t events);
 void scheduler_io_unregister(int core_id, int fd);
 
-// Thread-local reply slot set by the send path (sender) and step function (receiver).
-// g_pending_reply_slot: set before aether_send_message so the slot rides inside the Message.
-// g_current_reply_slot: set by the generated step function after mailbox_receive.
-extern AETHER_TLS void* g_pending_reply_slot;
+// The ask in hand: set by the generated step function after mailbox_receive
+// from the message's _reply_slot, read by the reply.
 extern AETHER_TLS void* g_current_reply_slot;
+
+// An ask's message (aether_send_message.c, #3387): the payload copied and
+// `reply_slot` in it, built by the ask itself, never handed over through a
+// thread-local (a send can step its target inline, and that handler's own
+// sends read it too, #3395). 0 when there was no memory for the copy: what
+// the message owns is released and nothing is sent. aether_send_built sends
+// a message built so, as aether_send_message routes one.
+int  aether_ask_message(void* actor, void* message_data, size_t message_size,
+                        void* reply_slot, Message* out);
+void aether_send_built(ActorBase* actor, Message msg);
 
 #endif

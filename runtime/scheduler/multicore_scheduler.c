@@ -3434,7 +3434,7 @@ static void send_through_core(ActorBase* actor, Message msg, int from_core) {
     // asking core runs nothing until the reply comes, so its target moved
     // there could not run to give it.
     if (from_core >= 0 && from_core == current_core_id && !actor->auto_process &&
-        from_core != target_core && !g_pending_reply_slot) {
+        from_core != target_core && !msg._reply_slot) {
         atomic_store_explicit(&actor->migrate_to, from_core, memory_order_relaxed);
     }
 
@@ -3547,9 +3547,9 @@ void scheduler_send_many(ActorBase* actor, const Message* msgs, int n) {
             atomic_fetch_add_explicit(&schedulers[tc].work_count, enq, memory_order_relaxed);
             sched_wake(&schedulers[tc]);
         }
-        // The gather a single send asks for (#3090), not for an ask (#3196).
-        if (!g_pending_reply_slot)
-            atomic_store_explicit(&actor->migrate_to, me, memory_order_relaxed);
+        // The gather a single send asks for (#3090). An ask is never batched
+        // (#3196: its target is not gathered).
+        atomic_store_explicit(&actor->migrate_to, me, memory_order_relaxed);
         i += k;
     }
 }
@@ -3908,11 +3908,9 @@ void scheduler_actor_thread_exit(ActorBase* actor) {
 // Ask/Reply support
 // ============================================================================
 
-// Thread-locals: the sender stashes a reply slot here before calling
-// aether_send_message so the slot rides inside the Message._reply_slot field.
+// The ask's reply slot rides in its Message._reply_slot (aether_ask_message).
 // The receiver's step function copies Message._reply_slot into
 // g_current_reply_slot after mailbox_receive, so scheduler_reply can find it.
-AETHER_TLS void* g_pending_reply_slot = NULL;
 AETHER_TLS void* g_current_reply_slot = NULL;
 
 static void reply_slot_decref(ActorReplySlot* slot) {
@@ -4174,6 +4172,19 @@ void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg
         return NULL;
     }
 
+    /* Its message, with the slot in it (#3395), before anything of this
+     * thread's or its core's is marked: a copy that finds no memory fails
+     * the ask, as the slot's own allocation does, with nothing to restore
+     * (#3387). An unwind from here once left the core marked as asking and
+     * the slot set for every later send. */
+    Message ask_msg;
+    if (!aether_ask_message(target, msg_data, msg_size, slot, &ask_msg)) {
+        free(slot);
+        aether_alloc_failed(AETHER_STOP_OUT_OF_MEMORY);
+        *status = AETHER_ASK_NO_MEMORY;
+        return NULL;
+    }
+
     pthread_mutex_init(&slot->mutex, NULL);
     pthread_cond_init(&slot->cond, NULL);
     atomic_init(&slot->refcount, 2);  // asker + actor handler
@@ -4216,12 +4227,9 @@ void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg
         atomic_flag_clear_explicit(&asking_core->actor_lock.lock, memory_order_release);
     }
 
-    // Stash the slot in the thread-local so aether_send_message propagates it
-    // into Message._reply_slot.  This supports concurrent asks to the same actor
-    // because each Message carries its own slot instead of a single per-actor field.
-    g_pending_reply_slot = slot;
-    aether_send_message((void*)target, msg_data, msg_size);
-    g_pending_reply_slot = NULL;
+    // Each Message carries its own slot, so concurrent asks to one actor
+    // each get their own reply.
+    aether_send_built(target, ask_msg);
 
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);

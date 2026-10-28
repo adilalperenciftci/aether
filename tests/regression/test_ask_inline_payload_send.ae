@@ -1,0 +1,67 @@
+// An ask's reply slot rides in its own message only (#3395).
+//
+// Front's handler asks Middle, an idle actor of its own core, so the ask's
+// send steps Middle there and then. Middle sends Helper a message with
+// fields before it replies. The ask used to hand its slot to the send
+// through a thread-local, which Middle's own send read too: Helper's
+// message carried Front's slot, Helper's step let it go, Middle's reply let
+// it go again, and Front's wait read freed memory (a crash on every run).
+
+extern exit(code: int)
+
+message Poke { n: int, s: string }
+message Get {}
+message Value { v: int }
+message Start {}
+
+actor Helper {
+    state pokes = 0
+    receive {
+        Poke(n, s) -> { pokes = pokes + n }
+    }
+}
+
+actor Middle {
+    receive {
+        Get() -> {
+            h = spawn(Helper())
+            h ! Poke { n: 1, s: "x" }
+            reply Value { v: 10 }
+        }
+    }
+}
+
+actor Front {
+    receive {
+        Start() -> {
+            m = spawn(Middle())
+            v, err = m ? Get {}
+            if err != "" {
+                reply Value { v: -1 }
+            } else {
+                reply Value { v: v + 1 }
+            }
+        }
+    }
+}
+
+main() {
+    println("=== an ask's reply slot rides in its own message only (#3395) ===")
+    i = 0
+    bad = 0
+    while i < 20 {
+        f = spawn(Front())
+        v, err = f ? Start {}
+        if v != 11 || err != "" {
+            println("  FAIL round ${i}: (${v}, \"${err}\"), want (11, \"\")")
+            bad = bad + 1
+        }
+        i = i + 1
+    }
+    if bad > 0 {
+        println("FAIL: ${bad} round(s)")
+        exit(1)
+    }
+    println("  PASS 20 rounds: Middle's own send carried no slot, Front got Middle's reply")
+    println("All PASS")
+}

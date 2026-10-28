@@ -3580,6 +3580,7 @@ destructured from there (`p, err = store ? GetRange {}`, then `lo, hi = p`).
 | `"the handler returned without replying"` | the handler that took the ask finished without a `reply` |
 | `"the asking actor was killed"` | the actor whose handler asked was killed while it waited (`actors.kill`), and the ask ended at once |
 | `"the mailbox is full"` | the actor has a mailbox bound (`@mailbox(bound: N)`) and N messages it has not handled yet; the ask was refused at once |
+| `"out of memory"` | there was no memory to make the ask (its reply slot, or the copy of its message); nothing was sent, and inside a library call the call then ends with `AETHER_OUT_OF_MEMORY` (#3387) |
 
 An ask to a dead actor, in either form, ends at once rather than after the
 timeout, and so does one whose actor dies before replying or whose handler

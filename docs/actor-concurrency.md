@@ -197,7 +197,10 @@ An ask (`actor ? Msg {}`) sends its message with a reply slot (`Message._reply_s
 - an ask to an actor that is already dead (panicked or released) is not sent;
 - an ask whose message is dropped undelivered (its target died or was released on the way, or the mailbox it waited in was drained at the death) fails as dead;
 - an ask whose handler panics with it in hand fails from the step's panic barrier as "died before it replied";
-- an ask whose handler returns without replying fails when its step ends, as "returned without replying".
+- an ask whose handler returns without replying fails when its step ends, as "returned without replying";
+- an ask with no memory to make it (its reply slot, or the copy of its message) fails at once and sends nothing (#3387): no state of the thread or of its core is left set, and inside a library call the call ends with `AETHER_OUT_OF_MEMORY`.
+
+The slot rides in the ask's own message, which the ask builds itself (#3395). It is never handed to the send through the thread: the send can step its target inline, and a message that handler sends carries no slot.
 
 The ask a handler holds is part of its thread's step context, with the actor stepping. A step can run inside another (a send steps an idle actor of the same core inline, and a cooperative ask polls until its reply), so each step starts with no ask of its own and gives the enclosing step its context back when it ends: a handler that sends, or asks, before it replies still answers its own asker.
 
