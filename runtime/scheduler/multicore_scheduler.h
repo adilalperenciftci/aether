@@ -604,8 +604,20 @@ int  aether_actor_incarnation(void* ref);
  * NULL. */
 ActorBase* aether_rebirth_take(void (*step)(void*), size_t size);
 void scheduler_spawn_ready(ActorBase* actor);
-/* A panic left a rebirth half done on this thread: undone (the step barrier). */
+/* A panic left a rebirth half done on this thread: undone. */
 void aether_rebirth_abandon(void);
+/* The step barrier's part (#3389, aether_step_barrier.h): a step nested in
+ * another puts the thread's restart claim, reborn block and spawn brackets
+ * aside (1 when it held any), and gets them back when it ends; a step that
+ * panicked undoes the claim and closes the brackets it made itself. */
+typedef struct {
+    ActorBase* target;
+    ActorBase* reborn;
+    int capture_floor;
+} AetherSpawnAside;
+int  aether_spawn_put_aside(AetherSpawnAside* s);
+void aether_spawn_give_back(const AetherSpawnAside* s);
+void aether_spawn_step_panicked(void);
 /* The scheduler's part once a reborn actor is alive (wake its core). */
 void scheduler_actor_revived(ActorBase* actor);
 /* Live restart claims and spawn captures, on any thread (aether_supervision.c).

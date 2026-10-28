@@ -202,7 +202,7 @@ An ask (`actor ? Msg {}`) sends its message with a reply slot (`Message._reply_s
 
 The slot rides in the ask's own message, which the ask builds itself (#3395). It is never handed to the send through the thread: the send can step its target inline, and a message that handler sends carries no slot.
 
-The ask a handler holds is part of its thread's step context, with the actor stepping. A step can run inside another (a send steps an idle actor of the same core inline, and a cooperative ask polls until its reply), so each step starts with no ask of its own and gives the enclosing step its context back when it ends: a handler that sends, or asks, before it replies still answers its own asker.
+The ask a handler holds is part of its thread's step context, with the actor stepping. A step can run inside another (a send steps an idle actor of the same core inline, and a cooperative ask polls until its reply), so each step starts with no ask of its own and gives the enclosing step its context back when it ends: a handler that sends, or asks, before it replies still answers its own asker. The ask is one part of a step's context ("The delivery contract", item 5, has the rest).
 
 `v, err = actor ? Msg {}` reads the reason (the language reference's Ask Pattern lists them); `v = actor ? Msg {}` gives the reply type's zero value for any of them, as it does at a timeout.
 
@@ -235,6 +235,12 @@ What a send promises, on both schedulers (#2974):
 2. **At most once.** A message is handled once, or dropped once. A message to an actor that has ended (panicked, killed, stopped), or that its death or a restart in place drops, is released through `aether_message_drop` (what its fields own included) and counted by `scheduler_dead_sends()` (`actors.dead_sends()`); one to a released actor by `scheduler_released_sends()`, one sent while the scheduler is stopped by `scheduler_stopped_sends()`. An ask that no reply can come for fails with the reason as soon as that is known (the actor is dead, dies with it, or its mailbox is full), not at its timeout (#3151).
 3. **Unbounded by default, as a decision.** A send never blocks its sender. The sender is often a core's own thread, and one blocked on a full mailbox whose actor that same core, or a core in a cycle with it, must run would deadlock the scheduler. So what a mailbox cannot take waits in the core queues, the senders' deferred sends and the actor's overflow, and memory is the limit.
 4. **A bound when the actor asks for one.** `@mailbox(bound: N)` (above, "A bounded mailbox") caps what waits for an actor at N. A send past it is refused at once rather than blocked: counted for a plain `!`, reported to the caller of `try_send` and of an ask.
+5. **A handler runs in its own context, whichever thread steps it.** A step can run inside another: a send steps an idle actor of the same core inline, inside the sender's handler, and a cooperative ask polls until its reply. So every step, at entry, puts aside the per-thread context of the code it runs inside and starts with none of it; at exit, normal or by panic, it gives that context back as it was; and its panic, or its end, undoes only what the step itself made (#3389; the rule is written once, in `runtime/actors/aether_step_barrier.h`). The context, part by part:
+   - the ask in hand and the actor stepping: a handler that sends, or asks, before it replies still answers its own asker;
+   - the in-step flags the signal handler reads: the outer handler keeps its signal recovery after an inner step;
+   - a supervisor's restart claim, the reborn block and the spawn brackets: a nested step's spawn takes no claimed block and is no factory's child, and its panic undoes no enclosing claim.
+
+   A part costs a step only when some thread holds that kind of context: it is put aside behind one load of a global that says so.
 
 ## The end of an actor
 

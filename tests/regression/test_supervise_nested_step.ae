@@ -1,0 +1,177 @@
+// A step inside a supervisor's restart starts with the thread's restart
+// claim put aside (#3389).
+//
+// A supervisor restarts a child by claiming the child's block, running the
+// child's factory, whose spawn of the child's type takes the block, and
+// checking the child is alive again. The claim is the thread's. A step can
+// run inside another: a send to an idle actor of the same core steps that
+// actor there and then, inside the factory. That nested step saw the claim
+// as its own:
+// - when it panicked, its barrier undid the claim, so the factory's spawn
+//   made a fresh Worker nobody holds and the supervisor gave up ("the
+//   restart of w failed");
+// - when it spawned an actor of the child's type, that spawn took the
+//   child's block, and the Worker the factory made and configured was the
+//   orphan: the child's ref reached an unconfigured one;
+// - when it spawned any actor inside the factory's bracket (the first
+//   start, made in a handler here), that actor was taken for the child.
+// Every actor here is on one core, so each payload message the factory
+// sends steps its receiver inline.
+
+import std.actors
+import std.os
+import std.supervise
+
+message Boom {}
+message Poke { why: string }
+message Make { what: string }
+message Count {}
+message Label { text: string }
+message GetLabel {}
+
+extern exit(code: int)
+
+// What the factories reach: module state, so they capture nothing.
+var g_fragile: actor_ref = null
+var g_maker: actor_ref = null
+var g_calls = 0
+var g_mcalls = 0
+
+actor Worker {
+    state n = 0
+    state label = ""
+    receive {
+        Boom() -> { panic("worker blew up") }
+        Count() -> { reply n }
+        Label(text) -> { label = text }
+        GetLabel() -> { reply label }
+    }
+}
+
+// Panics on the message the factory sends it.
+actor Fragile {
+    receive {
+        Poke(why) -> { panic(why) }
+    }
+}
+
+// Spawns an actor: of the child's own type, or a Helper.
+actor Maker {
+    state made = 0
+    receive {
+        Make(what) -> {
+            if what == "a helper" {
+                _h = spawn(Helper())
+            } else {
+                _m = spawn(Worker())
+            }
+            made = made + 1
+        }
+    }
+}
+
+actor Helper {
+    receive {
+        Count() -> { reply 0 }
+    }
+}
+
+// Starts a supervisor in its handler, so the first start's factory runs
+// on a core's thread too, where its send steps the receiver inline.
+message StartOne {}
+
+actor Starter {
+    receive {
+        StartOne() -> {
+            s = supervise.start(strategy: "one_for_one", max_restarts: 3, within_secs: 60) {
+                supervise.child("u", || {
+                        g_maker ! Make { what: "a helper" }
+                        u = spawn(Worker())
+                        u ! Label { text: "configured" }
+                    })
+            }
+            reply s
+        }
+    }
+}
+
+check(label: string, ok: bool) -> int {
+    if !ok {
+        println("  FAIL ${label}")
+        return 1
+    }
+    println("  PASS ${label}")
+    return 0
+}
+
+main() {
+    // Before any spawn: every actor on core 0.
+    _e = os.setenv("AETHER_SINGLE_CORE", "1")
+    println("=== a step inside a supervisor's restart starts with the restart claim put aside (#3389) ===")
+    fails = 0
+
+    // The factory's send steps Fragile inline, and Fragile panics there.
+    g_fragile = spawn(Fragile())
+    sup = supervise.start(strategy: "one_for_one", max_restarts: 3, within_secs: 60) {
+        supervise.child("w", || {
+                if g_calls > 0 {
+                    g_fragile ! Poke { why: "fragile blew up" }
+                }
+                g_calls = g_calls + 1
+                w = spawn(Worker())
+                w ! Label { text: "configured" }
+            })
+    }
+    wait_for_idle()
+    w = supervise.which(sup, "w")
+    w ! Boom {}
+    wait_for_idle()
+    lw, lerr = w ? GetLabel {}
+    fails = fails + check("a panic in a nested step: the restart is made, got ${supervise.restarts(sup)}",
+        supervise.restarts(sup) == 1)
+    fails = fails + check("under the same ref, incarnation 1, got ${actors.incarnation(w)}",
+        actors.incarnation(w) == 1 && supervise.which(sup, "w") == w)
+    fails = fails + check("configured by its factory, got (\"${lw}\", \"${lerr}\")", lw == "configured" && lerr == "")
+
+    // The factory's send steps Maker inline, and Maker spawns a Worker there.
+    maker = spawn(Maker())
+    g_maker = maker
+    sup2 = supervise.start(strategy: "one_for_one", max_restarts: 3, within_secs: 60) {
+        supervise.child("v", || {
+                if g_mcalls > 0 {
+                    g_maker ! Make { what: "a worker" }
+                }
+                g_mcalls = g_mcalls + 1
+                v = spawn(Worker())
+                v ! Label { text: "configured" }
+            })
+    }
+    wait_for_idle()
+    v = supervise.which(sup2, "v")
+    v ! Boom {}
+    wait_for_idle()
+    lv, verr = v ? GetLabel {}
+    fails = fails + check("a nested step's spawn of the child's type: the restart is made, got ${supervise.restarts(sup2)}",
+        supervise.restarts(sup2) == 1)
+    fails = fails + check("the child is the one its factory configured, got (\"${lv}\", \"${verr}\")",
+        lv == "configured" && verr == "")
+    fails = fails + check("and the nested step's spawn ran, got ${maker.made}", maker.made == 1)
+
+    // A supervisor started in a handler: the factory's send steps Maker
+    // inline, which spawns a Helper there before the factory spawns the
+    // child. The child is the first actor the factory itself brings alive.
+    starter = spawn(Starter())
+    sup3 = starter ? StartOne {}
+    wait_for_idle()
+    u = supervise.which(sup3, "u")
+    lu, uerr = u ? GetLabel {}
+    fails = fails + check("a nested step's spawn is not the child, got (\"${lu}\", \"${uerr}\")",
+        lu == "configured" && uerr == "")
+    fails = fails + check("and that spawn ran, got ${maker.made}", maker.made == 2)
+
+    if fails > 0 {
+        println("FAIL: ${fails} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

@@ -13,13 +13,34 @@
  * unanswered fails, a stop() or a kill that came while it ran is finalized,
  * and the scheduler's own after-step work runs.
  *
- * The step context (the ask being handled, the actor stepping) is the
- * thread's, and a step can run inside another: a send steps an idle actor of
- * the same core inline while the sender's handler is still running, its ask
- * not yet answered, and a cooperative ask polls until its reply. Each step
- * starts with no ask in hand and gives the enclosing one its context back
- * when it ends. Neither variable changes between the sigsetjmp and a longjmp
- * back to it, so both are intact on the panic path.
+ * A step runs in its own context, whatever thread runs it and whatever
+ * runs below it there (#3389). A step can run inside another: a send steps
+ * an idle actor of the same core inline while the sender's handler is still
+ * running, and a cooperative ask polls until its reply. The rule, for every
+ * step and both of its ends:
+ *
+ *   - at entry, the step puts aside the per-thread context of the code it
+ *     runs inside, and starts with none of it;
+ *   - at exit, normal or by panic, it gives that context back as it was;
+ *   - its panic, and its end, undo only what the step itself made.
+ *
+ * The context, part by part:
+ *   - the ask in hand (g_current_reply_slot) and the actor stepping
+ *     (g_current_step_actor): a handler that sends, or asks, before it
+ *     replies still answers its own asker;
+ *   - the in-step flags (g_aether_in_actor_step, g_aether_current_actor_id):
+ *     the outer handler keeps its signal recovery after an inner step;
+ *   - a supervisor's restart claim, the reborn block and the spawn brackets
+ *     (aether_supervision.c): a nested step's spawn takes no claimed block
+ *     and is no factory's child, and its panic undoes no enclosing claim.
+ *
+ * Each part costs a step only when some thread holds that kind of context:
+ * it is put aside behind a load of a global that says so
+ * (g_aether_spawn_watch for the claim); the ask and the actor are two
+ * thread-local words, and the in-step flags are restored from what the
+ * step read when it set them. Neither the locals holding what was put aside
+ * nor the variables change between the sigsetjmp and a longjmp back to it,
+ * so all of it is intact on the panic path.
  *
  * The scheduler's parts are passed as functions it defines static: the
  * compiler sees them at the call and inlines the whole. The caller has
@@ -37,13 +58,40 @@
 extern AETHER_TLS void* g_current_reply_slot;
 extern AETHER_TLS void* g_current_step_actor;
 
+/* What a step put aside, to give back when it ends. */
+typedef struct {
+    void* reply_slot;
+    void* step_actor;
+    int in_step;
+    int actor_id;
+    int spawn_hid;
+    AetherSpawnAside spawn;
+} AetherStepAside;
+
+static inline void aether_step_put_aside(AetherStepAside* s) {
+    s->reply_slot = g_current_reply_slot;
+    s->step_actor = g_current_step_actor;
+    g_current_reply_slot = NULL;
+    s->in_step = g_aether_in_actor_step;
+    s->actor_id = s->in_step ? g_aether_current_actor_id : -1;
+    s->spawn_hid = unlikely(atomic_load_explicit(&g_aether_spawn_watch, memory_order_relaxed) != 0) &&
+                   aether_spawn_put_aside(&s->spawn);
+}
+
+static inline void aether_step_give_back(const AetherStepAside* s) {
+    if (unlikely(s->spawn_hid)) aether_spawn_give_back(&s->spawn);
+    g_aether_in_actor_step = s->in_step;
+    g_aether_current_actor_id = s->actor_id;
+    g_current_reply_slot = s->reply_slot;
+    g_current_step_actor = s->step_actor;
+}
+
 static inline void aether_step_barrier(ActorBase* actor,
                                        void (*finalize)(ActorBase*),
                                        void (*fail_slot)(void* slot, int why),
                                        void (*after_step)(ActorBase*)) {
-    void* outer_slot = g_current_reply_slot;
-    void* outer_actor = g_current_step_actor;
-    g_current_reply_slot = NULL;
+    AetherStepAside aside;
+    aether_step_put_aside(&aside);
 
     AetherJmpFrame* f = aether_try_push();
     if (AETHER_SIGSETJMP(f->buf, 1) == 0) {
@@ -73,8 +121,7 @@ static inline void aether_step_barrier(ActorBase* actor,
         } else if (after_step) {
             after_step(actor);
         }
-        g_current_reply_slot = outer_slot;
-        g_current_step_actor = outer_actor;
+        aether_step_give_back(&aside);
         return;
     }
 
@@ -111,15 +158,16 @@ static inline void aether_step_barrier(ActorBase* actor,
 
     // What waits for it is dropped and credited, and its watchers told.
     finalize(actor);
-    // A restart in place its handler had begun is undone (#2974).
-    aether_rebirth_abandon();
+    // A restart in place its handler had begun is undone (#2974), and the
+    // spawn brackets it opened are closed: its own, never an enclosing
+    // step's, which were put aside (#3389).
+    aether_spawn_step_panicked();
 
     aether_fire_death_hook(actor->id, reason);
     /* A heap-built panic message (aether_panic_owned) belongs to whoever
      * caught it, here this barrier. The hook has seen it; release it. */
     if (reason_release) reason_release(reason);
-    g_current_reply_slot = outer_slot;
-    g_current_step_actor = outer_actor;
+    aether_step_give_back(&aside);
 }
 
 #endif /* AETHER_STEP_BARRIER_H */

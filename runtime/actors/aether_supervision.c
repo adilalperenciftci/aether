@@ -432,6 +432,9 @@ void aether_actor_trap_exits(int on) {
 // ---------------------------------------------------------------------------
 
 static AETHER_TLS int t_capture_depth = 0;   // the spawn capture, below
+/* The brackets below this depth are an enclosing step's (#3389): a step
+ * nested in it notes no spawn into them and closes none of them. */
+static AETHER_TLS int t_capture_floor = 0;
 /* Live rebirth claims and spawn captures, on any thread. Every spawn passes
  * through aether_rebirth_take and scheduler_spawn_ready; while this is 0 they
  * read no thread-local, which on some targets is a call (emutls). A thread
@@ -504,7 +507,7 @@ ActorBase* aether_rebirth_take(void (*step)(void*), size_t size) {
 
 void scheduler_spawn_ready(ActorBase* a) {
     if (likely(atomic_load_explicit(&g_aether_spawn_watch, memory_order_relaxed) == 0)) return;
-    if (unlikely(t_capture_depth > 0) && a) aether_actor_capture_note(a);
+    if (unlikely(t_capture_depth > t_capture_floor) && a) aether_actor_capture_note(a);
     if (likely(t_reborn != a) || !a) return;   // a fresh spawn: alive already
     t_reborn = NULL;
     atomic_fetch_sub_explicit(&g_aether_spawn_watch, 1, memory_order_relaxed);   // the claim is done
@@ -557,6 +560,53 @@ void aether_rebirth_abandon(void) {
     atomic_fetch_sub_explicit(&g_aether_spawn_watch, 1, memory_order_relaxed);
 }
 
+/* The spawn brackets the running step opened and did not close (a panic
+ * skipped their end): closed, down to the step's floor. */
+static void capture_close_to_floor(void) {
+    while (t_capture_depth > t_capture_floor) {
+        t_capture_depth--;
+        atomic_fetch_sub_explicit(&g_aether_spawn_watch, 1, memory_order_relaxed);
+    }
+}
+
+/* A step begins inside another (aether_step_barrier.h, #3389). The claim,
+ * the reborn block and the brackets this thread holds are the enclosing
+ * step's: put aside, so the step's spawns take no claimed block and are no
+ * bracket's child, and its panic undoes none of them. 0 when the thread
+ * holds none (the caller has seen g_aether_spawn_watch set: some thread
+ * does). */
+int aether_spawn_put_aside(AetherSpawnAside* s) {
+    ActorBase* target = t_rebirth_target;
+    ActorBase* reborn = t_reborn;
+    int depth = t_capture_depth;
+    if (!target && !reborn && depth == t_capture_floor) return 0;
+    s->target = target;
+    s->reborn = reborn;
+    s->capture_floor = t_capture_floor;
+    t_rebirth_target = NULL;
+    t_reborn = NULL;
+    t_capture_floor = depth;
+    return 1;
+}
+
+/* The step ends, either way. A claim it made and brackets it opened and did
+ * not end are undone (they are its own), then the enclosing step's are back. */
+void aether_spawn_give_back(const AetherSpawnAside* s) {
+    aether_rebirth_abandon();
+    capture_close_to_floor();
+    t_rebirth_target = s->target;
+    t_reborn = s->reborn;
+    t_capture_floor = s->capture_floor;
+}
+
+/* The step panicked: what it made of its own is undone, the enclosing
+ * step's (put aside, when there was any) untouched. */
+void aether_spawn_step_panicked(void) {
+    if (likely(atomic_load_explicit(&g_aether_spawn_watch, memory_order_relaxed) == 0)) return;
+    aether_rebirth_abandon();
+    capture_close_to_floor();
+}
+
 int aether_actor_incarnation(void* ref) {
     return ref ? atomic_load_explicit(&((ActorBase*)ref)->incarnation, memory_order_acquire) : 0;
 }
@@ -582,7 +632,7 @@ void aether_actor_capture_begin(void) {
 }
 
 void* aether_actor_capture_end(void) {
-    if (t_capture_depth <= 0) return NULL;
+    if (t_capture_depth <= t_capture_floor) return NULL;   // an enclosing step's
     t_capture_depth--;
     atomic_fetch_sub_explicit(&g_aether_spawn_watch, 1, memory_order_relaxed);
     return t_capture_depth < AETHER_CAPTURE_DEPTH ? t_captured[t_capture_depth] : NULL;
@@ -590,5 +640,5 @@ void* aether_actor_capture_end(void) {
 
 void aether_actor_capture_note(ActorBase* a) {
     int top = t_capture_depth - 1;
-    if (top >= 0 && top < AETHER_CAPTURE_DEPTH && !t_captured[top]) t_captured[top] = a;
+    if (top >= t_capture_floor && top < AETHER_CAPTURE_DEPTH && !t_captured[top]) t_captured[top] = a;
 }
