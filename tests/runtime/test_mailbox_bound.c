@@ -16,6 +16,7 @@
 #include "../../runtime/actors/actor_state_machine.h"
 #include "../../runtime/actors/aether_send_message.h"
 #include "../../runtime/scheduler/multicore_scheduler.h"
+#include "../../runtime/actors/aether_actor_thread.h"
 #include "../../runtime/utils/aether_thread.h"
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -147,22 +148,35 @@ static BdActor* bd_actor(int core, int bound) {
  * overflow when the relief moves D, with its first number, to core 1, where
  * it holds that number. Main sends more once it holds. Nothing else is
  * taken meanwhile, so exactly the bound is pending, the held one besides:
- * 51 accepted in all, whenever the relief came. E, on core 3, sends D 30
- * plain while D holds: all dropped and counted. Main's ask fails at once.
- * Let go, D handles the 51 in order, and every place has come back. */
+ * 51 accepted in all, whenever the relief came. E, an actor with a thread of
+ * its own, sends D 30 plain while D holds: all dropped and counted. Main's
+ * ask fails at once. Let go, D handles the 51 in order, and every place has
+ * come back.
+ *
+ * Three cores, as in test_ask_relief.c: the relief moves D to an idle core,
+ * preferring a parked one, and with core 2 in B's long step that is core 1
+ * alone. E runs on no core, so wherever D goes it cannot hold E up (E on a
+ * fourth core was where D went when core 1 was awake: E never ran). */
 static void test_mailbox_bound_across_overflow(void) {
-    scheduler_init(4);
+    scheduler_init(3);
     BdActor* d = bd_actor(0, 50);
     BdActor* a = bd_actor(0, 0);
     BdActor* b = bd_actor(2, 0);
-    BdActor* e = bd_actor(3, 0);
     a->ask = (ActorBase*)b;
     b->watch = (ActorBase*)d;
     b->want = 51;
     d->hold_first = 1;
-    e->to = (ActorBase*)d;
     uint64_t full_before = scheduler_full_drops();
     scheduler_start();
+    BdActor* e = (BdActor*)scheduler_spawn_actor(-1, (void (*)(void*))bd_step, sizeof(BdActor));
+    int e_started = 0;
+    if (e) {
+        memset((char*)e + sizeof(ActorBase), 0, sizeof(BdActor) - sizeof(ActorBase));
+        atomic_store(&e->first_core, -1);
+        e->to = (ActorBase*)d;
+        e->auto_process = 1;
+        e_started = pthread_create(&e->thread, NULL, aether_actor_thread, e) == 0;
+    }
 
     bd_send(a, BD_ASK, 0);
     int asked = bd_wait(&b->asked, 1, 3000);
@@ -181,8 +195,11 @@ static void test_mailbox_bound_across_overflow(void) {
         else other++;
     }
     int pending_held = atomic_load(&d->mailbox_pending);
-    bd_send(e, BD_EMIT, 30);
-    int emitted = bd_wait(&e->done, 1, 5000);
+    int emitted = 0;
+    if (e_started) {
+        bd_send(e, BD_EMIT, 30);
+        emitted = bd_wait(&e->done, 1, 5000);
+    }
     BdMsg q = { BD_COUNT, 0 };
     int status = -1;
     void* r = scheduler_ask_message_status((ActorBase*)d, &q, sizeof q, 5000, &status);
@@ -192,9 +209,14 @@ static void test_mailbox_bound_across_overflow(void) {
     int handled = bd_wait(&d->got, 51, 5000);
     scheduler_wait();
     int pending_after = atomic_load(&d->mailbox_pending);
+    if (e_started) {
+        scheduler_release_actor((ActorBase*)e);   // its thread ends it
+        pthread_join(e->thread, NULL);
+    }
     scheduler_shutdown();
     scheduler_cleanup();
 
+    ASSERT_TRUE(e_started);
     ASSERT_TRUE(asked);
     ASSERT_TRUE(holding);
     ASSERT_TRUE(emitted);
@@ -214,7 +236,6 @@ static void test_mailbox_bound_across_overflow(void) {
     free(a);
     free(b);
     free(d);
-    free(e);
 }
 
 /* D holds its first number with 10 accepted behind it, and is killed: its

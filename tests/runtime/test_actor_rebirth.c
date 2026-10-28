@@ -292,6 +292,10 @@ static void test_rebirth_keeps_watch_list(void) {
     uint64_t until = aether_now_ns() + 3000ULL * 1000000ULL;
     while (!(atomic_load(&t->exit_flags) & AETHER_EXIT_FINALIZED) && aether_now_ns() < until)
         rb_sleep_ms(1);
+    // The core that finalized it lets go of its step lock just after; the
+    // claim takes it, so the core is let finish first (it counts the kill's
+    // request done once it has).
+    scheduler_wait();
     struct AetherWatch* before = atomic_load(&t->death_watch);
     const char* why = aether_actor_death_reason(t);
     int killed = why && strcmp(why, "killed") == 0;
