@@ -4,4 +4,5 @@
   it, so a connection accepted in between used freed memory. The TLS state is
   swapped under a lock now, and each accept takes a reference to what it
   uses (the `SSL_CTX`, or the pure server's credentials), so what a re-load
-  replaces is freed by its last user (#3371).
+  replaces is freed by its last user. Two re-loads at once, from two
+  threads, are safe too: the configuration calls take turns (#3371).
