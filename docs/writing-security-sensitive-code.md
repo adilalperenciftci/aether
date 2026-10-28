@@ -236,10 +236,28 @@ pinned commit into `$CONFORMANCE_CACHE` (default
 - **BoGo** (`make conformance-bogo`, `tests/conformance/bogo`): BoringSSL's
   `ssl/test/runner` drives `shim.ae`, which runs `tls13_client` or
   `tls13_server` for each test. It needs Go (1.27 at the pinned commit) and
-  git, takes about five minutes, and is not run in CI. Tests that need a flag
-  the shim does not handle count as unimplemented; `config.json` disables
-  each test that fails, with the reason. `BOGO_FLAGS="-test 'Basic-*'"`
-  narrows a run.
+  git, takes about five minutes, and no CI job runs it. `config.json`
+  disables each test that fails, with the reason: TLS 1.2 and earlier, which
+  the pure stack does not implement, and the TLS 1.3 tests where it differs
+  from BoringSSL by design. `BOGO_FLAGS="-test 'Basic-*'"` narrows a run.
+  The shim handles only the flags its header lists; a test that passes any
+  other counts as unimplemented (about 7450 tests at the pinned commit,
+  against about 390 that pass), so BoGo does not cover:
+  - session resumption (`-resume-count`, the `-on-resume-*` and
+    `-expect-session-miss` checks) and with it 0-RTT (`-enable-early-data`,
+    `-on-resume-shim-writes-first`, `-on-resume-expect-accept-early-data`).
+    The client's resumption and 0-RTT are tested in `crypto_tls13_resume`,
+    against a scripted server and `openssl s_server`; the pure server issues
+    no tickets;
+  - ALPN (`-advertise-alpn`, `-select-alpn`, `-expect-alpn`);
+  - client certificates (`-require-any-client-certificate` and `-verify-peer`
+    on a server, a certificate on a client): the pure server asks for none,
+    and the client's mutual TLS is tested in `crypto_tls13_mtls_signature`;
+  - SNI (`-host-name`), configured groups and signature algorithms
+    (`-curves`, `-key-shares`, `-signing-prefs`, `-verify-prefs`), and the
+    `-expect-*` checks of what was negotiated;
+  - ECH, external PSKs, OCSP stapling and certificate compression options,
+    renegotiation, DTLS and QUIC.
 
 A case that changes verdict fails its run, so a change to the TLS code that
 makes any of them pass or fail differently has to say so in the same commit.

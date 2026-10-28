@@ -8,7 +8,7 @@
 #
 # limbo.json (40 MB) is fetched at a pinned commit and checked against its
 # SHA-256 into $CONFORMANCE_CACHE (default $HOME/.cache/aether-conformance),
-# which the Linux CI job caches; it is never committed. To move the pin,
+# which CI's ci-crypto-ct job caches; it is never committed. To move the pin,
 # change both values below and update expected.txt from a LIMBO_PRINT=1 run.
 # limbo.ae and expected.txt say what each case checks and which do not agree.
 

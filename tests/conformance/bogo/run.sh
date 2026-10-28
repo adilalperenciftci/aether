@@ -7,8 +7,10 @@
 #
 # BoringSSL is fetched at a pinned commit (git checks every object against
 # the commit's hash) into $CONFORMANCE_CACHE (default
-# $HOME/.cache/aether-conformance), which the Linux CI job caches; it is never
-# committed. The runner needs Go (go.mod says which; 1.27 at this commit).
+# $HOME/.cache/aether-conformance); it is never committed. No CI job runs
+# BoGo: it is run by hand (make conformance-bogo), and needs Go (go.mod says
+# which; 1.27 at this commit) and git. ci-crypto-ct caches the same
+# directory for x509-limbo, not for this.
 # config.json disables each test that fails, with the reason; a test that
 # fails and is not disabled fails the run. Tests that need a flag the shim
 # does not implement exit 89 and count as "unimplemented"
