@@ -304,11 +304,23 @@ fn send_plaintext_handshake(sock: ptr, msg: byte[]) -> string {
     return ""
 }
 
+// Send the record(s) `rec`; null (a record that could not be sealed) is an
+// error like a failed send, never a slice of nothing (#3380).
 fn send_record_raw(sock: ptr, rec: ptr) -> string {
+    if rec == null { return "a record could not be sealed" }
     rlen = bytes.length(rec)
     n = srv_send_view(sock, bytes.view(rec)[0..rlen])
     if n != rlen { return "failed to send record" }
     return ""
+}
+
+// `msg` of `content_type` under `ctx`, in as many records as it takes
+// (tls13_record.seal_records), sent: "" or why not (#3380).
+fn send_sealed(sock: ptr, ctx: ptr, content_type: int, msg: byte[]) -> string {
+    recs = tls13_record.seal_records(ctx, content_type, msg)
+    err = send_record_raw(sock, recs)
+    if recs != null { bytes.free(recs) }
+    return err
 }
 
 // The alert for a ClientHello parse_client_hello refused: illegal_parameter
@@ -705,19 +717,20 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
     cli_hs_ctx = tls13_record.new_aead(rec_aead, bytes.view(hs_client_key(keys))[0..rec_key_len], hs_client_iv(keys))
 
     // 5. Send Encrypted Flight
+    // Each message in as many records as it takes (a chain over 16 KiB
+    // fills several, RFC 8446 5.1); the first one that cannot be sealed or
+    // sent ends the handshake (#3380).
     // a. EncryptedExtensions
     ee = tls13_hs.encrypted_extensions()
-    ee_rec = tls13_record.seal_record(srv_hs_ctx, tls13_record.CONTENT_HANDSHAKE, bytes.view(ee))
-    send_record_raw(sock, ee_rec)
+    fl_err = send_sealed(sock, srv_hs_ctx, tls13_record.CONTENT_HANDSHAKE, bytes.view(ee))
     tls13_client.transcript_add(tr, bytes.view(ee))
-    bytes.free(ee); bytes.free(ee_rec)
+    bytes.free(ee)
 
     // b. Certificate
     cert_msg = tls13_hs.certificate_msg(cert_chain, cert_lens, 0)
-    cert_rec = tls13_record.seal_record(srv_hs_ctx, tls13_record.CONTENT_HANDSHAKE, bytes.view(cert_msg))
-    send_record_raw(sock, cert_rec)
+    if fl_err == "" { fl_err = send_sealed(sock, srv_hs_ctx, tls13_record.CONTENT_HANDSHAKE, bytes.view(cert_msg)) }
     tls13_client.transcript_add(tr, bytes.view(cert_msg))
-    bytes.free(cert_msg); bytes.free(cert_rec)
+    bytes.free(cert_msg)
 
     // c. CertificateVerify, with the scheme of the server's key when the
     // client's signature_algorithms offers it (RFC 8446 4.4.3, #3326). An
@@ -752,19 +765,24 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
         return null, cv_err
     }
     cv_msg = tls13_hs.certificate_verify_msg(scheme, bytes.view(sig))
-    cv_rec = tls13_record.seal_record(srv_hs_ctx, tls13_record.CONTENT_HANDSHAKE, bytes.view(cv_msg))
-    send_record_raw(sock, cv_rec)
+    if fl_err == "" { fl_err = send_sealed(sock, srv_hs_ctx, tls13_record.CONTENT_HANDSHAKE, bytes.view(cv_msg)) }
     tls13_client.transcript_add(tr, bytes.view(cv_msg))
-    bytes.free(th_cert); bytes.free(sig); bytes.free(cv_msg); bytes.free(cv_rec)
+    bytes.free(th_cert); bytes.free(sig); bytes.free(cv_msg)
 
     // d. Server Finished
     th_cv = transcript_hash_algo(tr, hash_algo)
     svd = finished_verify_data_algo(hs_server_secret(keys), bytes.view(th_cv)[0..hash_len], hash_algo, hash_len)
     fin_msg = tls13_hs.finished_msg(svd, hash_len)
-    fin_rec = tls13_record.seal_record(srv_hs_ctx, tls13_record.CONTENT_HANDSHAKE, bytes.view(fin_msg))
-    send_record_raw(sock, fin_rec)
+    if fl_err == "" { fl_err = send_sealed(sock, srv_hs_ctx, tls13_record.CONTENT_HANDSHAKE, bytes.view(fin_msg)) }
     tls13_client.transcript_add(tr, bytes.view(fin_msg))
-    bytes.free(th_cv); bytes.free(svd); bytes.free(fin_msg); bytes.free(fin_rec)
+    bytes.free(th_cv); bytes.free(svd); bytes.free(fin_msg)
+    if fl_err != "" {
+        bytes.free(srnd); bytes.free(sh)
+        tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
+        tls13_record.free_ctx(srv_hs_ctx); tls13_record.free_ctx(cli_hs_ctx)
+        tls13_client.free_hs_keys(keys); bytes.free(th_chsh)
+        return null, "handshake: ${fl_err}"
+    }
 
     // 6. Derive Application Traffic Keys, over the transcript through the
     // server Finished (RFC 8446 7.1). They come before the client Finished
@@ -923,8 +941,9 @@ fn read_client_finished(rio: *RecordIO, cli_hs_ctx: ptr, tr: ptr, client_hs_secr
     return 0, ""
 }
 
-// Send application data as one encrypted record. A KeyUpdate the client
-// asked for goes first (RFC 8446 4.6.3, #3320).
+// Send application data, in encrypted records of at most 2^14 bytes each
+// (#3380). A KeyUpdate the client asked for goes first (RFC 8446 4.6.3,
+// #3320).
 conn_send(conn: ptr, data: byte[]) -> string {
     if data.len < 0 { panic("tls13_server.conn_send: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     c = conn as *ServerConn
@@ -933,7 +952,9 @@ conn_send(conn: ptr, data: byte[]) -> string {
         kerr = send_key_update(c, tls13_hs.KEY_UPDATE_NOT_REQUESTED)
         if kerr != "" { return kerr }
     }
-    rec = tls13_record.seal_record(c.app_send as ptr, tls13_record.CONTENT_APPLICATION_DATA, data)
+    // Data over 2^14 bytes goes in several records (#3380).
+    rec = tls13_record.seal_records(c.app_send as ptr, tls13_record.CONTENT_APPLICATION_DATA, data)
+    if rec == null { return "send: the record could not be sealed" }
     n = srv_send_view(c.sock, bytes.view(rec))
     tot = bytes.length(rec)
     bytes.free(rec)
@@ -998,7 +1019,7 @@ fn send_hs_alert(sock: ptr, ctx: ptr, desc: int) {
     rec = tls13_record.seal_record(ctx, tls13_record.CONTENT_ALERT, bytes.view(a))
     send_record_raw(sock, rec)
     bytes.free(a)
-    bytes.free(rec)
+    if rec != null { bytes.free(rec) }
 }
 
 // A fatal alert under the connection's application-traffic keys.
@@ -1009,7 +1030,7 @@ fn send_alert_app(c: *ServerConn, desc: int) {
     rec = tls13_record.seal_record(c.app_send as ptr, tls13_record.CONTENT_ALERT, bytes.view(body)[0..2])
     send_record_raw(c.sock, rec)
     bytes.free(body)
-    bytes.free(rec)
+    if rec != null { bytes.free(rec) }
 }
 
 // Send fatal alert `desc`, mark the connection failed, and return (null,

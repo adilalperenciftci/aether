@@ -3,12 +3,13 @@
 //
 //   CERT_PATH, KEY_PATH   the certificate and key
 //
-// Prints "READY <port>" and serves "/" until killed, or
-// "FAIL: server_set_tls: <why>" when the pure server refuses the
-// certificate and key, and exits 1.
+// Prints "READY <port>" and serves "/" and "/big" (40000 bytes) until
+// killed, or "FAIL: server_set_tls: <why>" when the pure server refuses
+// the certificate and key, and exits 1.
 
 import std.http
 import std.os
+import std.strbuilder
 import std.cryptography.tls13_server
 
 extern exit(code: int)
@@ -17,6 +18,19 @@ handle_root(req: ptr, res: ptr, ud: ptr) {
     http.response_set_status(res, 200)
     http.response_set_header(res, "Content-Type", "text/plain")
     http.response_set_body(res, "keys-ok")
+}
+
+// /big: 40000 bytes, more than two TLS records of data (#3380).
+handle_big(req: ptr, res: ptr, ud: ptr) {
+    sb = strbuilder.new(40000)
+    i = 0
+    while i < 40000 {
+        _a = strbuilder.append_byte(sb, 98)
+        i = i + 1
+    }
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, strbuilder.finish(sb))
 }
 
 message StartSrv { raw: ptr }
@@ -49,6 +63,7 @@ main() {
     }
     println("READY ${http.server_port(raw)}")
     http.server_get(raw, "/", handle_root, 0)
+    http.server_get(raw, "/big", handle_big, 0)
     a = spawn(SrvActor())
     a ! StartSrv { raw: raw }
     sleep(60000)

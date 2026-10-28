@@ -115,6 +115,12 @@ knowing before debugging a handshake:
   but sends no key share for it gets a **HelloRetryRequest** asking for that
   share (#3325), and a client offering none of them (a P-384-only client,
   say) is refused with a `handshake_failure` alert
+- a handshake message or a write over one TLS record (2^14 bytes), such as
+  a certificate chain over 16 KiB or a large response, goes out in as many
+  records as it takes (#3380), and the pure client reads one split across
+  records (#3321) up to 256 KiB for the server's Certificate and 64 KiB for
+  its other handshake messages (#3366); the pure server takes a ClientHello
+  split across records, up to 64 KiB, and asks for no client certificate
 
 The client side is the mirror, and is now wired the same way (#1849):
 `std.http.client` does HTTPS through OpenSSL where it is compiled in, and

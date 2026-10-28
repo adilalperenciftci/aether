@@ -132,7 +132,10 @@ key's own scheme when the client offers it, in constant time (see
 (#3326). `server_set_tls` loads the certificate and key on this backend as on
 OpenSSL's, and returns why when it cannot serve them: an unreadable file, an
 encrypted or too-short key, a key that does not match the certificate
-(#3328).
+(#3328). A chain or a response over one TLS record (2^14 bytes) goes out in
+as many records as it takes, so a large chain serves as it does on OpenSSL
+(#3380); the server reads a ClientHello split across records, up to 64 KiB
+(#3321).
 
 The client has the same choice per request, `client.set_tls_backend(req,
 backend)` (see the client section of `std/http/README.md`).

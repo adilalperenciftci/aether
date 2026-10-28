@@ -44,7 +44,7 @@ extern malloc(size: int) -> ptr
 @extern("free") libc_free(p: ptr)
 
 exports(
-    new, new_aead, rekey, free_ctx, seal_record, open_record, nonce_for, check_header,
+    new, new_aead, rekey, free_ctx, seal_record, seal_records, open_record, nonce_for, check_header,
     ALERT_UNEXPECTED_MESSAGE, ALERT_BAD_RECORD_MAC, ALERT_RECORD_OVERFLOW, ALERT_DECODE_ERROR,
     RecordCtx, OpenedRecord,
     CONTENT_HANDSHAKE, CONTENT_APPLICATION_DATA, CONTENT_ALERT,
@@ -239,6 +239,40 @@ seal_record(ctx: ptr, content_type: int, plaintext: byte[]) -> ptr {
     bytes.free(enc)
     c.seq = c.seq + 1
     return rec
+}
+
+// `plaintext` of `content_type` as records of at most CONTENT_MAX_PLAIN_LEN
+// bytes of content each, back to back in one fresh buffer (caller frees),
+// or null when one cannot be sealed (seal_record's limits). RFC 8446 5.1:
+// a handshake message larger than a record is split across records, and
+// application data is cut the same way (#3380). Empty `plaintext` is one
+// empty record.
+seal_records(ctx: ptr, content_type: int, plaintext: byte[]) -> ptr {
+    if plaintext.len < 0 { panic("tls13_record.seal_records: the `plaintext` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int n = plaintext.len
+    if n <= CONTENT_MAX_PLAIN_LEN { return seal_record(ctx, content_type, plaintext) }
+    out = bytes.new(n + (n / CONTENT_MAX_PLAIN_LEN + 1) * (RECORD_HEADER_LEN + 1 + TAG_LEN))
+    olen = 0
+    off = 0
+    while off < n {
+        m = n - off
+        if m > CONTENT_MAX_PLAIN_LEN { m = CONTENT_MAX_PLAIN_LEN }
+        rec = seal_record(ctx, content_type, plaintext[off..off + m])
+        if rec == null {
+            bytes.free(out)
+            return null
+        }
+        rl = bytes.length(rec)
+        bytes.copy_from_bytes(out, olen, rec, 0, rl)
+        olen = olen + rl
+        bytes.free(rec)
+        off = off + m
+    }
+    res = bytes.new(olen)
+    bytes.set(res, olen - 1, 0)
+    bytes.copy_from_bytes(res, 0, out, 0, olen)
+    bytes.free(out)
+    return res
 }
 
 // Parsed result of opening a record.

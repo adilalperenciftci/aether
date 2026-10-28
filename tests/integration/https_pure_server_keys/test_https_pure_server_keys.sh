@@ -15,7 +15,10 @@
 #   4. the chain is exactly the certificate text's certificates: a key
 #      between certificates, or a combined key and certificate file, never
 #      goes on the wire, and a CERTIFICATE block that does not parse refuses
-#      the text (#3378).
+#      the text (#3378);
+#   5. a chain over 16 KiB goes out in several records and verifies, the
+#      server serves the next connection, and a 40000-byte response is
+#      whole (#3380).
 #
 # In a build without OpenSSL only the "aether" client cases run.
 
@@ -178,5 +181,35 @@ sent_chain() { # name count: the server for $1 sends $2 certificates, each one
 sent_chain mixed 2
 sent_chain combo 1
 refused_at_setup badcert badcert "certificate 2 of the chain does not parse" "a CERTIFICATE block that does not parse"
+
+
+# 5. Records: a chain over 16 KiB (the leaf, then 50 copies of another
+#    certificate) goes out in several records and verifies, the server
+#    lives on to serve the next connection, and a 40000-byte response
+#    crosses two record boundaries (#3380).
+start_server p256 p256
+[ -n "$S_PORT" ] || { echo "    got: $OUT"; fail "the P-256 server did not start"; }
+for b in $BACKENDS; do
+    run env URL="https://localhost:$S_PORT/big" CAFILE="$TMP/p256.pem" BACKEND="$b" LEN_ONLY=1 "$TMP/client"
+    case "$OUT" in
+        *"STATUS 200 LEN 40000"*) echo "    ok: a 40000-byte response, client \"$b\"" ;;
+        *) echo "    got: $OUT"; fail "a 40000-byte response, client \"$b\": not whole" ;;
+    esac
+done
+{ cat "$TMP/p256.pem"; i=0; while [ "$i" -lt 50 ]; do cat "$TMP/p384.pem"; i=$((i + 1)); done; } > "$TMP/bigchain.pem"
+cp "$TMP/p256.key" "$TMP/bigchain.key"
+[ "$(wc -c < "$TMP/bigchain.pem")" -gt 30000 ] || fail "the big chain is not over 16 KiB of DER"
+start_server bigchain bigchain
+[ -n "$S_PORT" ] || { echo "    got: $OUT"; fail "the big-chain server did not start"; }
+for b in $BACKENDS; do
+    for pass in 1 2; do
+        run env URL="https://localhost:$S_PORT/" CAFILE="$TMP/p256.pem" BACKEND="$b" "$TMP/client"
+        case "$OUT" in
+            *"STATUS 200 BODY keys-ok"*) ;;
+            *) echo "    got: $OUT"; fail "a chain over 16 KiB, client \"$b\", connection $pass: not fetched" ;;
+        esac
+    done
+    echo "    ok: a chain over 16 KiB, two connections, client \"$b\""
+done
 
 echo "  [PASS] $NAME"

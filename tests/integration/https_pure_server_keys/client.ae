@@ -6,7 +6,8 @@
 //   BACKEND   "aether" or "openssl"
 //
 // Prints "BACKEND-ERR: <error>" when set_tls_backend refuses, else
-// "STATUS <code> BODY <body>" or "ERR: <error>".
+// "STATUS <code> BODY <body>" (with LEN_ONLY=1, "STATUS <code> LEN <n>")
+// or "ERR: <error>".
 
 import std.http.client
 import std.cryptography.tls13_client
@@ -28,6 +29,11 @@ main() {
         println("ERR: ${err}")
         return
     }
-    println("STATUS ${client.response_status(resp)} BODY ${client.response_body(resp)}")
+    if os.getenv("LEN_ONLY") == "1" {
+        b = client.response_body_bytes(resp)
+        println("STATUS ${client.response_status(resp)} LEN ${b.len}")
+    } else {
+        println("STATUS ${client.response_status(resp)} BODY ${client.response_body(resp)}")
+    }
     client.response_free(resp)
 }
