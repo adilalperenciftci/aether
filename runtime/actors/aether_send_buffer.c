@@ -2,8 +2,12 @@
 #include "../scheduler/multicore_scheduler.h"
 #include <string.h>
 
-// Thread-local send buffer
-AETHER_TLS SendBuffer g_send_buffer = {NULL, {{0}}, 0, -1};
+// This thread's send buffer: named in this file only (aether_send_buffer.h).
+static AETHER_TLS SendBuffer t_send_buffer = {NULL, {{0}}, 0, -1};
+
+SendBuffer* send_buffer_here(void) {
+    return &t_send_buffer;
+}
 
 // Flush accumulated messages to target actor. Every message goes, always
 // (#3292), by the scheduler's own send path: scheduler_send_many sends them
@@ -15,15 +19,15 @@ AETHER_TLS SendBuffer g_send_buffer = {NULL, {{0}}, 0, -1};
 // counted in flight; to count none of them as sent; and, from a thread that
 // is no core's, to write the shared channel without its lock.
 void send_buffer_flush(void) {
-    if (g_send_buffer.count == 0 || !g_send_buffer.target) {
+    if (t_send_buffer.count == 0 || !t_send_buffer.target) {
         return;
     }
     // Taken out of the buffer first: a send can step its target inline, and
     // a handler that buffers sends of its own finds the buffer empty.
-    ActorBase* actor = (ActorBase*)g_send_buffer.target;
-    int n = g_send_buffer.count;
+    ActorBase* actor = (ActorBase*)t_send_buffer.target;
+    int n = t_send_buffer.count;
     Message msgs[SEND_BUFFER_SIZE];
-    memcpy(msgs, g_send_buffer.buffer, (size_t)n * sizeof(Message));
-    g_send_buffer.count = 0;
+    memcpy(msgs, t_send_buffer.buffer, (size_t)n * sizeof(Message));
+    t_send_buffer.count = 0;
     scheduler_send_many(actor, msgs, n);
 }

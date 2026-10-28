@@ -45,27 +45,29 @@ static ActorBase* make_idle_actor(void) {
 
 // The test thread's buffer, empty, with no target.
 static void reset_send_buffer(void) {
-    g_send_buffer.target = NULL;
-    g_send_buffer.count = 0;
+    SendBuffer* b = send_buffer_here();
+    b->target = NULL;
+    b->count = 0;
 }
 
 // Test 1: send_buffer_flush is a no-op when the buffer is empty.
 TEST_CATEGORY(send_buffer_flush_empty_is_noop, TEST_CATEGORY_RUNTIME) {
     reset_send_buffer();
     send_buffer_flush();
-    ASSERT_EQ(0, g_send_buffer.count);
-    ASSERT_TRUE(g_send_buffer.target == NULL);
+    ASSERT_EQ(0, send_buffer_here()->count);
+    ASSERT_TRUE(send_buffer_here()->target == NULL);
 }
 
 // Test 2: send_buffer_flush is a no-op when target is NULL even with
 // count > 0 (defensive: the API never leaves the buffer so).
 TEST_CATEGORY(send_buffer_flush_null_target_is_noop, TEST_CATEGORY_RUNTIME) {
     reset_send_buffer();
-    g_send_buffer.target = NULL;
-    g_send_buffer.count = 3;
-    g_send_buffer.buffer[0] = message_create_simple(1, 0, 100);
+    SendBuffer* b = send_buffer_here();
+    b->target = NULL;
+    b->count = 3;
+    b->buffer[0] = message_create_simple(1, 0, 100);
     send_buffer_flush();
-    ASSERT_EQ(3, g_send_buffer.count);
+    ASSERT_EQ(3, b->count);
     reset_send_buffer();
 }
 
@@ -80,9 +82,9 @@ TEST_CATEGORY(send_buffered_accumulates, TEST_CATEGORY_RUNTIME) {
         send_buffered((struct ActorBase*)actor, message_create_simple(1, 0, i));
     }
 
-    ASSERT_EQ(10, g_send_buffer.count);
+    ASSERT_EQ(10, send_buffer_here()->count);
     ASSERT_EQ(10, send_buffer_pending());
-    ASSERT_TRUE(g_send_buffer.target == actor);
+    ASSERT_TRUE(send_buffer_here()->target == actor);
     ASSERT_EQ(0, atomic_load(&actor->active));  // not flushed → not activated
 
     reset_send_buffer();  // nothing was sent: the messages own nothing
@@ -93,8 +95,8 @@ TEST_CATEGORY(send_buffered_accumulates, TEST_CATEGORY_RUNTIME) {
 TEST_CATEGORY(send_buffer_force_flush_empty_is_noop, TEST_CATEGORY_RUNTIME) {
     reset_send_buffer();
     send_buffer_force_flush();
-    ASSERT_EQ(0, g_send_buffer.count);
-    ASSERT_TRUE(g_send_buffer.target == NULL);
+    ASSERT_EQ(0, send_buffer_here()->count);
+    ASSERT_TRUE(send_buffer_here()->target == NULL);
 }
 
 // Test 5: send_buffer_pending reports the current count.
@@ -150,14 +152,14 @@ static void buf_step(BufActor* self) {
     }
     if (msg.payload_ptr) aether_free_message(msg.payload_ptr);
     if (msg.type == BUF_GO) {
-        int core = g_send_buffer.core_id;
+        int core = send_buffer_here()->core_id;
         int next[2] = { 0, 0 };
         for (int i = 0; i < self->count; i++) {
             int second = self->to2 && (i / BUF_RUN) % 2 == 1;
             ActorBase* to = second ? self->to2 : self->to;
             send_buffered((struct ActorBase*)to,
                           message_create_simple(BUF_NUMBER, 0, ++next[second]));
-            if (g_send_buffer.core_id != core) atomic_fetch_add(&self->wrong_core, 1);
+            if (send_buffer_here()->core_id != core) atomic_fetch_add(&self->wrong_core, 1);
         }
         send_buffer_force_flush();
         if (self->release_to) atomic_store(&((BufActor*)self->to)->release, 1);
@@ -296,7 +298,7 @@ TEST_CATEGORY(send_buffer_flush_from_foreign_thread, TEST_CATEGORY_RUNTIME) {
         send_buffered((struct ActorBase*)t, message_create_simple(BUF_NUMBER, 0, i));
     send_buffer_force_flush();
     int pending = send_buffer_pending();
-    void* target = g_send_buffer.target;
+    void* target = send_buffer_here()->target;
     int all = buf_wait(&t->got, 700, 5000);
     scheduler_shutdown();
     scheduler_cleanup();

@@ -72,7 +72,8 @@ typedef struct {
  * one, were addressed through the variable's non-thread address and landed
  * in the thread-local template, not the calling thread's block. A scalar
  * read or written whole (an int, a pointer: current_core_id,
- * g_current_step_actor) has no adjacent store to merge with. */
+ * g_current_step_actor) has no adjacent store to merge with. The send buffer
+ * (aether_send_buffer.c) follows the same rule. */
 AetherFrames* aether_frames_here(void);
 
 #endif /* AETHER_FRAMES_H */

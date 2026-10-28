@@ -20,20 +20,16 @@ typedef struct {
     uint64_t count;
 } CounterActor;
 
+// One message a step: the scheduler counts each step as one message handled,
+// and scheduler_shutdown() waits until every message sent has been. A step
+// that took up to 128 left the count short, and the shutdown waited forever.
 void counter_step(void* self) {
     CounterActor* actor = (CounterActor*)self;
     Message msg;
-    
-    int batch_size = 128;
-    int received = 0;
-    while (received < batch_size && mailbox_receive(&actor->base.mailbox, &msg)) {
+    if (mailbox_receive(&actor->base.mailbox, &msg)) {
         actor->count++;
-        received++;
     }
-    
-    if (received > 0) {
-        atomic_store_explicit(&actor->base.active, 1, memory_order_relaxed);  // Keep processing
-    }
+    atomic_store_explicit(&actor->base.active, actor->base.mailbox.count > 0, memory_order_relaxed);
 }
 
 // Benchmark unbuffered sends (current implementation)
@@ -78,8 +74,10 @@ double bench_unbuffered(int num_actors, int messages_per_actor) {
     
     clock_gettime(CLOCK_MONOTONIC, &end);
     
-    scheduler_stop();
-    scheduler_wait();
+    // Joined and torn down: the next benchmark initialises the scheduler
+    // again, and scheduler_init() on one that is only stopped does nothing.
+    scheduler_shutdown();
+    scheduler_cleanup();
     
     double elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
     uint64_t total_msgs = 0;
@@ -146,8 +144,9 @@ double bench_buffered(int num_actors, int messages_per_actor) {
     
     clock_gettime(CLOCK_MONOTONIC, &end);
     
-    scheduler_stop();
-    scheduler_wait();
+    // As in bench_unbuffered.
+    scheduler_shutdown();
+    scheduler_cleanup();
     
     double elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
     uint64_t total_msgs = 0;
