@@ -8,6 +8,7 @@
 
 import std.actors
 import std.supervise
+import std.sync
 
 message Bump {}
 message Boom {}
@@ -16,6 +17,7 @@ message Label { text: string }
 message Watch { who: actor_ref }
 message Count {}
 message GetLabel {}
+message Hold { gate: ptr }
 
 extern exit(code: int)
 
@@ -29,6 +31,13 @@ actor Worker {
         Label(text) -> { label = text }
         Count() -> { reply n }
         GetLabel() -> { reply label }
+        // Waits until main opens the gate: what main sends meanwhile queues
+        // behind this (#3360).
+        Hold(gate) -> {
+            while sync.atomic_load(gate) == 0 {
+                sleep(1)
+            }
+        }
     }
 }
 
@@ -73,9 +82,17 @@ main() {
     b ! Bump {}
     wait_for_idle()
     dead0 = actors.dead_sends()
+    // The Bump must be queued behind the panic. Sent one after the other, the
+    // actor on its own core could die and be restarted before the Bump went,
+    // which then reached the new incarnation (#3360): so it is held while
+    // both are queued.
+    gate = sync.atomic_new(0)
+    a ! Hold { gate: gate }
     a ! Boom {}
     a ! Bump {} // queued behind the panic: dropped, counted
+    sync.atomic_store(gate, 1)
     wait_for_idle()
+    sync.atomic_free(gate)
     a ! Bump {} // after the restart: the new incarnation
     a ! Bump {}
     wait_for_idle()
