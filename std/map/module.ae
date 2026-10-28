@@ -38,9 +38,9 @@ extern map_has(map: ptr, key: @aether string) -> int
 extern map_remove(map: ptr, key: @aether string)
 extern map_size(map: ptr) -> int
 extern map_clear(map: ptr)
-extern map_free(map: ptr)
+extern map_free(map: @frees ptr)
 extern map_keys_raw(map: ptr) -> ptr
-extern map_keys_free(keys: ptr)
+extern map_keys_free(keys: @frees ptr)
 extern map_keys_size_raw(keys: ptr) -> int
 extern map_keys_get_raw(keys: ptr, index: int) -> string
 extern aether_string_is_string(p: @aether ptr) -> int

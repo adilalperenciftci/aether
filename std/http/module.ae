@@ -121,7 +121,7 @@ extern http_get_with_timeout_ns_raw(url: string, timeout: Duration) -> ptr
 extern http_post_raw(url: string, body: string, content_type: string) -> ptr
 extern http_put_raw(url: string, body: string, content_type: string) -> ptr
 extern http_delete_raw(url: string) -> ptr
-extern http_response_free(response: ptr)
+extern http_response_free(response: @frees ptr)
 extern http_response_status_code(response: ptr) -> int
 extern http_response_body_str(response: ptr) -> string
 extern http_response_headers_str(response: ptr) -> string
@@ -276,7 +276,7 @@ extern http_server_set_host(server: ptr, host: string)
 extern http_server_start_raw(server: ptr) -> int
 extern http_server_start_background_raw(server: ptr) -> int
 extern http_server_stop(server: ptr)
-extern http_server_free(server: ptr)
+extern http_server_free(server: @frees ptr)
 // TLS termination (#260 Tier 0). Loads the cert+key (PEM-encoded);
 // after this call every accepted connection completes a TLS handshake
 // before the HTTP parse runs. Returns "" on success, error string
@@ -650,7 +650,7 @@ extern http_ws_message_data(ws: ptr) -> string
 extern http_ws_message_length(ws: ptr) -> int
 extern http_ws_close(ws: ptr, code: int, reason: string)
 extern http_ws_connect(url: string) -> ptr
-extern http_ws_client_free(ws: ptr)
+extern http_ws_client_free(ws: @frees ptr)
 
 server_websocket(server: ptr, path: string, handler: @keep ptr, user_data: ptr) {
     http_server_websocket(server, path, handler, user_data)
@@ -680,7 +680,7 @@ ws_connect(url: string) -> ptr {
     return http_ws_connect(url)
 }
 
-ws_client_free(ws: ptr) {
+ws_client_free(ws: @frees ptr) {
     http_ws_client_free(ws)
 }
 
@@ -886,7 +886,7 @@ extern http_server_use_middleware_loop_safe(server: ptr, middleware: ptr, user_d
 extern http_get_header(req: ptr, name: string) -> string
 extern http_get_query_param(req: ptr, name: string) -> string
 extern http_get_path_param(req: ptr, name: string) -> string
-extern http_request_free(req: ptr)
+extern http_request_free(req: @frees ptr)
 
 // HTTP Response - building
 extern http_response_create() -> ptr
@@ -930,7 +930,7 @@ response_set_body_bytes(res: ptr, body: byte[]) {
 // caller-owned and must be closed with tcp.close.
 extern http_response_accept_tunnel(res: ptr) -> ptr
 extern http_response_json(res: ptr, json: string)
-extern http_server_response_free(res: ptr)
+extern http_server_response_free(res: @frees ptr)
 
 response_accept_tunnel(res: ptr) -> ptr {
     return http_response_accept_tunnel(res)

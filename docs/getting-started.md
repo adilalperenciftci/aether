@@ -167,18 +167,28 @@ Requires [Emscripten](https://emscripten.org/) (`emcc` on PATH).
 ae check hello.ae
 ```
 
-**Add a package (any git host):**
+**Add a package (GitHub, GitLab, Bitbucket, Codeberg, or a self-hosted forge):**
 
 ```bash
-ae add github.com/user/repo          # latest from GitHub
+ae add github.com/user/repo          # the default branch
 ae add github.com/user/repo@v1.0.0   # specific version
 ae add gitlab.com/user/repo           # GitLab
 ae add codeberg.org/user/repo         # Codeberg
-ae add github.com/user/repo@v1.0.0 --source   # force the git clone
+ae add github.com/user/repo@v1.1.0 --update   # move a pinned dependency
+ae add github.com/user/repo@v1.0.0 --source   # the source, even with a release artifact
 ```
 
+`ae add` takes the source archive the forge serves for the tag (or for the
+default branch) and needs no git. It pins the hash of the tree in
+`aether.toml`'s `[dependency-hashes]`: a later `ae add` must get the same
+tree, a build refuses an installed package that is not it, and `--update`
+is how a pin moves. Without `@version` it installs the version
+`aether.toml` names, so on a fresh checkout `ae add <package>` installs the
+pinned dependency. [package-fetching.md](package-fetching.md) has the
+details, mirrors included.
+
 With `@version`, `ae add` prefers a **published release artifact** when the
-package ships one for your platform, and falls back to cloning otherwise.
+package ships one for your platform, and takes the source archive otherwise.
 The asset is expected at the same layout Aether's own releases use:
 
 ```
@@ -188,14 +198,15 @@ https://<package>/releases/download/<tag>/<repo>-<tag>-<os>-<arch>.tar.gz
 (`.zip` is tried too; `<os>-<arch>` is `linux-x86_64`, `macos-arm64`, and
 so on.) A sibling `<asset>.sha256` is verified when present: a
 **mismatch is fatal and installs nothing**, and there is no silent
-fall-back to git, which would defeat the check. An artifact with no
+fall-back to the source, which would defeat the check. An artifact with no
 published checksum installs with a warning.
 
 Prebuilt `--emit=lib` artifacts are directly importable: the binary-import
 prepass reads the artifact's catalog and synthesizes the interface, so a
 released library needs no toolchain to consume. Set
 `AE_RELEASE_BASE_URL` to point at an internal mirror serving the same
-layout.
+layout, and the source archives at `<package>/archive/<tag>.tar.gz`
+([package-fetching.md](package-fetching.md)).
 
 For a **binary package**, publish `aether.toml` with a `[package]` section
 containing `binary = "<stem>"` and `modules = "."`, plus
@@ -203,7 +214,7 @@ containing `binary = "<stem>"` and `modules = "."`, plus
 `.sha256` sidecar. Unlike the archive path, a binary package requires the
 checksum: a missing or mismatched checksum is fatal. If the declared binary
 is missing for the selected target, `ae add` fails without trying another
-libc, a source archive, or a git clone.
+libc or a source archive.
 
 Publish Linux binary packages under distinct glibc and musl identities:
 

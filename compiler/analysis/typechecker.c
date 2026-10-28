@@ -11,6 +11,8 @@
 #include "actor_reply.h"
 #include "missing_return.h"
 #include "slice_escape.h"
+#include "actor_protocol.h"
+#include "free_check.h"
 #include "quote.h"
 
 /* Defined with typecheck_program below; infer_type needs it far earlier. */
@@ -3256,6 +3258,18 @@ static int fn_modes_fit(const Type* from, const Type* to) {
     return 1;
 }
 
+/* The program's actor named `name`, or NULL. */
+static ASTNode* find_actor_definition(const char* name) {
+    ASTNode* program = g_typecheck_program;
+    for (int i = 0; program && name && i < program->child_count; i++) {
+        ASTNode* d = program->children[i];
+        if (d && d->type == AST_EXPORT_STATEMENT && d->child_count > 0) d = d->children[0];
+        if (d && d->type == AST_ACTOR_DEFINITION && d->value && strcmp(d->value, name) == 0)
+            return d;
+    }
+    return NULL;
+}
+
 int is_type_compatible(Type* from, Type* to) {
     if (!from || !to) return 0;
 
@@ -3306,6 +3320,12 @@ int is_type_compatible(Type* from, Type* to) {
         }
         return is_type_compatible(from, to->element_type);
     }
+
+    /* #3142: an owned value is lent where a bare `ptr` is taken, as an
+     * argument: the place keeps owning it (what a call may do with it is
+     * checked by check_owned_rules). */
+    if (tc_type_is_owned(from) && to->kind == TYPE_PTR && !to->element_type && !to->distinct_name)
+        return 1;
 
     // #480 distinct types: a distinct type converts to/from any other type
     // ONLY via an explicit `as` cast — never implicitly, even when the base
@@ -3466,6 +3486,16 @@ int is_type_compatible(Type* from, Type* to) {
     // Bare actor_ref (no type parameter) is compatible with any actor_ref
     if (from->kind == TYPE_ACTOR_REF && to->kind == TYPE_ACTOR_REF) {
         if (!from->element_type || !to->element_type) return 1;
+        /* #385: a reference to an actor passes where one following the
+         * protocol it implements is wanted. */
+        if (to->element_type->kind == TYPE_STRUCT && to->element_type->struct_name &&
+            from->element_type->kind == TYPE_STRUCT && from->element_type->struct_name &&
+            aether_protocol_lookup(to->element_type->struct_name)) {
+            if (strcmp(from->element_type->struct_name, to->element_type->struct_name) == 0) return 1;
+            ASTNode* actor = find_actor_definition(from->element_type->struct_name);
+            const char* implemented = actor ? aether_actor_protocol_name(actor) : NULL;
+            return implemented && strcmp(implemented, to->element_type->struct_name) == 0;
+        }
         return is_type_compatible(from->element_type, to->element_type);
     }
 
@@ -5477,6 +5507,9 @@ static void resolve_purity_queries(ASTNode* node, ASTNode* program,
                                    const char** globals, int nglobals);
 // #480: resolve `type X = distinct Y` placeholders into distinct Types.
 static void resolve_distinct_types(ASTNode* program);
+static void collect_owned_types(ASTNode* program);   /* #3142 */
+static void check_owned_types(ASTNode* program);     /* #3142 */
+static void check_owned_rules(ASTNode* program);     /* #3142 */
 static void resolve_cfn_types(ASTNode* program);   /* #2200 */
 // #914: resolve `type Name = A | B | C` references into TYPE_SUM.
 static void resolve_sum_types(ASTNode* program);
@@ -6742,6 +6775,7 @@ int typecheck_program(ASTNode* program) {
     g_tc_ptr_to_closure = 0;
     tc_clauses_reset();   /* #2647: a program's clause sets, indexed afresh */
     hoist_cache_reset();  /* #3083: the hoisting answers, gathered afresh */
+    aether_protocols_collect(program);   /* #385: actor_ref[P] and the sends through it */
 
     /* #2631: a module file checked on its own (it has an `exports(...)`
      * list, the test `program_is_module` below makes too) knows the
@@ -6777,6 +6811,7 @@ int typecheck_program(ASTNode* program) {
     // #480: resolve `type X = distinct Y` placeholders into distinct Types
     // across the whole AST before any type-checking or inference runs.
     resolve_distinct_types(program);
+    collect_owned_types(program);   /* #3142 */
 
     // #2200: resolve `cfn Name(...) -> R` references — rewrite bare
     // TYPE_STRUCT{Name} use-sites into the named function-pointer signature.
@@ -7698,6 +7733,18 @@ int typecheck_program(ASTNode* program) {
     /* A slice of a function's own storage must not outlive it (#2785): asked
      * of the checked program, whose coercions into slices are explicit. */
     if (error_count == 0) error_count += check_slice_escapes(program);
+    /* #385: sends through references that follow a protocol, in the order
+     * it allows, asked of the checked program. */
+    if (error_count == 0) error_count += check_actor_protocols(program);
+    /* #3142: an owned pointer type's drop function, and the rules that keep
+     * its values to one owner. */
+    if (error_count == 0) {
+        check_owned_types(program);
+        check_owned_rules(program);
+    }
+    /* #1300: a value used or freed after it was freed, a view after its
+     * storage went, and the `@frees` and `@moves` declarations. */
+    if (error_count == 0) error_count += check_frees(program);
 
     // #481: validate effect tags over the whole-program call graph.
     check_effect_tags(program);
@@ -7986,11 +8033,30 @@ static ASTNode* receive_arm_message_pattern(ASTNode* arm) {
 static void reject_duplicate_receive_arms(ASTNode* actor) {
     ASTNode* seen[256];
     int seen_count = 0;
+    ASTNode* first_wildcard = NULL;
     for (int i = 0; i < actor->child_count; i++) {
         ASTNode* rs = actor->children[i];
         if (!rs || rs->type != AST_RECEIVE_STATEMENT) continue;
         for (int j = 0; j < rs->child_count; j++) {
-            ASTNode* pattern = receive_arm_message_pattern(rs->children[j]);
+            ASTNode* arm = rs->children[j];
+            /* One `_` arm takes every message no other arm names (#3289);
+             * a second never runs. */
+            if (arm && arm->type == AST_RECEIVE_ARM && arm->child_count >= 2 && arm->children[0] &&
+                arm->children[0]->type == AST_WILDCARD_PATTERN) {
+                if (first_wildcard) {
+                    char msg[320];
+                    snprintf(msg, sizeof(msg),
+                             "this `_` arm can never run: the `_` arm at line %d already "
+                             "receives every message of actor '%s' that no other arm names",
+                             first_wildcard->line, actor->value ? actor->value : "?");
+                    type_error_code_hint(msg, "keep one `_` arm", arm->line, arm->column,
+                                         AETHER_ERR_ACTOR_ERROR);
+                } else {
+                    first_wildcard = arm;
+                }
+                continue;
+            }
+            ASTNode* pattern = receive_arm_message_pattern(arm);
             if (!pattern || !pattern->value) continue;
             ASTNode* first = NULL;
             for (int s = 0; s < seen_count && !first; s++)
@@ -8009,6 +8075,70 @@ static void reject_duplicate_receive_arms(ASTNode* actor) {
             }
         }
     }
+}
+
+/* #385: the actor a reference's type names, a `spawn(A())` result or a
+ * reference typed `actor_ref[A]`; NULL for a bare `actor_ref`, which is the
+ * dynamic escape and stays unchecked. */
+static ASTNode* actor_ref_target_actor(Type* t, SymbolTable* table) {
+    if (!t || t->kind != TYPE_ACTOR_REF || !t->element_type ||
+        t->element_type->kind != TYPE_STRUCT || !t->element_type->struct_name)
+        return NULL;
+    Symbol* s = lookup_symbol(table, t->element_type->struct_name);
+    return s && s->node && s->node->type == AST_ACTOR_DEFINITION ? s->node : NULL;
+}
+
+/* #385: whether `actor` takes messages named `msg`: an arm names it, or a
+ * `_` arm takes every message no arm names (#3289). */
+static int actor_receives_message(ASTNode* actor, const char* msg) {
+    for (int i = 0; i < actor->child_count; i++) {
+        ASTNode* rs = actor->children[i];
+        if (!rs || rs->type != AST_RECEIVE_STATEMENT) continue;
+        for (int j = 0; j < rs->child_count; j++) {
+            ASTNode* arm = rs->children[j];
+            if (arm && arm->type == AST_RECEIVE_ARM && arm->child_count >= 2 && arm->children[0] &&
+                arm->children[0]->type == AST_WILDCARD_PATTERN)
+                return 1;
+            ASTNode* pattern = receive_arm_message_pattern(arm);
+            if (pattern && pattern->value && strcmp(pattern->value, msg) == 0) return 1;
+        }
+    }
+    return 0;
+}
+
+/* #385: a send or an ask of a message that the target actor has no arm
+ * for, where the target's type names its actor, is refused: at run time the
+ * message is dropped (an ask's caller waits for nothing). A bare
+ * `actor_ref` is not checked. */
+static void reject_unhandled_send(ASTNode* target, ASTNode* message, SymbolTable* table) {
+    if (!target || !message || message->type != AST_MESSAGE_CONSTRUCTOR || !message->value) return;
+    Type* t = infer_type(target, table);
+    ASTNode* actor = actor_ref_target_actor(t, table);
+    /* A reference typed `actor_ref[P]`, P a protocol, takes P's messages. */
+    ASTNode* proto = (!actor && t && t->kind == TYPE_ACTOR_REF && t->element_type &&
+                      t->element_type->kind == TYPE_STRUCT)
+                         ? aether_protocol_lookup(t->element_type->struct_name) : NULL;
+    if (t) free_type(t);
+    char msg[400], hint[400];
+    if (proto) {
+        if (aether_protocol_has_message(proto, message->value)) return;
+        snprintf(msg, sizeof(msg), "protocol '%s' has no message '%s'", proto->value,
+                 message->value);
+        snprintf(hint, sizeof(hint),
+                 "a reference typed actor_ref[%s] is sent only the messages of its protocol",
+                 proto->value);
+        type_error_code_hint(msg, hint, message->line, message->column, AETHER_ERR_ACTOR_ERROR);
+        return;
+    }
+    if (!actor || actor_receives_message(actor, message->value)) return;
+    snprintf(msg, sizeof(msg),
+             "actor '%s' has no receive arm for '%s', so this message would be dropped",
+             actor->value ? actor->value : "?", message->value);
+    snprintf(hint, sizeof(hint),
+             "add an arm for `%s` (or a `_` arm) to '%s', or send through a bare `actor_ref`, "
+             "which is not checked",
+             message->value, actor->value ? actor->value : "?");
+    type_error_code_hint(msg, hint, message->line, message->column, AETHER_ERR_ACTOR_ERROR);
 }
 
 static const char* ret_type_spell(Type* t, char* buf, size_t n);
@@ -9577,6 +9707,368 @@ static int call_arg_mode(ASTNode* program, ASTNode* call, int i) {
     return is_into_param(p) ? FN_MODE_INTO : FN_MODE_BORROWED;
 }
 
+/* #1300: what the callee of `call` does to the memory its argument `i`
+ * points at: TC_ARG_FREES (C's `free`, `heap.free`, a `@frees` parameter),
+ * TC_ARG_MOVES (a `@moves` parameter: the storage may move) or 0; *into
+ * is set when the result points into it (an `@into` parameter). A call
+ * through a value says nothing of it. */
+int tc_call_arg_effect(ASTNode* program, ASTNode* call, int i, int* into) {
+    if (into) *into = 0;
+    if (!call || call->type != AST_FUNCTION_CALL || !call->value || call_value_type(call)) return 0;
+    ASTNode* decl = call_callee_decl(program, call);
+    if (!decl) {
+        /* The builtins: C's free, and heap.new's release. */
+        if (i == 0 && (!strcmp(call->value, "free") || !strcmp(call->value, "heap.free")))
+            return TC_ARG_FREES;
+        return 0;
+    }
+    ASTNode* p = call_decl_param(decl, call, i);
+    if (!p) return 0;
+    if (into) *into = is_into_param(p);
+    /* An extern that is C's free, under its name or another. */
+    if (decl->type == AST_EXTERN_FUNCTION && i == 0 && decl->value &&
+        (!strcmp(decl->value, "free") || binds_symbol(decl->annotation, "free")))
+        return TC_ARG_FREES;
+    if (param_has_mode(p, "frees_param")) return TC_ARG_FREES;
+    if (param_has_mode(p, "moves_param")) return TC_ARG_MOVES;
+    return 0;
+}
+
+/* #3142: owned pointer types, `type T = owned ptr drop f`: each one's name,
+ * its drop function as written, and the C function a release calls. */
+#define AETHER_MAX_OWNED 64
+typedef struct {
+    const char* name;
+    const char* drop;       /* as written: `bytes.free` */
+    const char* drop_c;     /* the C function: `bytes_free`, `free` */
+    ASTNode* def;
+} OwnedDef;
+static OwnedDef g_owned[AETHER_MAX_OWNED];
+static int g_owned_count = 0;
+
+static void collect_owned_types(ASTNode* program) {
+    g_owned_count = 0;
+    for (int i = 0; program && i < program->child_count; i++) {
+        ASTNode* d = program->children[i];
+        if (d && d->type == AST_EXPORT_STATEMENT && d->child_count > 0) d = d->children[0];
+        if (!d || d->type != AST_DISTINCT_TYPE_DEF || !d->value || !d->annotation ||
+            strncmp(d->annotation, "owned_drop:", 11) != 0 || g_owned_count >= AETHER_MAX_OWNED)
+            continue;
+        OwnedDef* o = &g_owned[g_owned_count++];
+        o->name = d->value;
+        o->drop = d->annotation + 11;
+        o->drop_c = NULL;
+        o->def = d;
+    }
+}
+
+static OwnedDef* owned_def_of(const Type* t) {
+    if (!t || !t->distinct_name) return NULL;
+    for (int i = 0; i < g_owned_count; i++)
+        if (strcmp(g_owned[i].name, t->distinct_name) == 0) return &g_owned[i];
+    return NULL;
+}
+
+int tc_type_is_owned(const Type* t) {
+    return owned_def_of(t) != NULL;
+}
+
+const char* tc_owned_drop_c(const Type* t) {
+    OwnedDef* o = owned_def_of(t);
+    return o ? o->drop_c : NULL;
+}
+
+/* An owned type's base is a bare `ptr`, and its drop function takes one
+ * pointer and frees it: C's `free` (as `free`, an extern bound to it, or
+ * `heap.free`), or a function or extern whose one parameter is `@frees`.
+ * The C function a release calls is recorded. */
+static void check_owned_types(ASTNode* program) {
+    for (int i = 0; i < g_owned_count; i++) {
+        OwnedDef* o = &g_owned[i];
+        char msg[400];
+        Type* base = o->def->node_type;
+        if (!base || base->kind != TYPE_PTR || base->element_type) {
+            snprintf(msg, sizeof(msg), "owned type '%s' must be over a bare `ptr`", o->name);
+            type_error_code_hint(msg, "write `type Name = owned ptr drop f`", o->def->line,
+                                 o->def->column, AETHER_ERR_OWNED);
+            continue;
+        }
+        if (!strcmp(o->drop, "free") || !strcmp(o->drop, "heap.free")) {
+            o->drop_c = "free";
+            continue;
+        }
+        ASTNode* decl = effect_resolve_callee(program, o->drop);
+        if (!decl) decl = call_extern_decl(program, o->drop);
+        ASTNode* p = NULL;
+        int params = 0;
+        for (int k = 0; decl && k < decl->child_count; k++) {
+            ASTNode* c = decl->children[k];
+            if (!c) continue;
+            if (decl->type == AST_EXTERN_FUNCTION ||
+                c->type == AST_PATTERN_VARIABLE || c->type == AST_VARIABLE_DECLARATION) {
+                if (c->type == AST_BLOCK) continue;
+                params++;
+                if (!p) p = c;
+            }
+        }
+        int c_free = decl && decl->type == AST_EXTERN_FUNCTION &&
+                     (!strcmp(decl->value, "free") || binds_symbol(decl->annotation, "free"));
+        if (!decl || params != 1 || !p || !p->node_type || p->node_type->kind != TYPE_PTR ||
+            (!c_free && !param_has_mode(p, "frees_param"))) {
+            snprintf(msg, sizeof(msg),
+                     "owned type '%s' is released by '%s', which %s", o->name, o->drop,
+                     !decl ? "is not a function the program declares"
+                     : params != 1 ? "does not take exactly one parameter"
+                                   : "does not free a pointer it is given (`@frees ptr`)");
+            type_error_code_hint(msg,
+                                 "name a function that takes one `ptr` declared `@frees`, "
+                                 "such as `bytes.free`",
+                                 o->def->line, o->def->column, AETHER_ERR_OWNED);
+            continue;
+        }
+        if (decl->type == AST_EXTERN_FUNCTION && decl->annotation &&
+            !strncmp(decl->annotation, "c_symbol:", 9)) {
+            const char* sym = decl->annotation + 9;
+            const char* end = strchr(sym, ';');
+            o->drop_c = end ? aether_internf("%.*s", (int)(end - sym), sym) : sym;
+        } else {
+            o->drop_c = decl->value;
+        }
+    }
+}
+
+/* #3142: the rules that keep an owned value to one owner. A value of an
+ * owned type is held by one place (a local, a handler's binding of a message
+ * field, an actor's state field, a message field) and released by its drop
+ * function when that place lets go of it; `move` hands it to another place.
+ * So: a copy of it into a second place is refused (`move` it), and so is a
+ * place that could not release it (a struct field, an element, a module
+ * `var`, a closure's capture) and a call that would free or keep it behind
+ * its owner's back. A function borrows it, as it borrows a `ptr`; a
+ * parameter of an owned type is borrowed and is neither rebound nor handed
+ * on. `null` is an owned value holding nothing, so `Buf?` is refused for
+ * `Buf`. A `return` of an owned local hands it over (a `move`). */
+static Type* owned_msg_field_type(ASTNode* program, const char* msg, const char* field) {
+    for (int i = 0; program && msg && field && i < program->child_count; i++) {
+        ASTNode* d = program->children[i];
+        if (d && d->type == AST_EXPORT_STATEMENT && d->child_count > 0) d = d->children[0];
+        if (!d || d->type != AST_MESSAGE_DEFINITION || !d->value || strcmp(d->value, msg)) continue;
+        for (int k = 0; k < d->child_count; k++) {
+            ASTNode* f = d->children[k];
+            if (f && f->type == AST_MESSAGE_FIELD && f->value && !strcmp(f->value, field))
+                return f->node_type;
+        }
+    }
+    return NULL;
+}
+
+static int owned_is_move(ASTNode* e) {
+    return e && e->type == AST_UNARY_EXPRESSION && e->value && !strcmp(e->value, "move");
+}
+
+static int owned_is_place(ASTNode* e) {
+    return e && (e->type == AST_IDENTIFIER || e->type == AST_MEMBER_ACCESS ||
+                 e->type == AST_ARRAY_ACCESS) && owned_def_of(e->node_type);
+}
+
+static ASTNode* owned_unwrap(ASTNode* e) {
+    while (e && (e->type == AST_VALUE_CAST || e->type == AST_SLICE_TO_PTR) && e->child_count > 0)
+        e = e->children[0];
+    return e;
+}
+
+static void owned_error(ASTNode* at, const char* msg, const char* hint) {
+    type_error_code_hint(msg, hint, at ? at->line : 0, at ? at->column : 0, AETHER_ERR_OWNED);
+}
+
+static void owned_refuse_optional(Type* t, ASTNode* at, const char* what) {
+    if (!t || t->kind != TYPE_OPTIONAL || !owned_def_of(t->element_type)) return;
+    char msg[320];
+    snprintf(msg, sizeof(msg), "%s is an optional owned pointer: an owned value holding nothing "
+             "is `null`", what);
+    owned_error(at, msg, "write the owned type itself and use `null` for none");
+}
+
+static int owned_param_named(ASTNode* fn, const char* name) {
+    for (int i = 0; fn && name && i < fn->child_count; i++) {
+        ASTNode* p = fn->children[i];
+        if (p && (p->type == AST_PATTERN_VARIABLE || p->type == AST_CLOSURE_PARAM) && p->value &&
+            !strcmp(p->value, name) && owned_def_of(p->node_type))
+            return 1;
+    }
+    return 0;
+}
+
+static int owned_mentions(ASTNode* n, const char** name) {
+    if (!n) return 0;
+    if (n->type == AST_IDENTIFIER && n->value && owned_def_of(n->node_type)) {
+        *name = n->value;
+        return 1;
+    }
+    for (int i = 0; i < n->child_count; i++)
+        if (owned_mentions(n->children[i], name)) return 1;
+    return 0;
+}
+
+static void owned_walk(ASTNode* program, ASTNode* fn, ASTNode* n) {
+    if (!n) return;
+    char msg[400];
+    switch (n->type) {
+        case AST_VARIABLE_DECLARATION: {
+            ASTNode* init = n->child_count > 0 ? n->children[0] : NULL;
+            owned_refuse_optional(n->node_type, n, n->value ? n->value : "this binding");
+            if (n->value && owned_param_named(fn, n->value)) {
+                snprintf(msg, sizeof(msg), "'%s' is borrowed: a parameter of an owned type is "
+                         "the caller's, so it is not bound to another value", n->value);
+                owned_error(n, msg, "bind a local of the function's own instead");
+            } else if (init && owned_is_place(init)) {
+                snprintf(msg, sizeof(msg), "'%s' would be a second owner of what %s holds",
+                         n->value ? n->value : "this binding",
+                         init->type == AST_IDENTIFIER ? init->value : "that place");
+                owned_error(n, msg, "hand it over with `move`: `x = move y`");
+            }
+            break;
+        }
+        case AST_ASSIGNMENT:
+            if (n->child_count >= 2 && n->children[1] && owned_def_of(n->children[1]->node_type))
+                owned_error(n->children[1], "an owned value is not stored in a field or an element: "
+                            "nothing there would release it",
+                            "keep it in a local, an actor's state field or a message field");
+            break;
+        case AST_STRUCT_LITERAL: case AST_ARRAY_LITERAL: case AST_TUPLE_LITERAL:
+            for (int i = 0; i < n->child_count; i++) {
+                ASTNode* f = n->children[i];
+                ASTNode* v = (f && f->type == AST_FIELD_INIT && f->child_count > 0) ? f->children[0] : f;
+                if (v && owned_def_of(v->node_type))
+                    owned_error(v, "an owned value is not put in a struct, an array or a tuple: "
+                                "nothing there would release it",
+                                "keep it in a local, an actor's state field or a message field");
+            }
+            break;
+        case AST_FUNCTION_CALL:
+            for (int i = 0; n->value && i < n->child_count; i++) {
+                ASTNode* a = owned_unwrap(n->children[i]);
+                if (!a) continue;
+                if (owned_is_move(a) && a->child_count > 0 && owned_def_of(a->children[0]->node_type)) {
+                    snprintf(msg, sizeof(msg), "'%s' borrows its arguments: an owned value goes to "
+                             "it as it is, not moved", n->value);
+                    owned_error(a, msg, "drop the `move`; the value stays its owner's");
+                    continue;
+                }
+                if (!owned_def_of(a->node_type)) continue;
+                int effect = tc_call_arg_effect(program, n, i, NULL);
+                if (effect == TC_ARG_FREES) {
+                    snprintf(msg, sizeof(msg), "an owned value is released by its owner, so '%s' "
+                             "must not free it: it would be freed twice", n->value);
+                    owned_error(a, msg, "let the owner go (the end of its scope), or `move` it on");
+                } else if (call_arg_mode(program, n, i) == FN_MODE_KEEP) {
+                    snprintf(msg, sizeof(msg), "'%s' keeps what it is given, and an owned value has "
+                             "one owner", n->value);
+                    owned_error(a, msg, "keep it in a local, an actor's state field or a message field");
+                }
+            }
+            break;
+        case AST_MESSAGE_CONSTRUCTOR:
+            for (int i = 0; n->value && i < n->child_count; i++) {
+                ASTNode* f = n->children[i];
+                if (!f || f->type != AST_FIELD_INIT || !f->value || f->child_count == 0) continue;
+                ASTNode* v = f->children[0];
+                if (owned_def_of(owned_msg_field_type(program, n->value, f->value)) &&
+                    owned_is_place(v)) {
+                    snprintf(msg, sizeof(msg), "the message takes '%s' from its owner: hand it over "
+                             "with `move`", f->value);
+                    owned_error(v, msg, "`field: move x`, after which `x` is not used");
+                }
+            }
+            break;
+        case AST_CLOSURE:
+            if (!ast_is_trailing_block(n)) {
+                const char* name = NULL;
+                if (owned_mentions(n, &name)) {
+                    snprintf(msg, sizeof(msg), "a closure names the owned value '%s': it would "
+                             "share what one owner holds", name);
+                    owned_error(n, msg, "pass it to the closure as an argument when it is called");
+                    return;
+                }
+            }
+            break;
+        case AST_RETURN_STATEMENT: {
+            ASTNode* v = n->child_count > 0 ? n->children[0] : NULL;
+            if (v && v->type == AST_IDENTIFIER && v->value && owned_def_of(v->node_type)) {
+                if (owned_param_named(fn, v->value)) {
+                    snprintf(msg, sizeof(msg), "'%s' is borrowed: a parameter of an owned type is "
+                             "the caller's to release, not this function's to hand on", v->value);
+                    owned_error(v, msg, "return a value the function owns");
+                } else {
+                    /* The local goes with the return: a move, so the exit
+                     * that releases the function's owned locals skips it. */
+                    ASTNode* mv = create_ast_node(AST_UNARY_EXPRESSION, "move", v->line, v->column);
+                    mv->node_type = clone_type(v->node_type);
+                    add_child(mv, v);
+                    n->children[0] = mv;
+                }
+            }
+            break;
+        }
+        default:
+            break;
+    }
+    for (int i = 0; i < n->child_count; i++) owned_walk(program, fn, n->children[i]);
+}
+
+static void check_owned_rules(ASTNode* program) {
+    if (g_owned_count == 0 || !program) return;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* d = program->children[i];
+        if (d && d->type == AST_EXPORT_STATEMENT && d->child_count > 0) d = d->children[0];
+        if (!d) continue;
+        switch (d->type) {
+            case AST_STRUCT_DEFINITION:
+                for (int k = 0; k < d->child_count; k++) {
+                    ASTNode* f = d->children[k];
+                    if (f && f->type == AST_STRUCT_FIELD && owned_def_of(f->node_type))
+                        owned_error(f, "an owned value is not a struct field: a struct is copied, and "
+                                    "nothing would release it",
+                                    "keep it in a local, an actor's state field or a message field");
+                }
+                break;
+            case AST_CONST_DECLARATION:
+                if (owned_def_of(d->node_type))
+                    owned_error(d, "a module-level var does not own a value: nothing releases it",
+                                "keep it in a local or an actor's state field");
+                break;
+            case AST_MESSAGE_DEFINITION:
+                for (int k = 0; k < d->child_count; k++) {
+                    ASTNode* f = d->children[k];
+                    if (f && f->type == AST_MESSAGE_FIELD)
+                        owned_refuse_optional(f->node_type, f, f->value ? f->value : "a field");
+                }
+                break;
+            case AST_FUNCTION_DEFINITION:
+            case AST_BUILDER_FUNCTION:
+            case AST_FUNCTION_CLAUSE:
+            case AST_MAIN_FUNCTION:
+                for (int k = 0; k < d->child_count; k++) {
+                    ASTNode* p = d->children[k];
+                    if (p && p->type == AST_PATTERN_VARIABLE)
+                        owned_refuse_optional(p->node_type, p, p->value ? p->value : "a parameter");
+                }
+                owned_walk(program, d, d);
+                break;
+            case AST_ACTOR_DEFINITION:
+                for (int k = 0; k < d->child_count; k++) {
+                    ASTNode* c = d->children[k];
+                    if (c && c->type == AST_STATE_DECLARATION)
+                        owned_refuse_optional(c->node_type, c, c->value ? c->value : "a state field");
+                }
+                owned_walk(program, NULL, d);
+                break;
+            default:
+                break;
+        }
+    }
+}
+
 /* The declared result of the callee of `call`, or NULL when not known. */
 static Type* call_result_decl_type(ASTNode* program, ASTNode* call) {
     Type* vt = call_value_type(call);
@@ -9600,6 +10092,10 @@ static Carried carries_borrowed_ptr(ASTNode* e, const KeepSet* s) {
             return keep_set_lookup(s, e->value);
         case AST_PTR_AS_STRUCT_CAST: case AST_PTR_AS_ARRAY_CAST: case AST_PTR_AS_FN_CAST:
         case AST_VALUE_CAST:
+        /* #3294: a slice of it (`(p as byte[])[0..n]`) views the memory it
+         * points at, as a cast does, and so do the coercions between a
+         * slice and a pointer. */
+        case AST_SLICE_EXPR: case AST_SLICE_TO_PTR: case AST_SLICE_FROM_ARRAY:
             return e->child_count > 0 ? carries_borrowed_ptr(e->children[0], s) : none;
         case AST_IF_EXPRESSION: {
             if (e->child_count < 3) return none;
@@ -10955,7 +11451,12 @@ static int type_can_hold_ptr_decl(ASTNode* program, Type* t, int depth) {
     switch (t->kind) {
         case TYPE_PTR: case TYPE_FUNCTION: case TYPE_UNKNOWN: case TYPE_WILDCARD:
             return 1;
-        case TYPE_OPTIONAL: case TYPE_ARRAY: case TYPE_ISOLATED:
+        case TYPE_ARRAY:
+            /* A slice is a pointer and a length (#3294); a fixed-size array
+             * holds its elements in place. */
+            if (!type_is_sized_array(t)) return 1;
+            return type_can_hold_ptr_decl(program, t->element_type, depth + 1);
+        case TYPE_OPTIONAL: case TYPE_ISOLATED:
             return type_can_hold_ptr_decl(program, t->element_type, depth + 1);
         case TYPE_TUPLE: case TYPE_SUM:
             for (int i = 0; i < t->tuple_count; i++)
@@ -11009,8 +11510,38 @@ static void check_param_modes(ASTNode* program, ASTNode* decl) {
             p->type != AST_CLOSURE_PARAM)
             continue;
         int keep = is_keep_param(p), into = is_into_param(p);
-        if (!keep && !into) continue;
         char msg[320];
+        /* #1300: `@frees` and `@moves` say what a call does to the memory
+         * a pointer, a `*T` or a slice parameter points at. */
+        int frees = param_has_mode(p, "frees_param"), moves = param_has_mode(p, "moves_param");
+        if (frees || moves) {
+            const char* mode2 = frees ? "frees" : "moves";
+            Type* pt = p->node_type;
+            int pointer = pt && (pt->kind == TYPE_PTR || pt->kind == TYPE_ARRAY);
+            const char* other = (frees && moves) ? "moves"
+                                : keep ? "keep" : into ? "into"
+                                : (is_extern && param_has_mode(p, "retain_param")) ? "retain"
+                                : (is_extern && param_has_mode(p, "holder_param")) ? "holds"
+                                : (frees && is_extern && param_has_mode(p, "noescape_param")) ? "noescape"
+                                                                                               : NULL;
+            if (!pointer) {
+                snprintf(msg, sizeof(msg),
+                         "`@%s` applies to a pointer or slice parameter; '%s' is %s", mode2,
+                         p->value, with_article(type_spelled(pt)));
+                type_error_code_hint(msg, "drop it: only memory a parameter points at is freed or moved",
+                                     p->line, p->column, AETHER_ERR_FREES_MODE);
+            } else if (other) {
+                snprintf(msg, sizeof(msg), "'%s' is declared both `@%s` and `@%s`", p->value, mode2,
+                         other);
+                type_error_code_hint(msg,
+                                     frees ? "a function that frees what it is given neither keeps "
+                                             "it nor hands it on: declare `@frees` alone"
+                                           : "declare one",
+                                     p->line, p->column, AETHER_ERR_FREES_MODE);
+            }
+            continue;
+        }
+        if (!keep && !into) continue;
         const char* mode = into ? "into" : "keep";
         const char* other = (into && keep) ? "keep"
                             : (is_extern && param_has_mode(p, "retain_param")) ? "retain"
@@ -11951,7 +12482,8 @@ static const char* type_unknown_name(Type* t, SymbolTable* table, int depth) {
     if (!t || depth > 32 || t->kind == TYPE_PTR) return NULL;
     if (t->kind == TYPE_STRUCT && t->struct_name && !strchr(t->struct_name, '.') &&
         !symbol_names_type(lookup_symbol(table, t->struct_name)) &&
-        !c_struct_def_node(t->struct_name))
+        !c_struct_def_node(t->struct_name) &&
+        !aether_protocol_lookup(t->struct_name))   /* `actor_ref[P]` (#385) */
         return t->struct_name;
     const char* u = type_unknown_name(t->element_type, table, depth + 1);
     for (int i = 0; !u && t->tuple_types && i < t->tuple_count; i++)
@@ -15011,6 +15543,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
 
                 // Validate field value types match declared field types
                 typecheck_message_constructor(message, table);
+                reject_unhandled_send(actor_ref, message, table);   /* #385 */
             }
             return 1;
         }
@@ -15694,6 +16227,20 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
              * mismatch reached C: an int from `-> string`, a struct of
              * another name. */
             if (!check_return_statement(stmt, table)) return 0;
+            return 1;
+
+        case AST_REPLY_STATEMENT:
+            /* #3301: a reply's value is an expression, checked as one, so
+             * its type (the one the asker is given) is stamped on it. As a
+             * statement's child it went to typecheck_node, which checks no
+             * expression: `reply o ?? d` left `??` untyped, and the reply
+             * went out as an int. */
+            for (int i = 0; i < stmt->child_count; i++) {
+                ASTNode* v = stmt->children[i];
+                if (!v) continue;
+                if (v->type == AST_MESSAGE_CONSTRUCTOR) typecheck_message_constructor(v, table);
+                else typecheck_expression(v, table);
+            }
             return 1;
 
         default:
@@ -17525,6 +18072,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
 
                 // Validate field value types match declared field types
                 typecheck_message_constructor(message, table);
+                reject_unhandled_send(actor_ref, message, table);   /* #385 */
             }
             set_node_type(expr, create_type(TYPE_VOID));
             return 1;
@@ -17549,6 +18097,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                         return 0;
                     }
                     typecheck_message_constructor(message, table);
+                    reject_unhandled_send(expr->children[0], message, table);   /* #385 */
                 } else {
                     typecheck_expression(message, table);
                 }

@@ -1,4 +1,4 @@
-// std.tar - Streaming POSIX ustar TAR Archive Module
+// std.tar - Streaming TAR archives: writes POSIX ustar, reads ustar, pax and GNU
 // Import with: import std.tar
 
 import std.io
@@ -25,7 +25,7 @@ const KIND_OTHER = 4
 // C extern declarations from std/tar/aether_tar.c
 extern aether_tar_set_mtime_raw(path: string, mtime: long, is_symlink: int) -> int
 extern aether_tar_get_mode_raw(path: string) -> int
-extern aether_tar_slice_string(data: string, offset: int, len: int) -> string @heap
+extern aether_tar_slice_string(data: @aether string, offset: int, len: int) -> string @heap
 extern aether_tar_join_name(prefix: string, name: string) -> string @heap
 
 struct TarReader {
@@ -41,6 +41,12 @@ struct TarReader {
     entry_link_name: string
     reached_eof: int
     is_at_entry: int
+    // What a pax extended header or a GNU long-name entry said about the
+    // entry after it (#3302): its path, its link target, its size.
+    pending_name: string
+    pending_link: string
+    pending_size: long
+    has_pending_size: int
 }
 
 struct TarWriter {
@@ -311,6 +317,9 @@ reader_open(path: string) -> {
     reader.fd = fd
     reader.entry_name = ""
     reader.entry_link_name = ""
+    reader.pending_name = ""
+    reader.pending_link = ""
+    reader.has_pending_size = 0
     reader.entry_bytes_read = 0
     reader.entry_bytes_total = 0
     reader.reached_eof = 0
@@ -318,10 +327,139 @@ reader_open(path: string) -> {
     return reader as ptr, ""
 }
 
+// The most metadata entries read before the entry they describe.
+const MAX_META_RUN = 64
+// The most bytes a metadata entry may hold.
+const MAX_META_BYTES = 1048576
+
+// Advances to the next entry: 1 when there is one, 0 at the end of the
+// archive. Metadata entries (pax headers, GNU long names) are read on the
+// way and apply to the entry they precede.
 reader_next(reader_ptr: ptr) -> {
     if reader_ptr == null {
         return 0, "null reader"
     }
+    var run = 0
+    while run <= MAX_META_RUN {
+        got, err = read_header(reader_ptr)
+        if got != 2 {
+            return got, err
+        }
+        run = run + 1
+    }
+    return 0, "more than ${MAX_META_RUN} metadata entries before an entry"
+}
+
+// A decimal field of a pax record, or -1 when it is not one.
+parse_decimal(data: string, n: int, from: int, to: int) -> long {
+    if to <= from {
+        return -1
+    }
+    var val: long = 0
+    var i = from
+    while i < to {
+        c = string_char_at_n(data, n, i)
+        if c < 48 || c > 57 {
+            return -1
+        }
+        // (2^63 - 1) / 10
+        if val > 922337203685477579 {
+            return -1
+        }
+        val = val * 10 + (c - 48)
+        i = i + 1
+    }
+    return val
+}
+
+// Applies a pax extended header's records (`<length> <key>=<value>\n`,
+// POSIX.1-2008 pax) to the entry after it: path, linkpath and size. The
+// other keys (times, owners, charset) are not used by extraction.
+apply_pax(reader: *TarReader, data: string, n: int) -> string {
+    var pos = 0
+    while pos < n {
+        var sp = pos
+        while sp < n && string_char_at_n(data, n, sp) != 32 {
+            sp = sp + 1
+        }
+        len = parse_decimal(data, n, pos, sp)
+        if sp >= n || len <= (sp - pos) as long || len > (n - pos) as long {
+            return "malformed pax record length"
+        }
+        last = pos + (len as int) - 1
+        if string_char_at_n(data, n, last) != 10 {
+            return "pax record not ended by a newline"
+        }
+        var eq = sp + 1
+        while eq < last && string_char_at_n(data, n, eq) != 61 {
+            eq = eq + 1
+        }
+        if eq >= last || eq == sp + 1 {
+            return "malformed pax record"
+        }
+        key = aether_tar_slice_string(data, sp + 1, eq - sp - 1)
+        value = aether_tar_slice_string(data, eq + 1, last - eq - 1)
+        if key == "path" {
+            reader.pending_name = value
+        } else if key == "linkpath" {
+            reader.pending_link = value
+        } else if key == "size" {
+            psize = parse_decimal(value, string_length(value), 0, string_length(value))
+            if psize < 0 {
+                return "malformed pax size"
+            }
+            reader.pending_size = psize
+            reader.has_pending_size = 1
+        }
+        pos = pos + (len as int)
+    }
+    return ""
+}
+
+// Reads a metadata entry's payload and padding, and keeps what it says
+// about the entry that follows.
+read_meta_entry(reader: *TarReader, typeflag: int, size: long) -> string {
+    if size > MAX_META_BYTES as long {
+        return "metadata entry larger than ${MAX_META_BYTES} bytes"
+    }
+    pad = ((512 - (size % 512)) % 512) as int
+    total = (size as int) + pad
+    if total == 0 {
+        return ""
+    }
+    data, n, err = io.fd_read_n(reader.fd, total)
+    if err != "" {
+        string_release(data)
+        return "failed to read metadata entry: ${err}"
+    }
+    if n < total {
+        string_release(data)
+        return "truncated metadata entry"
+    }
+    used = size as int
+    var result = ""
+    if typeflag == 120 { // 'x': pax header for the next entry
+        result = apply_pax(reader, data, used)
+    } else if typeflag == 76 || typeflag == 75 { // 'L' / 'K': GNU long name / link
+        var len = 0
+        while len < used && string_char_at_n(data, n, len) != 0 {
+            len = len + 1
+        }
+        long_name = aether_tar_slice_string(data, 0, len)
+        if typeflag == 76 {
+            reader.pending_name = long_name
+        } else {
+            reader.pending_link = long_name
+        }
+    }
+    // 'g': a pax global header. Its records hold for the rest of the
+    // archive; none of them changes what extraction writes (git archive
+    // puts the commit id there), so it is read past.
+    string_release(data)
+    return result
+}
+
+read_header(reader_ptr: ptr) -> {
     reader = reader_ptr as *TarReader
     if reader.reached_eof == 1 {
         return 0, ""
@@ -407,20 +545,53 @@ reader_next(reader_ptr: ptr) -> {
         return 0, "checksum validation failed: header claims ${parsed_chksum}, calculated ${calc_chksum}"
     }
 
-    // This module intentionally accepts POSIX ustar, not legacy/GNU/PAX
-    // variants with different header semantics.
-    if string_char_at_n(block, 512, 257) != 117 || string_char_at_n(block, 512, 258) != 115 || string_char_at_n(block, 512, 259) != 116 || string_char_at_n(block, 512, 260) != 97 || string_char_at_n(block, 512, 261) != 114 || string_char_at_n(block, 512, 262) != 0 || string_char_at_n(block, 512, 263) != 48 || string_char_at_n(block, 512, 264) != 48 {
+    // A POSIX ustar header (magic "ustar", a NUL, version "00"), which pax
+    // archives (git archive's included) use too, or GNU tar's ("ustar", two
+    // spaces, a NUL) (#3302). Pre-POSIX v7 headers carry no magic and are
+    // refused.
+    ustar_magic = string_char_at_n(block, 512, 257) == 117 && string_char_at_n(block, 512, 258) == 115 && string_char_at_n(block, 512, 259) == 116 && string_char_at_n(block, 512, 260) == 97 && string_char_at_n(block, 512, 261) == 114
+    posix = ustar_magic && string_char_at_n(block, 512, 262) == 0 && string_char_at_n(block, 512, 263) == 48 && string_char_at_n(block, 512, 264) == 48
+    gnu = ustar_magic && string_char_at_n(block, 512, 262) == 32 && string_char_at_n(block, 512, 263) == 32 && string_char_at_n(block, 512, 264) == 0
+    if !posix && !gnu {
         string_release(block)
-        return 0, "unsupported tar format: expected POSIX ustar header"
+        return 0, "unsupported tar format: expected a POSIX ustar or GNU tar header"
+    }
+
+    // Decode Size
+    size, size_err = parse_octal(block, 124, 12)
+    if size_err != "" {
+        string_release(block)
+        return 0, "invalid octal size: ${size_err}"
+    }
+    if size < 0 {
+        string_release(block)
+        return 0, "negative size in header"
+    }
+
+    // A pax extended header ('x', for the next entry; 'g', for the archive)
+    // or a GNU long name ('L') or long link ('K') describes the entry that
+    // follows: it is read here, and reader_next goes on to that entry.
+    typeflag = string_char_at_n(block, 512, 156)
+    if typeflag == 120 || typeflag == 103 || typeflag == 76 || typeflag == 75 {
+        string_release(block)
+        meta_err = read_meta_entry(reader, typeflag, size)
+        if meta_err != "" {
+            return 0, meta_err
+        }
+        return 2, ""
     }
 
     // Decode Name and Prefix. Each is a string of its own (R3 releases
-    // them, and full_name, on every path out).
+    // them, and full_name, on every path out). A path a metadata entry
+    // gave replaces both.
     name = decode_string(block, 0, 100)
     prefix = decode_string(block, 345, 155)
 
     full_name = name
-    if string_length(prefix) > 0 {
+    if string_length(reader.pending_name) > 0 {
+        full_name = string.concat(reader.pending_name, "")
+        reader.pending_name = ""
+    } else if string_length(prefix) > 0 {
         full_name = aether_tar_join_name(prefix, name)
     }
 
@@ -435,15 +606,10 @@ reader_next(reader_ptr: ptr) -> {
         return 0, "invalid UTF-8 in entry name"
     }
 
-    // Decode Size
-    size, size_err = parse_octal(block, 124, 12)
-    if size_err != "" {
-        string_release(block)
-        return 0, "invalid octal size: ${size_err}"
-    }
-    if size < 0 {
-        string_release(block)
-        return 0, "negative size in header"
+    // A size a pax header gave (one past the header's 8 GiB) replaces it.
+    if reader.has_pending_size == 1 {
+        size = reader.pending_size
+        reader.has_pending_size = 0
     }
 
     // Decode Mode
@@ -460,8 +626,12 @@ reader_next(reader_ptr: ptr) -> {
         return 0, "invalid octal mtime: ${mtime_err}"
     }
 
-    // Decode Linkname
+    // Decode Linkname, or take the one a metadata entry gave
     linkname = decode_string(block, 157, 100)
+    if string_length(reader.pending_link) > 0 {
+        linkname = string.concat(reader.pending_link, "")
+        reader.pending_link = ""
+    }
     if string_length(linkname) > 0 {
         if !is_valid_utf8(linkname) {
             string_release(block)
@@ -470,7 +640,6 @@ reader_next(reader_ptr: ptr) -> {
     }
 
     // Decode Kind from Typeflag
-    typeflag = string_char_at_n(block, 512, 156)
     var kind = KIND_OTHER
     if typeflag == 48 || typeflag == 0 { // '0' or '\0'
         kind = KIND_FILE

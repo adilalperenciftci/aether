@@ -43,7 +43,9 @@ typedef enum {
     DEF_FUNCTION,   /* Aether wrapper: name(params) -> Ret { ... }            */
     DEF_EXTERN,     /* extern name(params) -> Ret                             */
     DEF_CONST,      /* const NAME = value                                     */
-    DEF_STRUCT      /* struct Name { ... }                                    */
+    DEF_STRUCT,     /* struct Name { ... }                                    */
+    DEF_MESSAGE,    /* message Name { field: T ... }                          */
+    DEF_PROTOCOL    /* protocol Name { from -> Message -> to ... } (#385)     */
 } DefKind;
 
 typedef struct {
@@ -598,6 +600,33 @@ static void record_def(Module* mod, char** exports, int export_count,
     }
 }
 
+/* The lines of a `message` or `protocol` declaration that starts at `decl`,
+ * between its braces, each trimmed and on a line of its own indented by four
+ * spaces: "\n    a -> M -> b\n" for one transition. A one-line declaration
+ * (`message Close {}`) gives "". */
+static char* decl_body(const char* decl) {
+    const char* open = strchr(decl, '{');
+    if (!open) return xstrdup("");
+    const char* close = strchr(open + 1, '}');
+    if (!close) close = open + 1 + strlen(open + 1);
+    Str out = {0};
+    const char* p = open + 1;
+    while (p < close) {
+        const char* eol = memchr(p, '\n', (size_t)(close - p));
+        const char* end = eol ? eol : close;
+        char* piece = xstrndup(p, (size_t)(end - p));
+        char* tr = trim(piece);
+        if (tr[0]) {
+            str_add(&out, "\n    ");
+            str_add(&out, tr);
+        }
+        free(piece);
+        p = eol ? eol + 1 : close;
+    }
+    if (out.len) str_add(&out, "\n");
+    return out.len ? str_take(&out) : xstrdup("");
+}
+
 /* The value of `const NAME = value // note`: up to a `//` that is not inside
  * a string literal, trimmed. A plain `/` stays: `const SEP = "/"` was cut
  * to `"` when the value stopped at the first slash. */
@@ -714,6 +743,20 @@ static int parse_module_ae(const char* filepath, const char* module_name) {
                 record_def(mod, exports, export_count, nm, DEF_CONST,
                            NULL, NULL, val, str_get(&pending_doc));
                 free(val);
+            } else if ((strncmp(t, "message", 7) == 0 && isspace((unsigned char)t[7])) ||
+                       (strncmp(t, "protocol", 8) == 0 && isspace((unsigned char)t[8]))) {
+                /* #385: a message or a protocol, rendered as declared: its
+                 * lines up to the closing brace, each trimmed. */
+                int is_proto = t[0] == 'p';
+                const char* q = t + (is_proto ? 8 : 7);
+                while (*q == ' ' || *q == '\t') q++;
+                const char* name_start = q;
+                while (*q && is_ident_char((unsigned char)*q)) q++;
+                nm = xstrndup(name_start, (size_t)(q - name_start));
+                char* body = decl_body(line + (t - buf));
+                record_def(mod, exports, export_count, nm, is_proto ? DEF_PROTOCOL : DEF_MESSAGE,
+                           NULL, NULL, body, str_get(&pending_doc));
+                free(body);
             } else if (strncmp(t, "struct", 6) == 0 && isspace((unsigned char)t[6])) {
                 const char* q = t + 6;
                 while (*q == ' ' || *q == '\t') q++;
@@ -832,6 +875,8 @@ static const char* kind_label(DefKind k) {
         case DEF_EXTERN:   return "extern";
         case DEF_CONST:    return "const";
         case DEF_STRUCT:   return "struct";
+        case DEF_MESSAGE:  return "message";
+        case DEF_PROTOCOL: return "protocol";
         case DEF_FUNCTION: default: return "fn";
     }
 }
@@ -997,6 +1042,13 @@ static int generate_module_page(const char* output_dir, Module* mod) {
             if (fn->value[0]) fputs(" = ", f);
             html_out(f, fn->value);
             fputs("</code></pre>\n", f);
+        } else if (fn->kind == DEF_MESSAGE || fn->kind == DEF_PROTOCOL) {
+            fputs("      <pre class=\"usage\"><code>", f);
+            fputs(fn->kind == DEF_PROTOCOL ? "protocol " : "message ", f);
+            html_out(f, fn->name);
+            fputs(" {", f);
+            html_out(f, fn->value);
+            fputs("}</code></pre>\n", f);
         } else if (fn->kind == DEF_STRUCT) {
             fputs("      <pre class=\"usage\"><code>struct ", f);
             html_out(f, fn->name);

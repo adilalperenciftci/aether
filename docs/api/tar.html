@@ -136,7 +136,7 @@
 <main class="content">
   <div class="module-header">
     <h1>tar</h1>
-    <p class="module-desc">std.tar - Streaming POSIX ustar TAR Archive Module Import with: import std.tar</p>
+    <p class="module-desc">std.tar - Streaming TAR archives: writes POSIX ustar, reads ustar, pax and GNU Import with: import std.tar</p>
     <p class="import-line"><code>import std.tar</code></p>
   </div>
   <div class="functions" id="functions">
@@ -179,6 +179,7 @@
       <h3 class="function-name">reader_next <span class="kind">fn</span></h3>
       <pre class="usage"><code>reader_next(reader_ptr) <span class="arrow">-&gt;</span> (int, string)</code></pre>
       <p class="signature"><span class="sig-params">reader_ptr: ptr</span></p>
+      <p class="doc">Advances to the next entry: 1 when there is one, 0 at the end of the archive. Metadata entries (pax headers, GNU long names) are read on the way and apply to the entry they precede.</p>
     </div>
     <div class="function" id="entry_name" data-name="entry_name">
       <h3 class="function-name">entry_name <span class="kind">fn</span></h3>

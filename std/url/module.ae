@@ -307,6 +307,6 @@ query_get_all(list: ptr, name: string) -> ptr {
 
 // Release a list parse_query or query_get_all returned, with its entries.
 // Null (a failed parse) is a no-op.
-query_free(list: ptr) {
+query_free(list: @frees ptr) {
     string_list_free(list)
 }

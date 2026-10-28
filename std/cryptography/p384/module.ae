@@ -110,7 +110,7 @@ from_be48(b: ptr) -> ptr {
 // ---- Jacobian point (X:Y:Z) ----
 struct P384Pt { x: ptr y: ptr z: ptr }
 pt_new(x: @keep ptr, y: @keep ptr, z: @keep ptr) -> *P384Pt { q = malloc(sizeof(P384Pt)) as *P384Pt; q.x = x; q.y = y; q.z = z; return q }
-pt_free(q: *P384Pt) { bignum.free(q.x); bignum.free(q.y); bignum.free(q.z); libc_free(q) }
+pt_free(q: @frees *P384Pt) { bignum.free(q.x); bignum.free(q.y); bignum.free(q.z); libc_free(q) }
 
 // Point at infinity: Z = 0.
 pt_infinity() -> *P384Pt { return pt_new(bignum.from_int(1), bignum.from_int(1), bignum.from_int(0)) }

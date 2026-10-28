@@ -147,12 +147,12 @@ exports(
 )
 
 // ---- Raw externs ----
-extern sqlite_open_raw(path: string) -> ptr
+extern sqlite_open_raw(path: @aether string) -> ptr
 extern sqlite_close_raw(db: ptr) -> int
 // Returns NULL on success, an owned error string on failure.
-extern sqlite_exec_raw(db: ptr, sql: string) -> string @heap
+extern sqlite_exec_raw(db: ptr, sql: @aether string) -> string @heap
 // Returns a ResultSet ptr on success, NULL on failure.
-extern sqlite_query_raw(db: ptr, sql: string) -> ptr
+extern sqlite_query_raw(db: ptr, sql: @aether string) -> ptr
 extern sqlite_rs_row_count(rs: ptr) -> int
 extern sqlite_rs_col_count(rs: ptr) -> int
 extern sqlite_rs_col_name(rs: ptr, idx: int) -> string
@@ -227,10 +227,10 @@ const SQLITE_ROW = 100
 const SQLITE_DONE = 101
 
 // ---- Raw externs ----
-extern sqlite_prepare_raw(db: ptr, sql: string) -> ptr
+extern sqlite_prepare_raw(db: ptr, sql: @aether string) -> ptr
 extern sqlite_bind_int_raw(stmt: ptr, idx: int, v: int) -> int
-extern sqlite_bind_text_raw(stmt: ptr, idx: int, text: string) -> int
-extern sqlite_bind_blob_raw(stmt: ptr, idx: int, data: string, len: int) -> int
+extern sqlite_bind_text_raw(stmt: ptr, idx: int, text: @aether string) -> int
+extern sqlite_bind_blob_raw(stmt: ptr, idx: int, data: @aether string, len: int) -> int
 extern sqlite_bind_i64_raw(stmt: ptr, idx: int, hi: int, lo: int) -> int
 extern sqlite_bind_null_raw(stmt: ptr, idx: int) -> int
 extern sqlite_step_raw(stmt: ptr) -> int
@@ -507,7 +507,7 @@ extern sqlite_column_int64_raw(stmt: ptr, col: int) -> long
 extern sqlite_bind_double_raw(stmt: ptr, idx: int, v: float) -> int
 extern sqlite_bind_int64_raw(stmt: ptr, idx: int, v: long) -> int
 extern sqlite_bind_parameter_count_raw(stmt: ptr) -> int
-extern sqlite_bind_parameter_index_raw(stmt: ptr, name: string) -> int
+extern sqlite_bind_parameter_index_raw(stmt: ptr, name: @aether string) -> int
 extern sqlite_last_insert_rowid_raw(db: ptr) -> long
 
 // ---- Go-style wrappers ----

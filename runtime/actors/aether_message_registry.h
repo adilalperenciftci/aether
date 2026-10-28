@@ -16,6 +16,9 @@ typedef struct MessageFieldDef {
     // Element C type for array fields, owned by this struct. NULL for
     // non-array fields. For `string[]` this is "const char*".
     char* element_c_type;
+    // #3142: the field holds an owned pointer, which a message carries in
+    // its heap payload (never inline) so a drop of the message releases it.
+    int owned;
     struct MessageFieldDef* next;
 } MessageFieldDef;
 

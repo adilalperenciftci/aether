@@ -25,7 +25,7 @@ const YAML_MAPPING = 3
 // ---- Raw C Bindings Externs ----
 extern yaml_parse_raw(yaml_str: string) -> ptr
 extern yaml_last_error() -> string
-extern yaml_free_raw(doc: ptr)
+extern yaml_free_raw(doc: @frees ptr)
 extern yaml_root_raw(doc: ptr) -> ptr
 extern yaml_node_type_raw(node: ptr) -> int
 extern yaml_node_get_scalar_raw(node: ptr) -> string
@@ -56,7 +56,7 @@ parse(yaml_str: string) -> ptr! {
 }
 
 // Free a parsed YAML document.
-free(doc: ptr) {
+free(doc: @frees ptr) {
     yaml_free_raw(doc)
 }
 

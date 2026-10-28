@@ -43,7 +43,7 @@ extern zstd_try_stream_flush(handle: ptr) -> int
 extern zstd_try_stream_finish(handle: ptr) -> int
 extern zstd_get_stream_bytes(handle: ptr) -> ptr
 extern zstd_get_stream_length(handle: ptr) -> int
-extern zstd_release_stream(handle: ptr)
+extern zstd_release_stream(handle: @frees ptr)
 
 extern zstd_try_compress(data: ptr, length: int, level: int) -> int
 extern zstd_get_compress_bytes() -> ptr
@@ -142,6 +142,6 @@ stream_take(handle: ptr) -> {
 }
 
 // Release the handle. Safe on null.
-stream_free(handle: ptr) {
+stream_free(handle: @frees ptr) {
     if handle != null { zstd_release_stream(handle) }
 }

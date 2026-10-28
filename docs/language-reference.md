@@ -2332,9 +2332,11 @@ Every place that holds a string (a local, a struct field, an element, a module-l
 - **A function may not free a parameter** (E0901): `string.free(p)` or `release(p)` on a `string` parameter, or `string.seq_free(p)` on a `*StringSeq` one, would release a reference the function does not own. Store it to keep it; a parameter the body re-binds holds a string of its own and may be freed.
 - **`string.free(x)` releases the reference `x` holds and leaves `x` empty**, for a local, a field or a module-level `var`. Nothing frees it again.
 
-- **A `ptr` parameter is borrowed for the call unless it is declared `@keep`** (E0902). A `ptr` owns nothing, so a pointer a function keeps (stores where it outlives the call, returns, sends in a message, puts in a std container, or passes to another `@keep` parameter) is declared `p: @keep ptr`; a pointer computed from it (`p + n`, `p - n`) points into the same memory and counts as `p`. A struct local to the function, and a closure that runs and is dropped inside the call, do not outlive it: putting the pointer in one (`s = Pair { a: p }`, `s.a = p`, `run(|| { use(p) })`) keeps nothing, and the struct or the closure is a keep only when it escapes itself, returned, stored in a field, a module-level `var` or a container, or passed to a `@keep` or `@retain` parameter. A tuple (`t = (p, 1)`), an optional, and anything read out of a holder (a field, a tuple part, an optional's payload `o!` or `o ?? d`, a `match` binding) hold it the same way, except that a part of a tuple or a field of a struct built from parts holds only what went into that part or field (after `t = (p, q)` and `a, b = t`, `b` holds `q` and not `p`; after `s = Pair { a: p, b: q }` or `s.b = q`, `s.b` holds `q`), and so does what a closure that captured it returns (`call(f)`). A closure that captured the pointer and stores it somewhere that outlives the call keeps it too, and so does one that reads it through an address of a local, or a local a closure assigns, stored there after the closure was written: it is checked where it is called or passed (`g = || { kept = pb.item }`, `b.item = p`, `call(g)`). The checker verifies each function against its own body, and a call against the callee's signature; a loop's body is checked with what every pass through it binds, so `kept = q` placed before `q = p` in a loop keeps `p`, unless the body first binds `q` anew (`q = list.new()`). A `string` reaches a `@keep ptr` only through `string.keep(s)`, which hands over a reference of its own (`string.release_kept(p)` gives it back), or as a literal or a `const` bound to one, which is pinned, and a `*StringSeq` only through `string.seq_retain(s)` (`string.seq_free` gives it back). C memory viewed as `string[]` (`(names as string[])[i] = s`) is given the string's characters and no reference, so the string must outlive C's reads: a string built in the statement never does, and a local does only when the memory ends with the function (an argv array the function allocates, hands to C and does not let escape). Memory that outlives the function (reached through a parameter, a module-level `var`, a field or a heap box, or whose pointer is returned or stored) takes `(names as ptr[])[i] = string.keep(s)`, given back with `string.release_kept` where the memory is freed, and refuses any other string but a literal or a `const` bound to one. A closure's `ptr` parameter borrows unless it is declared `@keep` (`|el: @keep ptr, t: float|`), and the mode is part of a function's type, `fn(@keep ptr, float)`: a call through a value of that type is checked as a direct call is, and a function goes only where its type says what it keeps, never into a bare `fn`, a `ptr` or a typed C function pointer, whose parameters borrow ([Closure types that say what they keep](#closure-types-that-say-what-they-keep-fnkeep-ptr-float)). A typed pointer (`*Node`) and a `distinct` type over `ptr` are not checked: a string converts to neither.
+- **A `ptr` parameter is borrowed for the call unless it is declared `@keep`** (E0902). A `ptr` owns nothing, so a pointer a function keeps (stores where it outlives the call, returns, sends in a message, puts in a std container, or passes to another `@keep` parameter) is declared `p: @keep ptr`; a pointer computed from it (`p + n`, `p - n`) points into the same memory and counts as `p`, and so does a slice made from it (`p as byte[]`, `(p as byte[])[0..n]`), which is the pointer and a length (#3294). A struct local to the function, and a closure that runs and is dropped inside the call, do not outlive it: putting the pointer in one (`s = Pair { a: p }`, `s.a = p`, `run(|| { use(p) })`) keeps nothing, and the struct or the closure is a keep only when it escapes itself, returned, stored in a field, a module-level `var` or a container, or passed to a `@keep` or `@retain` parameter. A tuple (`t = (p, 1)`), an optional, and anything read out of a holder (a field, a tuple part, an optional's payload `o!` or `o ?? d`, a `match` binding) hold it the same way, except that a part of a tuple or a field of a struct built from parts holds only what went into that part or field (after `t = (p, q)` and `a, b = t`, `b` holds `q` and not `p`; after `s = Pair { a: p, b: q }` or `s.b = q`, `s.b` holds `q`), and so does what a closure that captured it returns (`call(f)`). A closure that captured the pointer and stores it somewhere that outlives the call keeps it too, and so does one that reads it through an address of a local, or a local a closure assigns, stored there after the closure was written: it is checked where it is called or passed (`g = || { kept = pb.item }`, `b.item = p`, `call(g)`). The checker verifies each function against its own body, and a call against the callee's signature; a loop's body is checked with what every pass through it binds, so `kept = q` placed before `q = p` in a loop keeps `p`, unless the body first binds `q` anew (`q = list.new()`). A `string` reaches a `@keep ptr` only through `string.keep(s)`, which hands over a reference of its own (`string.release_kept(p)` gives it back), or as a literal or a `const` bound to one, which is pinned, and a `*StringSeq` only through `string.seq_retain(s)` (`string.seq_free` gives it back). C memory viewed as `string[]` (`(names as string[])[i] = s`) is given the string's characters and no reference, so the string must outlive C's reads: a string built in the statement never does, and a local does only when the memory ends with the function (an argv array the function allocates, hands to C and does not let escape). Memory that outlives the function (reached through a parameter, a module-level `var`, a field or a heap box, or whose pointer is returned or stored) takes `(names as ptr[])[i] = string.keep(s)`, given back with `string.release_kept` where the memory is freed, and refuses any other string but a literal or a `const` bound to one. A closure's `ptr` parameter borrows unless it is declared `@keep` (`|el: @keep ptr, t: float|`), and the mode is part of a function's type, `fn(@keep ptr, float)`: a call through a value of that type is checked as a direct call is, and a function goes only where its type says what it keeps, never into a bare `fn`, a `ptr` or a typed C function pointer, whose parameters borrow ([Closure types that say what they keep](#closure-types-that-say-what-they-keep-fnkeep-ptr-float)). A typed pointer (`*Node`) and a `distinct` type over `ptr` are not checked: a string converts to neither.
 - **A `fn` or `fn?` parameter, and a struct or sum parameter taken by value that holds a `ptr` or a closure (in a field or a variant, or an optional of one), are borrowed the same way** (E0902). A closure may capture a borrowed `ptr` of its caller, and a struct's `ptr` field points at the caller's memory, so a function that keeps such a parameter (stores it where it outlives the call, boxes it there with `box_closure`, puts it in a container, or passes it to a parameter that keeps it) declares it `@keep`: `on_event(cb: @keep fn)`, `register(h: @keep Handler)`. What a call keeps is read from the callee's declaration, never from the name it spells: std's list and map stores (`list.add`, `list.set`, `map.put`, their raw forms and their `collections.` spellings) declare the item `@retain` at the C boundary, so they keep it, and a program's own `list_add` keeps what its own body keeps. The function's own body is checked, as for a `ptr` parameter, and a caller is then checked against the declaration: a closure that captures a borrowed `ptr`, given to a `@keep fn` parameter, is E0902 at the caller. A closure the function only calls, or hands to a borrowing parameter (`run(|| { use(p) })`), keeps nothing, and neither does handing the parameter back with `return`. A store into memory the function allocates and frees (an array it hands to C) keeps nothing either, for any parameter, and neither does one into a std container the function makes (`list.new()`, `map.new()`) and lets go nowhere: the stores name the container that holds what they keep (`@holds`), and a list a function makes, uses and frees, or hands only to functions that borrow it, ends with the function. A container that is a parameter, a field or a module-level `var`, or that is returned or stored, keeps it past the call. The declaration changes no count: the call borrows the closure as every call does, and the callee's store takes its own reference.
-- **A `ptr` parameter declared `@into` may reach the function's result and nowhere else** (E0902). A function that builds a value around its argument (a recorder, an iterator, a view) declares `p: @into ptr` and may `return` it, as the pointer, a view of it (`p as *Node`, `p + n`), in a struct, a tuple part or an optional, in a closure that captures it, or in the result of another `@into` call; any other escape is E0902 as for a borrowed parameter. Its result type must be able to hold a pointer (a pointer, a function, or a struct, tuple, optional, array or sum with such a part), and only a bare `ptr` takes `@into`. The caller holds the result as it holds a struct local that holds its argument: the result may live in a local, be read and be lent to borrowing parameters (`(&q) as ptr`), and it escapes, with the argument, only where the argument itself would (returned, stored in a module-level `var`, a field through a pointer or a container, sent, captured by a closure that escapes, given to a `@keep` or `@retain` parameter). With several `@into` parameters the result holds every one of them. A function that returns another `@into` call's result made from its own parameter declares that parameter `@into` too, and its callers are checked the same way. A string reaches an `@into ptr` only through `string.keep(s)` (or as a literal or a `const` bound to one), a closure given to one is boxed on the heap with a reference of its own (`release_closure` gives it back), and `@into` is part of a function's type as `@keep` is (`fn(@into ptr) -> Recorder`): a call through such a value holds its result to the same rule. An extern's parameter may be `@into` too ([`@retain`, `@noescape` and `@into`](#retain-noescape-and-into-what-an-extern-does-with-a-parameter)).
+- **A `ptr` parameter declared `@into` may reach the function's result and nowhere else** (E0902). A function that builds a value around its argument (a recorder, an iterator, a view) declares `p: @into ptr` and may `return` it, as the pointer, a view of it (`p as *Node`, `p + n`), in a struct, a tuple part or an optional, in a closure that captures it, or in the result of another `@into` call; any other escape is E0902 as for a borrowed parameter. Its result type must be able to hold a pointer (a pointer, a slice, a function, or a struct, tuple, optional, array or sum with such a part), and only a bare `ptr` takes `@into`. The caller holds the result as it holds a struct local that holds its argument: the result may live in a local, be read and be lent to borrowing parameters (`(&q) as ptr`), and it escapes, with the argument, only where the argument itself would (returned, stored in a module-level `var`, a field through a pointer or a container, sent, captured by a closure that escapes, given to a `@keep` or `@retain` parameter). With several `@into` parameters the result holds every one of them. A function that returns another `@into` call's result made from its own parameter declares that parameter `@into` too, and its callers are checked the same way. A string reaches an `@into ptr` only through `string.keep(s)` (or as a literal or a `const` bound to one), a closure given to one is boxed on the heap with a reference of its own (`release_closure` gives it back), and `@into` is part of a function's type as `@keep` is (`fn(@into ptr) -> Recorder`): a call through such a value holds its result to the same rule. An extern's parameter may be `@into` too ([`@retain`, `@noescape` and `@into`](#retain-noescape-and-into-what-an-extern-does-with-a-parameter)).
+- **What a call does to the memory it is given: `@frees` and `@moves`** (#1300). A `ptr`, `*T` or slice parameter declared `@frees` says the call frees what the argument points at: `free(b: @frees ptr)`. One declared `@moves` says the call may move the storage the argument holds, as a buffer that grows does: `append(b: @moves ptr, s: string)`. C's `free` (as `free`, or an extern bound to it, `@extern("free") libc_free(p: ptr)`) and `heap.free` free their argument without a word; std's release functions (`bytes.free`, `list.free`, `map.free`, `json.free` and the rest) declare `@frees`, and std.bytes' growing calls `@moves`. A function that declares `@frees` frees the parameter on every path to its end, or finds it null there, without first binding it to something else; one that declares `@moves` passes it, on some path, to a parameter that may move or free it (E0904). Neither changes what the call compiles to: they say what happens, so the next rule can follow it. An extern's parameter takes them too ([`@retain`, `@noescape` and `@into`](#retain-noescape-and-into-what-an-extern-does-with-a-parameter)).
+- **Nothing is used or freed after it is freed** (E0903). Where a local is freed on every path that reaches a later use, the use is an error: a read (`n.v` after `heap.free(n)`), a second free (`free(p)` twice), or a free a loop repeats on its next turn without binding the local afresh in between (`free(p)` in a loop body, `p` allocated before the loop). A view dies with the storage it views: a slice of a local (`buf[1..3]`), a cast of it (`p as int[]`, `p as *Node`) and the result of a call whose `@into` parameter it was given (`bytes.view(b)`) are views of the local's storage, and a read of one after that storage was freed, or after a call that may move it (`bytes.append(b, ...)`), is the same error; take the view again after the call. Only a fault that happens whichever way the program goes is reported: a free in one branch of an `if` and not the other, followed by a use, says nothing, and so does comparing a freed pointer with `null` or reading a slice's own `.len`. A local whose address is taken, or that a closure or a `defer` names, is not followed from there, and a local bound to a fresh value is clean again. Freeing through a value (a closure, a function pointer) is not seen.
 
 ```aether,run
 struct Recorder { context: ptr, count: int }
@@ -2514,6 +2516,69 @@ main() {
 A store that copies what it is given keeps nothing: a map's key, a set's item. `@scoped` reads the same declarations: a `@scoped` value given to a parameter that keeps it escapes its block ("it is passed to a parameter that keeps it"), as one given to `list.add`, `map.put` or `string.seq_cons` (head or tail) does, and one given to `set.add`, which copies it, does not.
 
 ---
+
+### Owned pointers, `type T = owned ptr drop f`
+
+A `ptr` owns nothing (R4): whoever frees it does so by hand. An **owned
+pointer** type names the function that releases it, and then the place that
+holds one releases it when it lets go (#3142):
+
+```aether,fragment
+import std.bytes
+
+type Buf = owned ptr drop bytes.free
+
+message Chunk { data: Buf }
+
+actor Sink {
+    state kept: Buf = null
+    receive {
+        Chunk(data) -> {
+            use(data)                // lent to a function, as a `ptr` is
+            if keep_it() {
+                kept = move data     // the state keeps it, releasing what it held
+            }
+        }                            // else the binding releases it here
+    }
+}
+
+main() {
+    s = spawn(Sink())
+    b = bytes.new(64) as Buf         // `as` makes a pointer owned
+    s ! Chunk { data: move b }       // b holds nothing now
+}
+```
+
+A value of an owned type has one holder at a time, and that holder releases
+it with the type's drop function:
+
+- **Who holds it.** A local (released at every exit of its function, and
+  when the local is bound again), a handler's binding of a message field
+  (taken out of the message, released when the handler ends), an actor's
+  state field (released when it is stored into, and when the actor ends), a
+  message field (released when the message is dropped undelivered: its actor
+  died, it was never handled). `null` is a value holding nothing; the state
+  field above starts empty.
+- **`move` hands it on**, and leaves the place it left holding nothing: into
+  a message field (`data: move b`), a state field (`kept = move data`), a
+  local (`c = move b`). A `return` of a local is a `move`. The move checker
+  refuses a later use of the name ([`move`](isolated.md#move-handing-a-buffer-over-2975)).
+- **A function borrows it**, as a `ptr`: an owned value goes where a bare
+  `ptr` is taken, and the holder keeps it. A parameter of an owned type is
+  borrowed too, so it is neither rebound nor returned.
+- **Refused** (E0905): a copy into a second holder without `move` (`c = b`),
+  a message field set from a holder without `move`, a call that would free
+  it (an `@frees` parameter, C's `free`, `heap.free`, through a cast too) or
+  keep it (`@keep`, `@retain`, a std container), a `move` into a function
+  argument, and a holder that could not release it: a struct field, an
+  element, a module-level `var`, a closure's capture, an optional `T?` (use
+  `T` and `null`).
+- **The drop function** takes one `ptr` and frees it: C's `free`, or a
+  function or extern whose parameter is `@frees` (`bytes.free`, a function of
+  the program's own). The type's base is a bare `ptr`.
+
+A handler that panics while it holds an owned binding does not release it;
+the message's other owned fields are released with the message.
 
 ## Optionals
 
@@ -3426,6 +3491,24 @@ counter ! Increment { amount: 10 }
 counter ! Reset {}
 ```
 
+A send, or an ask, of a message the target actor has no receive arm for is
+a compile error (E0600) wherever the target's type names its actor: the
+result of `spawn(Counter())`, and a parameter, field or result typed
+`actor_ref[Counter]` (#385). At run time such a message would be dropped. An
+actor with a `_` arm (see [Wildcard Handler](#wildcard-handler)) takes every
+message. A bare `actor_ref` names no actor and is not checked: it is the way
+to send a message chosen at run time, and the type of references that come
+from a registry or a map.
+
+```aether,fragment
+w = spawn(Writer())     // Writer has an arm for Open only
+w ! Close {}            // error: actor 'Writer' has no receive arm for 'Close'
+```
+
+A function can take or return a typed reference, `close_it(w:
+actor_ref[Writer])` or `-> actor_ref[Writer]`, and a `spawn` result passes
+where one is wanted.
+
 ### Ask Pattern (Request-Reply)
 
 The `?` operator sends a message and blocks until the actor replies. The compiler
@@ -3505,8 +3588,10 @@ core waiting on that very actor when there is one, else an idle one. So an
 asked actor on another core that asks one of them in turn gets its answer.
 Nothing else is run inside the waiting handler: an actor of the core that
 asks the waiting actor waits until its handler is done, as it would have. An
-actor with more messages queued than its mailbox holds stays until the ask
-ends, since moved, its later messages could overtake them (#3241).
+actor with more messages queued than its mailbox holds moves as well, with
+all of them in order: what its mailbox cannot take goes into an overflow of
+its own that moves with it, and what it is sent later goes behind that, so
+each sender's messages still arrive in the order they were sent (#3241).
 
 ### Reply Statement
 
@@ -3537,6 +3622,80 @@ receive {
     _ -> { println("unknown message") }
 }
 ```
+
+The `_` arm runs for every message type that no other arm of the actor
+names, wherever it stands among the arms, and binds nothing; the message is
+then released as a handled one is (#3289). An ask that only the `_` arm
+takes, and that it does not answer with `reply`, fails at once with `"the
+handler returned without replying"`. An actor has at most one `_` arm: a
+second can never run, and is an error. An actor without one drops a message
+no arm names, which is why a send of such a message, where the compiler
+knows the actor, is refused (see [Sending Messages](#sending-messages-fire-and-forget)).
+
+### Protocols
+
+A protocol says which messages a reference to an actor may be sent, and in
+which order (#385). Each line is a transition, `state -> Message -> state`:
+the message it allows in the first state, and the state it leads to. The
+first line's state is where a new reference starts; a state with no line
+out of it takes no message.
+
+```aether,fails
+message Open { path: string }
+message Write { data: string }
+message Close {}
+
+protocol FileWriter {
+    start -> Open -> writing
+    writing -> Write -> writing
+    writing -> Close -> done
+}
+
+actor Writer implements FileWriter {
+    receive {
+        Open(path) -> { /* ... */ }
+        Write(data) -> { /* ... */ }
+        Close() -> { /* ... */ }
+    }
+}
+
+main() {
+    w = spawn(Writer())
+    w ! Open { path: "out.txt" }
+    w ! Write { data: "hello" }
+    w ! Close {}
+    w ! Write { data: "late" }   // error: 'w' is in state 'done'
+}
+```
+
+The compiler follows each reference through the function that holds it,
+and a send or an ask the protocol does not allow in a state the reference
+may be in there is an error (E0600) naming the states and what each takes:
+
+- **Branches and loops.** After an `if`, a `match` or a `try`, a reference
+  may be in the state of any path that reaches the next statement, so a
+  message must be allowed in all of them: `if c { w ! Close {} }` followed
+  by `w ! Write {}` is refused. A loop is followed until its states settle,
+  so a `Close` inside a loop is refused on its second turn. A condition the
+  compiler can decide (`if DEBUG`, a `const`) takes only its branch.
+- **A reference whose state is not known.** A parameter typed
+  `actor_ref[FileWriter]`, or `actor_ref[Writer]` for an actor that
+  implements it, starts in no known state: a send through it must be one of
+  the protocol's messages, and leads to the state that message leads to.
+  `actor_ref[FileWriter]` takes a reference to any actor that implements
+  FileWriter, and is sent only FileWriter's messages.
+- **Out of sight.** Passing the reference to a function, copying it to
+  another variable, storing it, capturing it in a closure or naming it in a
+  `defer` lets its state change where the compiler does not follow: sends
+  through it after that are checked as through a parameter's. A function
+  that takes a bare `actor_ref` is the way to send a message outside the
+  protocol, and a message the protocol does not have is refused otherwise.
+
+A protocol's messages are declared ones, each state has at most one line
+per message, and an actor that `implements` a protocol has a receive arm for
+each of its messages (a `_` arm does not count). A protocol and its actors
+can come from an imported module, as messages do. `protocol` and
+`implements` are words only in these places: they stay usable as names.
 
 ---
 
@@ -4126,6 +4285,8 @@ caller may hold the result in a local, and E0902 refuses it where it would
 carry a borrowed `ptr` parameter out of the caller. `@into` does not combine
 with `@retain` (C may keep the argument anywhere) or `@noescape` (the
 argument stays out of the result too).
+
+An extern's `ptr`, `*T` or slice parameter may be `@frees` (the C function frees what it is given, or ends the caller's hold on it: `extern aether_bytes_free(b: @frees ptr)`) or `@moves` (it may move the storage the argument holds, as a buffer that grows does). Neither changes the call; they say what happens to the memory, and E0903 follows it: a local given to an `@frees` parameter is freed from there, and a view of one given to an `@moves` parameter is dead ([String ownership](#string-ownership)). C's `free` frees its argument under any name an extern gives it. `@frees` does not combine with `@retain`, `@holds`, `@into`, `@keep` or `@noescape`.
 
 An extern's parameter may also be `@keep`: that is how `ae` declares a
 binary import's export whose Aether parameter is `@keep ptr` (#3013), and a
@@ -4757,7 +4918,7 @@ An error stops the build and prints its code, `error[E0301]: ...`, with the sour
 | `E0303` | A name the module does not export |
 | `E0304` | A name hidden in this scope by `hide` or `seal except` ([hide and seal](hide-and-seal.md)) |
 | `E0305` | A module exports two names that answer to one short name, `add` beside `aether_set_add` or `join` beside `string_join`: one name per operation ([module-system-design.md](module-system-design.md)) |
-| `E0600` | An actor rule, such as a closure in a handler writing the actor's state |
+| `E0600` | An actor rule, such as a closure in a handler writing the actor's state, a send of a message the target actor has no arm for, a second `_` arm, or a send its protocol does not allow |
 | `E0700` | Missing return: control can reach the end of a function whose result is not void ([Returning on every path](#returning-on-every-path-e0700)) |
 | `E0701` | A `select()` with no value for a platform (`linux:`, `windows:`, `macos:`) and no `other:` fallback ([named-args-and-select.md](named-args-and-select.md#missing-platform-is-a-compile-error)) |
 | `E0800` | A construct a quote cannot hold: a closure, `callback` or block inside one, `defer`, `try`, `panic`, an actor operation, `match`, string interpolation, `new`, an array literal ([quote.md](quote.md#what-a-quote-may-contain-and-the-errors)) |
@@ -4769,6 +4930,9 @@ An error stops the build and prints its code, `error[E0301]: ...`, with the sour
 | `E0900` | A slice of a function's own storage (an array literal, an array of its own) leaves the function: returned, stored in a module-level `var` or in a field that outlives it, or captured by a closure that does ([Slices](#slices-t)) |
 | `E0901` | A function frees a `string` or `*StringSeq` parameter it only borrows ([String ownership](#string-ownership)) |
 | `E0902` | A function keeps a `ptr` parameter not declared `@keep`, an `@into` parameter reaches anything but the function's result, a call's result that holds a borrowed `ptr` parameter (through an `@into` argument) escapes, `@into` is declared where it cannot apply (not a bare `ptr`, a result that cannot hold a pointer, beside `@keep`, `@retain` or `@noescape`), a `string` is given to a `@keep ptr` or an `@into ptr` without `string.keep` (a `*StringSeq` without `string.seq_retain`), a string C memory viewed as `string[]` would read after its owner frees it (one built in the statement, or any but a pinned literal where the memory outlives the function), or a function with a `@keep` or `@into` parameter goes where a call through it would be checked as borrowing (a bare `fn`, a closure type with a weaker mode, a `ptr`, a typed C function pointer, an `as fn(...)` cast) ([String ownership](#string-ownership)) |
+| `E0903` | A local used or freed again after it was freed on every path to that point, a free a loop repeats on its next turn, or a view (a slice, a cast, an `@into` call's result) read after its storage was freed or may have moved ([String ownership](#string-ownership)) |
+| `E0904` | A function's `@frees` parameter not freed (or found null) on every path, or bound to something else first, or a `@moves` parameter no call may move, or either mode where it does not apply |
+| `E0905` | An owned pointer (`type T = owned ptr drop f`) given a second holder without `move`, freed or kept behind its holder's back, moved into a function, held where it cannot be released (a struct field, an element, a module `var`, a closure, an optional), or a drop function that does not free what it is given ([Owned pointers](#owned-pointers-type-t--owned-ptr-drop-f)) |
 | `E1000` | A file defines a function under a name it also imports selectively (`import std.string (length)` beside its own `length`), so a bare call in the function's body would reach itself ([module-system-design.md](module-system-design.md)) |
 
 ### Limits

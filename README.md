@@ -150,7 +150,7 @@ ae fmt [--check] [path]  # Format source (stdin, or .ae files/dirs in place)
 ae fmt --short-names src # Rewrite json.json_free(v) as json.free(v) where both are one function
 ae test [file|dir]...    # Discover and run tests (every file and directory named)
 ae examples [dir]        # Build the example programs (examples/README.md)
-ae add <host/user/repo>  # Add a dependency (any git host)
+ae add <host/user/repo>  # Add a dependency (any forge; no git, hash-pinned)
 ae repl                  # Start interactive REPL
 ae cache                 # Show build cache info
 ae cache gc              # Trim the cache to its limit (AETHER_CACHE_MAX_MB, default 5120)

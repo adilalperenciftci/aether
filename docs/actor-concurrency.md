@@ -24,7 +24,7 @@ The actor runtime includes several performance optimizations applied automatical
 - Uses ascending core-id lock ordering consistent with migration to prevent deadlock
 
 **Message Delivery:**
-- Same-core messages: direct mailbox or SPSC queue write (no queue overhead)
+- Same-core messages: direct mailbox write (no queue overhead)
 - Cross-core messages: lock-free queue with batch dequeue
 - Adaptive batch processing: 64 to 1024 messages per scheduler cycle
 
@@ -44,7 +44,7 @@ a scheduler thread runs the handler, from the first actor on (#3112).
 
 **Direct Send:**
 - Bypasses incoming queue for same-core actors
-- Writes directly to actor mailbox or SPSC queue
+- Writes directly to the actor's mailbox
 - Guarded by `current_core_id` to prevent data races from non-scheduler threads
 
 **Adaptive Batching:**
@@ -183,7 +183,7 @@ A handled message's fields are released by the step after its handler: `_aether_
 - the message a handler panicked on: the step records it in `step_payload` while the handler runs, and the step's panic barrier drops it, since the release after the handler never ran;
 - a message refused because the scheduler is not running, or that could not be queued for lack of memory.
 
-The receiver's own definitions interpret the payload, as its dispatch does, so a message is released as the program that defined it lays it out. A `ptr` field owns nothing (R4), so a buffer sent with `move` and dropped undelivered is not freed: that needs a type that owns a `ptr`, which #3142 tracks. A message sent through a C `AetherActorRef` whose actor was released has only its payload freed, since the block may hold another actor by then, whose definitions need not be the sender's.
+The receiver's own definitions interpret the payload, as its dispatch does, so a message is released as the program that defined it lays it out. A `ptr` field owns nothing (R4), so a buffer sent with `move` in one and dropped undelivered is not freed; a field of an owned type (`type Buf = owned ptr drop bytes.free`, #3142) is, by this same release, and a handler that binds such a field takes it out of the message, so the release after the handler finds nothing left of it. A message sent through a C `AetherActorRef` whose actor was released has only its payload freed, since the block may hold another actor by then, whose definitions need not be the sender's.
 
 ### Asking
 
@@ -207,9 +207,15 @@ An ask made in a handler blocks its core's scheduler thread. Only a core's own s
 
 A relief that did something is followed by the next 50 µs later (`ASK_RELIEF_BUSY_NS`). One that found nothing is followed by the next after twice the last gap, up to 8 ms (`ASK_RELIEF_IDLE_MAX_NS`). An actor stepping on this thread (the asker, and any actor below it on the stack) holds its step lock and stays. Nothing is stepped inside the waiting handler: an actor run there that asked the asker could never be answered. Moved to another core, it runs on that core's thread, and an ask of the asker waits there until the asker's handler is done.
 
-An actor with more messages queued than its mailbox holds (32) keeps a message in flight, and moved, its senders' next messages could overtake it, so it waits for the ask, as every actor of the core did before. #3241 tracks handing it over with an overflow of its own.
+An actor with more messages queued than its mailbox holds (32) moves too (#3241). Left in a queue, one of its messages would hold it on the waiting core, and moved without it, its senders' next messages would leave through other queues and could overtake it. So a message the relief finds for an actor whose mailbox is full goes, in order, into an overflow that belongs to the actor: its `inbox`, the unbounded FIFO an actor with a thread of its own takes every message in (#2598), made the first time. There, as in the mailbox, the message is the actor's and no longer counted in flight, and the actor moves with mailbox and overflow together. From then on the overflow holds the actor's newest messages:
 
-`tests/runtime/test_ask_relief.c` places the actors on chosen cores. It covers a chain of asks back to the waiting core, the waiting core's other actors, and a same-core target whose message the batch still held.
+- every delivery to it while its overflow holds anything goes behind it: the loop's batch, a local send, a relief, the deferred-send flush, the send buffer;
+- every step refills the mailbox from it once the mailbox is down to half, so the mailbox never runs empty while the overflow holds anything, and the loops that step an actor while its mailbox has messages drain both;
+- a panic drops what it holds with the mailbox, credited as handled, and a release or a teardown drops and frees it.
+
+Like the mailbox, the overflow is touched only by the thread that runs the actor, and a move hands both over at once. Only a relief starts one: a mailbox found full anywhere else is made room in or queued, as before. The cost on paths that never overflow is one load of `inbox` per delivery and per step.
+
+`tests/runtime/test_ask_relief.c` places the actors on chosen cores. It covers a chain of asks back to the waiting core, the waiting core's other actors, and a same-core target whose message the batch still held; and an actor sent 100 and more messages while its core waits, which moves to another core and handles them all in order, with what is sent to it later, by a local send or through the new core's queue, behind its overflow, and with a panic dropping what the overflow holds.
 
 An ask that was answered or failed returns only once its reply slot is freed. The replier lets go of the slot a few instructions after it wakes the asker, so the asker waits for that and frees the slot itself (#3245). What an ask allocated is gone when it returns, which a program that counts its heap around asks relies on. A timed-out ask does not wait; its replier frees the slot when it comes.
 
@@ -375,13 +381,13 @@ Actors are placed on the caller's core at spawn time. Actors spawned from the ma
 
 During operation, a sender on another core sets a `migrate_to` hint on the target actor, asking for it on the sender's core. The actor's own core moves it, before it runs the message that brought the request, so a chain of sends (a thread ring, a pipeline) gathers on one core in its first round and its sends turn local. A busy actor whose messages run first is asked again after that batch. A move is non-blocking: if a lock cannot be taken, it waits for the next iteration.
 
-An actor moves only while no message for it is on its way through a core's queues. A sender counts its message in the actor's `inflight` before it reads the actor's core, and the core that delivers the message to the mailbox uncounts it, a whole run of one actor's messages at once. The move turns `inflight` from 0 to a moving mark, so a message cannot be left behind on the core the actor leaves and then overtaken by the sender's next one (#3093). The same holds for what the moving actor sent itself. A core takes in its messages through one queue per sending core and drains them in index order, so a sender that moved with a message still in a receiver's queue from its old core could have its next one, sent from the new core, delivered first. So a core moves an actor only while nothing sent from that core is still on its way: no core's queue from it holds a message and its overflow is empty (#3240). A message that finds the mailbox full keeps its place: the actor's core steps it to make room, instead of putting the message at the back of a queue. Work stealing goes through the same path: the idle core asks for an actor, and the busy core moves it.
+An actor moves only while no message for it is on its way through a core's queues. A sender counts its message in the actor's `inflight` before it reads the actor's core, and the core that delivers the message to the mailbox (or to the actor's own overflow behind it, #3241, which moves with the actor as the mailbox does) uncounts it, a whole run of one actor's messages at once. The move turns `inflight` from 0 to a moving mark, so a message cannot be left behind on the core the actor leaves and then overtaken by the sender's next one (#3093). The same holds for what the moving actor sent itself. A core takes in its messages through one queue per sending core and drains them in index order, so a sender that moved with a message still in a receiver's queue from its old core could have its next one, sent from the new core, delivered first. So a core moves an actor only while nothing sent from that core is still on its way: no core's queue from it holds a message and its overflow is empty (#3240). A message that finds the mailbox full keeps its place: the actor's core steps it to make room, instead of putting the message at the back of a queue. Work stealing goes through the same path: the idle core asks for an actor, and the busy core moves it.
 
 Measured on Windows (i7-13700K, 1,000,000 messages, 10 runs, M msg/s, medians) against the runtime before (#3090): thread ring 24.91 from 3.03, on 0.078 s of CPU from 5.56 s, its 100 actors on one core; fork-join 39.69 from 30.23, each worker's batch delivered as one run; ping-pong (12.56 and 12.36) and counting (42.90 and 42.84) unchanged; skynet 1.69 from 1.31, with a narrower spread.
 
 ### Message Routing
 
-- **Same-core messages:** Direct mailbox or SPSC queue write (verified via `current_core_id`), behind any message of the actor still in the queues
+- **Same-core messages:** Direct mailbox write (verified via `current_core_id`), behind any message of the actor still in the queues or its overflow (#3241)
 - **Cross-core messages:** Counted in the target's `inflight`, then enqueued to the target core's lock-free incoming queue
 - **A message on a core the actor has left:** Only one routed by a stale read or by the runtime itself, since a counted message holds the actor where it was routed; forwarded to the actor's current core, still counted
 

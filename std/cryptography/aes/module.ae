@@ -59,7 +59,7 @@ extern malloc(size: int) -> ptr
 // per megabyte for AES-256.
 extern aether_aes_available() -> int
 extern aether_aes_new(key: ptr, keylen: int, encrypt: int) -> ptr
-extern aether_aes_free(ctx: ptr)
+extern aether_aes_free(ctx: @frees ptr)
 extern aether_aes_block(ctx: ptr, inp: ptr, out: ptr) -> int
 extern aether_aes_cbc_encrypt(ctx: ptr, iv: ptr, inp: ptr, out: ptr, n: int) -> int
 extern aether_aes_cbc_decrypt(ctx: ptr, iv: ptr, inp: ptr, out: ptr, n: int) -> int
@@ -97,7 +97,7 @@ new_decryptor(key: byte[]) -> ptr {
     return c
 }
 
-free(ctx: ptr) {
+free(ctx: @frees ptr) {
     if ctx == null { return }
     c = ctx as *AesCtx
     if c.native != null { aether_aes_free(c.native) }

@@ -1,4 +1,5 @@
 #include "../analysis/quote.h"
+#include "../analysis/actor_protocol.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -497,6 +498,8 @@ const char* get_single_int_field(MessageDef* msg_def) {
     if (!msg_def || !msg_def->fields) return NULL;
     MessageFieldDef* field = msg_def->fields;
     if (field->next != NULL) return NULL;
+    /* #3142: an owned pointer goes in the payload, which a drop releases. */
+    if (field->owned) return NULL;
     return is_inlineable_scalar(field->type_kind) ? field->name : NULL;
 }
 
@@ -1557,6 +1560,22 @@ static int try_emit_heap_string_exit_free(CodeGenerator* gen, ASTNode* deferred)
 /* A temporary that lives to its statement's end (call_returns_view): its
  * block releases it on every exit, and leaves it NULL for the next time the
  * block runs. Annotation: "scoped_temp_free:<name>". */
+/* #3142: an owned local's release at its function's every exit, and left
+ * holding nothing. Annotation: "owned_exit_drop:<name>:<C drop function>". */
+static int try_emit_owned_exit_drop(CodeGenerator* gen, ASTNode* deferred) {
+    if (!deferred || !deferred->annotation) return 0;
+    const char* prefix = "owned_exit_drop:";
+    size_t plen = strlen(prefix);
+    if (strncmp(deferred->annotation, prefix, plen) != 0) return 0;
+    const char* rest = deferred->annotation + plen;
+    const char* sep = strchr(rest, ':');
+    if (!sep || sep == rest || !sep[1]) return 0;
+    print_indent(gen);
+    fprintf(gen->output, "/* deferred */ if (%.*s) { %s((void*)%.*s); %.*s = NULL; }\n",
+            (int)(sep - rest), rest, sep + 1, (int)(sep - rest), rest, (int)(sep - rest), rest);
+    return 1;
+}
+
 static int try_emit_scoped_temp_free(CodeGenerator* gen, ASTNode* deferred) {
     if (!deferred || !deferred->annotation) return 0;
     const char* prefix = "scoped_temp_free:";
@@ -1723,6 +1742,7 @@ static void emit_deferred_one(CodeGenerator* gen, int i) {
         !try_emit_heap_string_exit_free(gen, deferred) &&
         !try_emit_handover_exit_free(gen, deferred) &&   /* #2798 */
         !try_emit_scoped_temp_free(gen, deferred) &&
+        !try_emit_owned_exit_drop(gen, deferred) &&        /* #3142 */
         !try_emit_struct_destroy(gen, deferred) &&
         !try_emit_cell_release(gen, deferred) &&
         !try_emit_own_drop(gen, deferred)) {               /* #2921 */
@@ -2157,9 +2177,22 @@ int message_owns_fields(CodeGenerator* gen, const char* name) {
     ASTNode* def = gen->program ? find_message_definition(gen->program, name) : NULL;
     for (int i = 0; def && i < def->child_count; i++) {
         ASTNode* f = def->children[i];
-        if (f && f->type == AST_MESSAGE_FIELD && own_type_owns(gen, f->node_type)) return 1;
+        if (f && f->type == AST_MESSAGE_FIELD &&
+            (own_type_owns(gen, f->node_type) || tc_type_is_owned(f->node_type)))   /* #3142 */
+            return 1;
     }
     return 0;
+}
+
+/* #3142: the release of the owned pointer at `lv` (type `t`), when `t` is an
+ * owned type: its drop function called on it unless it holds nothing, and
+ * the place left holding nothing. Returns 1 when `t` is owned. */
+int emit_owned_ptr_drop(CodeGenerator* gen, Type* t, const char* lv) {
+    const char* drop = tc_owned_drop_c(t);
+    if (!drop) return 0;
+    print_indent(gen);
+    fprintf(gen->output, "if (%s) { %s((void*)%s); %s = NULL; }\n", lv, drop, lv, lv);
+    return 1;
 }
 
 /* #3142: does the program emit _aether_release_message, which its actors'
@@ -2738,6 +2771,9 @@ const char* get_c_type(Type* type) {
              * cases used cut a long name, and a fifth call overwrote a
              * result a caller still held. */
             if (type->element_type && type->element_type->kind == TYPE_STRUCT && type->element_type->struct_name) {
+                /* `actor_ref[P]`, P a protocol (#385): any actor that
+                 * implements P, so no one actor's type. */
+                if (aether_protocol_lookup(type->element_type->struct_name)) return "void*";
                 return cg_internf("%s*", type->element_type->struct_name);
             }
             return "void*";
@@ -5602,6 +5638,7 @@ static void emit_main_body(CodeGenerator* gen, ASTNode* main) {
              * function-exit release for every hoisted string local,
              * so what main() holds at its tail is released at exit. */
             push_heap_string_exit_free_defers(gen, main->children[0]);
+            hoist_owned_locals(gen, main->children[0]);   /* #3142 */
         }
         generate_statement(gen, main->children[0]);
         gen->current_promoted_captures = prev_promoted;
@@ -8322,6 +8359,10 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#    define AETHER_MAYBE_UNUSED");
     print_line(gen, "#  endif");
     print_line(gen, "#endif");
+    /* #3142: `move x` of an owned pointer: its value, and the place left
+     * holding nothing, so the release at the place's exit skips it. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void* aether_owned_take(void** p) "
+                    "{ void* v = *p; *p = NULL; return v; }");
     /* Weak linkage for a @c_callback DEFINITION: the symbol stays external (a C
        caller binds it by name), but if the module carrying it lands in more than
        one translation unit, the duplicate definitions dedupe at link instead of
@@ -9760,6 +9801,15 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
             }
             fprintf(gen->output, "typedef struct %s %s;\n", sd->value, sd->value);
         }
+        /* Each actor's too, so the bare name is usable before the actor's
+         * own `typedef struct X { ... } X;`: a function whose parameter or
+         * result is `actor_ref[X]` is declared as taking or returning `X*`
+         * (#3290), and a closure that captures an actor handle gets an env
+         * slot typed `X` before the actor struct is emitted (#1626). C
+         * allows repeating a typedef with the same definition, so the full
+         * definition later is unaffected. */
+        if (sd && sd->type == AST_ACTOR_DEFINITION && sd->value)
+            fprintf(gen->output, "typedef struct %s %s;\n", sd->value, sd->value);
         /* #891: register each @c_struct overlay (name + fields) so member
          * access can lower to width-correct mem_get_* / set_*. No C typedef is
          * emitted — the overlay is a pure-Aether lens, not a C struct. */
@@ -10185,22 +10235,6 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
 
     emit_sandbox_trust_wrappers(gen, program);
 
-    /* Forward typedef for each actor, so the BARE name is usable before the
-     * actor's own `typedef struct X { ... } X;` is emitted.
-     *
-     * A closure that captures an actor handle gets an env slot typed from
-     * lookup_var_c_type, which yields the bare "X" — but the closure env
-     * typedef is emitted well before the actor struct, so the slot read as
-     * an implicit int and the C compiler reported "initialization of 'X *'
-     * from incompatible pointer type 'int *'". C allows repeating a
-     * typedef with the same definition, so the later full definition is
-     * unaffected. (#1626) */
-    for (int i = 0; i < program->child_count; i++) {
-        ASTNode* child = program->children[i];
-        if (!child || child->type != AST_ACTOR_DEFINITION || !child->value) continue;
-        fprintf(gen->output, "typedef struct %s %s;\n", child->value, child->value);
-    }
-
     // Forward declarations for actor spawn functions (actors can spawn other actors
     // from within receive handlers, which appear before the spawn function definition)
     for (int i = 0; i < program->child_count; i++) {
@@ -10458,6 +10492,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                             field_def->type_kind = field->node_type ? field->node_type->kind : TYPE_UNKNOWN;
                             field_def->c_type = NULL;
                             field_def->element_c_type = NULL;
+                            field_def->owned = tc_type_is_owned(field->node_type);   /* #3142 */
                             if (field->node_type) {
                                 const char* resolved = get_c_type(field->node_type);
                                 if (resolved) {
@@ -10517,6 +10552,11 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                             ASTNode* f = child->children[fi];
                             if (f && f->type == AST_MESSAGE_FIELD && own_type_owns(gen, f->node_type))
                                 own_emit_part(gen, f->node_type, cg_internf("m->%s", f->value), OWN_DROP);
+                            /* #3142: an owned pointer the handler did not take
+                             * (its binding empties the field), or a message
+                             * that was never handled. */
+                            else if (f && f->type == AST_MESSAGE_FIELD)
+                                emit_owned_ptr_drop(gen, f->node_type, cg_internf("m->%s", f->value));
                         }
                         unindent(gen);
                         print_line(gen, "}");

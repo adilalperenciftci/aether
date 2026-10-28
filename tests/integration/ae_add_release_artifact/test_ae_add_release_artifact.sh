@@ -15,8 +15,10 @@
 #      (the security-critical case; a released binary must be verified
 #      in a way a git tag need not be),
 #   3. an artifact with no published .sha256 installs but WARNS,
-#   4. --source skips the artifact path entirely (falls to git),
-#   5. no matching artifact falls back to git rather than failing.
+#   4. --source skips the artifact path entirely: the source archive is
+#      fetched (over this server's HTTP, through ae-fetch) and its hash pinned,
+#   5. no matching artifact falls back to the source archive rather than
+#      failing (#1362: no git either way).
 #
 # HOME is redirected to a scratch dir so the real package cache is never
 # touched.
@@ -93,6 +95,16 @@ mk_release() {   # $1 = tag, $2 = "sum" | "nosum"
 mk_release v1.0.0 sum
 mk_release v2.0.0 badsum
 mk_release v3.0.0 nosum
+# The source archives a forge serves for a tag, under the mirror layout
+# (<pkg>/archive/<tag>.tar.gz), with the single top directory they have.
+mk_source() {   # $1 = tag
+    d="$FORGE/$PKG/archive"
+    mkdir -p "$d" "$TMP/srctree/repo-$1"
+    printf 'greet() -> string { return "from source" }\n' > "$TMP/srctree/repo-$1/source.ae"
+    ( cd "$TMP/srctree" && tar -czf "$d/$1.tar.gz" "repo-$1" )
+}
+mk_source v1.0.0
+mk_source v9.9.9
 
 # ---- serve it on a free loopback port ------------------------------------
 PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
@@ -161,24 +173,25 @@ grep -qi "publishes no .sha256" "$TMP/nosum.log" \
     || fail "unsigned artifact was not installed" "$TMP/nosum.log"
 
 # ---- Property 4: --source skips the artifact path ------------------------
-# fake.host does not resolve, so git fails — that failure IS the proof the
-# artifact path was skipped.
+# v1.0.0 publishes an artifact; --source must take the source archive anyway.
 P="$(new_proj src)"
 ( cd "$P" && HOME="$P/home" AE_RELEASE_BASE_URL="$BASE" "$AE" add "$PKG@v1.0.0" --source ) \
-    >"$TMP/src.log" 2>&1
+    >"$TMP/src.log" 2>&1 || fail "--source exited non-zero" "$TMP/src.log"
 grep -q "Found release artifact" "$TMP/src.log" \
     && fail "--source still used the release artifact" "$TMP/src.log"
-grep -qi "Downloading\.\.\." "$TMP/src.log" \
-    || fail "--source did not take the git path" "$TMP/src.log"
+[ -f "$P/home/.aether/packages/$PKG/source.ae" ] \
+    || fail "--source did not install the source archive" "$TMP/src.log"
+grep -q "\"$PKG\" = \"sha256-" "$P/aether.toml" \
+    || fail "--source did not pin the source tree's hash" "$P/aether.toml"
 
-# ---- Property 5: no matching artifact falls back to git ------------------
+# ---- Property 5: no matching artifact falls back to the source -----------
 P="$(new_proj none)"
 ( cd "$P" && HOME="$P/home" AE_RELEASE_BASE_URL="$BASE" "$AE" add "$PKG@v9.9.9" ) \
-    >"$TMP/none.log" 2>&1
+    >"$TMP/none.log" 2>&1 || fail "the source fallback exited non-zero" "$TMP/none.log"
 grep -q "Found release artifact" "$TMP/none.log" \
     && fail "claimed to find an artifact for an unpublished tag" "$TMP/none.log"
-grep -qi "Downloading\.\.\." "$TMP/none.log" \
-    || fail "did not fall back to git when no artifact matched" "$TMP/none.log"
+[ -f "$P/home/.aether/packages/$PKG/source.ae" ] \
+    || fail "did not fall back to the source archive when no artifact matched" "$TMP/none.log"
 
-echo "  [PASS] ae_add_release_artifact: artifact install + checksum gate + --source/no-asset fallbacks"
+echo "  [PASS] ae_add_release_artifact: artifact install + checksum gate + --source/no-asset source fallbacks"
 exit 0

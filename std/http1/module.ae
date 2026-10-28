@@ -82,7 +82,7 @@ response_new() -> ptr {
     return r as ptr
 }
 
-response_free(rp: ptr) {
+response_free(rp: @frees ptr) {
     if rp == null { return }
     r = rp as *HttpResponse
     if r.buf != null { bytes.free(r.buf) }

@@ -762,7 +762,7 @@ digest_final_bytes(ctx: ptr) -> {
 // aborted operation. NULL-safe; a no-op on a null handle. After a
 // successful digest_final_* the context is already freed, so this is
 // only for the bail-out-before-final case.
-digest_free(ctx: ptr) {
+digest_free(ctx: @frees ptr) {
     if ctx == null {
         return
     }

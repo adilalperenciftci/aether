@@ -62,7 +62,7 @@ extern strarr_set_raw(arr: ptr, i: int, s: string)
 extern strarr_data(arr: ptr) -> string[]
 
 // Free the spine only; borrowed elements are the caller's.
-extern strarr_free(arr: ptr)
+extern strarr_free(arr: @frees ptr)
 
 // ---- Go-style wrappers ----
 
@@ -127,6 +127,6 @@ array(arr: ptr) -> string[] {
 }
 
 // Free the spine.
-free(arr: ptr) {
+free(arr: @frees ptr) {
     strarr_free(arr)
 }

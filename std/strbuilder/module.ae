@@ -59,7 +59,7 @@ extern aether_strbuilder_truncate(b: ptr, new_length: int) -> int
 extern aether_strbuilder_clear(b: ptr) -> int
 extern aether_strbuilder_finish(b: ptr) -> string @heap
 extern aether_strbuilder_finish_with_length(b: ptr) -> (ptr, int)
-extern aether_strbuilder_free(b: ptr)
+extern aether_strbuilder_free(b: @frees ptr)
 
 // ---- Aether-side wrappers ----
 // Allocate a new builder with at least `cap_hint` bytes reserved. If
@@ -208,6 +208,6 @@ finish_with_length(b: ptr) -> byte[] {
 // Discard the builder without producing a string. Idempotent on
 // null. Use on error paths where the in-progress output is no
 // longer wanted.
-free(b: ptr) {
+free(b: @frees ptr) {
     aether_strbuilder_free(b)
 }

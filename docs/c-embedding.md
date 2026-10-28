@@ -287,7 +287,7 @@ The `ActorBase` contains:
 - `step`: Your message handler
 - `assigned_core`: Current core assignment (`atomic_int`, safe for cross-core reads)
 - `migrate_to`: Affinity hint for message-driven migration (`atomic_int`)
-- `spsc_queue`: Lock-free same-core messaging (pointer, lazily allocated)
+- `spsc_queue`: unused, NULL (kept for the layout, #3292)
 - `reply_slot`: Non-NULL during ask/reply (`_Atomic` pointer)
 - `step_lock`: Prevents concurrent `step()` during work-steal handoff (`atomic_flag`)
 - `timeout_ns`, `last_activity_ns`: Receive timeout and when idling began

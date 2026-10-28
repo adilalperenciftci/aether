@@ -141,7 +141,7 @@ pt_new(x: @keep ptr, y: @keep ptr, z: @keep ptr, t: @keep ptr) -> *EdPt {
     q.x = x; q.y = y; q.z = z; q.t = t
     return q
 }
-pt_free(q: *EdPt) {
+pt_free(q: @frees *EdPt) {
     bignum.free(q.x); bignum.free(q.y); bignum.free(q.z); bignum.free(q.t)
     libc_free(q)
 }

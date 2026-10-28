@@ -2,124 +2,125 @@
 # `ae add <pkg>@<tag>` must pin the tag exactly, and a failed pin must leave
 # nothing resolvable behind (report: ae-add-tag-pin-fails-but-leaves-main).
 #
-# The checkout ran through run_cmd, which posix_spawns argv with NO shell, so
-# `cd "dir" && git checkout ... 2>/dev/null || ...` was handed to a program
-# literally named `cd`. The whole line failed every time -- the tag pin never
-# worked -- yet the clone (a lone `git clone`, no shell metacharacters)
-# succeeded, so `ae add @tag` exited 1 having left a clone of the DEFAULT
-# BRANCH in the cache. A later resolve then bound the dependency to that
-# unpinned tree and went green against the wrong code.
+# The history: the checkout ran through run_cmd, which posix_spawns argv with
+# NO shell, so `cd "dir" && git checkout ...` was handed to a program named
+# `cd`; the tag pin never worked, yet the clone succeeded, so `ae add @tag`
+# exited 1 having left the DEFAULT BRANCH in the cache. Since #1362 there is
+# no git at all: `ae add` takes the archive the forge serves for the tag, so
+# what lands is the tag's tree by construction, and this pins that it stays so.
 #
-# Hermetic: a local bare git repo with three tags, served over file:// via
-# AE_RELEASE_BASE_URL. Nothing here touches the network or the real cache.
+# Hermetic: a mirror laid out as `ae add` reads one
+# (<mirror>/<pkg>/archive/<ref>.tar.gz, <mirror>/<pkg>/tags.json), served
+# over file:// through AE_RELEASE_BASE_URL. Nothing here touches the network
+# or the real cache. A `git` that fails and leaves a mark is first on PATH.
 #
 # Pinned properties:
-#   1. @vX.Y.Z checks out exactly that tag (not tag+N-commits),
+#   1. @vX.Y.Z installs exactly that tag's tree, not the default branch's,
 #   2. the bare form @X.Y.Z resolves too,
-#   3. a nonexistent tag exits 1, LISTS the available tags (empty before),
-#      and leaves NO directory in the cache,
-#   4. a valid pin records the dependency in aether.toml.
+#   3. a nonexistent tag exits 1, LISTS the available tags, and leaves NO
+#      directory in the cache,
+#   4. a valid pin records the dependency and its hash in aether.toml,
+#   5. git is never run.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AE="$ROOT/build/ae"
 [ -n "${EXE_EXT:-}" ] && AE="$AE$EXE_EXT"
 [ -x "$AE" ] || { echo "  [SKIP] ae_add_tag_pin: ae not built"; exit 0; }
-command -v git >/dev/null 2>&1 || { echo "  [SKIP] ae_add_tag_pin: git needed"; exit 0; }
+command -v tar >/dev/null 2>&1 || { echo "  [SKIP] ae_add_tag_pin: tar needed to build the fixture"; exit 0; }
 
 TMP="$(mktemp -d)"
 cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT
 
-# Build a fake forge: origin/<host>/<user>/<repo> is a bare repo with tags.
-PKG="example.com/acme/widget"
-WORK="$TMP/work"
-BARE="$TMP/origin/$PKG"
-mkdir -p "$WORK" "$BARE"
-git init -q "$WORK"
-( cd "$WORK"
-  git config user.email t@t.test; git config user.name t
-  echo "v1" > f.txt; git add f.txt; git commit -qm one; git tag v0.1.0
-  echo "v2" > f.txt; git commit -aqm two; git tag v0.2.0
-  echo "v3" > f.txt; git commit -aqm three; git tag v0.2.1
-  echo "past-the-tag" > f.txt; git commit -aqm four    # default branch is now PAST v0.2.1
-  git init -q --bare "$BARE"
-  git push -q "$BARE" HEAD:refs/heads/main --tags ) || {
-    echo "  [FAIL] ae_add_tag_pin: could not build fixture repo"; exit 1; }
+fail() {
+    echo "  [FAIL] ae_add_tag_pin: $1"
+    [ -n "$2" ] && [ -f "$2" ] && sed 's/^/    /' "$2" | head -20
+    exit 1
+}
 
-# A consumer project, with HOME redirected so the real cache is untouched.
-PROJ="$TMP/proj"
-mkdir -p "$PROJ"
-( cd "$PROJ" && "$AE" init consumer >/dev/null 2>&1 ) || {
-    echo "  [FAIL] ae_add_tag_pin: ae init failed"; exit 1; }
-CONS="$PROJ/consumer"
+# A fake forge: one archive per tag, each with the single top directory a
+# forge's archive has, and a default branch PAST the newest tag.
+PKG="example.com/acme/widget"
+ARCH="$TMP/mirror/$PKG/archive"
+mkdir -p "$ARCH" "$TMP/src"
+for spec in v0.1.0:v1 v0.2.0:v2 v0.2.1:v3 HEAD:past-the-tag; do
+    tag=${spec%%:*}
+    mkdir -p "$TMP/src/widget-$tag"
+    printf '%s\n' "${spec#*:}" > "$TMP/src/widget-$tag/f.txt"
+    ( cd "$TMP/src" && tar -czf "$ARCH/$tag.tar.gz" "widget-$tag" ) \
+        || fail "could not build the fixture archive for $tag"
+done
+printf '[{"name":"v0.2.1"},{"name":"v0.2.0"},{"name":"v0.1.0"}]\n' > "$TMP/mirror/$PKG/tags.json"
+
+# A git that must never run.
+mkdir -p "$TMP/bin"
+printf '#!/bin/sh\ntouch "%s/git-ran"\nexit 1\n' "$TMP" > "$TMP/bin/git"
+chmod +x "$TMP/bin/git"
+PATH="$TMP/bin:$PATH"
+export PATH
+
 # get_home_dir() (tools/ae_cache.c) prefers USERPROFILE on Windows and only
-# falls back to HOME, so exporting HOME alone leaves a native ae.exe reading —
-# and WRITING — the REAL user profile: the assertion below then fails because
-# the package landed in the developer's own ~/.aether/packages instead of the
-# sandbox. Same shape dep_resolution and version_gc_dedupe already handle; a
-# native ae.exe also cannot resolve an MSYS /tmp/... path, hence cygpath.
+# falls back to HOME, so exporting HOME alone leaves a native ae.exe reading
+# and WRITING the real user profile. A native ae.exe also cannot resolve an
+# MSYS /tmp/... path, hence cygpath.
 export HOME="$TMP/home"
 if command -v cygpath >/dev/null 2>&1; then
     USERPROFILE="$(cygpath -m "$TMP/home")"
+    export AE_RELEASE_BASE_URL="file://$(cygpath -m "$TMP/mirror")"
 else
     USERPROFILE="$TMP/home"
+    export AE_RELEASE_BASE_URL="file://$TMP/mirror"
 fi
 export USERPROFILE
 mkdir -p "$HOME"
-# The clone URL goes to whichever git comes first on the Windows PATH. Git for
-# Windows maps /tmp to a directory of its own, not MSYS2's, so an MSYS2 path
-# in the URL names no repository there (#2775). The Windows form of the path,
-# file://C:/..., is one both MSYS2's git and Git for Windows parse alike.
-if command -v cygpath >/dev/null 2>&1; then
-    export AE_RELEASE_BASE_URL="file://$(cygpath -m "$TMP/origin")"
-else
-    export AE_RELEASE_BASE_URL="file://$TMP/origin"
-fi
 CACHE="$HOME/.aether/packages/$PKG"
 
-# --- 1. @vX.Y.Z pins EXACTLY that tag ----------------------------------
-( cd "$CONS" && "$AE" add "$PKG@v0.2.1" ) > "$TMP/add.log" 2>&1
-if [ ! -d "$CACHE" ]; then
-    echo "  [FAIL] ae_add_tag_pin: @v0.2.1 installed nothing"
-    sed 's/^/    /' "$TMP/add.log" | head -8; exit 1
-fi
-desc=$(git -C "$CACHE" describe --tags 2>/dev/null)
-if [ "$desc" != "v0.2.1" ]; then
-    echo "  [FAIL] ae_add_tag_pin: @v0.2.1 landed at '$desc', not the tag"
-    echo "         (a '-N-g<sha>' suffix means the default branch, not the pin)"
-    exit 1
-fi
+new_project() {
+    p="$TMP/$1"
+    mkdir -p "$p"
+    printf '[package]\nname = "consumer"\nversion = "0.1.0"\n\n[dependencies]\n' > "$p/aether.toml"
+    echo "$p"
+}
 
-# --- 4. and it is recorded in the manifest -----------------------------
-grep -q "$PKG" "$CONS/aether.toml" || {
-    echo "  [FAIL] ae_add_tag_pin: pin not written to aether.toml"; exit 1; }
+# --- 1. @vX.Y.Z installs EXACTLY that tag ------------------------------
+CONS="$(new_project one)"
+( cd "$CONS" && "$AE" add "$PKG@v0.2.1" ) > "$TMP/add.log" 2>&1 \
+    || fail "@v0.2.1 exited non-zero" "$TMP/add.log"
+[ -d "$CACHE" ] || fail "@v0.2.1 installed nothing" "$TMP/add.log"
+got=$(cat "$CACHE/f.txt" 2>/dev/null)
+[ "$got" = "v3" ] || fail "@v0.2.1 landed '$got', not the tag's tree (past-the-tag is the default branch)" "$TMP/add.log"
+
+# --- 4. and it is recorded, with its hash ------------------------------
+grep -q "\"$PKG\" = \"v0.2.1\"" "$CONS/aether.toml" \
+    || fail "pin not written to [dependencies]" "$CONS/aether.toml"
+grep -q '^\[dependency-hashes\]' "$CONS/aether.toml" \
+    || fail "no [dependency-hashes] section" "$CONS/aether.toml"
+grep -q "\"$PKG\" = \"sha256-[0-9a-f]\{64\}\"" "$CONS/aether.toml" \
+    || fail "the tree's hash was not pinned" "$CONS/aether.toml"
 
 # --- 2. the bare form resolves too -------------------------------------
-rm -rf "$CACHE"
-( cd "$CONS" && "$AE" add "$PKG@0.2.0" ) > "$TMP/add2.log" 2>&1
-desc=$(git -C "$CACHE" describe --tags 2>/dev/null)
-if [ "$desc" != "v0.2.0" ]; then
-    echo "  [FAIL] ae_add_tag_pin: bare @0.2.0 landed at '$desc', not v0.2.0"
-    sed 's/^/    /' "$TMP/add2.log" | head -8; exit 1
-fi
+rm -rf "$CACHE" "$CACHE.fetched"
+CONS="$(new_project two)"
+( cd "$CONS" && "$AE" add "$PKG@0.2.0" ) > "$TMP/add2.log" 2>&1 \
+    || fail "bare @0.2.0 exited non-zero" "$TMP/add2.log"
+got=$(cat "$CACHE/f.txt" 2>/dev/null)
+[ "$got" = "v2" ] || fail "bare @0.2.0 landed '$got', not v0.2.0's tree" "$TMP/add2.log"
 
 # --- 3. a bad tag: exit 1, lists tags, leaves NOTHING ------------------
-rm -rf "$CACHE"
+rm -rf "$CACHE" "$CACHE.fetched"
+CONS="$(new_project bad)"
 ( cd "$CONS" && "$AE" add "$PKG@v9.9.9" ) > "$TMP/bad.log" 2>&1
 rc=$?
-if [ "$rc" -eq 0 ]; then
-    echo "  [FAIL] ae_add_tag_pin: a nonexistent tag exited 0"; exit 1
-fi
-if [ -d "$CACHE" ]; then
-    echo "  [FAIL] ae_add_tag_pin: a failed pin LEFT a clone in the cache:"
-    echo "         $(git -C "$CACHE" describe --tags --always 2>/dev/null) -- the reproducibility hole"
-    exit 1
-fi
-# The available-versions list was empty before the fix; it must name the tags.
-if ! grep -q "v0.2.1" "$TMP/bad.log"; then
-    echo "  [FAIL] ae_add_tag_pin: 'Available versions:' did not list the real tags"
-    sed 's/^/    /' "$TMP/bad.log" | head -10; exit 1
-fi
+[ "$rc" -ne 0 ] || fail "a nonexistent tag exited 0" "$TMP/bad.log"
+[ ! -e "$CACHE" ] || fail "a failed pin LEFT a tree in the cache" "$TMP/bad.log"
+[ ! -e "$CACHE.fetched" ] || fail "a failed pin left a fetch record" "$TMP/bad.log"
+grep -q "v0.2.1" "$TMP/bad.log" \
+    || fail "'Available versions:' did not list the real tags" "$TMP/bad.log"
+grep -q "$PKG" "$CONS/aether.toml" \
+    && fail "a failed pin was recorded in aether.toml" "$CONS/aether.toml"
 
-echo "  [PASS] ae_add_tag_pin: tags pin exactly; a failed pin lists versions and leaves no cache"
+# --- 5. no git ---------------------------------------------------------
+[ ! -e "$TMP/git-ran" ] || fail "ae add ran git"
+
+echo "  [PASS] ae_add_tag_pin: tags pin exactly, with their hash; a failed pin lists versions and leaves nothing; no git"

@@ -79,7 +79,7 @@ extern zlib_try_stream_flush(handle: ptr) -> int
 extern zlib_try_stream_finish(handle: ptr) -> int
 extern zlib_get_stream_bytes(handle: ptr) -> ptr
 extern zlib_get_stream_length(handle: ptr) -> int
-extern zlib_release_stream(handle: ptr)
+extern zlib_release_stream(handle: @frees ptr)
 
 // Length-preserving string constructor from std.string — takes an
 // explicit byte count so binary payloads with embedded NULs survive
@@ -323,6 +323,6 @@ stream_take(handle: ptr) -> {
 }
 
 // Release the handle. Safe on null.
-stream_free(handle: ptr) {
+stream_free(handle: @frees ptr) {
     if handle != null { zlib_release_stream(handle) }
 }

@@ -1,90 +1,29 @@
 #include "aether_send_buffer.h"
-#include "aether_spsc_queue.h"
 #include "../scheduler/multicore_scheduler.h"
-#include "../scheduler/lockfree_queue.h"
 #include <string.h>
 
 // Thread-local send buffer
 AETHER_TLS SendBuffer g_send_buffer = {NULL, {{0}}, 0, -1};
 
-// Forward declare to access schedulers
-extern Scheduler schedulers[];
-
-// Flush accumulated messages to target actor
+// Flush accumulated messages to target actor. Every message goes, always
+// (#3292), by the scheduler's own send path: scheduler_send_many sends them
+// as that many single sends would go (counted as sent, behind whatever is
+// queued for the actor, kept when a queue is full) and enqueues a batch for
+// an actor of another core in one step. The flush used to keep what its
+// same-core path could not place in the buffer, which then grew past its end;
+// to drop the part of a cross-core batch the queue had no room for, still
+// counted in flight; to count none of them as sent; and, from a thread that
+// is no core's, to write the shared channel without its lock.
 void send_buffer_flush(void) {
     if (g_send_buffer.count == 0 || !g_send_buffer.target) {
         return;
     }
-    
+    // Taken out of the buffer first: a send can step its target inline, and
+    // a handler that buffers sends of its own finds the buffer empty.
     ActorBase* actor = (ActorBase*)g_send_buffer.target;
-    // An actor with its own thread takes every message in its inbox (#2598):
-    // its SPSC queue and mailbox are not a sender's to write.
-    if (actor->auto_process) {
-        for (int i = 0; i < g_send_buffer.count; i++) {
-            scheduler_actor_thread_deliver(actor, g_send_buffer.buffer[i]);
-        }
-        g_send_buffer.count = 0;
-        return;
-    }
-    int target_core = atomic_load_explicit(&actor->assigned_core, memory_order_relaxed);
-    
-    // Fast path: same core, use lock-free SPSC queue
-    if (g_send_buffer.core_id == target_core && g_send_buffer.core_id >= 0) {
-        // Try SPSC queue first (lock-free, fastest path)
-        // spsc_queue is lazy-allocated (NULL for regular actors); allocate if needed
-        if (!actor->spsc_queue) {
-            actor->spsc_queue = calloc(1, sizeof(SPSCQueue));
-            if (actor->spsc_queue) spsc_queue_init(actor->spsc_queue);
-        }
-        int sent = actor->spsc_queue
-            ? spsc_enqueue_batch(actor->spsc_queue, g_send_buffer.buffer, g_send_buffer.count) : 0;
-        if (sent == g_send_buffer.count) {
-            atomic_store_explicit(&actor->active, 1, memory_order_relaxed);
-            g_send_buffer.count = 0;
-            return;
-        }
-        
-        // SPSC queue full, fall back to mailbox
-        sent = mailbox_send_batch(&actor->mailbox, g_send_buffer.buffer, g_send_buffer.count);
-        if (sent == g_send_buffer.count) {
-            atomic_store_explicit(&actor->active, 1, memory_order_relaxed);
-            g_send_buffer.count = 0;
-            return;
-        }
-        
-        // Partial send - move unsent messages to front
-        int unsent = g_send_buffer.count - sent;
-        memmove(g_send_buffer.buffer, g_send_buffer.buffer + sent, unsent * sizeof(Message));
-        g_send_buffer.count = unsent;
-        return;
-    }
-    
-    // Slow path: cross-core batch enqueue (KEY OPTIMIZATION)
-    // Batch all messages to same actor in ONE atomic operation. Counted in
-    // flight before the actor's core is read again (#3090, #3093), so it
-    // stays on the core they are routed to until they reach its mailbox.
-    inflight_enter(actor, g_send_buffer.count);
-    target_core = atomic_load_explicit(&actor->assigned_core, memory_order_acquire);
-    void* actors[SEND_BUFFER_SIZE];
-    for (int i = 0; i < g_send_buffer.count; i++) {
-        actors[i] = actor;  // All messages to same actor
-    }
-    
-    // Use the per-sender SPSC channel for this thread (SPSC invariant: only this thread writes here).
-    int from_idx = (g_send_buffer.core_id >= 0 && g_send_buffer.core_id < MAX_CORES)
-                   ? g_send_buffer.core_id : MAX_CORES;
-    if (queue_enqueue_batch(&schedulers[target_core].from_queues[from_idx],
-                            actors, g_send_buffer.buffer, g_send_buffer.count)) {
-        // Success - update work count once for entire batch
-        atomic_fetch_add(&schedulers[target_core].work_count, g_send_buffer.count);
-        g_send_buffer.count = 0;
-    } else {
-        // Queue full - fall back to individual sends with backoff, which
-        // count each message themselves
-        inflight_leave(actor, g_send_buffer.count);
-        for (int i = 0; i < g_send_buffer.count; i++) {
-            scheduler_send_remote(actor, g_send_buffer.buffer[i], g_send_buffer.core_id);
-        }
-        g_send_buffer.count = 0;
-    }
+    int n = g_send_buffer.count;
+    Message msgs[SEND_BUFFER_SIZE];
+    memcpy(msgs, g_send_buffer.buffer, (size_t)n * sizeof(Message));
+    g_send_buffer.count = 0;
+    scheduler_send_many(actor, msgs, n);
 }

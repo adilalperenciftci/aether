@@ -231,16 +231,16 @@ picks how it gets there:
 // aether_send_message(), abridged
 const int my_core = current_core_id;
 if (my_core >= 0 && my_core == atomic_load(&actor->assigned_core)) {
-    scheduler_send_local(actor, msg);     // same core: lock-free SPSC queue
+    scheduler_send_local(actor, msg);     // same core: straight into the mailbox
 } else {
     scheduler_send_remote(actor, msg, my_core);
 }
 ```
 
-Every send takes this path, whatever the number of actors (#3112). The SPSC
-queue is allocated on first use (`ensure_spsc_queue` in
-[`runtime/scheduler/multicore_scheduler.c`](../runtime/scheduler/multicore_scheduler.c)),
-so an actor that never receives a same-core send does not pay for one.
+Every send takes this path, whatever the number of actors (#3112). A
+same-core send goes straight into the mailbox unless a message of the actor
+is still in the queues or its overflow, which it then goes behind
+([`runtime/scheduler/multicore_scheduler.c`](../runtime/scheduler/multicore_scheduler.c)).
 
 ### Message Pool Allocation
 ```c

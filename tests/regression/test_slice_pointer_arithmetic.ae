@@ -1,0 +1,51 @@
+// `s + n` on a slice points at element n, not n bytes in (#3299).
+//
+// The bug: a slice decays to its pointer in arithmetic, and that pointer was
+// a bare `ptr`, whose arithmetic counts bytes, so `b + 3` on a `uint32[]`
+// pointed 3 bytes into the first element. Pre-fix this writes 44 into byte 3
+// (b[0] becomes 738197504) and the first check fails. The fix keeps the
+// slice's element type through the decay, as a fixed-size array's has, so
+// the arithmetic is in elements, as the language reference says; a bare
+// `ptr` still counts bytes.
+
+extern malloc(n: int) -> ptr
+
+setv(p: ptr, v: uint32) {
+    pv = p as uint32[]
+    pv[0] = v
+}
+
+setl(p: ptr, v: long) {
+    pv = p as long[]
+    pv[0] = v
+}
+
+main() {
+    b = make([]uint32, 8)
+    setv(b + 3, 44)
+    if b[3] != 44 || b[0] != 0 {
+        println("FAIL: b + 3 on a uint32[] wrote b[3] = ${b[3]}, b[0] = ${b[0]}")
+        exit(1)
+    }
+    free(b)
+
+    // An unbounded view over a raw buffer, wider elements.
+    raw = malloc(64)
+    tv = raw as long[]
+    tv[0] = 0
+    tv[5] = 0
+    setl(tv + 5, 7)
+    if tv[5] != 7 || tv[0] != 0 {
+        println("FAIL: tv + 5 on a long[] view wrote tv[5] = ${tv[5]}, tv[0] = ${tv[0]}")
+        exit(1)
+    }
+
+    // A bare ptr still counts bytes.
+    q = raw + 8
+    if (q as long[])[0] != 0 {
+        println("FAIL: raw + 8 is not byte 8")
+        exit(1)
+    }
+    free(raw)
+    println("slice pointer arithmetic: all checks passed (3)")
+}

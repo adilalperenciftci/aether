@@ -1,6 +1,25 @@
 #include "codegen_internal.h"
 #include <string.h>
 
+/* The message name of the `_` arm's handler, `<Actor>_handle__aether_any`:
+ * no message can be named so, `_aether` names being the compiler's. */
+#define RECEIVE_ANY_HANDLER "_aether_any"
+
+/* Whether `actor` has a `_` receive arm (#3289). */
+static int actor_has_wildcard_arm(ASTNode* actor) {
+    for (int i = 0; i < actor->child_count; i++) {
+        ASTNode* rs = actor->children[i];
+        if (!rs || rs->type != AST_RECEIVE_STATEMENT) continue;
+        for (int j = 0; j < rs->child_count; j++) {
+            ASTNode* arm = rs->children[j];
+            if (arm && arm->type == AST_RECEIVE_ARM && arm->child_count >= 2 &&
+                arm->children[0] && arm->children[0]->type == AST_WILDCARD_PATTERN)
+                return 1;
+        }
+    }
+    return 0;
+}
+
 // Helper: given the receive-arm pattern, return 1 if the identifier name `rhs_name`
 // binds a pattern field whose message-def type_kind is TYPE_PTR or TYPE_STRING.
 // "Bound name" is either pf->value or its first PATTERN_VARIABLE child's value
@@ -379,6 +398,9 @@ static void emit_actor_destroy_state(CodeGenerator* gen, ASTNode* actor) {
     for (int i = 0; i < actor->child_count; i++) {
         ASTNode* child = actor->children[i];
         if (!child || child->type != AST_STATE_DECLARATION || !child->node_type) continue;
+        /* #3142: an owned pointer the state holds. */
+        if (emit_owned_ptr_drop(gen, child->node_type, cg_internf("self->%s", child->value)))
+            continue;
         if (!own_type_owns(gen, child->node_type) || state_field_is_ptr(gen, actor, child->value))
             continue;
         own_emit_part(gen, child->node_type, cg_internf("self->%s", child->value), OWN_DROP);
@@ -544,12 +566,17 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                     }
                 }
 
-                // Generate handler if we found a pattern
-                if (pattern && pattern->type == AST_MESSAGE_PATTERN) {
-                    MessageDef* msg_def = lookup_message(gen->message_registry, pattern->value);
-                    if (msg_def) {
+                // Generate handler if we found a pattern. The `_` arm's
+                // handler takes every message type no other arm names
+                // (#3289); it binds nothing.
+                int wildcard = pattern && pattern->type == AST_WILDCARD_PATTERN;
+                if (pattern && (pattern->type == AST_MESSAGE_PATTERN || wildcard)) {
+                    MessageDef* msg_def = wildcard ? NULL
+                                                   : lookup_message(gen->message_registry, pattern->value);
+                    const char* handler_msg = wildcard ? RECEIVE_ANY_HANDLER : pattern->value;
+                    if (msg_def || wildcard) {
                         print_line(gen, "static AETHER_HOT void %s_handle_%s(%s* self, void* _msg_data) {",
-                                  actor->value, pattern->value, actor->value);
+                                  actor->value, handler_msg, actor->value);
                         indent(gen);
                         /* #2498: the handler is a defer scope, as a function
                          * body is, opened before the pattern bindings so a
@@ -593,10 +620,14 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                         for (int k = 0; k < pattern->child_count; k++)
                             if (pattern->children[k] &&
                                 pattern->children[k]->type == AST_PATTERN_FIELD) binds_field = 1;
-                        print_line(gen, binds_field ? "%s* _pattern = (%s*)_msg_data;"
-                                                    : "%s* _pattern = (%s*)_msg_data; (void)_pattern;",
-                                   pattern->value, pattern->value);
-                        mark_var_declared(gen, "_pattern");
+                        if (wildcard) {
+                            print_line(gen, "(void)_msg_data;");
+                        } else {
+                            print_line(gen, binds_field ? "%s* _pattern = (%s*)_msg_data;"
+                                                        : "%s* _pattern = (%s*)_msg_data; (void)_pattern;",
+                                       pattern->value, pattern->value);
+                            mark_var_declared(gen, "_pattern");
+                        }
 
                         // This arm's Route 1 promoted names (published
                         // below). The synthetic name matches what
@@ -696,6 +727,23 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                                 Type* fsig = message_field_type(gen->program, pattern->value,
                                                                 field->value);
                                 if (is_fnptr_type(fsig)) register_fnptr_local(gen, var_name, fsig);
+                                /* #3142: an owned pointer moves from the
+                                 * message into the binding, which the
+                                 * handler's every exit releases (unless it
+                                 * was moved on); the message, emptied,
+                                 * releases nothing of it after the arm. */
+                                if (tc_type_is_owned(fsig)) {
+                                    print_line(gen, "_pattern->%s = NULL;", field->value);
+                                    ASTNode* carrier = create_ast_node(AST_EXPRESSION_STATEMENT, NULL,
+                                                                       field->line, field->column);
+                                    if (carrier) {
+                                        carrier->annotation = strdup(cg_internf("owned_exit_drop:%s:%s", var_name,
+                                                                        tc_owned_drop_c(fsig)));
+                                        codegen_own_node(gen, carrier);
+                                        push_defer(gen, carrier);
+                                    }
+                                    continue;
+                                }
                                 /* The binding is a view of the message's
                                  * field, which the message releases: one the
                                  * arm rebinds takes a reference of its own
@@ -749,6 +797,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                              * store into a state field takes a reference of
                              * its own (R3). */
                             push_heap_string_exit_free_defers(gen, arm_body);
+                            hoist_owned_locals(gen, arm_body);   /* #3142 */
                             for (int k = 0; k < arm_body->child_count; k++) {
                                 generate_statement(gen, arm_body->children[k]);
                             }
@@ -877,6 +926,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                 hoist_heap_string_trackers(gen, tbody);
                 hoist_opt_string_locals(gen, tbody);
                 push_heap_string_exit_free_defers(gen, tbody);
+                hoist_owned_locals(gen, tbody);   /* #3142 */
                 for (int j = 0; j < tbody->child_count; j++) {
                     generate_statement(gen, tbody->children[j]);
                 }
@@ -924,8 +974,16 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
         // build still emitted the label-address table and died with exactly
         // the error quoted above (#1655). optimizer.c's equivalent guards
         // already list all three; this one was the outlier.
-        print_line(gen, "#if AETHER_GCC_COMPAT && !defined(__EMSCRIPTEN__) && \\");
-        print_line(gen, "    !defined(__wasi__) && !defined(__wasm__)");
+        /* An actor whose only arm is `_` names no message, so there is no
+         * label to jump to: clang refuses an indirect goto in a function
+         * with no label address (#3289). The switch below has only its
+         * default then, which falls through to the `_` arm. */
+        if (pattern_count > actor_has_wildcard_arm(actor)) {
+            print_line(gen, "#if AETHER_GCC_COMPAT && !defined(__EMSCRIPTEN__) && \\");
+            print_line(gen, "    !defined(__wasi__) && !defined(__wasm__)");
+        } else {
+            print_line(gen, "#if 0   /* only a `_` arm: nothing to dispatch by message */");
+        }
         print_line(gen, "// COMPUTED GOTO DISPATCH - 15-30%% faster than switch");
         print_line(gen, "static void* dispatch_table[256] = {");
         indent(gen);
@@ -1004,8 +1062,12 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
         print_line(gen, "default: break;");
         print_line(gen, "}");
         print_line(gen, "#endif");
-        /* A type it has no handler for is dropped, its payload with what
+        /* A type no arm names goes to the `_` arm when there is one
+         * (#3289), recorded as a named arm's payload is for a panic out of
+         * it; then, handled or not, it is dropped, its payload with what
          * its fields own (#3142). */
+        if (actor_has_wildcard_arm(actor))
+            emit_handler_on_payload(gen, actor->value, RECEIVE_ANY_HANDLER);
         print_line(gen, "aether_message_drop(&self->_aether_base, &msg);");
         emit_timeout_rearm(gen, timeout_arm);
         print_line(gen, "return;  // Unknown message type");

@@ -23,7 +23,9 @@ burn(n: int) -> int {
 
 kernel(p: ptr) -> ptr {
     sink = sink + burn(rounds)
-    return p
+    // The work is what is measured; the sink observes it. The item is
+    // borrowed, so it is not handed back (E0902).
+    return null
 }
 
 main() {

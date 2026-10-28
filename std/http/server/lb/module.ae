@@ -137,7 +137,7 @@ no_cache() -> ptr { return _cfg_none() }
 // Release a config built by any of the constructors above. serve() runs until
 // the server stops, so a program that serves never needs this; one that builds
 // a config and takes another path (or a test) would otherwise leak the handle.
-config_free(c: ptr) {
+config_free(c: @frees ptr) {
     if c != null { list_free(c) }
 }
 

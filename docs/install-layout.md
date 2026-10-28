@@ -31,6 +31,9 @@ $PREFIX/
     ├── runtime/                  # runtime C sources (the actor scheduler, memory,
     │                              # panic/try-catch, sandbox, etc.)
     ├── std/                      # stdlib sources + module.ae descriptors
+    ├── tools/ae-fetch/main.ae    # the package fetcher's source: `ae add` builds it
+    │                              # with this toolchain on first use, into
+    │                              # ~/.aether/tools (docs/package-fetching.md)
     └── contrib/                  # contrib module.ae descriptors + headers
                                    # (matching libaether_<x>.a archives come from
                                    # `make install-contrib`; this dir alone gives
