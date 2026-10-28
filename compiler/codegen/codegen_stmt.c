@@ -2734,7 +2734,10 @@ static int value_path_through_pointer(ASTNode* obj) {
     while (obj && (obj->type == AST_MEMBER_ACCESS || obj->type == AST_ARRAY_ACCESS) &&
            obj->child_count > 0 && obj->children[0]) {
         Type* ht = obj->children[0]->node_type;
-        if (ht && (ht->kind == TYPE_PTR || (obj->type == AST_ARRAY_ACCESS && type_is_slice(ht))))
+        /* An actor's state reached through its reference is read by the
+         * actor's thread, as a box through a pointer may be (#3386). */
+        if (ht && (ht->kind == TYPE_PTR || ht->kind == TYPE_ACTOR_REF ||
+                   (obj->type == AST_ARRAY_ACCESS && type_is_slice(ht))))
             return 1;
         obj = obj->children[0];
     }
@@ -2793,7 +2796,9 @@ const char* struct_replace_fn(const char* sname, int is_volatile) {
  * An element of an array of such structs (`items[0]`, `o.items[0]`) is its
  * array's: a local array that owns its elements starts zeroed or
  * initialised (#2528), an actor's state starts zeroed (#2688), and a field
- * array is its holder's. */
+ * array is its holder's. So is a state field of another actor reached
+ * through its reference (`r.kept.name`, `r.items[0].name`), which its spawn
+ * set and which the actor owns (#3386). */
 static int value_path_trackers_are_initialised(CodeGenerator* gen, ASTNode* obj) {
     while (obj) {
         if (obj->type == AST_ARRAY_ACCESS && obj->child_count >= 2 && obj->children[0] &&
@@ -2808,6 +2813,8 @@ static int value_path_trackers_are_initialised(CodeGenerator* gen, ASTNode* obj)
             !obj->children[0]->node_type) break;
         ASTNode* holder = obj->children[0];
         if (holder->node_type->kind == TYPE_PTR) return 1;
+        if (holder->node_type->kind == TYPE_ACTOR_REF)
+            return actor_ref_owned_state(gen, holder, obj->value) != NULL;
         if (holder->node_type->kind != TYPE_STRUCT) return 0;
         obj = holder;
     }
@@ -3332,8 +3339,56 @@ static int emit_struct_element_store(CodeGenerator* gen, ASTNode* lhs, ASTNode* 
 static int emit_slice_element_store(CodeGenerator* gen, ASTNode* lhs, ASTNode* rhs);
 static int emit_composite_field_store(CodeGenerator* gen, ASTNode* lhs, ASTNode* rhs);
 
+/* #3386: a store into another actor's state through its reference, `r.f = v`
+ * (a whole fixed-size array too) or `r.f[i] = v` into an element of one.
+ * The state is a place
+ * (R2) the actor owns: destroy_state drops what it holds, and its spawn set
+ * it, so what a store replaces can be read. So the store is R3's, as the
+ * actor's own `f = v` is: it takes `v` (a fresh value moved, anything else
+ * retained) and drops what the place held, and since the actor reads the
+ * place on its own thread, what it takes is published (#2919), as through
+ * a pointer. It was a plain C assignment: the state shared what the source
+ * still owned (std.supervise's `sup.kids[i] = s.kids[i]`, whose spec was
+ * then freed, left the supervisor holding released names and factories)
+ * and leaked what it replaced. A deeper path (`r.f.name = v`,
+ * `r.f[i].name = v`) is a struct's, trusted through the reference by
+ * value_path_trackers_are_initialised. The place is evaluated once. */
+static int emit_actor_ref_state_store(CodeGenerator* gen, ASTNode* lhs, ASTNode* rhs) {
+    ASTNode* field = lhs;
+    int element = 0;
+    if (lhs->type == AST_ARRAY_ACCESS && lhs->child_count >= 2 && lhs->children[0]) {
+        field = lhs->children[0];
+        element = 1;
+    }
+    if (field->type != AST_MEMBER_ACCESS || !field->value || field->child_count != 1 ||
+        !field->children[0]) return 0;
+    ASTNode* sd = actor_ref_owned_state(gen, field->children[0], field->value);
+    if (!sd) return 0;
+    Type* st = sd->node_type;
+    int sized = st->kind == TYPE_ARRAY && st->array_size > 0 && st->element_type;
+    if (element && !sized) return 0;
+    Type* t = element ? st->element_type : st;
+    if (!own_type_owns(gen, t)) return 0;
+    print_indent(gen);
+    fprintf(gen->output, "{ %s* _ae_sp = %s(", get_c_type(sized && !element ? st->element_type : t),
+            sized && !element ? "" : "&");
+    generate_expression(gen, lhs);
+    fprintf(gen->output, ");\n");
+    print_indent(gen);
+    if (sized && !element) {
+        emit_owning_array_store(gen, "_ae_sp", st, rhs);
+        own_emit_part(gen, st, "_ae_sp", OWN_PUBLISH);
+    } else {
+        emit_owning_store(gen, "(*_ae_sp)", t, rhs, 1);
+    }
+    print_indent(gen);
+    fprintf(gen->output, "}\n");
+    return 1;
+}
+
 static int emit_struct_field_heap_assign(CodeGenerator* gen, ASTNode* lhs, ASTNode* rhs) {
     if (!gen || !lhs || !rhs) return 0;
+    if (emit_actor_ref_state_store(gen, lhs, rhs)) return 1;   /* #3386 */
     if (emit_slice_element_store(gen, lhs, rhs)) return 1;   /* #2921 */
     if (emit_composite_field_store(gen, lhs, rhs)) return 1;  /* #2921 */
     if (emit_struct_element_store(gen, lhs, rhs)) return 1;

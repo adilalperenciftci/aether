@@ -161,7 +161,11 @@ closure, released when the element leaves (`list.remove`, `list.clear`, a
 store over it, `map.remove`, `free`); a `list.set` that fails gives back what
 it was handed. A module `var` and an actor's state field take what is stored
 and release what they replace; the actor's state is released when the actor
-is destroyed. A message owns its fields: the send takes them, a receive arm
+is destroyed. So does a store into another actor's state through its
+reference (`w.label = s`, `w.items[i] = v`, a part of one such as
+`w.items[i].name = s`): the actor's state holds a reference of its own, and
+since the actor reads it on its own thread, a string it takes is published,
+as one stored through a pointer is. A message owns its fields: the send takes them, a receive arm
 reads them in place, and the message is released after the arm. What the
 arm keeps (in state, in a container) it takes.
 

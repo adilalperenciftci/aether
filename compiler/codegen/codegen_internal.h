@@ -550,6 +550,9 @@ int state_array_owned(ASTNode* state_decl, int* len);
 /* #2688: a `T[N]` state field whose struct T owns strings or closures: T's
  * name (each element is the actor's own), or NULL. */
 const char* state_struct_array_owned(CodeGenerator* gen, ASTNode* state_decl, int* len);
+/* #3386: the owning state declaration `field` of the actor the reference
+ * `ref` names (`r.field`), or NULL. */
+ASTNode* actor_ref_owned_state(CodeGenerator* gen, ASTNode* ref, const char* field);
 /* #2528 (codegen_stmt.c): `v` as the value an owned string element takes. */
 void emit_owned_string_element(CodeGenerator* gen, ASTNode* v);
 

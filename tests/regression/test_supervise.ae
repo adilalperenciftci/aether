@@ -7,6 +7,7 @@
 // went nowhere.
 
 import std.actors
+import std.string
 import std.supervise
 import std.sync
 
@@ -60,6 +61,26 @@ check(label: string, ok: bool) -> int {
     }
     println("  PASS ${label}")
     return 0
+}
+
+// A name built at run time, which only the spec holds once given to
+// supervise.child.
+child_name(base: string) -> string {
+    return string.concat(base, "-w")
+}
+
+// Allocations of the sizes the spec's names and closures had, which reuse
+// whatever was freed.
+churn(base: string) -> int {
+    n = 0
+    i = 0
+    while i < 64 {
+        s = child_name(base)
+        f = || { return string.length(s) }
+        n = n + call(f)
+        i = i + 1
+    }
+    return n
 }
 
 main() {
@@ -155,6 +176,33 @@ main() {
     wait_for_idle()
     fails = fails + check("transient and temporary: no restart, got ${supervise.restarts(kinds)}",
         supervise.restarts(kinds) == 0)
+
+    // The supervisor holds its children's names and factories by references
+    // of its own (#3386): supervise.start frees the spec they came from. The
+    // factory captures a local, and the name is built at run time; a byte
+    // copy left both released, so the first factory call read a freed
+    // environment.
+    helper = spawn(Worker())
+    cap = supervise.start(strategy: "one_for_one", max_restarts: 3, within_secs: 60) {
+        supervise.child(child_name("cap"), || {
+                helper ! Bump {}
+                return spawn(Worker())
+            })
+    }
+    wait_for_idle()
+    churned = churn("cap")
+    cw = supervise.which(cap, "cap-w")
+    fails = fails + check("the run-time name finds its child after churn (${churned})", cw != null)
+    cw ! Boom {}
+    wait_for_idle()
+    churn("cap")
+    int hn = helper ? Count {}
+    fails = fails + check("the factory ran at the start and at the restart, got ${hn}", hn == 2)
+    fails = fails + check("one restart under the name, got ${supervise.restarts(cap)}",
+        supervise.restarts(cap) == 1 && supervise.which(cap, "cap-w") == cw)
+    // Ending it releases what its state holds, once.
+    supervise.stop(cap)
+    wait_for_idle()
 
     // The budget: more than 2 restarts within the window and the supervisor
     // gives up; its watcher gets a Down that says so.

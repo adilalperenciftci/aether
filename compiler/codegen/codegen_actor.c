@@ -393,6 +393,33 @@ const char* state_struct_array_owned(CodeGenerator* gen, ASTNode* state_decl, in
     return sname;
 }
 
+/* #3386: the state declaration of `field` in the actor the reference `ref`
+ * names (`r.field`, `r` an actor reference to a Sink), when that state is a
+ * place that owns what it holds: of an owning type, not widened to a
+ * pointer, so destroy_state drops it (emit_actor_destroy_state). NULL for
+ * anything else, a protocol's reference included (no one actor). */
+ASTNode* actor_ref_owned_state(CodeGenerator* gen, ASTNode* ref, const char* field) {
+    const char* name = referenced_actor(ref);
+    if (!gen || !gen->program || !name || !field) return NULL;
+    for (int i = 0; i < gen->program->child_count; i++) {
+        ASTNode* actor = gen->program->children[i];
+        if (actor && actor->type == AST_EXPORT_STATEMENT && actor->child_count > 0)
+            actor = actor->children[0];
+        if (!actor || actor->type != AST_ACTOR_DEFINITION || !actor->value ||
+            strcmp(actor->value, name) != 0) continue;
+        for (int j = 0; j < actor->child_count; j++) {
+            ASTNode* sd = actor->children[j];
+            if (!sd || sd->type != AST_STATE_DECLARATION || !sd->value ||
+                strcmp(sd->value, field) != 0) continue;
+            if (!sd->node_type || !own_type_owns(gen, sd->node_type) ||
+                state_field_is_ptr(gen, actor, field)) return NULL;
+            return sd;
+        }
+        return NULL;
+    }
+    return NULL;
+}
+
 /* #2528: `_aether_state_drop_<Actor>(void*)`, the scheduler's hook for what the
  * state fields own, run once by the free path that ends a scheduler-owned
  * actor, after it can no longer be stepped. Each state field of an owning
