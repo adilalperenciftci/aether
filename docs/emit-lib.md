@@ -601,10 +601,10 @@ aether_set_call_deadline(50);              // 50 ms wall-clock
 
 call_into_aether();                        // returns inside both bounds
 
-if (aether_deadline_tripped()) {
-    /* The deadline fired mid-call. The Aether call returned
-     * early via the codegen tripwire. Any partial state is
-     * the host's to interpret. */
+if (aether_last_outcome() == AETHER_DEADLINE) {
+    /* The deadline fired mid-call: the call ended at a safe point
+     * and returned its zero value. Any partial state is the
+     * host's to interpret. */
 }
 ```
 
@@ -619,23 +619,52 @@ cap exceeded" up the call chain rather than aborting. Pass `0` to
 disable.
 
 **Wall-clock deadline.** Per-thread monotonic (`CLOCK_MONOTONIC`).
-The codegen emits `if (aether_caps_armed && aether_caps_deadline_tripped())
-{ __aether_abort_call(); break; }` at every `for` / `while` loop head
+The codegen emits a safe point, `if (aether_caps_armed && aether_exec_poll())
+{ __aether_abort_call(); break; }`, at every `for` / `while` loop head
 under `--emit=lib` not under `--emit=exe` (zero overhead on
-non-sandboxed builds). `aether_caps_armed` is a plain global that goes
-nonzero once any thread arms a deadline (or trips one) and stays so; until
-then a loop head costs one load, with no call and no thread-local read.
-(The call reads two thread-locals, and on macOS each of those is itself a
-call: in a ported interpreter that was a fifth of the run time.) On trip the sticky flag flips; subsequent
-loop heads in the same call exit too, so any depth of nested loops
-unwinds in O(N) tripwire-bounded breaks. Pass `0` to disable; pass
-a fresh ms value to clear the sticky flag and re-arm.
+non-sandboxed builds). `aether_caps_armed` is a global that goes
+nonzero once any thread arms a deadline, trips one or cancels a call, and
+stays so; until then a loop head costs one load, with no call and no
+thread-local read. It is an atomic read with a relaxed load (a plain load
+on x86 and ARM), so a loop that started before another thread's cancel
+sees it. (The call reads thread-locals, and on macOS each of
+those is itself a call: in a ported interpreter that was a fifth of the
+run time.) Pass `0` to disable; pass a fresh ms value to clear the sticky
+flag and re-arm.
 
-The trip is observable via `aether_deadline_tripped()` the host
-checks after the call to know whether the result was complete or
-truncated. Retrying a tripped deadline is the host's policy:
-re-arm + call again with a more generous budget, or surface
-`Deadline` to the user.
+**Interruptions (#2956).** Inside an export, the first safe point past the
+deadline ends the call: the interruption unwinds like a panic, so every
+frame on the way runs its defers and releases its owned locals, and the
+export returns its zero value with the outcome `AETHER_DEADLINE`. A `try`
+in the script runs its own cleanup and passes the interruption on instead
+of running its handler: a script cannot swallow its deadline. Another
+thread can end a call the same way: `aether_exec_token()` on the calling
+thread names the running call (or, outside one, its next), and
+`aether_exec_cancel(token)` from any thread ends it at its next safe point
+with `AETHER_CANCELLED`. A call nested inside the cancelled one ends first;
+the cancelled one at its own next safe point, once the host code between
+them has returned. A cancel of a call that already ended does nothing.
+Outside any export (a library's actor, say) a loop head breaks at a passed
+deadline, as it did before.
+
+The safe points are loop heads, and `json.parse`, which checks every 4096
+values it reads and then fails with "stopped: the call's deadline passed or
+it was cancelled" (the export then ends with the outcome). Nothing else
+stops a call, so these are bounded only by their own length:
+
+- straight-line code, however long;
+- recursion without a loop: a safe point at every function's entry would
+  cut it, but it made fib(30) through its stub 1.18 ms against 0.69 ms, so
+  there is none;
+- C-backed std operations other than the JSON parse (string split, join and
+  replace, `json.stringify`, a regex match, compression), each bounded by
+  its input;
+- `extern` C functions, and host services the script calls: they run to
+  their return, and the next safe point after it ends the call.
+
+The trip is also observable via `aether_deadline_tripped()`. Retrying a
+tripped deadline is the host's policy: re-arm + call again with a more
+generous budget, or surface `Deadline` to the user.
 
 ## Failures and nested calls at the boundary
 
@@ -662,8 +691,9 @@ case AETHER_DEADLINE:  /* cut by its deadline: r is not a result */ break;
   report it). The library takes the next call at once. Nothing done before
   the failure is rolled back: host effects, module state, messages sent.
 - **A zero value with an outcome other than `AETHER_OK` is not a result.**
-  Release only what an `AETHER_OK` call returned. `AETHER_DEADLINE` means a
-  tripwire saw the call's deadline pass, so a value it returned is partial.
+  Release only what an `AETHER_OK` call returned. `AETHER_DEADLINE` and
+  `AETHER_CANCELLED` mean a safe point ended the call ("Per-call resource
+  caps" above): it returned its zero value, its defers run.
 - **Nested calls.** An export that calls a host service, which calls an
   export again on the same thread, runs two executions. The inner one sees
   what the service set for it (caller info, `aether_set_call_deadline`),
@@ -687,21 +717,22 @@ case AETHER_DEADLINE:  /* cut by its deadline: r is not a result */ break;
   x86 and x86-64 the stub saves it with `__builtin_setjmp` (0.57 ns; the C
   library's setjmp is 2.85 ns on Windows), elsewhere with setjmp. Measured
   on Windows MinGW, a C host calling in a loop (medians of 9 interleaved
-  rounds against main): an export that calls a function costs 5.8 ns a call
+  rounds against main): an export that calls a function costs 5.7 ns a call
   against 0.4 ns, about 2 ns of it the registers Win64 makes the stub keep
   (rbx, rbp, rsi, rdi, r12 to r15, xmm6 to xmm15) for a panic's return;
   fib(30) through its stub is 0.699 ms against 0.701 ms, the difference
   lost in the recursion. An export that can neither panic, allocate, loop
   nor call anything (scalar parameters and locals, `+ - *`, comparisons,
-  if/else, return) gets no frame and records its OK outcome only: 0.38 ns
+  if/else, return) gets no frame and records its OK outcome only: 0.57 ns
   against 0.19 ns.
 - **The host API is in every library.** A library built with its own
   runtime carries `aether_set_call_deadline`, `aether_deadline_tripped`,
   `aether_set_memory_cap`, `aether_set_caller`, `aether_clear_caller`,
-  `aether_last_outcome` and `aether_last_outcome_text` even when its code
-  calls none of them, so a host that loads it can call them in its runtime
-  (a library DLL had no `aether_set_call_deadline` before). On the shared
-  runtime they are the shared runtime's.
+  `aether_last_outcome`, `aether_last_outcome_text`, `aether_exec_token`
+  and `aether_exec_cancel` even when its code calls none of them, so a host
+  that loads it can call them in its runtime (a library DLL had no
+  `aether_set_call_deadline` before). On the shared runtime they are the
+  shared runtime's.
 
 ## What's out of scope for v1
 

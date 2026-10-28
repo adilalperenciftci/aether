@@ -24,7 +24,18 @@ typedef struct {
     int     next_set;
     int     sandbox_depth;     /* this thread's sandbox levels at entry */
     int     has_view;          /* aether_host.c kept its caller info */
+    int     stop;              /* why a C-backed std loop stopped early */
+    uint64_t serial;           /* this thread's count of executions, its token */
 } AetherExecRecord;
+
+/* Where another thread asks for an execution of this one to stop
+ * (aether_exec_cancel): the serial of the execution to cancel, 0 for none.
+ * Made the first time a token is asked for on a thread and kept for the
+ * process, so a token never points at freed memory. */
+typedef struct AetherCancelCell {
+    _Atomic uint64_t pending;
+    struct AetherCancelCell* next;
+} AetherCancelCell;
 
 #define AETHER_OUTCOME_TEXT_MAX 1024
 
@@ -37,6 +48,9 @@ typedef struct {
     int              exec_depth;
     int              outcome;  /* the last execution's, aether_last_outcome() */
     char             outcome_text[AETHER_OUTCOME_TEXT_MAX];
+    int              interrupting; /* the outcome an interruption on its way carries */
+    uint64_t         serial;   /* executions entered on this thread */
+    AetherCancelCell* cell;
     /* The allocation journal (aether_unwind.c): its entries are tagged with
      * the frame depth they were made at. */
     struct AetherUnwindEntry* journal;
@@ -44,8 +58,21 @@ typedef struct {
     int              journal_capacity;
 } AetherFrames;
 
-/* Defined in aether_unwind.c, which every program links (the generated code
- * journals), so a program that never catches does not pull aether_panic.o. */
-extern AETHER_TLS_SHARED AetherFrames aether_frames;
+/* This thread's block. The block is a `static` thread-local of
+ * aether_unwind.c, the one file that owns it (with the try frames' push and
+ * pop and the journal, the paths every step and every try takes); every
+ * other file reaches it through this function and never names the
+ * thread-local.
+ *
+ * The rule for the runtime's thread-locals: an extern thread-local is a
+ * scalar written whole; an aggregate stays static to its file, reached by
+ * accessor. Generated code goes further and names none (a Windows DLL cannot
+ * import a thread-local). An extern aggregate was miscompiled by GCC 16.2
+ * for x86_64-w64-mingw32 at -O2: two adjacent stores into it, merged into
+ * one, were addressed through the variable's non-thread address and landed
+ * in the thread-local template, not the calling thread's block. A scalar
+ * read or written whole (an int, a pointer: current_core_id,
+ * g_current_step_actor) has no adjacent store to merge with. */
+AetherFrames* aether_frames_here(void);
 
 #endif /* AETHER_FRAMES_H */

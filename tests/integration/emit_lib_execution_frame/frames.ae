@@ -31,12 +31,16 @@ plain(n: int) -> int {
 }
 
 // The inner call of a host service: returns 7 (which 0), refuses with -1
-// (1), or panics (2). It leaves a sandbox level of its own pushed, which
-// its frame takes off.
+// (1), panics (2), or loops until the deadline the service set for it
+// ends it (3). It leaves a sandbox level of its own pushed, which its
+// frame takes off.
 inner(which: int) -> int {
     sandbox_push(null)
     if which == 2 {
         panic("inner panicked")
+    }
+    if which == 3 {
+        return count_to(2000000000)
     }
     if which == 1 {
         return -1

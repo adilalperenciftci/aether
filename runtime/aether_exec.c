@@ -53,16 +53,16 @@ static inline int sandbox_any(void) {
 #endif
 
 int aether_exec_depth(void) {
-    return aether_frames.exec_depth;
+    return aether_frames_here()->exec_depth;
 }
 
 void aether_exec_mark_view(int depth) {
-    AetherFrames* F = &aether_frames;
+    AetherFrames* F = aether_frames_here();
     if (depth >= 1 && depth <= F->exec_depth) F->exec[depth - 1].has_view = 1;
 }
 
 void aether_exec_set_next_deadline(int64_t ms) {
-    AetherFrames* F = &aether_frames;
+    AetherFrames* F = aether_frames_here();
     if (F->exec_depth <= 0) {
         aether_caps_set_deadline_ms(ms);
         return;
@@ -72,7 +72,7 @@ void aether_exec_set_next_deadline(int64_t ms) {
     running->next_at_ns = s.at_ns;
     running->next_tripped = 0;
     running->next_set = 1;
-    if (ms > 0) aether_caps_armed = 1;
+    if (ms > 0) atomic_store_explicit(&aether_caps_armed, 1, memory_order_relaxed);
 }
 
 static inline AetherJmpFrame* exec_push(AetherFrames* F, void** buf) {
@@ -103,6 +103,8 @@ static inline AetherJmpFrame* exec_push(AetherFrames* F, void** buf) {
 #endif
     x->next_set = 0;
     x->has_view = 0;
+    x->stop = 0;
+    x->serial = ++F->serial;
     F->exec_depth = d + 1;
     AetherJmpFrame* f = &F->frames[F->depth++];
     /* reason and reason_release are written by the panic that targets
@@ -113,12 +115,12 @@ static inline AetherJmpFrame* exec_push(AetherFrames* F, void** buf) {
 }
 
 AetherJmpFrame* aether_exec_enter(void) {
-    return exec_push(&aether_frames, NULL);
+    return exec_push(aether_frames_here(), NULL);
 }
 
 #if AETHER_EXEC_BUILTIN_SJLJ
 void aether_exec_enter_at(void** buf) {
-    (void)exec_push(&aether_frames, buf);
+    (void)exec_push(aether_frames_here(), buf);
 }
 #endif
 
@@ -146,24 +148,42 @@ static inline void exec_finish(AetherFrames* F, int outcome) {
     if (sandbox_any()) aether_sandbox_restore(x->sandbox_depth);
 #endif
     if (x->has_view) aether_caller_leave(leaving);
+    /* A cancel of this execution is spent with it. */
+    if (F->cell) {
+        uint64_t s = x->serial;
+        atomic_compare_exchange_strong_explicit(&F->cell->pending, &s, 0,
+                                                memory_order_acq_rel, memory_order_relaxed);
+    }
     F->outcome = outcome;
 }
 
 void aether_exec_leave(void) {
-    AetherFrames* F = &aether_frames;
-    /* The trip flag is read only once some deadline was ever armed. */
-    if (aether_caps_armed && aether_caps_deadline_flag()) {
-        set_text(F, "the call's deadline passed");
-        exec_finish(F, AETHER_DEADLINE);
-        return;
+    AetherFrames* F = aether_frames_here();
+    /* Read only once some deadline or cancel was ever armed: the trip
+     * flag, and a C-backed std loop that stopped early (it returned an
+     * error, and no safe point came before the export returned). */
+    if (atomic_load_explicit(&aether_caps_armed, memory_order_relaxed)) {
+        int why = aether_caps_deadline_flag() ? AETHER_DEADLINE : F->exec[F->exec_depth - 1].stop;
+        if (why) {
+            set_text(F, aether_exec_reason(why));
+            exec_finish(F, why);
+            return;
+        }
     }
     exec_finish(F, AETHER_OK);
 }
 
 void aether_exec_failed(void) {
-    AetherFrames* F = &aether_frames;
+    AetherFrames* F = aether_frames_here();
     /* The panic reached this execution's frame: the innermost one. */
     AetherJmpFrame* f = &F->frames[F->depth - 1];
+    int outcome = AETHER_PANICKED;
+    if (F->interrupting) {
+        /* An interruption, delivered as a panic so every frame on the way
+         * ran its cleanup: the outcome it carries. */
+        outcome = F->interrupting;
+        F->interrupting = 0;
+    }
     set_text(F, aether_panic_reason_text(f->reason));
     /* A reason built at run time belongs to whoever catches it: this frame. */
     if (f->reason_release) {
@@ -171,26 +191,95 @@ void aether_exec_failed(void) {
         f->reason_release = NULL;
         release(f->reason);
     }
-    exec_finish(F, AETHER_PANICKED);
+    exec_finish(F, outcome);
+}
+
+// ---------------------------------------------------------------------------
+// Interruptions (#2956, D5): a deadline that passed or a cancel from another
+// thread ends the execution at a safe point instead of breaking a loop and
+// returning what the loop had. It is raised as a panic, so each frame on the
+// way releases what it holds (the allocation journal: owned locals and
+// defers), and a user `try` it meets re-raises it after its own cleanup
+// instead of running its handler (aether_exec_reraise): a script cannot
+// swallow its own deadline. The execution's frame ends the call with the
+// outcome, AETHER_DEADLINE or AETHER_CANCELLED, and the zero value.
+// ---------------------------------------------------------------------------
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noreturn))
+#endif
+static void interrupt(AetherFrames* F, int why) {
+    F->interrupting = why;
+    aether_panic(aether_exec_reason(why));
+}
+
+int aether_exec_poll(void) {
+    AetherFrames* F = aether_frames_here();
+    if (F->exec_depth > 0) {
+        int why = aether_exec_stop_reason();
+        if (why) interrupt(F, why);
+        return 0;
+    }
+    /* Outside any execution a loop still breaks at a passed deadline, as
+     * it did before (a library's actor, say). */
+    return aether_caps_deadline_tripped();
+}
+
+/* What a `try` calls when it catches one, aether_exec_interrupting() and
+ * aether_exec_reraise(), are aether_unwind.c's and aether_panic.c's: every
+ * program with a `try` calls them, and one that never runs a library call
+ * must not link this file (and the caller info and sandbox it reaches). */
+
+// ---------------------------------------------------------------------------
+// Cancellation tokens
+// ---------------------------------------------------------------------------
+
+static AetherCancelCell* _Atomic g_cells = NULL;   /* every cell made, kept */
+
+AETHER_EXEC_API AetherExecToken aether_exec_token(void) {
+    AetherFrames* F = aether_frames_here();
+    if (!F->cell) {
+        AetherCancelCell* c = (AetherCancelCell*)calloc(1, sizeof(AetherCancelCell));
+        if (c) {
+            AetherCancelCell* head = atomic_load_explicit(&g_cells, memory_order_relaxed);
+            do { c->next = head; } while (!atomic_compare_exchange_weak_explicit(
+                         &g_cells, &head, c, memory_order_release, memory_order_relaxed));
+            F->cell = c;
+        }
+    }
+    AetherExecToken t;
+    t.cell = F->cell;
+    /* The running execution's, or the next one's when none runs. */
+    t.serial = F->exec_depth > 0 ? F->exec[F->exec_depth - 1].serial : F->serial + 1;
+    return t;
+}
+
+AETHER_EXEC_API int aether_exec_cancel(AetherExecToken token) {
+    AetherCancelCell* c = (AetherCancelCell*)token.cell;
+    if (!c || !token.serial) return -1;
+    atomic_store_explicit(&c->pending, token.serial, memory_order_release);
+    atomic_store_explicit(&aether_caps_armed, 1, memory_order_relaxed);
+    return 0;
 }
 
 AETHER_EXEC_API int aether_last_outcome(void) {
-    return aether_frames.outcome;
+    return aether_frames_here()->outcome;
 }
 
 AETHER_EXEC_API const char* aether_last_outcome_text(void) {
     /* Written only for a failure: an OK call leaves the last text, unread. */
-    return aether_frames.outcome == AETHER_OK ? "" : aether_frames.outcome_text;
+    AetherFrames* F = aether_frames_here();
+    return F->outcome == AETHER_OK ? "" : F->outcome_text;
 }
 
 /* The stub of an export nothing can end from outside its code (a frameless
  * one, codegen.c lib_export_frameless): its call ended OK. */
 void aether_exec_ok(void) {
-    aether_frames.outcome = AETHER_OK;
+    aether_frames_here()->outcome = AETHER_OK;
 }
 
 void aether_exec_note_outcome(int outcome, const char* text) {
-    AetherFrames* F = &aether_frames;
+    AetherFrames* F = aether_frames_here();
     F->outcome = outcome;
     set_text(F, outcome == AETHER_OK ? "" : text);
 }

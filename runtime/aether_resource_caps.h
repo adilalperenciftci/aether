@@ -35,6 +35,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdatomic.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -67,8 +68,9 @@ void aether_caps_set_deadline_ms(int64_t ms);
  * --emit=lib is active. Returns 1 if the deadline has passed OR
  * the sticky-tripped flag is set; 0 otherwise. Direct TLS read +
  * atomic load + monotonic clock — no PLT call, no allocation. */
-/* Nonzero once any deadline has been armed or tripped (see the .c). */
-extern int aether_caps_armed;
+/* Nonzero once any deadline has been armed or tripped, or a call cancelled
+ * (see the .c). Read it with a relaxed atomic load. */
+extern _Atomic int aether_caps_armed;
 int aether_caps_deadline_tripped(void);
 
 /* Set the sticky-tripped flag; called by codegen-emitted code on
@@ -94,6 +96,21 @@ AetherDeadlineState aether_caps_deadline_for_ms(int64_t ms);
 /* The sticky flag alone: whether a tripwire saw the deadline pass (or
  * __aether_abort_call ran), without reading the clock. */
 int aether_caps_deadline_flag(void);
+
+/* Why the innermost execution should stop (runtime/aether_exec.h): its
+ * deadline passed (AETHER_STOP_DEADLINE, the outcome AETHER_DEADLINE) or
+ * it was cancelled (AETHER_STOP_CANCELLED, AETHER_CANCELLED); 0 for
+ * neither. For callers that found aether_caps_armed set. */
+#define AETHER_STOP_DEADLINE  2
+#define AETHER_STOP_CANCELLED 3
+int aether_exec_stop_reason(void);
+
+/* For a C-backed std operation that runs long on its input: 1 when the
+ * running execution should stop, so the operation returns early, cleanly
+ * (an error, its own memory freed); the next safe point, or the export's
+ * return, ends the execution with the outcome. One load while nothing is
+ * armed; 0 outside any execution. */
+int aether_exec_should_stop(void);
 
 /* Snapshot of currently-accounted bytes: what the cap-aware allocators
  * above (collections, arenas, pools, the actor registry) hold, and only

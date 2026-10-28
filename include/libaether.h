@@ -47,24 +47,29 @@ extern "C" {
  * Thread-safe: relaxed atomic store. */
 AETHER_API void aether_set_memory_cap(uint64_t bytes);
 
-/* Per-thread wall-clock deadline. After this call, every
- * codegen-emitted tripwire (at every loop head in `--emit=lib`
- * builds) checks `now >= deadline_at`. On positive trip the
- * sticky flag flips, and `aether_deadline_tripped()` returns 1
- * for every subsequent call until you arm a fresh deadline.
+/* Per-thread wall-clock deadline. After this call, every safe point
+ * (every loop head in `--emit=lib` builds, and every 4096 values a
+ * JSON parse reads) checks `now >= deadline_at`. Inside an export the
+ * first one past the deadline ends the call (#2956): the export returns
+ * its zero value with the outcome AETHER_DEADLINE, its defers and owned
+ * locals released on the way, and a `try` in the script does not catch
+ * it. Code that runs no safe point is not cut: straight-line code,
+ * recursion without a loop, and C-backed std operations other than the
+ * JSON parse (docs/emit-lib.md, "Per-call resource caps"). On a trip the
+ * sticky flag flips, and `aether_deadline_tripped()` returns 1 for every
+ * subsequent call until you arm a fresh deadline.
  *
  * Pass `0` to disable. Calling with a non-zero value clears the
  * sticky flag (a fresh deadline is a fresh chance). */
 AETHER_API void aether_set_call_deadline(int64_t ms);
 
-/* Codegen-tripwire target. Returns 1 when the per-thread deadline
- * has passed OR when `__aether_abort_call` was explicitly invoked
- * since the last `aether_set_call_deadline`. Returns 0 otherwise.
+/* Returns 1 when the per-thread deadline has passed OR when
+ * `__aether_abort_call` was explicitly invoked since the last
+ * `aether_set_call_deadline`. Returns 0 otherwise.
  *
- * Embedders typically don't call this directly — the codegen
- * emits checks at every loop head. The host's job is to set the
- * deadline before invoking the entry function and inspect any
- * error string the entry returns. */
+ * Embedders typically don't call this directly: aether_last_outcome()
+ * says AETHER_DEADLINE for a call the deadline ended. The host's job is
+ * to set the deadline before invoking the entry function. */
 AETHER_API int aether_deadline_tripped(void);
 
 /* How the last call into an export on this thread ended (#2956). Every
@@ -78,7 +83,7 @@ AETHER_API int aether_deadline_tripped(void);
  * Nested calls (an export calls a host service, which calls an export)
  * each have their own outcome, and the outer call's caller info,
  * deadline and sandbox grants are back when the inner one returns, on
- * every exit. The frame costs a context save per call (about 5.8 ns on
+ * every exit. The frame costs a context save per call (about 5.7 ns on
  * Windows MinGW for an export that calls a function; none for one that
  * can neither panic, allocate, loop nor call anything): docs/emit-lib.md,
  * "Failures and nested calls at the boundary". */
@@ -96,6 +101,25 @@ AETHER_API int aether_last_outcome(void);
  * 1023 bytes) or a fixed description otherwise. Borrowed: valid until the
  * next call into the library on this thread. */
 AETHER_API const char* aether_last_outcome_text(void);
+
+/* Cancellation from any thread (#2956). aether_exec_token() names the call
+ * running on the calling thread or, outside one, the next call that thread
+ * makes; pass it to another thread, whose aether_exec_cancel(token) ends
+ * that call at its next safe point (a loop head of the
+ * library's code, or every few thousand units of a long std operation)
+ * with AETHER_CANCELLED. A call nested inside the cancelled one ends first,
+ * then the cancelled one once the host code between them returns. A token
+ * stays valid for the process; cancelling a call that already ended does
+ * nothing. Returns 0, or -1 for a token that names nothing. A deadline set
+ * with aether_set_call_deadline ends a call the same way, with
+ * AETHER_DEADLINE: the export returns its zero value, its defers and owned
+ * locals released, and a `try` in it does not catch the interruption. */
+#ifndef AETHER_EXEC_TOKEN_DEFINED
+#define AETHER_EXEC_TOKEN_DEFINED
+typedef struct AetherExecToken { void* cell; uint64_t serial; } AetherExecToken;
+#endif
+AETHER_API AetherExecToken aether_exec_token(void);
+AETHER_API int aether_exec_cancel(AetherExecToken token);
 
 #ifdef __cplusplus
 }

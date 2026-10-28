@@ -1,0 +1,18 @@
+// A program that panics and catches, and does nothing else: what it links
+// from the runtime is the panic machinery, no more (#2955, #2956).
+
+fn risky(n: int) -> int {
+    if n > 2 {
+        panic("too big")
+    }
+    return n * 2
+}
+
+main() {
+    try {
+        println(risky(1))
+        println(risky(5))
+    } catch e {
+        println("caught: ${e}")
+    }
+}

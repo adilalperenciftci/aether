@@ -1,0 +1,48 @@
+// The library of the interruption test (#2956, D5): calls a host deadline
+// or a cancel from another thread ends.
+import std.json
+
+extern host_defer_ran()
+
+fn churn(n: int) -> int {
+    defer host_defer_ran()
+    i = 0
+    s = 0
+    while i < n {
+        if i % 2 == 0 {
+            s = s + i
+        } else {
+            s = s - i
+        }
+        i = i + 1
+    }
+    return s
+}
+
+// A loop the deadline cuts: the zero value, not what the loop had, and the
+// defer has run.
+spin(n: int) -> int {
+    return churn(n)
+}
+
+// The same loop inside a user `try`: the interruption is not the try's.
+guarded(n: int) -> int {
+    got = 7
+    try {
+        got = churn(n)
+    } catch e {
+        got = -1
+    }
+    return got
+}
+
+// A parse that runs long on its input, in C: it stops early, cleanly.
+parse_size(doc: string) -> int {
+    v, err = json.parse(doc)
+    if err != "" {
+        return -2
+    }
+    n = json.array_size(v)
+    json.free(v)
+    return n
+}

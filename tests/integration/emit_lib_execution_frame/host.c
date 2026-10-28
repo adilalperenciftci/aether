@@ -1,6 +1,7 @@
 /* A C host of frames.ae (#2955, #2956). Prints, for an export that panics
  * and for an outer export whose host service runs an inner export that
- * returns, refuses or panics, what each call returned and how it ended:
+ * returns, refuses, panics or loops past the deadline the service set for
+ * it, what each call returned and how it ended:
  *
  *   boom 0 outcome 1 "boom 1"; plain 7 outcome 0; again 1 outcome 0
  *   which W: inner R outcome O "TEXT"; outer B outcome O
@@ -122,7 +123,7 @@ int main(int argc, char** argv) {
     int again = boom_fn(0);
     printf("boom %d outcome %d \"%s\"; plain %d outcome %d; again %d outcome %d\n", b, bo, bt, p, po,
            again, last_outcome_fn());
-    for (int which = 0; which < 3; which++) {
+    for (int which = 0; which < 4; which++) {
         set_caller_fn_("outer", NULL, NULL, 0, 0);
         set_deadline_fn(0);
         inner_ret = -9;

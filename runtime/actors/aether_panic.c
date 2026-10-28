@@ -3,7 +3,7 @@
  * from std/string is linked, so a runtime-only link (the WASI panic lib)
  * still resolves. */
 #include "../../std/string/aether_string.h"
-#include "../aether_sandbox.h"
+#include "../aether_exec.h"
 #include "aether_frames.h"
 
 #include <signal.h>
@@ -85,40 +85,16 @@ int aether_fnptr_claim(const void* r) {
 
 static AetherDeathHook death_hook = NULL;
 
-AetherJmpFrame* aether_try_push(void) {
-    AetherFrames* F = &aether_frames;
-    if (F->depth >= AETHER_PANIC_MAX_DEPTH) {
-        fprintf(stderr, "aether: try/catch nesting exceeded %d, aborting\n",
-                AETHER_PANIC_MAX_DEPTH);
-        abort();
-    }
-    AetherJmpFrame* f = &F->frames[F->depth++];
-    f->reason = NULL;
-    f->reason_release = NULL;
-    f->exec_buf = NULL;
-    return f;
-}
+/* The sandbox's unwind of the levels pushed inside a frame a panic leaves
+ * (#2955): set by aether_sandbox.c when it first looks for the runtime
+ * copies, before any thread can push a level, and reached through this
+ * pointer so that a program that panics but never enforces links no
+ * sandbox (aether_sandbox.o and the audit log it writes to). */
+void (*_Atomic aether_panic_sandbox_unwind)(int frames) = NULL;
 
-void aether_try_pop(void) {
-    AetherFrames* F = &aether_frames;
-    if (F->depth <= 0) {
-        // Defensive: popping an empty stack means codegen/runtime mismatch.
-        fprintf(stderr, "aether: aether_try_pop on empty stack\n");
-        abort();
-    }
-    /* The journal's entries of this frame move to its parent (or go, at
-     * depth zero): only when it has any. */
-    if (F->journal_count) aether_unwind_exit_frame();
-    F->depth--;
-}
-
-AetherJmpFrame* aether_current_frame(void) {
-    if (aether_frames.depth == 0) return NULL;
-    return &aether_frames.frames[aether_frames.depth - 1];
-}
-
-int aether_try_depth(void) {
-    return aether_frames.depth;
+static void unwind_sandbox_levels(void) {
+    void (*u)(int) = atomic_load_explicit(&aether_panic_sandbox_unwind, memory_order_relaxed);
+    if (u) u(aether_try_depth());
 }
 
 // ---------------------------------------------------------------------------
@@ -486,6 +462,27 @@ void aether_panic(const char* reason) {
     aether_panic_owned(reason, NULL);
 }
 
+/* The reason an interruption of a library call carries (#2956,
+ * aether_exec.c), by its outcome. */
+const char* aether_exec_reason(int outcome) {
+    switch (outcome) {
+    case AETHER_DEADLINE:      return "the call's deadline passed";
+    case AETHER_CANCELLED:     return "the call was cancelled";
+    case AETHER_MEMORY_CAP:    return "the call went past the memory cap";
+    case AETHER_OUT_OF_MEMORY: return "the call ran out of memory";
+    default:                   return "panic";
+    }
+}
+
+/* A `try` caught an interruption (aether_exec_interrupting()): it has done
+ * its cleanup, and the interruption goes on to the next frame out, which
+ * ends with the execution's. Here, with the panic it raises again, since
+ * every program with a `try` calls it. */
+void aether_exec_reraise(void) {
+    aether_try_pop();
+    aether_panic(aether_exec_reason(aether_frames_here()->interrupting));
+}
+
 void aether_panic_owned(const char* reason, void (*release)(const void*)) {
     if (!reason) { reason = "panic: (null)"; release = NULL; }
 
@@ -493,14 +490,12 @@ void aether_panic_owned(const char* reason, void (*release)(const void*)) {
     if (f) {
         f->reason = reason;
         f->reason_release = release;
-#ifdef AETHER_HAS_SANDBOX
         // The sandbox levels pushed inside the frame are left with it, in
         // the runtime, whichever code catches (#2955): a catch in code that
         // never enforces, or an actor's barrier, restored nothing, and the
         // thread stayed held to grants freed with the block. Before the
         // drain, which may free them.
-        aether_sandbox_unwind_to_frame(aether_try_depth());
-#endif
+        unwind_sandbox_levels();
         // Free the innermost frame's still-live journaled allocations
         // before the jump skips their deferred frees (aether_unwind.c).
         aether_unwind_drain_current();
@@ -573,9 +568,7 @@ static void aether_sig_handler(int sig, siginfo_t* info, void* ucontext) {
     }
     f->reason = reason;
     f->reason_release = NULL;
-#ifdef AETHER_HAS_SANDBOX
-    aether_sandbox_unwind_to_frame(aether_try_depth());
-#endif
+    unwind_sandbox_levels();
     aether_jump_to(f);
 }
 

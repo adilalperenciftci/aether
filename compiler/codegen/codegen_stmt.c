@@ -6071,7 +6071,7 @@ static void td_emit_dispatch(CodeGenerator* gen, int level, const char* fallback
         print_line(gen, "if (--_aether_reductions <= 0) { _aether_reductions = 10000; sched_yield(); }");
     }
     if (gen->emit_lib) {
-        print_line(gen, "if (aether_caps_armed && aether_caps_deadline_tripped()) { __aether_abort_call(); goto _ae_td_exit_%d; }", id);
+        print_line(gen, "if (atomic_load_explicit(&aether_caps_armed, memory_order_relaxed) && aether_exec_poll()) { __aether_abort_call(); goto _ae_td_exit_%d; }", id);
     }
     g_td_in_head++;
     for (int i = 0; i < si; i++) {
@@ -11262,7 +11262,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             // --emit=exe builds (the if (gen->emit_lib) gate elides
             // the print entirely).
             if (gen->emit_lib) {
-                print_line(gen, "if (aether_caps_armed && aether_caps_deadline_tripped()) { __aether_abort_call(); break; }");
+                print_line(gen, "if (atomic_load_explicit(&aether_caps_armed, memory_order_relaxed) && aether_exec_poll()) { __aether_abort_call(); break; }");
             }
             /* Issue #501: snapshot try_frame_depth at loop entry.
              * #893: record the loop's label / containing scope / C-label id. */
@@ -11382,7 +11382,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             }
             // Issue #343 codegen tripwire — see AST_FOR_LOOP comment.
             if (gen->emit_lib) {
-                print_line(gen, "if (aether_caps_armed && aether_caps_deadline_tripped()) { __aether_abort_call(); break; }");
+                print_line(gen, "if (atomic_load_explicit(&aether_caps_armed, memory_order_relaxed) && aether_exec_poll()) { __aether_abort_call(); break; }");
             }
             /* Issue #501: snapshot try_frame_depth at loop entry so
              * `break` / `continue` inside the body drains only
@@ -12773,6 +12773,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             print_line(gen, "} else {");
             indent(gen);
             print_line(gen, "_aether_ctx_unwind(_aether_try_ctx_%d);", uid);
+            /* #2956: an interruption (a library call's deadline or cancel)
+             * is not this try's to handle: its frame has done its cleanup
+             * (the journal drained, the builder contexts above), and the
+             * interruption goes on to the next frame, the execution's. */
+            print_line(gen, "if (aether_exec_interrupting()) aether_exec_reraise();");
             /* #2739: a binding a `try` of its handler writes is volatile:
              * the handler is outside that try, whose setjmp sees it. */
             print_line(gen, "%s %s = _aether_try_%d->reason ? _aether_try_%d->reason : \"panic\";",

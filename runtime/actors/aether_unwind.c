@@ -5,6 +5,7 @@
 #include "aether_unwind.h"
 #include "../utils/aether_compiler.h"
 #include "aether_frames.h"
+#include <stdio.h>
 #include <stdlib.h>
 
 /* An entry is a value (`free_fn(ptr)` on a drain) or a place (#2923): `ptr`
@@ -20,29 +21,82 @@ typedef struct AetherUnwindEntry {
 } AetherUnwindEntry;
 
 
-/* The per-thread frames block (aether_frames.h), with the journal in it.
+/* The per-thread frames block (aether_frames.h): the try and execution
+ * frames, the executions' records, the journal. Owned by this file and read
+ * only here: every other file, the runtime's included, reaches it through
+ * aether_frames_here() and never names the thread-local (aether_frames.h
+ * says why). The paths every actor step and every `try` take, the frames'
+ * push and pop and the journal, are here so they read it directly.
  * AETHER_TLS_SHARED, not AETHER_TLS: this object is pulled into both
  * executables and --emit=lib shared objects (the emitted prologue
  * references the track/forget symbols from every program). Initial-Exec
  * TLS relocations do not work inside shared objects; Global-Dynamic works
- * in both contexts. Defined here rather than in aether_panic.c, so that
- * journaling pulls in no more than this file. */
-AETHER_TLS_SHARED AetherFrames aether_frames;
+ * in both contexts. Here rather than in aether_panic.c, so that journaling
+ * pulls in no more than this file. */
+static AETHER_TLS_SHARED AetherFrames t_frames;
+
+AetherFrames* aether_frames_here(void) {
+    return &t_frames;
+}
+
+AetherJmpFrame* aether_try_push(void) {
+    AetherFrames* F = &t_frames;
+    if (F->depth >= AETHER_PANIC_MAX_DEPTH) {
+        fprintf(stderr, "aether: try/catch nesting exceeded %d, aborting\n",
+                AETHER_PANIC_MAX_DEPTH);
+        abort();
+    }
+    AetherJmpFrame* f = &F->frames[F->depth++];
+    f->reason = NULL;
+    f->reason_release = NULL;
+    f->exec_buf = NULL;
+    return f;
+}
+
+void aether_try_pop(void) {
+    AetherFrames* F = &t_frames;
+    if (F->depth <= 0) {
+        // Defensive: popping an empty stack means codegen/runtime mismatch.
+        fprintf(stderr, "aether: aether_try_pop on empty stack\n");
+        abort();
+    }
+    /* The journal's entries of this frame move to its parent (or go, at
+     * depth zero): only when it has any. */
+    if (F->journal_count) aether_unwind_exit_frame();
+    F->depth--;
+}
+
+AetherJmpFrame* aether_current_frame(void) {
+    AetherFrames* F = &t_frames;
+    if (F->depth == 0) return NULL;
+    return &F->frames[F->depth - 1];
+}
+
+int aether_try_depth(void) {
+    return t_frames.depth;
+}
+
+/* A `try` caught an interruption of a library call (#2956, aether_exec.c):
+ * it passes it on after its own cleanup (aether_exec_reraise). Here, where
+ * every program links it, and not in aether_exec.c. */
+int aether_exec_interrupting(void) {
+    return t_frames.interrupting != 0;
+}
 
 static void journal_at(const void* p, AetherUnwindFree free_fn, int depth);
 
 void aether_unwind_track(const void* p, AetherUnwindFree free_fn) {
-    if (aether_frames.depth == 0 || !p || !free_fn) return;
-    journal_at(p, free_fn, aether_frames.depth);
+    if (t_frames.depth == 0 || !p || !free_fn) return;
+    journal_at(p, free_fn, t_frames.depth);
 }
 
 void aether_unwind_track_place(const void* place, const void* owned, AetherUnwindFree release) {
-    if (aether_frames.depth == 0 || !place || !release) return;
-    journal_at(place, release, aether_frames.depth);
-    for (int i = aether_frames.journal_count - 1; i >= 0; i--) {
-        if (aether_frames.journal[i].ptr == place) {
-            aether_frames.journal[i].owned = owned;
-            aether_frames.journal[i].place = 1;
+    if (t_frames.depth == 0 || !place || !release) return;
+    journal_at(place, release, t_frames.depth);
+    for (int i = t_frames.journal_count - 1; i >= 0; i--) {
+        if (t_frames.journal[i].ptr == place) {
+            t_frames.journal[i].owned = owned;
+            t_frames.journal[i].place = 1;
             return;
         }
     }
@@ -52,44 +106,44 @@ static void journal_at(const void* p, AetherUnwindFree free_fn, int depth) {
     // Re-tracking an already-journaled pointer updates in place: the
     // ownership handoff shapes (callee returns, caller re-arms its own
     // defer) must never accumulate two entries for one allocation.
-    for (int i = aether_frames.journal_count - 1; i >= 0; i--) {
-        if (aether_frames.journal[i].ptr == p) {
-            aether_frames.journal[i].free_fn = free_fn;
-            aether_frames.journal[i].depth = depth;
+    for (int i = t_frames.journal_count - 1; i >= 0; i--) {
+        if (t_frames.journal[i].ptr == p) {
+            t_frames.journal[i].free_fn = free_fn;
+            t_frames.journal[i].depth = depth;
             return;
         }
     }
-    if (aether_frames.journal_count == aether_frames.journal_capacity) {
-        int cap = aether_frames.journal_capacity ? aether_frames.journal_capacity * 2 : 32;
+    if (t_frames.journal_count == t_frames.journal_capacity) {
+        int cap = t_frames.journal_capacity ? t_frames.journal_capacity * 2 : 32;
         AetherUnwindEntry* grown =
-            (AetherUnwindEntry*)realloc(aether_frames.journal,
+            (AetherUnwindEntry*)realloc(t_frames.journal,
                                         (size_t)cap * sizeof(AetherUnwindEntry));
         if (!grown) return;  // OOM: skip journaling; worst case is the old leak
-        aether_frames.journal = grown;
-        aether_frames.journal_capacity = cap;
+        t_frames.journal = grown;
+        t_frames.journal_capacity = cap;
     }
-    aether_frames.journal[aether_frames.journal_count].ptr = p;
-    aether_frames.journal[aether_frames.journal_count].owned = NULL;
-    aether_frames.journal[aether_frames.journal_count].free_fn = free_fn;
-    aether_frames.journal[aether_frames.journal_count].depth = depth;
-    aether_frames.journal[aether_frames.journal_count].place = 0;
-    aether_frames.journal_count++;
+    t_frames.journal[t_frames.journal_count].ptr = p;
+    t_frames.journal[t_frames.journal_count].owned = NULL;
+    t_frames.journal[t_frames.journal_count].free_fn = free_fn;
+    t_frames.journal[t_frames.journal_count].depth = depth;
+    t_frames.journal[t_frames.journal_count].place = 0;
+    t_frames.journal_count++;
 }
 
 void aether_unwind_forget(const void* p) {
-    if (aether_frames.journal_count == 0 || !p) return;
+    if (t_frames.journal_count == 0 || !p) return;
     // Scan newest-first: frees are overwhelmingly LIFO.
-    for (int i = aether_frames.journal_count - 1; i >= 0; i--) {
-        if (aether_frames.journal[i].ptr == p) {
-            aether_frames.journal[i] = aether_frames.journal[aether_frames.journal_count - 1];
-            aether_frames.journal_count--;
+    for (int i = t_frames.journal_count - 1; i >= 0; i--) {
+        if (t_frames.journal[i].ptr == p) {
+            t_frames.journal[i] = t_frames.journal[t_frames.journal_count - 1];
+            t_frames.journal_count--;
             return;
         }
     }
 }
 
 int aether_unwind_journal_size(void) {
-    return aether_frames.journal_count;
+    return t_frames.journal_count;
 }
 
 // Free every entry tagged at the innermost depth and remove it. Runs
@@ -102,19 +156,19 @@ int aether_unwind_journal_size(void) {
 // may forget or track other entries, which must not move under the loop.
 void aether_unwind_drain_current(void) {
     int n = 0;
-    for (int i = 0; i < aether_frames.journal_count; i++)
-        if (aether_frames.journal[i].depth >= aether_frames.depth) n++;
+    for (int i = 0; i < t_frames.journal_count; i++)
+        if (t_frames.journal[i].depth >= t_frames.depth) n++;
     if (n == 0) return;
     AetherUnwindEntry* drained = (AetherUnwindEntry*)malloc((size_t)n * sizeof(AetherUnwindEntry));
     int w = 0, d = 0;
-    for (int i = 0; i < aether_frames.journal_count; i++) {
-        if (aether_frames.journal[i].depth < aether_frames.depth) {
-            aether_frames.journal[w++] = aether_frames.journal[i];
+    for (int i = 0; i < t_frames.journal_count; i++) {
+        if (t_frames.journal[i].depth < t_frames.depth) {
+            t_frames.journal[w++] = t_frames.journal[i];
         } else if (drained) {
-            drained[d++] = aether_frames.journal[i];
+            drained[d++] = t_frames.journal[i];
         }
     }
-    aether_frames.journal_count = w;
+    t_frames.journal_count = w;
     /* Newest first, as scope exits run: a deferred statement still sees the
      * locals declared before it. */
     for (int i = d - 1; i >= 0; i--) {
@@ -139,13 +193,13 @@ void aether_unwind_drain_current(void) {
 // protection. With no parent frame nothing can unwind past them; their
 // deferred frees run normally, so the entries just leave the journal.
 void aether_unwind_exit_frame(void) {
-    if (aether_frames.depth <= 1) {
-        aether_frames.journal_count = 0;
+    if (t_frames.depth <= 1) {
+        t_frames.journal_count = 0;
         return;
     }
-    for (int i = 0; i < aether_frames.journal_count; i++) {
-        if (aether_frames.journal[i].depth >= aether_frames.depth) {
-            aether_frames.journal[i].depth = aether_frames.depth - 1;
+    for (int i = 0; i < t_frames.journal_count; i++) {
+        if (t_frames.journal[i].depth >= t_frames.depth) {
+            t_frames.journal[i].depth = t_frames.depth - 1;
         }
     }
 }
@@ -179,10 +233,10 @@ void aether_teardown(void* obj) {
 }
 
 void aether_unwind_thread_cleanup(void) {
-    free(aether_frames.journal);
-    aether_frames.journal = NULL;
-    aether_frames.journal_count = 0;
-    aether_frames.journal_capacity = 0;
+    free(t_frames.journal);
+    t_frames.journal = NULL;
+    t_frames.journal_count = 0;
+    t_frames.journal_capacity = 0;
     free(tls_teardown_queue);
     tls_teardown_queue = NULL;
     tls_teardown_capacity = 0;

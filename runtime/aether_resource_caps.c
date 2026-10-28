@@ -87,14 +87,24 @@ void aether_caps_set_memory_cap(uint64_t bytes) {
     atomic_store_explicit(&g_mem_cap, bytes, memory_order_relaxed);
 }
 
-/* Nonzero once any thread has armed or tripped a deadline. The codegen's
- * loop-head check reads this first, so code that never uses deadlines pays
- * one load instead of a call and two TLS reads. It is never cleared: another
- * thread may still be armed, and the full check below stays exact. */
-int aether_caps_armed = 0;
+/* Nonzero once any thread has armed or tripped a deadline, or cancelled a
+ * call (aether_exec.c). The codegen's loop-head check reads this first, so
+ * code that never uses deadlines pays one load instead of a call and two
+ * TLS reads. It is never cleared: another thread may still be armed, and
+ * the full check below stays exact.
+ *
+ * Atomic, read with relaxed loads (a plain load on x86 and ARM): a cancel
+ * comes from another thread while the call runs, and a loop that started
+ * before it must see it. As a plain int, clang read it once before a loop
+ * whose body calls nothing and never again, so the loop ran to its end. */
+_Atomic int aether_caps_armed = 0;
+
+static inline void caps_arm(void) {
+    atomic_store_explicit(&aether_caps_armed, 1, memory_order_relaxed);
+}
 
 void aether_caps_set_deadline_ms(int64_t ms) {
-    if (ms > 0) aether_caps_armed = 1;
+    if (ms > 0) caps_arm();
     if (ms <= 0) {
         g_deadline_at_ns = 0;
     } else {
@@ -108,7 +118,7 @@ int aether_caps_deadline_tripped(void) {
     if (g_tripped) return 1;
     if (g_deadline_at_ns == 0) return 0;
     if (now_ns() >= g_deadline_at_ns) {
-        aether_caps_armed = 1;
+        caps_arm();
         g_tripped = 1;
         return 1;
     }
@@ -116,7 +126,7 @@ int aether_caps_deadline_tripped(void) {
 }
 
 void __aether_abort_call(void) {
-    aether_caps_armed = 1;
+    caps_arm();
     g_tripped = 1;
 }
 
@@ -126,7 +136,7 @@ void aether_caps_deadline_save(AetherDeadlineState* out) {
 }
 
 void aether_caps_deadline_restore(const AetherDeadlineState* s) {
-    if (s->at_ns || s->tripped) aether_caps_armed = 1;
+    if (s->at_ns || s->tripped) caps_arm();
     g_deadline_at_ns = s->at_ns;
     g_tripped = s->tripped;
 }
@@ -198,4 +208,42 @@ void aether_caps_free(void* p, size_t bytes) {
     if (!p) return;
     free(p);
     aether_caps_account_free(bytes);
+}
+
+/* ------------------------------------------------------------------
+ * Stop checks of an execution (#2956, runtime/aether_exec.h): its
+ * deadline, or a cancel from another thread. Here, with the deadline they
+ * read, so a C-backed std operation can ask without linking the execution
+ * frames (the compiler links the std objects and this file).
+ * ------------------------------------------------------------------ */
+
+#include "actors/aether_frames.h"
+
+int aether_exec_stop_reason(void) {
+    AetherFrames* F = aether_frames_here();
+    if (aether_caps_deadline_tripped()) return AETHER_STOP_DEADLINE;
+    AetherCancelCell* c = F->cell;
+    if (!c) return 0;
+    uint64_t s = atomic_load_explicit(&c->pending, memory_order_acquire);
+    if (!s) return 0;
+    /* The cancelled execution, or one nested inside it: the innermost goes
+     * first; the cancelled one at its own next safe point, once the host
+     * code between them has returned. */
+    for (int i = F->exec_depth - 1; i >= 0; i--)
+        if (F->exec[i].serial == s) return AETHER_STOP_CANCELLED;
+    /* A cancel for an execution that already ended: spent. One that has not
+     * begun yet waits for it. */
+    if (s <= F->serial)
+        atomic_compare_exchange_strong_explicit(&c->pending, &s, 0, memory_order_acq_rel,
+                                                memory_order_relaxed);
+    return 0;
+}
+
+int aether_exec_should_stop(void) {
+    if (!atomic_load_explicit(&aether_caps_armed, memory_order_relaxed)) return 0;
+    AetherFrames* F = aether_frames_here();
+    if (F->exec_depth <= 0) return 0;
+    int why = aether_exec_stop_reason();
+    if (why) F->exec[F->exec_depth - 1].stop = why;
+    return why != 0;
 }

@@ -33,7 +33,8 @@ fail=0
 want='boom 0 outcome 1 "boom 1"; plain 7 outcome 0; again 1 outcome 0
 which 0: inner 7 outcome 0 ""; outer 7 outcome 0
 which 1: inner -1 outcome 0 ""; outer 7 outcome 0
-which 2: inner 0 outcome 1 "inner panicked"; outer 7 outcome 0'
+which 2: inner 0 outcome 1 "inner panicked"; outer 7 outcome 0
+which 3: inner 0 outcome 2 "the call'"'"'s deadline passed"; outer 7 outcome 0'
 
 case "$(uname -s 2>/dev/null)" in
     MINGW*|MSYS*|CYGWIN*|Windows_NT) ext=dll; exe=.exe; dl="" ;;

@@ -9,9 +9,9 @@
 #      the deadline window — even though the loop would otherwise
 #      run for many seconds.
 #   3. `aetherc --emit=exe` on the same source emits ZERO
-#      references to aether_caps_deadline_tripped — proving the
-#      gate elides the tripwire on exe builds (`--emit=exe` pays
-#      nothing).
+#      references to aether_caps_deadline_tripped or aether_exec_poll
+#      (the loop-head safe point since #2956), proving the gate
+#      elides the tripwire on exe builds (`--emit=exe` pays nothing).
 
 set -e
 
@@ -30,9 +30,10 @@ trap 'rm -rf "$TMPDIR" || true' EXIT
     exit 1
 }
 
-# Tripwire symbol must appear ≥2 times: the extern decl in the
-# program prelude + at least one call at a loop head.
-TRIPWIRE_COUNT=$(grep -c "aether_caps_deadline_tripped" "$TMPDIR/loop_lib.c" || true)
+# The loop-head safe point must appear >=2 times: the extern decl in the
+# program prelude + at least one call at a loop head (#2956: the
+# safe point asks aether_exec_poll(), which also sees a cancel).
+TRIPWIRE_COUNT=$(grep -c "aether_exec_poll" "$TMPDIR/loop_lib.c" || true)
 [ "$TRIPWIRE_COUNT" -ge 2 ] || {
     echo "  [FAIL] tripwire emission: expected ≥2 (extern decl + ≥1 loop site), got $TRIPWIRE_COUNT"
     exit 1
@@ -123,7 +124,7 @@ ELAPSED=$(grep -o 'ELAPSED_MS=[0-9]*' "$TMPDIR/run.log" | cut -d= -f2)
     head -30 "$TMPDIR/build_exe.log"
     exit 1
 }
-EXE_COUNT=$(grep -c "aether_caps_deadline_tripped" "$TMPDIR/loop_exe.c" || true)
+EXE_COUNT=$(grep -c -e "aether_caps_deadline_tripped" -e "aether_exec_poll" "$TMPDIR/loop_exe.c" || true)
 [ "$EXE_COUNT" = "0" ] || {
     echo "  [FAIL] --emit=exe contains $EXE_COUNT tripwire references (expected 0)"
     exit 1

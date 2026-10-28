@@ -72,6 +72,36 @@ void aether_exec_set_next_deadline(int64_t ms);
  * anything has no frame: it records the OK outcome only. */
 void aether_exec_ok(void);
 
+/* A safe point (#2956): every loop head of --emit=lib
+ * code calls this once aether_caps_armed is set. Inside an execution whose
+ * deadline passed or that was cancelled, it ends the execution (it does
+ * not return); outside any execution it returns whether the deadline
+ * passed, and the loop breaks, as before. */
+int aether_exec_poll(void);
+
+/* For a C-backed std operation that runs long on its input: 1 when the
+ * running execution should stop, so the operation returns early, cleanly
+ * (an error, its own memory freed); the next safe point, or the export's
+ * return, ends the execution with the outcome. */
+int aether_exec_should_stop(void);
+
+/* A user `try` caught an interruption: it re-raises it after its own
+ * cleanup, instead of running its handler. In aether_unwind.c and
+ * aether_panic.c, which a program with a `try` links anyway, so it does not
+ * link this file's. */
+int aether_exec_interrupting(void);
+void aether_exec_reraise(void);
+
+/* The reason text of an interruption's outcome (aether_panic.c). */
+const char* aether_exec_reason(int outcome);
+
+#ifndef AETHER_EXEC_TOKEN_DEFINED
+#define AETHER_EXEC_TOKEN_DEFINED
+typedef struct AetherExecToken { void* cell; uint64_t serial; } AetherExecToken;
+#endif
+AetherExecToken aether_exec_token(void);
+int aether_exec_cancel(AetherExecToken token);
+
 int aether_last_outcome(void);
 const char* aether_last_outcome_text(void);
 

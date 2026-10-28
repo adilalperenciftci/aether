@@ -21,9 +21,9 @@
   naming the library's outcome accessor; on Windows dbghelp is loaded when
   a panic's stack trace is printed, so a C host needs no `-ldbghelp`. The
   frame costs the context save a catchable panic needs: an export that
-  calls a function is 5.8 ns a call on Windows MinGW against 0.4 ns
+  calls a function is 5.7 ns a call on Windows MinGW against 0.4 ns
   before (the stub saves with `__builtin_setjmp` on x86, and Win64 makes it
   keep its callee-saved registers), fib(30) through its stub is unchanged,
   and an export that can neither panic, allocate, loop nor call anything
-  gets no frame (0.38 ns against 0.19 ns). A `try` frame no longer calls
+  gets no frame (0.57 ns against 0.19 ns). A `try` frame no longer calls
   into the allocation journal when it is pushed (#2955, #2956).

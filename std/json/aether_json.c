@@ -579,6 +579,7 @@ typedef struct {
     int line;           // 1-indexed
     int col;            // 1-indexed
     Arena* arena;       // where we allocate values/strings/arrays
+    unsigned values;    // parsed so far, for the stop check below
 } Parser;
 
 static inline int p_eof(const Parser* s) {
@@ -1278,7 +1279,18 @@ static JsonValue* parse_object(Parser* s, int depth) {
     }
 }
 
+/* A call into a library that runs long on its input (#2956): every 4096
+ * values the parse asks whether the running execution's deadline passed or
+ * it was cancelled, and stops with an error (the document's arena freed by
+ * the caller), so the call ends at its next safe point. Outside an execution
+ * this is one load and a branch per 4096 values. */
+extern int aether_exec_should_stop(void);
+
 static JsonValue* parse_value_depth(Parser* s, int depth) {
+    if ((++s->values & 4095u) == 0 && aether_exec_should_stop()) {
+        err_set(s->line, s->col, "stopped: the call's deadline passed or it was cancelled");
+        return NULL;
+    }
     if (depth > JSON_MAX_DEPTH) {
         err_set(s->line, s->col, "nesting depth exceeds limit of %d", JSON_MAX_DEPTH);
         return NULL;
@@ -1328,6 +1340,7 @@ JsonValue* json_parse_raw_n(const char* data, size_t n) {
     s.line = 1;
     s.col = 1;
     s.arena = a;
+    s.values = 0;
 
     JsonValue* root = parse_value_depth(&s, 0);
     if (!root) {

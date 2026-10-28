@@ -173,9 +173,18 @@ static const AetherSandboxRendezvous* find_rendezvous(void) {
     return f();
 }
 
+/* aether_panic.c's: how a panic ends the levels pushed inside the frame it
+ * leaves. Set here, before any level of this copy can exist (every push
+ * looks for the copies first), so that a program that never enforces does
+ * not link this file for its panics. */
+extern void (*_Atomic aether_panic_sandbox_unwind)(int frames);
+
 static const AetherSandboxRendezvous* rv(void) {
     const AetherSandboxRendezvous* r = atomic_load_explicit(&g_rv, memory_order_acquire);
     if (r) return r;
+    /* Before g_rv is published: a thread that sees g_rv set sees this. */
+    atomic_store_explicit(&aether_panic_sandbox_unwind, aether_sandbox_unwind_to_frame,
+                          memory_order_relaxed);
     const AetherSandboxRendezvous* found = find_rendezvous();
     if (!found || found->version != AETHER_SANDBOX_RV_VERSION) found = &g_own_rv;
     const AetherSandboxRendezvous* expected = NULL;

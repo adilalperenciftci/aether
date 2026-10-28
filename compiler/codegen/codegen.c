@@ -3442,7 +3442,7 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
     static const char* const host_api[] = {
         "aether_set_memory_cap", "aether_set_call_deadline", "aether_deadline_tripped",
         "aether_set_caller", "aether_clear_caller", "aether_last_outcome",
-        "aether_last_outcome_text",
+        "aether_last_outcome_text", "aether_exec_token", "aether_exec_cancel",
     };
     int host_api_n = (int)(sizeof(host_api) / sizeof(host_api[0]));
     fprintf(gen->output,
@@ -8583,6 +8583,10 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#endif");
     emit_libc_extern_headers(gen, program);
     print_line(gen, "#include \"aether_panic.h\"");
+    /* #2956: a `try` that catches an interruption (a library call's deadline
+     * or cancel) re-raises it after its own cleanup. */
+    print_line(gen, "extern int  aether_exec_interrupting(void);");
+    print_line(gen, "extern void aether_exec_reraise(void);");
     print_line(gen, "#include \"aether_slice.h\"");   /* #1286 `T[]` fat pointer */
     /* Cons-cell sequence type — std.collections.string_seq.
      *
@@ -8616,14 +8620,21 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * --emit=exe builds — the gate elides both the extern decls and
      * the per-loop checks. */
     if (gen->emit_lib) {
-        /* aether_caps_armed is a plain global, nonzero once any thread has
-         * armed (or tripped) a deadline. Testing it first keeps the loop-head
-         * check to one load when no deadline is in use: the call and its two
-         * thread-local reads were ~22% of mquickjs-ae's run time on macOS,
-         * where each TLS read goes through _tlv_get_addr. */
-        print_line(gen, "extern int  aether_caps_armed;");
+        /* aether_caps_armed is a global, nonzero once any thread has armed
+         * (or tripped) a deadline or cancelled a call. Testing it first keeps
+         * the loop-head check to one load when no deadline is in use: the
+         * call and its two thread-local reads were ~22% of mquickjs-ae's run
+         * time on macOS, where each TLS read goes through _tlv_get_addr. An
+         * atomic, loaded relaxed (a plain load on x86 and ARM), so a loop
+         * sees a cancel another thread makes while it runs (#2956): as a
+         * plain int, clang loaded it once before a loop that calls nothing. */
+        print_line(gen, "extern _Atomic int aether_caps_armed;");
         print_line(gen, "extern int  aether_caps_deadline_tripped(void);");
         print_line(gen, "extern void __aether_abort_call(void);");
+        /* #2956: the safe point. Inside an execution a passed deadline or a
+         * cancel ends it (runtime/aether_exec.h); outside one the loop
+         * breaks as before. */
+        print_line(gen, "extern int  aether_exec_poll(void);");
     }
     print_line(gen, "#ifdef _WIN32");
     /* The program TU does not include <windows.h> (#2673): mingw-w64's
