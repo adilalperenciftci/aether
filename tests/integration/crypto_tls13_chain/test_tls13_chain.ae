@@ -41,6 +41,8 @@
 //   explicit    a P-256 leaf under ica whose key gives the curve explicitly
 //   icaex       CA under root excluding bar.example.com; wild (*.example.com)
 //               and wildok (*.other.com) under it
+//   kunoca      under root, keyUsage keyCertSign and no basicConstraints;
+//               kunocaleaf under it
 //   akikeyid, akiissuer, akiserial, akiall
 //               self-issued roots whose authorityKeyIdentifier names another
 //               key, issuer (CN=Someone Else), serial, or all three, each
@@ -181,6 +183,14 @@ fn pem_akiselfleaf() -> string {
     return "-----BEGIN CERTIFICATE-----\nMIIBkDCCATagAwIBAgIIJq8378VgmTgwCgYIKoZIzj0EAwIwIDEeMBwGA1UEAwwV\nQUtJIFRlc3QgUm9vdCBha2lzZWxmMCAXDTI2MDEwMTAwMDAwMFoYDzIxMjYwMTAx\nMDAwMDAwWjAaMRgwFgYDVQQDDA9ha2lzZWxmLmV4YW1wbGUwWTATBgcqhkjOPQIB\nBggqhkjOPQMBBwNCAAQwXwhWMZDN4IZCbOL35yfkeFy0FwX45KhWH407YcMScBJ9\n0izmqLn1TvuRjvPwRs0fRTqE6/ejEwBXIUsO4CYlo14wXDAaBgNVHREEEzARgg9h\na2lzZWxmLmV4YW1wbGUwHQYDVR0OBBYEFJxwb+mecoiyctxYhHb0mvIRnguaMB8G\nA1UdIwQYMBaAFBc8PYM8mCLyqGRZ+gSBw+Tbm0qnMAoGCCqGSM49BAMCA0gAMEUC\nIQD0h/d7AMGPjpT43/LQ0jI9UC7xfVgpKsoUiqUZV+SVfwIgM+JuPWOLvh4CQ8PH\npmz7T2zzlLf1CzdV0ILJpGL/1dI=\n-----END CERTIFICATE-----\n"
 }
 
+fn pem_kunoca() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBkTCCATegAwIBAgIJALzJ/52vN7+bMAoGCCqGSM49BAMCMBoxGDAWBgNVBAMM\nD0NoYWluIFRlc3QgUm9vdDAgFw0yNjAxMDEwMDAwMDBaGA8yMTI2MDEwMTAwMDAw\nMFowLDEqMCgGA1UEAwwhQ2hhaW4gVGVzdCBrZXlDZXJ0U2lnbiB3aXRob3V0IGNB\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEEUcFbCXUf7FKXo7LS/UXMiKR3UHU\nJ1jgwMXgJzDxKAJ69HTqkw4aahTxaRd2npx3YTmvnZo3aodeyDpshGj1ZKNSMFAw\nDgYDVR0PAQH/BAQDAgIEMB0GA1UdDgQWBBQ/Rt2adefI5PJQ5O0DPF0KCedokTAf\nBgNVHSMEGDAWgBSTExS7Fdf26uuPXD5rPfcbIRUjbTAKBggqhkjOPQQDAgNIADBF\nAiEAvZxO7aNwYGq/hTqvqPAbyqmNLMbA2T44wMnj18/KapMCIHfoUQJ1NvEXCdrR\n7gAiurO3FBxF6dsu52a5ibLZUjxM\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_kunocaleaf() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBmzCCAUGgAwIBAgIJAI4YOTUjHLNgMAoGCCqGSM49BAMCMCwxKjAoBgNVBAMM\nIUNoYWluIFRlc3Qga2V5Q2VydFNpZ24gd2l0aG91dCBjQTAgFw0yNjAxMDEwMDAw\nMDBaGA8yMTI2MDEwMTAwMDAwMFowGTEXMBUGA1UEAwwOa3Vub2NhLmV4YW1wbGUw\nWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAQOEGq2nZ/yKWa4xrWbmuPAnEB+2gwH\nfqQmT1QyrS9FgfdJRyDXBBNJZp05NxpWncWO3+upiV1v5XgJJzBqBFrio10wWzAZ\nBgNVHREEEjAQgg5rdW5vY2EuZXhhbXBsZTAdBgNVHQ4EFgQUgW5LjmTj6c4Egf60\nb8wu5txZVWkwHwYDVR0jBBgwFoAUP0bdmnXnyOTyUOTtAzxdCgnnaJEwCgYIKoZI\nzj0EAwIDSAAwRQIgbe1tX6ydTS5d3prag2Ip72rrO60o2ph5MQsz8y5wwi4CIQDB\nrL4LFy1fzH5tG44zbSg/fyhYhf+A78fY5FK8B0xQXg==\n-----END CERTIFICATE-----\n"
+}
+
 fn pem_icabadku() -> string {
     return "-----BEGIN CERTIFICATE-----\nMIIBnTCCAUKgAwIBAgIJAO5sOGJd9DW0MAoGCCqGSM49BAMCMBoxGDAWBgNVBAMM\nD0NoYWluIFRlc3QgUm9vdDAgFw0yNjAxMDEwMDAwMDBaGA8yMTI2MDEwMTAwMDAw\nMFowJjEkMCIGA1UEAwwbQ2hhaW4gVGVzdCBJQ0EgYmFkIGtleVVzYWdlMFkwEwYH\nKoZIzj0CAQYIKoZIzj0DAQcDQgAE+AT3F9m1t43Wl9KNC+yZsRppa8bDFl4kbaiG\nPsGxKk7l0lYq8gIUpwiyFW+NNS6VqczNLtuv9B4bwTJq1IeE96NjMGEwDwYDVR0T\nAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAQCAQYwHQYDVR0OBBYEFHxFROCF4R/hDlD3\nhc31z5wKhT7eMB8GA1UdIwQYMBaAFJMTFLsV1/bq649cPms99xshFSNtMAoGCCqG\nSM49BAMCA0kAMEYCIQCaWu+7dE/IqZF7nMyC1p94Ii6rWRmTVyp/NllSkM+V3gIh\nAMUI5Zc9uRt4FhKk4Yp+eKa/vEKhlA2ln7/mgL91HabB\n-----END CERTIFICATE-----\n"
 }
@@ -299,6 +309,10 @@ main() {
     fails = fails + check("an end entity of the root, as a leaf", path_result(pem_ee(), ""), 1)
     fails = fails + check("a certificate signed by an end entity (cA FALSE)", path_result(pem_forged(), pem_ee()), 0)
     fails = fails + check("a certificate signed by an end entity without basicConstraints", path_result(pem_forged2(), pem_eenobc()), 0)
+    // keyUsage keyCertSign does not make a CA: without basicConstraints cA,
+    // an intermediate still issues nothing, now that keyCertSign outside a
+    // CA is no longer refused on its own (it is not, by OpenSSL).
+    fails = fails + check("an intermediate with keyCertSign and no basicConstraints", path_result(pem_kunocaleaf(), pem_kunoca()), 0)
     fails = fails + check("an end entity offered beside the real intermediate", path_result(pem_leaf(), "${pem_ee()}${pem_ica()}"), 1)
 
     // What #3340's decoders read leniently (chain_verify_path accepted each

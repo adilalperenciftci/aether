@@ -12,6 +12,8 @@
 //
 //   <id> SKIP <reason>     not run (a feature this validator does not have)
 //   <id> FAIL <reason>     runs, and the result differs from limbo's
+//   <id> AGREE <reason>    runs and agrees with limbo, where OpenSSL does not
+//                          (a note: checked as any case that is not listed)
 //
 // A mismatch not in the file fails the run, and so does a FAIL entry that
 // now agrees (so the file stays exact). Lines starting with # are comments.

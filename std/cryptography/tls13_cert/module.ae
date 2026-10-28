@@ -680,43 +680,26 @@ fn parse_tbs_fields(tbsr: ptr, out: *LeafCert) -> string {
         if string.equals(eerr, "") != 1 { break }
         etag = asn1.last_tag(tbsr)
         if etag == 0xA3 {
-            if out.version != 2 { out.ext_bits = out.ext_bits | EXT_MALFORMED }
+            // Processed whatever the version says, as OpenSSL does: a
+            // "v2" certificate carrying extensions is bound by them.
             parse_extensions(ext_content, out)
         }
         bytes.free(ext_content)
     }
 
-    usage_check(out)
     self_signed_check(out)
 
     return ""
 }
 
-// The serialNumber, kept in out.serial. One of more than 20 octets (RFC
-// 5280 4.1.2.2; 21 when the first is the 0x00 that keeps it positive), or
-// an empty one, marks the certificate EXT_MALFORMED. Zero and negative
-// serials are let through: the same section asks users to handle those
-// gracefully.
+// The serialNumber, kept in out.serial; an empty one (not an INTEGER)
+// marks the certificate EXT_MALFORMED. A serial over 20 octets (RFC 5280
+// 4.1.2.2, a rule for CAs), zero or negative is let through, as OpenSSL
+// lets it: it plays no part in validation.
 fn serial_check(sn: ptr, out: *LeafCert) {
     if out.serial == null { out.serial = copy_range(sn, 0, bytes.length(sn)) }
     n = bytes.length(sn)
-    if n == 0 || n > 21 || (n == 21 && (bytes.get(sn, 0) & 0xFF) != 0) {
-        out.ext_bits = out.ext_bits | EXT_MALFORMED
-    }
-}
-
-// RFC 5280 rules across fields, each marking EXT_MALFORMED when broken:
-// nameConstraints only in a CA certificate (4.2.1.10), keyCertSign only
-// with basicConstraints cA (4.2.1.3), and a subjectAltName marked critical
-// when the subject is empty (4.2.1.6).
-fn usage_check(out: *LeafCert) {
-    is_ca = 0
-    if out.is_ca == 1 { is_ca = 1 }
-    if (out.ext_bits & EXT_NC) != 0 && is_ca == 0 { out.ext_bits = out.ext_bits | EXT_MALFORMED }
-    if out.has_key_usage == 1 && out.key_cert_sign == 1 && is_ca == 0 {
-        out.ext_bits = out.ext_bits | EXT_MALFORMED
-    }
-    if out.subject_len <= 2 && (out.ext_bits & EXT_SAN) != 0 && (out.ext_bits & EXT_SAN_CRITICAL) == 0 {
+    if n == 0 {
         out.ext_bits = out.ext_bits | EXT_MALFORMED
     }
 }
@@ -795,13 +778,13 @@ fn spki_kind(oid: string, params: ptr) -> int {
 
 // (KEY_*, RSA bits) for the subjectPublicKey `key` of an SPKI of `kind`:
 // an EC key must be an uncompressed point of its curve's size, Ed25519 32
-// bytes, and RSA an RSAPublicKey of RSA_MIN_BITS..RSA_MAX_BITS, a whole
-// number of bytes (CABF 6.1.5), with an odd exponent above 1.
+// bytes, and RSA an RSAPublicKey of RSA_MIN_BITS..RSA_MAX_BITS with an odd
+// exponent above 1.
 fn spki_key_check(kind: int, key: ptr, klen: int) -> (int, int) {
     if key == null || klen < 1 { return KEY_NONE, 0 }
     if kind == KEY_RSA {
         bits = spki_rsa_bits(key, klen)
-        if bits >= RSA_MIN_BITS && bits <= RSA_MAX_BITS && bits % 8 == 0 { return KEY_RSA, bits }
+        if bits >= RSA_MIN_BITS && bits <= RSA_MAX_BITS { return KEY_RSA, bits }
         return KEY_NONE, bits
     }
     if kind == KEY_ED25519 {
@@ -859,10 +842,9 @@ const EXT_EKU = 16 // extKeyUsage present
 const EXT_NC = 32 // nameConstraints present
 const EXT_UNKNOWN_CRITICAL = 64 // a critical extension this code does not process
 const EXT_DUPLICATE = 128 // an extension OID appears twice
-const EXT_MALFORMED = 256 // an extension or field did not parse, or breaks an RFC 5280 rule on its use
+const EXT_MALFORMED = 256 // an extension or field did not parse, or a key identifier or AIA is critical
 const EXT_SAN = 512 // subjectAltName present
 const EXT_SAN_EMPTY = 1024 // subjectAltName with no names
-const EXT_SAN_CRITICAL = 2048 // subjectAltName marked critical
 const EXT_SELF_SIGNED = 4096 // not an extension: OpenSSL's self-signed (self_signed_check)
 
 const EKU_SERVER = 1 // id-kp-serverAuth
@@ -946,7 +928,6 @@ fn bytes_list_has(l: ptr, b: ptr) -> int {
 fn parse_one_extension(oid: string, critical: int, value: @keep ptr, out: *LeafCert) {
     if string.equals(oid, "2.5.29.17") == 1 {
         out.ext_bits = out.ext_bits | EXT_SAN
-        if critical == 1 { out.ext_bits = out.ext_bits | EXT_SAN_CRITICAL }
         n_any = decode_san_dnsnames(value, out)
         if n_any == 0 { out.ext_bits = out.ext_bits | EXT_SAN_EMPTY }
         return
@@ -971,13 +952,13 @@ fn parse_one_extension(oid: string, critical: int, value: @keep ptr, out: *LeafC
         return
     }
     // Recognised and not acted on: the subject and authority key
-    // identifiers and authority information access, which RFC 5280 4.2.1.1,
-    // 4.2.1.2 and 4.2.2.1 say MUST be non-critical (a critical one is
-    // refused as misused); CRL distribution points, certificate policies
-    // and SCTs. Policy constraints MUST be critical (4.2.1.11), and a
-    // critical one asks for policy processing this code does not do, so
-    // either way it is refused. Anything else that is critical cannot be
-    // honoured.
+    // identifiers (kept for self_signed_check) and authority information
+    // access, which RFC 5280 4.2.1.1, 4.2.1.2 and 4.2.2.1 say MUST be
+    // non-critical (a critical one is refused, as OpenSSL refuses it); CRL
+    // distribution points, certificate policies, SCTs, and non-critical
+    // policy constraints. Policy constraints that are critical ask for
+    // policy processing this code does not do. Anything else that is
+    // critical cannot be honoured.
     if string.equals(oid, "2.5.29.14") == 1 {
         if critical == 1 { out.ext_bits = out.ext_bits | EXT_MALFORMED }
         parse_ski(value, out)
@@ -990,41 +971,15 @@ fn parse_one_extension(oid: string, critical: int, value: @keep ptr, out: *LeafC
     }
     if string.equals(oid, "1.3.6.1.5.5.7.1.1") == 1 {
         if critical == 1 { out.ext_bits = out.ext_bits | EXT_MALFORMED }
-        if aia_ok(value) == 0 { out.ext_bits = out.ext_bits | EXT_MALFORMED }
         return
     }
     if string.equals(oid, "2.5.29.36") == 1 {
-        if critical == 1 {
-            out.ext_bits = out.ext_bits | EXT_UNKNOWN_CRITICAL
-        } else {
-            out.ext_bits = out.ext_bits | EXT_MALFORMED
-        }
+        if critical == 1 { out.ext_bits = out.ext_bits | EXT_UNKNOWN_CRITICAL }
         return
     }
     if string.equals(oid, "2.5.29.31") == 1 { return }
     if string.equals(oid, "2.5.29.32") == 1 || string.equals(oid, "1.3.6.1.4.1.11129.2.4.2") == 1 { return }
     if critical == 1 { out.ext_bits = out.ext_bits | EXT_UNKNOWN_CRITICAL }
-}
-
-// AuthorityInfoAccessSyntax ::= SEQUENCE SIZE (1..MAX) OF AccessDescription
-// AccessDescription ::= SEQUENCE { accessMethod OID, accessLocation GeneralName }
-// 1 when the extnValue `value` is one.
-fn aia_ok(value: @keep ptr) -> int {
-    vl = bytes.length(value)
-    tag, co, cl, nx = der_tlv(value, 0, vl)
-    if tag != 0x30 || nx != vl || cl == 0 { return 0 }
-    p = co
-    end = co + cl
-    while p < end {
-        dt, dco, dcl, dnx = der_tlv(value, p, end)
-        if dt != 0x30 { return 0 }
-        ot, _oco, _ocl, onx = der_tlv(value, dco, dco + dcl)
-        if ot != 0x06 { return 0 }
-        lt, _lco, _lcl, lnx = der_tlv(value, onx, dco + dcl)
-        if lt < 0 || lnx != dco + dcl { return 0 }
-        p = dnx
-    }
-    return 1
 }
 
 // subjectKeyIdentifier ::= OCTET STRING: kept in out.ski.
@@ -1177,9 +1132,12 @@ fn parse_ext_key_usage(value: @keep ptr, out: *LeafCert) {
 // GeneralSubtree ::= SEQUENCE { base GeneralName, minimum [0] DEFAULT 0,
 //                               maximum [1] OPTIONAL }
 // Each base is kept as its tag byte followed by its content, and its form
-// goes to nc_forms. EXT_MALFORMED: neither list, an empty list, a minimum or
-// maximum (RFC 5280 4.2.1.10: MUST be absent), or a base that is not a
-// well-formed constraint of its form (constraint_ok).
+// goes to nc_forms. EXT_MALFORMED: an empty permittedSubtrees (read as
+// "no constraint", as OpenSSL reads it, it would leave a constrained CA
+// unconstrained, so it is refused), a minimum or maximum (RFC 5280
+// 4.2.1.10: MUST be absent; OpenSSL refuses them too), or a base that is
+// not a well-formed constraint of its form (constraint_ok). An empty
+// excludedSubtrees, or neither list, constrains nothing, as in OpenSSL.
 fn parse_name_constraints(value: @keep ptr, out: *LeafCert) {
     r = asn1.reader_new(value)
     body, berr = asn1.read_tlv(r)
@@ -1190,7 +1148,6 @@ fn parse_name_constraints(value: @keep ptr, out: *LeafCert) {
         if body != null { bytes.free(body) }
         return
     }
-    lists = 0
     br = asn1.reader_new(body)
     while asn1.reader_eof(br) != 1 {
         trees, terr = asn1.read_tlv(br)
@@ -1200,7 +1157,6 @@ fn parse_name_constraints(value: @keep ptr, out: *LeafCert) {
             break
         }
         if ttag == 0xA0 || ttag == 0xA1 {
-            lists = lists + 1
             dest = list_new()
             tr = asn1.reader_new(trees)
             while asn1.reader_eof(tr) != 1 {
@@ -1231,7 +1187,7 @@ fn parse_name_constraints(value: @keep ptr, out: *LeafCert) {
                 bytes.free(sub)
             }
             asn1.reader_free(tr)
-            if list_size(dest) == 0 { out.ext_bits = out.ext_bits | EXT_MALFORMED }
+            if ttag == 0xA0 && list_size(dest) == 0 { out.ext_bits = out.ext_bits | EXT_MALFORMED }
             if ttag == 0xA0 {
                 free_bytes_list(out.nc_permitted)
                 out.nc_permitted = dest
@@ -1244,7 +1200,6 @@ fn parse_name_constraints(value: @keep ptr, out: *LeafCert) {
         }
         bytes.free(trees)
     }
-    if lists == 0 { out.ext_bits = out.ext_bits | EXT_MALFORMED }
     asn1.reader_free(br)
     bytes.free(body)
 }
@@ -2631,11 +2586,12 @@ const MAX_CHAIN_DEPTH = 8
 //     whose basicConstraints says it is not a CA, or whose keyUsage lacks
 //     keyCertSign, issues nothing;
 //   - no certificate has an unknown critical, repeated or malformed
-//     extension, an extension used where RFC 5280 forbids it (a critical
-//     key identifier or authority information access, policy constraints,
-//     name constraints or keyCertSign without cA, a non-critical
-//     subjectAltName beside an empty subject), or a serial number over 20
-//     octets; no CA has an empty subject;
+//     extension, or a critical key identifier or authority information
+//     access (RFC 5280 says MUST be non-critical; OpenSSL refuses them
+//     too); no CA has an empty subject. The issuance rules OpenSSL does
+//     not enforce either (nameConstraints or keyCertSign outside a CA,
+//     serial length, a non-critical SAN beside an empty subject) are not
+//     enforced, so both backends accept the same chains;
 //   - the leaf, and every issuer that lists extendedKeyUsage, allows
 //     `purpose` (PURPOSE_SERVER: id-kp-serverAuth, PURPOSE_CLIENT:
 //     id-kp-clientAuth); anyExtendedKeyUsage alone does not (RFC 5280

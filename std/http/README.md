@@ -174,10 +174,10 @@ and Go's crypto/x509 read it: the backend a program runs on must not change
 which chains it accepts), every issuer's name
 constraints hold (DNS names, IP addresses, mailboxes, URI hosts, directory
 names; a wildcard is refused under an excluded name it could match), and no
-certificate has a critical extension the client does not process or one
-RFC 5280 forbids where it appears. Every candidate path is tried, within a
-bound, so an extra or cross-signed certificate in the server's list does not
-hide a good one. Before #3303 only the names and the signatures were
+certificate has a critical extension the client does not process (nor a
+critical key identifier, which OpenSSL refuses too). Every candidate path is
+tried, within a bound, so an extra or cross-signed certificate in the
+server's list does not hide a good one. Before #3303 only the names and the signatures were
 checked, and a certificate a CA issued to any site could sign one for any
 other. The rules are measured against the x509-limbo and bettertls corpora
 in CI; `tests/conformance/x509_limbo/expected.txt` lists the cases that
