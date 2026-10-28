@@ -217,6 +217,10 @@ typedef struct HttpServer {
      * on a running server frees what it replaces only once no accept still
      * holds it (#3371). */
     pthread_mutex_t tls_lock;
+    /* Serializes the configuration calls (server_set_tls, server_set_tls_pem,
+     * server_set_tls_backend): each replaces tls_cert_pem and tls_key_pem,
+     * and two at once from two threads would free the old copies twice. */
+    pthread_mutex_t tls_config_lock;
 
     // HTTP/2 (#260 Tier 2). When h2_enabled == 1:
     //   - The TLS context advertises "h2" + "http/1.1" via ALPN so

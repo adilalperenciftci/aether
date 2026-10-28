@@ -1393,6 +1393,7 @@ HttpServer* http_server_create(int port) {
     atomic_init(&server->loop_plan_gen, 0);
     pthread_mutex_init(&server->live_lock, NULL);
     pthread_mutex_init(&server->tls_lock, NULL);
+    pthread_mutex_init(&server->tls_config_lock, NULL);
     server->live_fds = NULL;
     server->live_count = 0;
     server->live_cap = 0;
@@ -2349,7 +2350,9 @@ const char* http_server_set_tls_raw(HttpServer* server,
         tls_text_wipe_free(cert);
         return why;
     }
+    pthread_mutex_lock(&server->tls_config_lock);
     const char* err = tls_apply_pem(server, cert, key);
+    pthread_mutex_unlock(&server->tls_config_lock);
     tls_text_wipe_free(cert);
     tls_text_wipe_free(key);
     return err;
@@ -2361,7 +2364,10 @@ const char* http_server_set_tls_pem_raw(HttpServer* server,
     if (!server) return "server is null";
     if (!cert_pem || !*cert_pem) return "cert_pem is empty";
     if (!key_pem  || !*key_pem)  return "key_pem is empty";
-    return tls_apply_pem(server, cert_pem, key_pem);
+    pthread_mutex_lock(&server->tls_config_lock);
+    const char* err = tls_apply_pem(server, cert_pem, key_pem);
+    pthread_mutex_unlock(&server->tls_config_lock);
+    return err;
 }
 
 /* Choose this server's TLS backend (#1298): "aether" (the pure-Aether TLS
@@ -2390,17 +2396,19 @@ const char* http_server_set_tls_backend_raw(HttpServer* server, const char* name
     } else {
         return "unknown TLS backend (use \"aether\", \"openssl\" or \"\")";
     }
+    pthread_mutex_lock(&server->tls_config_lock);
     int previous = server->tls_backend;
     server->tls_backend = b;
+    const char* err = "";
     if (server->tls_enabled && server->tls_cert_pem && server->tls_key_pem) {
         /* The server's own copies, applied again on the new backend; a
          * backend that cannot serve them is not chosen, and the server keeps
          * the one it had (#3328). */
-        const char* err = tls_apply_pem(server, server->tls_cert_pem, server->tls_key_pem);
+        err = tls_apply_pem(server, server->tls_cert_pem, server->tls_key_pem);
         if (err && *err) server->tls_backend = previous;
-        return err;
     }
-    return "";
+    pthread_mutex_unlock(&server->tls_config_lock);
+    return err;
 }
 
 /* Enable HTTP/2 on this server (#260 Tier 2). Once enabled:
@@ -7858,6 +7866,7 @@ void http_server_free(HttpServer* server) {
     free(server->live_fds);
     pthread_mutex_destroy(&server->live_lock);
     pthread_mutex_destroy(&server->tls_lock);
+    pthread_mutex_destroy(&server->tls_config_lock);
 #if !defined(_WIN32) && !defined(__wasi__)
     if (server->wake_fds[0] >= 0) close(server->wake_fds[0]);
     if (server->wake_fds[1] >= 0) close(server->wake_fds[1]);

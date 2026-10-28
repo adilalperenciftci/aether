@@ -4,10 +4,16 @@
 # server_set_tls on a running server swapped the OpenSSL context, and with
 # #3362 the pure server's parsed credentials, without a lock: a connection
 # accepted between reading the pointer and taking its own reference used
-# freed memory. Two certificates for localhost, both signed by one root; an
-# actor sets the server's TLS 200 times, in turn, while 100 fetches run, on
-# each backend. Every fetch must succeed and nothing may crash (the
-# sanitizer legs run this too).
+# freed memory. Two certificates for localhost, both signed by one root; two
+# actors at once each set the server's TLS 100 times, in turn, while 100
+# fetches run, on each backend. Every fetch must succeed and nothing may
+# crash (the sanitizer legs run this too). The two at once are the second
+# race: each call replaced the server's stored copies of the certificate and
+# key outside any lock, so two together freed one old copy twice.
+#
+# Then the same through a proxy gateway on the OpenSSL backend, whose
+# connections the event loop takes on Linux and macOS: it takes the server's
+# context for each handshake, and must hold it while a re-load replaces it.
 #
 # In a build without OpenSSL only the "aether" backend runs.
 
@@ -50,13 +56,41 @@ BACKENDS="aether"
 if BACKEND=openssl ROOT_CA="$TMP/root.pem" CERT_A=/nonexistent KEY_A=/nonexistent \
         "$TMP/reload" 2>&1 | grep -q "has no OpenSSL"; then :; else BACKENDS="aether openssl"; fi
 
+# Run the program on backend $1, GATEWAY=$2; what it prints lands in $out,
+# and how it ended, should it die without a word.
+reload() {
+    rc=0
+    out=$(BACKEND="$1" GATEWAY="$2" ROOT_CA="$TMP/root.pem" CERT_A="$TMP/a.pem" KEY_A="$TMP/a.key" \
+          CERT_B="$TMP/b.pem" KEY_B="$TMP/b.key" "$TMP/reload" 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] || out="$out (exit status $rc)"
+}
+
 for b in $BACKENDS; do
-    out=$(BACKEND="$b" ROOT_CA="$TMP/root.pem" CERT_A="$TMP/a.pem" KEY_A="$TMP/a.key" \
-          CERT_B="$TMP/b.pem" KEY_B="$TMP/b.key" "$TMP/reload" 2>&1) || :
+    reload "$b" 0
     case "$out" in
         *"OK 100 of 100 after 200 loads"*) echo "    ok: $b backend: 100 fetches through 200 re-loads" ;;
         *) echo "$out" | tail -5 | sed 's/^/        /'; fail "$b backend: $out" ;;
     esac
 done
+
+# The event loop carries the handshakes of a proxy gateway's connections on
+# the OpenSSL backend, and takes its context from the server while re-loads
+# replace it. Windows has no event loop: there the gateway's connections are
+# the worker path's, which the cases above cover.
+case "$BACKENDS" in
+    *openssl*)
+        reload openssl 1
+        case "$out" in
+            *"OK 100 of 100 after 200 loads, "*" on the loop"*) ;;
+            *) echo "$out" | tail -5 | sed 's/^/        /'; fail "openssl gateway: $out" ;;
+        esac
+        taken=$(printf '%s\n' "$out" | sed -n 's/.*loads, \([0-9]*\) on the loop.*/\1/p' | tail -1)
+        case "$(uname -s)" in
+            MINGW*|MSYS*|CYGWIN*|Windows_NT) ;;
+            *) [ "${taken:-0}" -gt 0 ] || fail "openssl gateway: the event loop took no connection, so it was not tested" ;;
+        esac
+        echo "    ok: openssl gateway: 100 fetches through 200 re-loads, $taken on the event loop"
+        ;;
+esac
 
 echo "  [PASS] $NAME"
