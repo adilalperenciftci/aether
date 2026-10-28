@@ -277,7 +277,7 @@
       <h3 class="function-name">connect_buffered <span class="kind">fn</span></h3>
       <pre class="usage"><code>connect_buffered(host, port, read_buffer) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
       <p class="signature"><span class="sig-params">host: string, port: int, read_buffer: int</span></p>
-      <p class="doc">connect, with the receive buffer (SO_RCVBUF) set to `read_buffer` bytes before the connection is made, so the window the connection opens with is that size. A client meant to take little while it does not read (a test of a server's send timeout) connects this way: set_read_buffer on a connected socket shrinks the buffer, but the kernel still takes the window it advertised when connecting (#3338). No kernel promises the size, and macOS's loopback has taken far more; `available` says how much is waiting. Returns (socket, &quot;&quot;) or (null, error); `read_buffer` must be positive.</p>
+      <p class="doc">connect, with the receive buffer (SO_RCVBUF) set to `read_buffer` bytes before the connection is made, so the window the connection opens with is that size. A client meant to take little while it does not read (a test of a server's send timeout) connects this way: set_read_buffer on a connected socket shrinks the buffer, but the kernel still takes the window it advertised when connecting (#3338). The size is a request: a kernel may round it up (macOS holds about 300 KB for a 16 KB request on loopback). Returns (socket, &quot;&quot;) or (null, error); `read_buffer` must be positive.</p>
     </div>
     <div class="function" id="write" data-name="write">
       <h3 class="function-name">write <span class="kind">fn</span></h3>
