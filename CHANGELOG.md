@@ -14,6 +14,215 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.856.0]
+
+### Security
+
+- **The pure-Aether TLS client no longer accepts a certificate signed by a
+  non-CA.** `std.cryptography.tls13_cert`'s `chain_verify_path` checked only
+  names and signatures at each hop, so any leaf certificate a trusted CA had
+  issued could sign a certificate for any host and the client accepted it. An
+  issuing certificate must now carry basicConstraints `cA=TRUE` and, when it has
+  a keyUsage extension, `keyCertSign`. `leaf_is_ca` and `leaf_key_cert_sign`
+  report both. The rest of RFC 5280 path validation listed in #3303
+  (pathLenConstraint, extendedKeyUsage, critical extensions, name constraints,
+  intermediate validity, backtracking) is still open. The OpenSSL backend was
+  not affected. Contributed by Adil Alperen Çiftci (#3340).
+
+## [0.855.0]
+
+### Added
+
+- **Actor protocols.** A `protocol` lists the messages a reference to an
+  actor may be sent and in which order, as `state -> Message -> state`
+  lines; `actor Writer implements FileWriter` promises an arm for each. The
+  compiler follows every reference through the function holding it, across
+  branches, loops and asks, and refuses a send the protocol does not allow
+  in a state the reference may be in (E0600), naming the states and what
+  each takes: `Write` after `Close`, `Close` twice around a loop. A
+  parameter typed `actor_ref[FileWriter]` takes any actor that implements
+  it; a reference passed, copied, stored or captured is followed from an
+  unknown state; a bare `actor_ref` follows no protocol. The API pages
+  (docgen) now show an exported `message` or `protocol` as declared (#385).
+
+- **Use after free, double free and dead views are compile errors.** A
+  local freed on every path that reaches a later use is E0903 there: a read
+  after `heap.free(n)`, a second `free(p)`, a free a loop repeats on its next
+  turn without binding the local afresh, and a read of a view (a slice
+  `buf[1..3]`, a cast `p as *Node`, `bytes.view(b)`) after its storage was
+  freed or after a call that may move it (`bytes.set`, `bytes.copy_from_*`).
+  Only a fault that happens on every path is reported. What a call does is
+  read from its declaration: a `ptr`, `*T` or slice parameter declared
+  `@frees` frees what it is given and one declared `@moves` may move its
+  storage; C's `free` and `heap.free` free theirs. std's release functions
+  declare `@frees`, std.bytes' growing calls `@moves` and its views `@into`,
+  and an Aether function's declaration is checked against its body (E0904).
+  The check found a freed snapshot read on a test's failure path (#1300).
+  A program E0903 now refuses has a use after free on every path through
+  it: move the use before the free, or bind the local to a fresh value.
+
+- **Owned pointers: a buffer released wherever it ends up.** `type Buf =
+  owned ptr drop bytes.free` makes a pointer type whose holder releases it
+  with the named function: a local at its function's every exit and when it
+  is bound again, a handler's binding of a message field when the handler
+  ends, an actor's state field when it is replaced or the actor ends, and a
+  message dropped undelivered with the message. `move` hands it on and
+  leaves the place it left holding nothing, a function borrows it as it
+  borrows a `ptr`, and a copy without `move`, a free or keep behind the
+  holder's back, and a holder that could not release it (a struct field, a
+  closure, an optional) are E0905. A buffer moved to an actor no longer
+  leaks when the handler forgets it or its actor dies first (#3142).
+
+### Changed
+
+- **A send no arm of the target actor takes is a compile error.** `w !
+  Close {}` and `w ? Close {}` only checked that `w` was an actor reference
+  and `Close` a declared message, so a message the actor had no receive arm
+  for compiled and was dropped at run time. Where the target's type names
+  its actor (a `spawn(Writer())` result, a reference typed
+  `actor_ref[Writer]`, an actor from an imported module) such a send is now
+  refused (E0600), naming the actor and the message; a `_` arm takes every
+  message, and a bare `actor_ref` is not checked (#385).
+  Code that sent such a message compiled before and lost it at run time; to
+  build it again, add the arm, a `_` arm, or send through a parameter typed
+  bare `actor_ref`.
+
+- **`ae add` needs no git, and pins each package by the hash of its tree.**
+  It takes the source archive the forge serves for the tag (or the default
+  branch) over HTTPS: GitHub, GitLab, Bitbucket, Codeberg and self-hosted
+  Gitea, Forgejo or GitLab, or a mirror named by `AE_RELEASE_BASE_URL`, over
+  HTTP or `file://`. The fetcher is an Aether program (`tools/ae-fetch`,
+  std.http, std.tar, std.zlib), shipped as source and built by the
+  installed toolchain on first use. `aether.toml` gains
+  `[dependency-hashes]`: a later `ae add` must fetch the same tree (a moved
+  tag is refused), `ae build`, `ae run` and `ae lib-path` stop on an
+  installed package that is not the pinned tree, and `--update` moves a pin
+  to another version or tree. Without `@version`, `ae add` installs the
+  version `aether.toml` names, so a fresh checkout's dependencies install at
+  their pinned versions (#1362).
+  Migration: `--source` now means the source archive rather than a git
+  clone. Asking for another version of a dependency `aether.toml` already
+  lists needs `--update` (it used to print "Already in dependencies." and
+  change nothing). A package cached by git before this keeps working and is
+  not checked; `ae add <package> --update` refetches it and pins its hash.
+  A repository's symlinks are installed as symlinks and their targets are
+  part of the hash; one whose target leaves the package is refused, and on
+  Windows a symlink needs Developer Mode, as git needs it (#3306).
+
+### Fixed
+
+- **A core waiting in an ask hands over an actor with more messages than its
+  mailbox holds.** Such an actor kept one of its messages in a core queue,
+  and moved, its senders' next messages could have overtaken it, so it waited
+  for the ask to end. The relief now puts what its full mailbox cannot take,
+  in order, into an overflow that belongs to the actor (its `inbox`, as an
+  actor with a thread of its own has), and the actor moves with mailbox and
+  overflow together. Every delivery to an actor whose overflow holds anything
+  goes behind it (the core loop's batch, local sends, the reliefs, the
+  deferred-send flush), each step refills the mailbox from it, and a panic
+  drops what it holds, so each sender's messages keep their order on any
+  core (#3241).
+
+- **The C send buffer sends every message it holds, in order.**
+  `send_buffered()` stored a message one past its buffer when a flush could
+  place nothing (the target on the sender's core, its mailbox full), and
+  wrote further with each send after. The flush itself kept what its
+  same-core path could not place (and a target change then sent those to the
+  new target, a force flush dropped them), dropped the part of a cross-core
+  batch a full queue had no room for while still counting it in flight, so
+  the actor could never move again, counted none of its messages as sent, and
+  from a thread that is no core's wrote the shared channel without its lock.
+  A flush now hands the messages to a new `scheduler_send_many()`, which sends
+  them as that many single sends would go (behind what is queued for the
+  actor, kept when a queue is full) and enqueues a cross-core run in one
+  batch. The per-actor SPSC queue the same-core path used, outside every
+  ordering rule and drained only while the mailbox held something, is filled
+  by nothing now (#3292).
+
+- **A receive arm `_ -> { ... }` runs.** The language reference documented
+  the `_` arm as taking every message no other arm names, and it compiled,
+  but codegen gave it no handler: such a message was dropped and the body
+  never ran, and an actor whose only arm was `_` had none. The `_` arm now
+  has a handler that every unnamed message type is dispatched to, the
+  message is released after it as a handled one is, and an ask it does not
+  answer fails at once. A second `_` arm in one actor can never run and is
+  refused (E0600) (#3289).
+
+- **A function can take or return `actor_ref[Actor]`.** Its C declaration
+  names the actor's type, and the function declarations came before the
+  actors' forward typedefs, so the C compile failed with "unknown type
+  name". Actor typedefs are now declared with the structs', ahead of every
+  function (#3290).
+
+- **A borrowed `ptr` that leaves as a slice is E0902.** `(p as byte[])[0..n]`
+  returned from a function, or stored in a module-level `var`, carried the
+  caller's memory out of the call with no error, though `p as *Node` and
+  `p + n` were refused: a slice was not counted as something that holds a
+  pointer. A slice made from a `ptr` now carries it as a cast does, and
+  `@into` is accepted on a function whose result is a slice; std.bytes'
+  `view`, `capacity_view` and `data` declare their buffer `@into` (#3294).
+  A function that returned a slice of a borrowed `ptr` (`(p as byte[])[0..n]`,
+  `bytes.view(b)` of a parameter) compiled before and is E0902 now: declare
+  the parameter `@into`, as the E0902 help says.
+
+- **The fork-join benchmarks compile again.** Their kernels handed back a
+  borrowed item and one result closure kept a borrowed pointer, both E0902
+  since 0.836, and nothing built the programs under `benchmarks/`, so the
+  break went unseen. The kernels return `null` (their result was discarded),
+  the closure declares its parameter `@keep`, and a test now type-checks
+  every benchmark program (#3295).
+
+- **A string whose bytes look like a string header is read as bytes.** A
+  `string` argument to a C function not declared `@aether` arrives as its
+  characters, and some std and contrib C functions then asked those
+  characters whether they were a counted string. A payload beginning with
+  the header's magic bytes and plausible fields was taken for one, and a
+  pointer made of payload bytes was followed: a crash, or a read of
+  arbitrary memory, from a tar block, a regex subject, an HTTP response body
+  (an upstream or a cached one, through the proxy), an SQLite blob or a
+  bytes copy an attacker shapes. A C function that reads the header now
+  declares the parameter `@aether` and receives the counted string (std.bytes
+  `copy_from_string`, std.regex, std.tar, contrib.sqlite), and
+  `http_response_set_body_n`, whose body is bytes with a length, reads it as
+  bytes; docs/c-interop.md states the rule (#3297).
+
+- **`s + n` on a slice points at element `n`.** A slice decays to its
+  pointer in arithmetic, and that pointer was arithmetic on a bare `ptr`,
+  which counts bytes: `b + 3` on a `uint32[]` pointed into the first
+  element, so a write through it landed at byte 3. It now points at element
+  `n`, as the language reference says and as it does for a `T[N]` array; a
+  bare `ptr` still counts bytes, and so does a difference of a `ptr` and a
+  slice (#3299).
+
+- **An optional state field is stored by a handler's assignment.**
+  `kept = bytes.new(4)` in a handler, for `state kept: ptr? = none`,
+  declared a local of that name, which shadowed the state: the field stayed
+  `none` and the value was lost (a buffer leaked). A field of any other type
+  was stored. An optional state field is now stored as the others are,
+  dropping what it held (#3300).
+
+- **A reply's value is type-checked.** `reply label ?? "none"` sent an
+  `int`: the value of a `reply` was never checked as an expression, so a `??`
+  (or anything whose type that check sets) stayed untyped, and both the
+  reply and the asker took it for an int. It is now checked as a `return`'s
+  value is (#3301).
+
+- **std.tar reads pax and GNU archives.** The reader refused the archives
+  `git archive`, GitHub and GitLab serve: they open with a pax global header,
+  which stopped it with "unsupported entry type flag", and GNU tar's magic
+  failed the format check. A pax extended header (`x`) and a GNU long name or
+  long link (`L`, `K`) now apply to the entry after them, so a path past
+  ustar's 255 bytes and a pax size past 8 GiB read whole; a pax global header
+  is read past; GNU's `ustar  ` magic is accepted. Metadata entries are
+  bounded (1 MiB each, 64 before an entry). The writer still writes POSIX
+  ustar (#3302).
+
+- **`ae add` refuses a package name with `..`.** The name was checked only
+  for shell-safe characters, so `ae add github.com/../../somewhere`
+  installed outside `~/.aether/packages`. Every component must now be
+  non-empty and neither `.` nor `..`, and a version must be a tag name;
+  nothing is written otherwise (#3304).
+
 ## [0.854.0]
 
 ### Added
