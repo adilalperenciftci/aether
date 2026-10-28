@@ -59,6 +59,15 @@ if err != "" {
 }
 ```
 
+A program that holds its certificate and key in memory, and should not write
+the key to disk to hand it over, gives them as PEM text instead:
+`server_set_tls_pem(server, cert_pem, key_pem)` makes the same checks with
+the same results (#3362). Either way the first certificate is the server's
+own and the rest are the chain it sends with it, so a CA's bundle (leaf, then
+intermediates) serves as issued on both backends (#3370). The server keeps
+its own copy of the text, for a later `server_set_tls_backend`, and wipes it
+when it is replaced or the server is freed.
+
 **Two backends.** OpenSSL is the default wherever it is compiled in. The other
 is a pure-Aether TLS 1.3 implementation with no OpenSSL dependency at all,
 used automatically when the build has no OpenSSL, which is what lets a
@@ -74,13 +83,16 @@ err = http.server_set_tls_backend(server, "aether")
 if err != "" { println("TLS backend: ${err}"); return }
 ```
 
-The pure backend is **opt-in at the application**, because it reads the
-certificate and key itself and so needs filesystem capability that a plain
-`std.http` user should not inherit:
+The pure backend is **opt-in at the application**: a program that uses it
+imports it, and a plain `std.http` user does not carry it. The server reads
+the certificate and key files for both backends, so the pure server reads
+no files itself (and needs no `--with=fs` under `--emit=lib`); it parses
+them once, when the server is set up, and every connection shares that
+(#3362):
 
 ```aether,fragment
 import std.http
-import std.cryptography.tls13_server   // pure TLS server; needs --with=fs
+import std.cryptography.tls13_server   // pure TLS server
 ```
 
 The pure backend has constraints the OpenSSL one does not; they are worth

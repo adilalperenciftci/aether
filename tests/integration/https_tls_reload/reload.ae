@@ -1,0 +1,119 @@
+// A running TLS server re-loads its certificate while it accepts, for
+// test_https_tls_reload.sh (#3371).
+//
+//   BACKEND               "aether" or "openssl"
+//   ROOT_CA               the root both leaves are signed by
+//   CERT_A, KEY_A, CERT_B, KEY_B   two certificates for localhost and keys
+//
+// An actor sets the server's TLS 200 times, A and B in turn, while main
+// fetches 100 times. Prints "OK <fetched> of 100 after <loads> loads", or
+// "FAIL: ..." and exits 1.
+
+import std.fs
+import std.http
+import std.http.client
+import std.os
+import std.cryptography.tls13_client
+import std.cryptography.tls13_server
+
+extern exit(code: int)
+
+handle_root(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_body(res, "reload-ok")
+}
+
+message Reload { server: ptr, n: int }
+message Loads {}
+
+actor Reloader {
+    state done = 0
+    state failed = ""
+    receive {
+        Reload(server, n) -> {
+            ca, _e1 = fs.read(os.getenv("CERT_A"))
+            ka, _e2 = fs.read(os.getenv("KEY_A"))
+            cb, _e3 = fs.read(os.getenv("CERT_B"))
+            kb, _e4 = fs.read(os.getenv("KEY_B"))
+            i = 0
+            while i < n {
+                err = ""
+                if i % 2 == 0 {
+                    err = http.server_set_tls_pem(server, cb, kb)
+                } else {
+                    err = http.server_set_tls_pem(server, ca, ka)
+                }
+                if err != "" && failed == "" {
+                    failed = err
+                }
+                done = done + 1
+                i = i + 1
+            }
+        }
+        Loads() -> {
+            if failed != "" {
+                reply 0 - 1
+            } else {
+                reply done
+            }
+        }
+    }
+}
+
+main() {
+    raw = http.server_create(0)
+    http.server_set_host(raw, "127.0.0.1")
+    berr = http.server_set_tls_backend(raw, os.getenv("BACKEND"))
+    if berr != "" {
+        println("FAIL: server_set_tls_backend: ${berr}")
+        exit(1)
+    }
+    terr = http.server_set_tls(raw, os.getenv("CERT_A"), os.getenv("KEY_A"))
+    if terr != "" {
+        println("FAIL: server_set_tls: ${terr}")
+        exit(1)
+    }
+    http.server_get(raw, "/", handle_root, 0)
+    if http.server_bind(raw, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    serr = http.server_start_background(raw)
+    if serr != "" {
+        println("FAIL: start: ${serr}")
+        exit(1)
+    }
+    port = http.server_port(raw)
+    sleep(100)
+
+    r = spawn(Reloader())
+    r ! Reload { server: raw, n: 200 }
+    fetched = 0
+    k = 0
+    while k < 100 {
+        req = client.request("GET", "https://localhost:${port}/")
+        client.set_timeout(req, 10s)
+        client.set_cafile(req, os.getenv("ROOT_CA"))
+        resp, err = client.send_request(req)
+        client.request_free(req)
+        if err == "" {
+            if client.response_status(resp) == 200 {
+                fetched = fetched + 1
+            }
+            client.response_free(resp)
+        }
+        k = k + 1
+    }
+    wait_for_idle()
+    int loads = r ? Loads {}
+    http.server_stop(raw)
+    if loads < 0 {
+        println("FAIL: a re-load was refused")
+        exit(1)
+    }
+    if fetched != 100 {
+        println("FAIL: ${fetched} of 100 fetched while the server re-loaded")
+        exit(1)
+    }
+    println("OK ${fetched} of 100 after ${loads} loads")
+}

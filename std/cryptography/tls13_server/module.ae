@@ -23,7 +23,6 @@ import std.string
 import std.list
 import std.list(list_new, list_free, list_size)
 import std.mem(copy)
-import std.fs
 import std.tcp
 import std.cryptography.sha2
 import std.cryptography.hmac
@@ -1523,90 +1522,85 @@ pure_tls_server_available() -> int {
 
 extern aether_pure_tls_server_set_error(msg: string)
 
-// What std.http's server_set_tls asks when the pure server is chosen
-// (#3328): the certificate chain and the private key load, and they are a
-// pair. 1, or 0 with why in aether_pure_tls_server_set_error, so a server
-// that cannot complete a handshake is refused when it is configured, as the
-// OpenSSL backend refuses it, instead of dropping every connection.
-@c_callback("aether_pure_tls_server_check")
-pure_tls_server_check(cert_path: string, key_path: string) -> int {
-    cert_text, cerr = fs.read(cert_path)
-    if string.equals(cerr, "") != 1 {
-        aether_pure_tls_server_set_error("cannot read the TLS certificate: ${cerr}")
-        return 0
-    }
-    key_text, kerr = fs.read(key_path)
-    if string.equals(kerr, "") != 1 {
-        aether_pure_tls_server_set_error("cannot read the TLS private key: ${kerr}")
-        return 0
-    }
-    chain_list, lens_list = parse_cert_chain_pem(cert_text)
+// A server's certificate chain and private key, parsed and checked once when
+// the server is configured (#3362) and shared by every connection after:
+// accept and its signing only read them (the EC scalar or Ed25519 seed, the
+// RSA key's numbers; RSA blinding draws fresh values for each signature).
+struct ServerCreds {
+    chain: ptr // std.list of certificate DER bytes, the leaf first
+    lens: ptr // their lengths
+    key: ptr // *ServerKey
+}
+
+// What std.http's server_set_tls and server_set_tls_pem give the pure server
+// (#3328, #3362): the chain and the key as PEM text. They must load and be a
+// pair, so a server that cannot complete a handshake is refused when it is
+// configured, as the OpenSSL backend refuses it, instead of dropping every
+// connection. The creds, or null with why in aether_pure_tls_server_set_error.
+// The text is the caller's; nothing here keeps it.
+@c_callback("aether_pure_tls_server_load")
+pure_tls_server_load(cert_pem: string, key_pem: string) -> ptr {
+    chain_list, lens_list = parse_cert_chain_pem(cert_pem)
     if chain_list == null {
-        aether_pure_tls_server_set_error("no certificate in the TLS certificate file (PEM)")
-        return 0
+        aether_pure_tls_server_set_error("no certificate in the TLS certificate (PEM)")
+        return null
     }
-    key, perr = load_private_key(key_text)
+    key, perr = load_private_key(key_pem)
     if key == null {
         free_cert_chain(chain_list)
         list_free(lens_list)
         aether_pure_tls_server_set_error("the TLS private key cannot be used: ${perr}")
-        return 0
+        return null
     }
     merr = key_matches_cert(key as *ServerKey, list.at(chain_list, 0) as ptr)
-    free_private_key(key)
-    free_cert_chain(chain_list)
-    list_free(lens_list)
     if string.equals(merr, "") != 1 {
-        aether_pure_tls_server_set_error(merr)
-        return 0
-    }
-    return 1
-}
-
-// Consumes fd on every path; a successful connection owns it until close_conn.
-@c_callback("aether_pure_tls_server_accept")
-pure_tls_server_accept(fd: int, cert_path: string, key_path: string) -> ptr {
-    sock = tcp_socket_from_fd_owned(fd)
-    if sock == null { return null }
-
-    cert_text, cerr = fs.read(cert_path)
-    if string.equals(cerr, "") != 1 { tcp.close(sock); return null }
-    key_text, kerr = fs.read(key_path)
-    if string.equals(kerr, "") != 1 { tcp.close(sock); return null }
-
-    chain_list, lens_list = parse_cert_chain_pem(cert_text)
-    if chain_list == null {
-        tcp.close(sock)
-        return null
-    }
-
-    // Any key load_private_key reads (#3326); server_set_tls checked it
-    // against the certificate when the server was configured (#3328).
-    priv_key, _perr = load_private_key(key_text)
-    if priv_key == null {
+        free_private_key(key)
         free_cert_chain(chain_list)
         list_free(lens_list)
+        aether_pure_tls_server_set_error(merr)
+        return null
+    }
+    c = heap.new(ServerCreds)
+    c.chain = chain_list
+    c.lens = lens_list
+    c.key = key
+    return c as ptr
+}
+
+// Gives back what pure_tls_server_load made, the key's secret wiped.
+@c_callback("aether_pure_tls_server_free_creds")
+pure_tls_server_free_creds(creds: @frees ptr) {
+    if creds == null { return }
+    c = creds as *ServerCreds
+    free_private_key(c.key)
+    free_cert_chain(c.chain)
+    list_free(c.lens)
+    heap.free(c)
+}
+
+// Consumes fd on every path; a successful connection owns it until
+// close_conn. `creds` are the server's (pure_tls_server_load): borrowed, and
+// still the server's after.
+@c_callback("aether_pure_tls_server_accept_creds")
+pure_tls_server_accept_creds(fd: int, creds: ptr) -> ptr {
+    sock = tcp_socket_from_fd_owned(fd)
+    if sock == null { return null }
+    if creds == null {
         tcp.close(sock)
         return null
     }
+    c = creds as *ServerCreds
 
     x25519_priv = rand_into(32)
     if x25519_priv == null {
         // An all-zeros X25519 private key would make the shared secret
         // trivially recoverable, so refuse rather than fall back.
-        free_private_key(priv_key)
-        free_cert_chain(chain_list)
-        list_free(lens_list)
         tcp.close(sock)
         return null
     }
 
-    sconn, err = accept(sock, chain_list, lens_list, priv_key, x25519_priv)
-
-    free_private_key(priv_key)
+    sconn, err = accept(sock, c.chain, c.lens, c.key, x25519_priv)
     bytes.free(x25519_priv)
-    free_cert_chain(chain_list)
-    list_free(lens_list)
 
     if err != "" {
         if sconn != null { close_conn(sconn) } else { tcp.close(sock) }

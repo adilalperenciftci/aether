@@ -130,6 +130,10 @@ const char* http_server_set_tls_backend_raw(HttpServer* s, const char* n) {
 const char* http_server_set_tls_raw(HttpServer* s, const char* c, const char* k) {
     (void)s; (void)c; (void)k; return "TLS unavailable: networking not built in";
 }
+void* http_server_tls_ctx_ref(HttpServer* s) { (void)s; return NULL; }
+const char* http_server_set_tls_pem_raw(HttpServer* s, const char* c, const char* k) {
+    (void)s; (void)c; (void)k; return "TLS unavailable: networking not built in";
+}
 const char* http_server_set_h2_raw(HttpServer* s, int m) {
     (void)s; (void)m; return "HTTP/2 unavailable: networking not built in";
 }
@@ -344,6 +348,7 @@ const char* http_request_header_value(HttpRequest* r, int i) { (void)r; (void)i;
 #ifdef AETHER_HAS_OPENSSL
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/pem.h>
 /* x509v3.h for X509_VERIFY_PARAM_set1_host / the hostflags used when the
  * WebSocket client pins a wss:// certificate to its host. */
 #include <openssl/x509v3.h>
@@ -369,8 +374,8 @@ SSL_CTX* aether_http_client_ssl_ctx(void);
 #define AETHER_WEAK
 #endif
 
-AETHER_WEAK void* aether_pure_tls_server_accept(int fd, const char* cert_path, const char* key_path) {
-    (void)cert_path; (void)key_path;
+AETHER_WEAK void* aether_pure_tls_server_accept_creds(int fd, void* creds) {
+    (void)creds;
     /* The bridge consumes fd even when no implementation is linked. */
     close(fd);
     return NULL;
@@ -404,18 +409,21 @@ void aether_pure_tls_server_set_error(const char* msg) {
     memcpy(pt_server_check_err, msg, n);
     pt_server_check_err[n] = '\0';
 }
-/* 1 when the pure server can use the chain and key (they load and are a
- * pair), 0 when not, the reason set; -1 when no pure server is linked.
- * std.cryptography.tls13_server overrides this (#3328). */
-AETHER_WEAK int aether_pure_tls_server_check(const char* cert_path, const char* key_path) {
-    (void)cert_path; (void)key_path;
-    return -1;
+/* The pure server's parsed chain and key for this PEM text (#3362), or NULL
+ * with the reason set when they do not load or are not a pair (#3328).
+ * std.cryptography.tls13_server overrides both. */
+AETHER_WEAK void* aether_pure_tls_server_load(const char* cert_pem, const char* key_pem) {
+    (void)cert_pem; (void)key_pem;
+    return NULL;
+}
+AETHER_WEAK void aether_pure_tls_server_free_creds(void* creds) {
+    (void)creds;
 }
 
 /* #2297: the registered implementation (aether_callback_lookup), else the
  * symbol above; see the client side in aether_http.c. */
 #include "../../runtime/aether_callbacks.h"
-typedef void* (*pt_server_accept_fn)(int, const char*, const char*);
+typedef void* (*pt_server_accept_fn)(int, void*);
 typedef int   (*pt_server_send_fn)(void*, const void*, int);
 typedef int   (*pt_server_recv_fn)(void*, void*, int);
 typedef void  (*pt_server_close_fn)(void*);
@@ -424,9 +432,9 @@ static int pt_server_available(void) {
     pt_server_available_fn f = (pt_server_available_fn)aether_callback_lookup("aether_pure_tls_server_available");
     return f ? f() : aether_pure_tls_server_available();
 }
-static void* pt_server_accept(int fd, const char* cert_path, const char* key_path) {
-    pt_server_accept_fn f = (pt_server_accept_fn)aether_callback_lookup("aether_pure_tls_server_accept");
-    return f ? f(fd, cert_path, key_path) : aether_pure_tls_server_accept(fd, cert_path, key_path);
+static void* pt_server_accept(int fd, void* creds) {
+    pt_server_accept_fn f = (pt_server_accept_fn)aether_callback_lookup("aether_pure_tls_server_accept_creds");
+    return f ? f(fd, creds) : aether_pure_tls_server_accept_creds(fd, creds);
 }
 static int pt_server_send(void* c, const void* buf, int len) {
     pt_server_send_fn f = (pt_server_send_fn)aether_callback_lookup("aether_pure_tls_server_send");
@@ -440,22 +448,56 @@ static void pt_server_close(void* c) {
     pt_server_close_fn f = (pt_server_close_fn)aether_callback_lookup("aether_pure_tls_server_close");
     if (f) f(c); else aether_pure_tls_server_close(c);
 }
-typedef int   (*pt_server_check_fn)(const char*, const char*);
-/* NULL when the pure server can serve with this chain and key, else why not
- * (#3328): what the OpenSSL path learns from loading the files and
+typedef void* (*pt_server_load_fn)(const char*, const char*);
+typedef void  (*pt_server_free_creds_fn)(void*);
+/* The pure server's creds for this chain and key, or NULL with *why (#3328,
+ * #3362): what the OpenSSL path learns from loading them and
  * SSL_CTX_check_private_key, so both backends refuse the same setups when
  * the server is configured. */
-static const char* pt_server_check(const char* cert_path, const char* key_path) {
-    pt_server_check_fn f = (pt_server_check_fn)aether_callback_lookup("aether_pure_tls_server_check");
-    pt_server_check_err[0] = '\0';
-    int rc = f ? f(cert_path, key_path) : aether_pure_tls_server_check(cert_path, key_path);
-    if (rc == 1) return NULL;
-    if (rc < 0) {
-        return "the pure-Aether TLS server is not linked: add "
+static void* pt_server_load(const char* cert_pem, const char* key_pem, const char** why) {
+    if (!pt_server_available()) {
+        *why = "the pure-Aether TLS server is not linked: add "
                "`import std.cryptography.tls13_server` to the program";
+        return NULL;
     }
-    return pt_server_check_err[0] ? pt_server_check_err
-                                  : "the pure-Aether TLS server cannot use this certificate and key";
+    pt_server_load_fn f = (pt_server_load_fn)aether_callback_lookup("aether_pure_tls_server_load");
+    pt_server_check_err[0] = '\0';
+    void* creds = f ? f(cert_pem, key_pem) : aether_pure_tls_server_load(cert_pem, key_pem);
+    if (!creds) {
+        *why = pt_server_check_err[0] ? pt_server_check_err
+                                      : "the pure-Aether TLS server cannot use this certificate and key";
+    }
+    return creds;
+}
+static void pt_server_free_creds(void* creds) {
+    if (!creds) return;
+    pt_server_free_creds_fn f = (pt_server_free_creds_fn)aether_callback_lookup("aether_pure_tls_server_free_creds");
+    if (f) f(creds); else aether_pure_tls_server_free_creds(creds);
+}
+
+/* The pure server's creds, counted: the server holds one reference, and a
+ * connection being accepted another, so a re-load on a running server frees
+ * the creds it replaces after the last handshake that uses them (#3371). */
+typedef struct {
+    atomic_int refs;
+    void* creds;
+} PtCreds;
+static PtCreds* pt_creds_new(void* creds) {
+    PtCreds* p = (PtCreds*)malloc(sizeof(PtCreds));
+    if (!p) return NULL;
+    atomic_init(&p->refs, 1);
+    p->creds = creds;
+    return p;
+}
+static PtCreds* pt_creds_ref(PtCreds* p) {
+    if (p) atomic_fetch_add_explicit(&p->refs, 1, memory_order_relaxed);
+    return p;
+}
+static void pt_creds_unref(PtCreds* p) {
+    if (p && atomic_fetch_sub_explicit(&p->refs, 1, memory_order_acq_rel) == 1) {
+        pt_server_free_creds(p->creds);
+        free(p);
+    }
 }
 
 /* Per-connection read buffer. Persists across requests on a
@@ -1329,8 +1371,9 @@ HttpServer* http_server_create(int port) {
     server->tls_enabled = 0;
     server->tls_ctx = NULL;
     server->is_pure_tls = 0;
-    server->cert_path = NULL;
-    server->key_path = NULL;
+    server->tls_cert_pem = NULL;
+    server->tls_key_pem = NULL;
+    server->pure_creds = NULL;
     server->h2_enabled = 0;
     server->h2_max_concurrent_streams = 0;  /* nghttp2 default 100 when 0 */
     /* HTTP/1.1 is persistent by default (RFC 9112 section 9.3), and a proxy
@@ -1349,6 +1392,7 @@ HttpServer* http_server_create(int port) {
     atomic_init(&server->inflight_connections, 0);
     atomic_init(&server->loop_plan_gen, 0);
     pthread_mutex_init(&server->live_lock, NULL);
+    pthread_mutex_init(&server->tls_lock, NULL);
     server->live_fds = NULL;
     server->live_count = 0;
     server->live_cap = 0;
@@ -2055,54 +2099,60 @@ const char* http_server_set_metrics_raw(HttpServer* server,
 
 static void loop_plan_changed(HttpServer* server);
 
-const char* http_server_set_tls_raw(HttpServer* server,
-                                    const char* cert_path,
-                                    const char* key_path) {
-    if (!server) return "server is null";
-    if (!cert_path || !*cert_path) return "cert_path is empty";
-    if (!key_path  || !*key_path)  return "key_path is empty";
+/* Zeroes a copy of a certificate or private key, then frees it: the key text
+ * must not outlive its use (#3362). The volatile store keeps the compiler
+ * from dropping the writes as dead before the free. */
+static void tls_text_wipe_free(char* p) {
+    if (!p) return;
+    volatile char* v = p;
+    for (size_t i = 0, n = strlen(p); i < n; i++) v[i] = 0;
+    free(p);
+}
 
-    /* The backend: the program's choice (server_set_tls_backend, #1298),
-     * else AETHER_PURE_TLS, else OpenSSL where it is built in. */
-    int pure = 0;
-    if (server->tls_backend == 1) {
-        pure = 1;
-    } else if (server->tls_backend == 0) {
-        const char* env_pure = getenv("AETHER_PURE_TLS");
-        pure = env_pure && (strcmp(env_pure, "1") == 0 || strcasecmp(env_pure, "true") == 0);
+/* The whole of a certificate or key file, at most TLS_PEM_MAX bytes, as a
+ * NUL-terminated string the caller wipes and frees; NULL with why. */
+#define TLS_PEM_MAX (1 << 20)
+static char* tls_read_pem_file(const char* path, const char* what, char* why, size_t why_len) {
+    FILE* f = fopen(path, "rb");
+    if (!f) {
+        snprintf(why, why_len, "cannot read the TLS %s: %s", what, strerror(errno));
+        return NULL;
     }
-    /* The pure server is refused now, as the OpenSSL path refuses, rather
-     * than at every handshake; a refusal leaves the earlier setup, paths
-     * included, as it was (#3328). */
-    if (pure) {
-        const char* why = pt_server_check(cert_path, key_path);
-        if (why) return why;
-    }
-
-    if (server->cert_path) free(server->cert_path);
-    if (server->key_path) free(server->key_path);
-    server->cert_path = strdup(cert_path);
-    server->key_path = strdup(key_path);
-
-    if (pure) {
-#ifdef AETHER_HAS_OPENSSL
-        /* Re-applied after an OpenSSL setup: the pure stack takes over. */
-        if (server->tls_ctx) {
-            SSL_CTX_free((SSL_CTX*)server->tls_ctx);
-            server->tls_ctx = NULL;
+    char* buf = (char*)malloc(TLS_PEM_MAX + 1);
+    size_t n = buf ? fread(buf, 1, TLS_PEM_MAX + 1, f) : 0;
+    int bad = !buf || ferror(f);
+    fclose(f);
+    if (bad || n > TLS_PEM_MAX) {
+        if (buf) {
+            volatile char* v = buf;
+            for (size_t i = 0; i < n && i <= TLS_PEM_MAX; i++) v[i] = 0;
+            free(buf);
         }
-#endif
-        server->is_pure_tls = 1;
-        server->tls_enabled = 1;
-        loop_plan_changed(server);   /* #3269 */
-        return "";
+        snprintf(why, why_len, "cannot read the TLS %s: %s", what,
+                 bad ? "read failed" : "larger than 1 MiB");
+        return NULL;
     }
+    buf[n] = '\0';
+    return buf;
+}
 
 #ifdef AETHER_HAS_OPENSSL
-    server_openssl_init_once();
+/* Never ask for a passphrase: OpenSSL's default reads one from the terminal,
+ * which would hang a server whose key is encrypted. It is refused instead. */
+static int tls_pem_no_passphrase(char* buf, int size, int rwflag, void* u) {
+    (void)buf; (void)size; (void)rwflag; (void)u;
+    return -1;
+}
 
+/* An SSL_CTX serving this chain and key, or NULL with why. The first
+ * certificate is the leaf; every one after it is the chain the server sends
+ * with it (#3370): SSL_CTX_use_certificate_file read the first alone, so the
+ * intermediates in a CA's bundle never reached the client. */
+static SSL_CTX* tls_openssl_ctx_from_pem(HttpServer* server, const char* cert_pem,
+                                         const char* key_pem, const char** why) {
+    server_openssl_init_once();
     SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
-    if (!ctx) return "SSL_CTX_new failed";
+    if (!ctx) { *why = "SSL_CTX_new failed"; return NULL; }
     server_tls_min_security_level(ctx);
     /* Match the client side: TLS 1.2+ only. Older versions are
      * known-broken (POODLE, etc.) and there's no compat reason to
@@ -2113,17 +2163,67 @@ const char* http_server_set_tls_raw(HttpServer* server,
     SSL_CTX_set_options(ctx, SSL_OP_NO_COMPRESSION |
                               SSL_OP_NO_RENEGOTIATION);
 
-    if (SSL_CTX_use_certificate_file(ctx, cert_path, SSL_FILETYPE_PEM) != 1) {
+    ERR_clear_error();
+    BIO* cb = BIO_new_mem_buf(cert_pem, -1);
+    X509* leaf = cb ? PEM_read_bio_X509_AUX(cb, NULL, tls_pem_no_passphrase, NULL) : NULL;
+    if (!leaf || SSL_CTX_use_certificate(ctx, leaf) != 1) {
+        X509_free(leaf);
+        BIO_free(cb);
         SSL_CTX_free(ctx);
-        return "failed to load TLS certificate (check cert_path and PEM format; an RSA key needs 2048 bits or more)";
+        *why = "failed to load TLS certificate (check its PEM; an RSA key needs 2048 bits or more)";
+        return NULL;
     }
-    if (SSL_CTX_use_PrivateKey_file(ctx, key_path, SSL_FILETYPE_PEM) != 1) {
+    X509_free(leaf);
+    X509* ca;
+    while ((ca = PEM_read_bio_X509(cb, NULL, tls_pem_no_passphrase, NULL)) != NULL) {
+        if (SSL_CTX_add0_chain_cert(ctx, ca) != 1) {
+            X509_free(ca);
+            BIO_free(cb);
+            SSL_CTX_free(ctx);
+            *why = "failed to add a certificate of the TLS chain";
+            return NULL;
+        }
+    }
+    BIO_free(cb);
+    /* The read that ends the loop fails for want of another certificate;
+     * any other failure is a malformed one. */
+    unsigned long e = ERR_peek_last_error();
+    if (e && !(ERR_GET_LIB(e) == ERR_LIB_PEM && ERR_GET_REASON(e) == PEM_R_NO_START_LINE)) {
         SSL_CTX_free(ctx);
-        return "failed to load TLS private key (check key_path and PEM format)";
+        *why = "a certificate of the TLS chain is malformed (PEM)";
+        return NULL;
     }
+    ERR_clear_error();
+
+    BIO* kb = BIO_new_mem_buf(key_pem, -1);
+    EVP_PKEY* pk = kb ? PEM_read_bio_PrivateKey(kb, NULL, tls_pem_no_passphrase, NULL) : NULL;
+    BIO_free(kb);
+    if (!pk) {
+        SSL_CTX_free(ctx);
+        *why = strstr(key_pem, "ENCRYPTED")
+            ? "failed to load TLS private key: it is encrypted; give it unencrypted"
+            : "failed to load TLS private key (check its PEM)";
+        return NULL;
+    }
+    /* SSL_CTX_use_PrivateKey itself refuses a key that is not the leaf's:
+     * said as the pure server says it, not as a key that failed to load. */
+    ERR_clear_error();
+    if (SSL_CTX_use_PrivateKey(ctx, pk) != 1) {
+        unsigned long ke = ERR_peek_last_error();
+        int mismatch = ERR_GET_LIB(ke) == ERR_LIB_X509 &&
+                       (ERR_GET_REASON(ke) == X509_R_KEY_VALUES_MISMATCH ||
+                        ERR_GET_REASON(ke) == X509_R_KEY_TYPE_MISMATCH);
+        EVP_PKEY_free(pk);
+        SSL_CTX_free(ctx);
+        *why = mismatch ? "TLS cert and private key do not match"
+                        : "failed to load TLS private key (check its PEM)";
+        return NULL;
+    }
+    EVP_PKEY_free(pk);
     if (SSL_CTX_check_private_key(ctx) != 1) {
         SSL_CTX_free(ctx);
-        return "TLS cert and private key do not match";
+        *why = "TLS cert and private key do not match";
+        return NULL;
     }
 
     /* ALPN selection callback (#260 Tier 2). The callback inspects
@@ -2132,22 +2232,136 @@ const char* http_server_set_tls_raw(HttpServer* server,
      * advertised list — the SSL_CTX itself doesn't have to be
      * rebuilt. */
     SSL_CTX_set_alpn_select_cb(ctx, aether_alpn_select_cb, server);
+    return ctx;
+}
+#endif
 
-    /* Replace any prior context (idempotent re-load). */
-    if (server->tls_ctx) {
-        SSL_CTX_free((SSL_CTX*)server->tls_ctx);
+/* Serve TLS with this chain and key (PEM text the caller keeps), on the
+ * backend the server's choice names: the program's (server_set_tls_backend,
+ * #1298), else AETHER_PURE_TLS, else OpenSSL where it is built in. Both
+ * backends refuse a chain or key they cannot serve now, not at every
+ * handshake, and a refusal leaves the earlier setup as it was (#3328). On
+ * success the server keeps its own copies of the text, for a later backend
+ * change, and wipes them when they are replaced or the server is freed. */
+static const char* tls_apply_pem(HttpServer* server, const char* cert_pem, const char* key_pem) {
+    int pure = 0;
+    if (server->tls_backend == 1) {
+        pure = 1;
+    } else if (server->tls_backend == 0) {
+        const char* env_pure = getenv("AETHER_PURE_TLS");
+        pure = env_pure && (strcmp(env_pure, "1") == 0 || strcasecmp(env_pure, "true") == 0);
     }
+#ifndef AETHER_HAS_OPENSSL
+    pure = 1;
+#endif
+
+    const char* why = NULL;
+    PtCreds* creds = NULL;
+#ifdef AETHER_HAS_OPENSSL
+    SSL_CTX* ctx = NULL;
+#endif
+    if (pure) {
+        void* loaded = pt_server_load(cert_pem, key_pem, &why);
+        if (!loaded) return why;
+        creds = pt_creds_new(loaded);
+        if (!creds) {
+            pt_server_free_creds(loaded);
+            return "out of memory";
+        }
+    } else {
+#ifdef AETHER_HAS_OPENSSL
+        ctx = tls_openssl_ctx_from_pem(server, cert_pem, key_pem, &why);
+        if (!ctx) return why;
+#endif
+    }
+
+    /* The text is copied before anything is replaced, so running out of
+     * memory leaves the earlier setup too. */
+    char* cert_copy = strdup(cert_pem);
+    char* key_copy = strdup(key_pem);
+    if (!cert_copy || !key_copy) {
+        tls_text_wipe_free(cert_copy);
+        tls_text_wipe_free(key_copy);
+        pt_creds_unref(creds);
+#ifdef AETHER_HAS_OPENSSL
+        if (ctx) SSL_CTX_free(ctx);
+#endif
+        return "out of memory";
+    }
+    /* cert_pem and key_pem may be these very buffers (a backend change
+     * applies the server's own copies again): copied above, and not read
+     * after this. */
+    tls_text_wipe_free(server->tls_cert_pem);
+    tls_text_wipe_free(server->tls_key_pem);
+    server->tls_cert_pem = cert_copy;
+    server->tls_key_pem = key_copy;
+
+    /* Swapped under the lock accepts take their references under; what is
+     * replaced is released after, and freed by its last holder (#3371). The
+     * pure stack takes over from an OpenSSL context when it is chosen, and
+     * the other way round. */
+    pthread_mutex_lock(&server->tls_lock);
+    PtCreds* old_creds = (PtCreds*)server->pure_creds;
+    server->pure_creds = creds;
+#ifdef AETHER_HAS_OPENSSL
+    SSL_CTX* old_ctx = (SSL_CTX*)server->tls_ctx;
     server->tls_ctx = ctx;
-    server->is_pure_tls = 0;
+#endif
+    server->is_pure_tls = pure;
     server->tls_enabled = 1;
+    pthread_mutex_unlock(&server->tls_lock);
+    pt_creds_unref(old_creds);
+#ifdef AETHER_HAS_OPENSSL
+    if (old_ctx) SSL_CTX_free(old_ctx);
+#endif
     loop_plan_changed(server);   /* #3269 */
     return "";
+}
+
+void* http_server_tls_ctx_ref(HttpServer* server) {
+#ifdef AETHER_HAS_OPENSSL
+    if (!server) return NULL;
+    pthread_mutex_lock(&server->tls_lock);
+    SSL_CTX* ctx = (SSL_CTX*)server->tls_ctx;
+    if (ctx && SSL_CTX_up_ref(ctx) != 1) ctx = NULL;
+    pthread_mutex_unlock(&server->tls_lock);
+    return ctx;
 #else
-    server->is_pure_tls = 1;
-    server->tls_enabled = 1;
-    loop_plan_changed(server);
-    return "";
+    (void)server;
+    return NULL;
 #endif
+}
+
+const char* http_server_set_tls_raw(HttpServer* server,
+                                    const char* cert_path,
+                                    const char* key_path) {
+    if (!server) return "server is null";
+    if (!cert_path || !*cert_path) return "cert_path is empty";
+    if (!key_path  || !*key_path)  return "key_path is empty";
+
+    /* Read here, for both backends, so they say the same about a file they
+     * cannot read; the pure server once read both at every connection. */
+    static _Thread_local char why[600];
+    char* cert = tls_read_pem_file(cert_path, "certificate", why, sizeof why);
+    if (!cert) return why;
+    char* key = tls_read_pem_file(key_path, "private key", why, sizeof why);
+    if (!key) {
+        tls_text_wipe_free(cert);
+        return why;
+    }
+    const char* err = tls_apply_pem(server, cert, key);
+    tls_text_wipe_free(cert);
+    tls_text_wipe_free(key);
+    return err;
+}
+
+const char* http_server_set_tls_pem_raw(HttpServer* server,
+                                        const char* cert_pem,
+                                        const char* key_pem) {
+    if (!server) return "server is null";
+    if (!cert_pem || !*cert_pem) return "cert_pem is empty";
+    if (!key_pem  || !*key_pem)  return "key_pem is empty";
+    return tls_apply_pem(server, cert_pem, key_pem);
 }
 
 /* Choose this server's TLS backend (#1298): "aether" (the pure-Aether TLS
@@ -2178,15 +2392,11 @@ const char* http_server_set_tls_backend_raw(HttpServer* server, const char* name
     }
     int previous = server->tls_backend;
     server->tls_backend = b;
-    if (server->tls_enabled && server->cert_path && server->key_path) {
-        char* cert = strdup(server->cert_path);
-        char* key = strdup(server->key_path);
-        const char* err = (cert && key) ? http_server_set_tls_raw(server, cert, key)
-                                        : "out of memory";
-        free(cert);
-        free(key);
-        /* A backend that cannot serve this certificate and key is not
-         * chosen: the server keeps the one it had (#3328). */
+    if (server->tls_enabled && server->tls_cert_pem && server->tls_key_pem) {
+        /* The server's own copies, applied again on the new backend; a
+         * backend that cannot serve them is not chosen, and the server keeps
+         * the one it had (#3328). */
+        const char* err = tls_apply_pem(server, server->tls_cert_pem, server->tls_key_pem);
         if (err && *err) server->tls_backend = previous;
         return err;
     }
@@ -6851,8 +7061,21 @@ void http_server_drain_connection(HttpServer* server, int client_fd) {
     conn->applied_recv_timeout_ms = -1;
 
     if (server->tls_enabled) {
-        if (server->is_pure_tls) {
-            void* pure_conn = pt_server_accept(conn->fd, server->cert_path, server->key_path);
+        /* What this connection is accepted with, a reference taken under
+         * the lock a re-load swaps it under, and given back once the
+         * handshake is done (#3371). */
+        pthread_mutex_lock(&server->tls_lock);
+        int pure = server->is_pure_tls;
+        PtCreds* creds = pure ? pt_creds_ref((PtCreds*)server->pure_creds) : NULL;
+#ifdef AETHER_HAS_OPENSSL
+        SSL_CTX* ctx = NULL;
+        if (!pure && server->tls_ctx && SSL_CTX_up_ref((SSL_CTX*)server->tls_ctx) == 1)
+            ctx = (SSL_CTX*)server->tls_ctx;
+#endif
+        pthread_mutex_unlock(&server->tls_lock);
+        if (pure) {
+            void* pure_conn = pt_server_accept(conn->fd, creds ? creds->creds : NULL);
+            pt_creds_unref(creds);
             if (!pure_conn) {
                 /* pt_server_accept consumes the fd on failure too. */
                 free(conn);
@@ -6861,8 +7084,11 @@ void http_server_drain_connection(HttpServer* server, int client_fd) {
             conn->pure_tls = pure_conn;
         }
 #ifdef AETHER_HAS_OPENSSL
-        else if (server->tls_ctx) {
-            if (conn_tls_accept(conn, (SSL_CTX*)server->tls_ctx) != 0) {
+        else if (ctx) {
+            /* SSL_new holds a reference of its own from here. */
+            int rc = conn_tls_accept(conn, ctx);
+            SSL_CTX_free(ctx);
+            if (rc != 0) {
                 close(client_fd);
                 free(conn);
                 return;
@@ -7551,8 +7777,10 @@ void http_server_free(HttpServer* server) {
     http_server_monitor_null_raw(server);   /* gives back the closures' environments */
 
 
-    if (server->cert_path) free(server->cert_path);
-    if (server->key_path) free(server->key_path);
+    tls_text_wipe_free(server->tls_cert_pem);
+    tls_text_wipe_free(server->tls_key_pem);
+    pt_creds_unref((PtCreds*)server->pure_creds);
+    server->pure_creds = NULL;
     free(server->host);
     
     // Free routes
@@ -7629,6 +7857,7 @@ void http_server_free(HttpServer* server) {
 
     free(server->live_fds);
     pthread_mutex_destroy(&server->live_lock);
+    pthread_mutex_destroy(&server->tls_lock);
 #if !defined(_WIN32) && !defined(__wasi__)
     if (server->wake_fds[0] >= 0) close(server->wake_fds[0]);
     if (server->wake_fds[1] >= 0) close(server->wake_fds[1]);

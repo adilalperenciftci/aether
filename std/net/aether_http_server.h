@@ -205,8 +205,18 @@ typedef struct HttpServer {
     int is_pure_tls;
     int tls_backend;            /* 0 default (AETHER_PURE_TLS, then the build),
                                  * 1 "aether", 2 "openssl": server_set_tls_backend (#1298) */
-    char* cert_path;
-    char* key_path;
+    /* The certificate chain and private key as PEM text (#3362), kept so a
+     * later server_set_tls_backend can apply them again, and wiped when they
+     * are replaced or the server is freed; and the pure server's parsed form
+     * of them, which every pure connection shares. */
+    char* tls_cert_pem;
+    char* tls_key_pem;
+    void* pure_creds;
+    /* Guards tls_ctx, pure_creds and is_pure_tls: a connection takes a
+     * reference to what it is accepted with under it, so a server_set_tls
+     * on a running server frees what it replaces only once no accept still
+     * holds it (#3371). */
+    pthread_mutex_t tls_lock;
 
     // HTTP/2 (#260 Tier 2). When h2_enabled == 1:
     //   - The TLS context advertises "h2" + "http/1.1" via ALPN so
@@ -459,6 +469,21 @@ const char* http_server_set_keepalive_raw(HttpServer* server,
 const char* http_server_set_tls_raw(HttpServer* server,
                                     const char* cert_path,
                                     const char* key_path);
+
+// http_server_set_tls with the certificate chain and private key given as PEM
+// text instead of file paths (#3362), so a program that holds them in memory
+// need not write the key to disk. Same checks, same results, both backends;
+// the first certificate is the leaf and the rest its chain. The server keeps
+// its own copy of the text and wipes it when it is replaced or the server is
+// freed.
+const char* http_server_set_tls_pem_raw(HttpServer* server,
+                                        const char* cert_pem,
+                                        const char* key_pem);
+
+// The server's OpenSSL context (an SSL_CTX*) with a reference taken under
+// its TLS lock, for an accept path to hand SSL_new and then SSL_CTX_free;
+// NULL when the server has none (#3371).
+void* http_server_tls_ctx_ref(HttpServer* server);
 
 // Choose the TLS backend (#1298): "aether", "openssl" or "" (the default:
 // AETHER_PURE_TLS, then OpenSSL where it is built in). Returns "" or why the

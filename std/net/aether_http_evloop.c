@@ -1956,9 +1956,12 @@ static void ev_take_submissions(EvDriver* d) {
          * without waiting, like everything else here: a connection mid
          * handshake costs a slot, not a thread. */
         if (d->loop->server && d->loop->server->tls_enabled) {
-            SSL_CTX* ctx = (SSL_CTX*)d->loop->server->tls_ctx;
+            /* Taken with a reference, so a re-load of the server's TLS
+             * cannot free it before SSL_new holds its own (#3371). */
+            SSL_CTX* ctx = (SSL_CTX*)http_server_tls_ctx_ref(d->loop->server);
             if (!ctx) { close(fd); free(c); continue; }
             c->ssl = SSL_new(ctx);
+            SSL_CTX_free(ctx);
             if (!c->ssl || SSL_set_fd(c->ssl, fd) != 1) {
                 if (c->ssl) SSL_free(c->ssl);
                 close(fd);
