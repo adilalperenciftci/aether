@@ -124,10 +124,12 @@ import std.cryptography.tls13_client
 
 to the program and `https://` works in a cross-built binary that links no TLS
 library at all. The pure client offers X25519MLKEM768 by default, alongside
-X25519 and P-256 key shares, so it gets post-quantum key exchange from any
-server that supports it (#2483). `set_insecure` and `set_cafile` are honoured on the pure path
-too, and an https request through a forward proxy works because the CONNECT
-tunnel is established before the handshake either way.
+X25519 and P-256 key shares (and names P-384 without one, for a server that
+asks for it in a HelloRetryRequest, #3369), so it gets post-quantum key
+exchange from any server that supports it (#2483). `set_insecure` and
+`set_cafile` are honoured on the pure path too, and an https request through
+a forward proxy works because the CONNECT tunnel is established before the
+handshake either way.
 
 Without that import the pure client is not linked, and an https request in a
 no-OpenSSL build fails with an error naming the missing import rather than

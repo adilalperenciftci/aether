@@ -39,13 +39,13 @@ extern string_char_at_n(str: string, known_length: int, index: int) -> int
 
 exports(
     ChParsed, parse_client_hello, free_ch, server_hello,
-    client_hello, client_hello_sni, client_hello_full, client_hello_pq, client_hello_psk, PskCh, parse_server_hello,
+    client_hello, client_hello_sni, client_hello_full, client_hello_offer, client_hello_pq, client_hello_psk, PskCh, parse_server_hello,
     ShParsed, check_extensions, check_certificate, check_certificate_request, offers_sig_scheme,
     MSG_SERVER_HELLO, MSG_HELLO_RETRY, MSG_ENCRYPTED_EXTENSIONS, MSG_CERTIFICATE_ENTRY,
     MSG_NEW_SESSION_TICKET, MSG_CERTIFICATE_REQUEST,
     OFFER_SNI, OFFER_ALPN, OFFER_STATUS, OFFER_PSK, OFFER_EARLY,
     TLS_CHACHA20_POLY1305_SHA256, TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384,
-    GROUP_X25519, GROUP_SECP256R1, GROUP_X25519MLKEM768,
+    GROUP_X25519, GROUP_SECP256R1, GROUP_SECP384R1, GROUP_X25519MLKEM768,
     SIGBIT_ECDSA_P256, SIGBIT_ECDSA_P384, SIGBIT_ECDSA_P521, SIGBIT_RSA_PSS_SHA256, SIGBIT_ED25519,
     SIGBIT_RSA_PSS_SHA384, SIGBIT_RSA_PSS_SHA512,
     HS_ENCRYPTED_EXTENSIONS, HS_CERTIFICATE, HS_CERTIFICATE_VERIFY, HS_FINISHED,
@@ -64,6 +64,9 @@ const TLS_CHACHA20_POLY1305_SHA256 = 0x1303
 // Named groups (RFC 8446 §4.2.7).
 const GROUP_X25519 = 0x001d
 const GROUP_SECP256R1 = 0x0017
+// secp384r1: the client names it in supported_groups without a key share,
+// for a server that wants it to ask in a HelloRetryRequest (#3369).
+const GROUP_SECP384R1 = 0x0018
 // Post-quantum hybrid: X25519 + ML-KEM-768 (draft-kwiatkowski-tls-ecdhe-mlkem;
 // the group Chrome/Cloudflare default to). Client share = ML-KEM ek(1184) ||
 // X25519 pub(32); server share = ML-KEM ct(1088) || X25519 pub(32).
@@ -224,21 +227,28 @@ client_hello_sni(random: ptr, session_id: byte[], x25519_pub: ptr, host: string)
 // Pass group2=0 or group3=0 to omit the respective entry. It offers
 // psk_key_exchange_modes { psk_dhe_ke }, so a server may send tickets (#3363).
 client_hello_full(random: ptr, session_id: byte[], group: int, pubkey: byte[], group2: int, pubkey2: byte[], group3: int, pubkey3: byte[], host: string) -> ptr {
-    if session_id.len < 0 { panic("tls13_hs.client_hello_full: the `session_id` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    return client_hello_offer(random, session_id, group, pubkey, group2, pubkey2, group3, pubkey3, host, 0)
+}
+
+// client_hello_full, and `named_only` (0 for none) listed last in
+// supported_groups with no key share: a group the client takes when a
+// HelloRetryRequest asks for it (RFC 8446 4.1.4, #3369).
+client_hello_offer(random: ptr, session_id: byte[], group: int, pubkey: byte[], group2: int, pubkey2: byte[], group3: int, pubkey3: byte[], host: string, named_only: int) -> ptr {
+    if session_id.len < 0 { panic("tls13_hs.client_hello_offer: the `session_id` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     int sid_len = session_id.len
     pubkey_len = 0
     if group != 0 {
-        if pubkey.len < 0 { panic("tls13_hs.client_hello_full: the `pubkey` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+        if pubkey.len < 0 { panic("tls13_hs.client_hello_offer: the `pubkey` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
         pubkey_len = pubkey.len
     }
     pubkey2_len = 0
     if group2 != 0 {
-        if pubkey2.len < 0 { panic("tls13_hs.client_hello_full: the `pubkey2` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+        if pubkey2.len < 0 { panic("tls13_hs.client_hello_offer: the `pubkey2` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
         pubkey2_len = pubkey2.len
     }
     pubkey3_len = 0
     if group3 != 0 {
-        if pubkey3.len < 0 { panic("tls13_hs.client_hello_full: the `pubkey3` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+        if pubkey3.len < 0 { panic("tls13_hs.client_hello_offer: the `pubkey3` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
         pubkey3_len = pubkey3.len
     }
     // Generous fixed buffer for up to 3 key shares + extensions.
@@ -298,6 +308,7 @@ client_hello_full(random: ptr, session_id: byte[], group: int, pubkey: byte[], g
     if group != 0 { num_groups = num_groups + 1 }
     if group2 != 0 { num_groups = num_groups + 1 }
     if group3 != 0 { num_groups = num_groups + 1 }
+    if named_only != 0 { num_groups = num_groups + 1 }
 
     sg_body = 2 + num_groups * 2
     off = put16(buf, off, 10)
@@ -306,6 +317,7 @@ client_hello_full(random: ptr, session_id: byte[], group: int, pubkey: byte[], g
     if group != 0 { off = put16(buf, off, group) }
     if group2 != 0 { off = put16(buf, off, group2) }
     if group3 != 0 { off = put16(buf, off, group3) }
+    if named_only != 0 { off = put16(buf, off, named_only) }
 
     // signature_algorithms (13): every scheme the client verifies.
     off = put_sig_algs(buf, off)

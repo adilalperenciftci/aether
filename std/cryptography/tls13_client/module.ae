@@ -106,6 +106,7 @@ import std.cryptography.hmac
 import std.cryptography.x25519
 import std.cryptography.mlkem
 import std.cryptography.p256
+import std.cryptography.p384
 import std.cryptography.tls13_kdf
 import std.cryptography.tls13_ks
 import std.cryptography.tls13_hs
@@ -732,6 +733,24 @@ fn fresh_p256_priv() -> ptr {
     }
 }
 
+// A fresh secp384r1 private scalar in [1, n-1], or null without randomness,
+// for the share a HelloRetryRequest asks for (#3369).
+fn fresh_p384_priv() -> ptr {
+    while true {
+        k = rand_into(48)
+        if k == null { return null }
+        if p384.private_key_valid(k) == 1 { return k }
+        bytes.free(k)
+    }
+}
+
+// Free the key exchange secrets of a full handshake (each may be null).
+fn free_hello_keys(dk: ptr, p256_priv: ptr, p384_priv: ptr) {
+    if dk != null { bytes.free(dk) }
+    if p256_priv != null { bytes.free(p256_priv) }
+    if p384_priv != null { bytes.free(p384_priv) }
+}
+
 // Close the socket of a handshake that failed once what the server has
 // already sent is read and dropped (#3368). Closing a socket that holds
 // unread bytes sends a TCP reset, and a peer that gets one may discard the
@@ -766,19 +785,28 @@ fn cleanup_hello(pub: ptr, rnd: ptr, sid: ptr, ch: ptr) {
     bytes.free(pub); bytes.free(rnd); bytes.free(sid); bytes.free(ch)
 }
 
-// Build the client key_share public value for `group` from a 32-byte private
-// scalar. x25519 -> the 32-byte public; secp256r1 -> 04 || X(32) || Y(32) (the
-// 65-byte uncompressed point). Returns (pubkey, pubkey_len).
+// Build the client key_share public value for `group` from its private
+// scalar. x25519 -> the 32-byte public; secp256r1 -> 04 || X(32) || Y(32),
+// secp384r1 -> 04 || X(48) || Y(48) (the uncompressed points, 65 and 97
+// bytes). Returns (pubkey, pubkey_len).
 fn keyshare_for_group(group: int, priv: ptr) -> (ptr, int) {
-    if group == tls13_hs.GROUP_SECP256R1 {
-        px, py = p256.scalar_mult_base(priv)
-        pt = bytes.new(65)
-        bytes.set(pt, 64, 0)
+    if group == tls13_hs.GROUP_SECP256R1 || group == tls13_hs.GROUP_SECP384R1 {
+        cl = 32
+        px = null
+        py = null
+        if group == tls13_hs.GROUP_SECP256R1 {
+            px, py = p256.scalar_mult_base(priv)
+        } else {
+            cl = 48
+            px, py = p384.scalar_mult_base(priv)
+        }
+        pt = bytes.new(1 + 2 * cl)
+        bytes.set(pt, 2 * cl, 0)
         bytes.set(pt, 0, 0x04)
-        bytes.copy_from_bytes(pt, 1, px, 0, 32)
-        bytes.copy_from_bytes(pt, 33, py, 0, 32)
+        bytes.copy_from_bytes(pt, 1, px, 0, cl)
+        bytes.copy_from_bytes(pt, 1 + cl, py, 0, cl)
         bytes.free(px); bytes.free(py)
-        return pt, 65
+        return pt, 1 + 2 * cl
     }
     // default: x25519
     pub = x25519.base_point(priv)
@@ -786,19 +814,27 @@ fn keyshare_for_group(group: int, priv: ptr) -> (ptr, int) {
 }
 
 // Compute the ECDHE shared secret for `group` from our private scalar and the
-// server's key_share. x25519 -> agree(); secp256r1 -> ECDH x-coordinate from
-// the server's uncompressed point. Returns (shared, "") or (null, err).
+// server's key_share. x25519 -> agree(); secp256r1 and secp384r1 -> the ECDH
+// x coordinate from the server's uncompressed point, which ecdh refuses off
+// the curve. Returns (shared, "") or (null, err).
 fn ecdhe_shared(group: int, priv: ptr, server_ks: ptr, server_ks_len: int) -> (ptr, string) {
-    if group == tls13_hs.GROUP_SECP256R1 {
-        if server_ks_len != 65 { return null, "secp256r1 key_share not a 65-byte point" }
-        if (bytes.get(server_ks, 0) & 0xFF) != 0x04 { return null, "secp256r1 key_share not uncompressed" }
-        sx = bytes.new(32); bytes.set(sx, 31, 0)
-        sy = bytes.new(32); bytes.set(sy, 31, 0)
-        bytes.copy_from_bytes(sx, 0, server_ks, 1, 32)
-        bytes.copy_from_bytes(sy, 0, server_ks, 33, 32)
-        sh = p256.ecdh(priv, sx, sy)
+    if group == tls13_hs.GROUP_SECP256R1 || group == tls13_hs.GROUP_SECP384R1 {
+        cl = 32
+        name = "secp256r1"
+        if group == tls13_hs.GROUP_SECP384R1 {
+            cl = 48
+            name = "secp384r1"
+        }
+        if server_ks_len != 1 + 2 * cl { return null, "${name} key_share not a ${1 + 2 * cl}-byte point" }
+        if (bytes.get(server_ks, 0) & 0xFF) != 0x04 { return null, "${name} key_share not uncompressed" }
+        sx = bytes.new(cl); bytes.set(sx, cl - 1, 0)
+        sy = bytes.new(cl); bytes.set(sy, cl - 1, 0)
+        bytes.copy_from_bytes(sx, 0, server_ks, 1, cl)
+        bytes.copy_from_bytes(sy, 0, server_ks, 1 + cl, cl)
+        sh = null
+        if group == tls13_hs.GROUP_SECP256R1 { sh = p256.ecdh(priv, sx, sy) } else { sh = p384.ecdh(priv, sx, sy) }
         bytes.free(sx); bytes.free(sy)
-        if sh == null { return null, "secp256r1 ECDH failed" }
+        if sh == null { return null, "${name} ECDH failed" }
         return sh, ""
     }
     return x25519.agree(priv, server_ks)
@@ -886,6 +922,8 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
     // X25519MLKEM768 first (the hybrid post-quantum group, RFC 10024), then
     // x25519 and secp256r1. The hybrid share reuses the caller's x25519
     // scalar, as Chrome and Go do, so one X25519 public covers both entries.
+    // secp384r1 is named too, without a share, as BoringSSL does: a server
+    // that wants it asks in a HelloRetryRequest (#3369).
     p256_priv = fresh_p256_priv()
     rnd = rand_into(32)
     sid = rand_into(32)
@@ -913,23 +951,30 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
     bytes.copy_from_bytes(hybrid, ek_len, x_pub, 0, 32)
     bytes.free(ek) // dk carries what decapsulation needs
 
-    ch = tls13_hs.client_hello_full(rnd, bytes.view(sid)[0..32], tls13_hs.GROUP_X25519MLKEM768, bytes.view(hybrid)[0..ek_len + 32], tls13_hs.GROUP_X25519, bytes.view(x_pub)[0..x_pub_len], tls13_hs.GROUP_SECP256R1, bytes.view(p_pub)[0..p_pub_len], host)
+    // secp384r1 is named with no share, for a server that asks for it in a
+    // HelloRetryRequest (#3369).
+    ch = tls13_hs.client_hello_offer(rnd, bytes.view(sid)[0..32], tls13_hs.GROUP_X25519MLKEM768, bytes.view(hybrid)[0..ek_len + 32], tls13_hs.GROUP_X25519, bytes.view(x_pub)[0..x_pub_len], tls13_hs.GROUP_SECP256R1, bytes.view(p_pub)[0..p_pub_len], host, tls13_hs.GROUP_SECP384R1)
     bytes.free(p_pub); bytes.free(hybrid) // copied into the CH
     pub = x_pub // cleanup_hello frees this
     ch_len = bytes.length(ch)
     tr = transcript_new()
     transcript_add(tr, bytes.view(ch)[0..ch_len])
+    p384_priv = null
     serr = send_plaintext_handshake(sock, bytes.view(ch)[0..ch_len])
     if string.equals(serr, "") != 1 {
-        bytes.free(dk); bytes.free(p256_priv)
+        free_hello_keys(dk, p256_priv, p384_priv)
         cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); tcp.close(sock)
         return null, serr
     }
     rio = recio_new(sock)
 
     // The ServerHello, after at most one HelloRetryRequest (RFC 8446 4.1.4,
-    // #3325). Every group has a share here, so a HelloRetryRequest can only
-    // ask for a cookie; the second ClientHello is the first with it.
+    // #3325). Every group but secp384r1 has a share here, so a
+    // HelloRetryRequest asks for a secp384r1 share (#3369) or a cookie; the
+    // second ClientHello is the first with that share alone, or the cookie.
+    // `shares` are the groups the ClientHello the server answers has shares
+    // for: a ServerHello must pick one of them (4.2.8).
+    shares = GB_ALL
     retried = 0
     hrr_suite = 0
     ccs_sent = 0
@@ -942,7 +987,7 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
         shrec2, shlen, sherr = recio_next_hs(rio)
         if string.equals(sherr, "") != 1 {
             if rio.alert != 0 { send_plain_alert(sock, rio.alert) }
-            bytes.free(dk); bytes.free(p256_priv)
+            free_hello_keys(dk, p256_priv, p384_priv)
             cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); close_drained(sock)
             return null, sherr
         }
@@ -952,7 +997,7 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
         bytes.copy_from_bytes(sh, 0, shrec, 5, sh_msg_len)
         perr = tls13_hs.parse_server_hello(bytes.view(sh)[0..sh_msg_len], &parsed)
         if string.equals(perr, "") == 1 {
-            ha, herr = check_hello_fields(&parsed, sh, sid, retried, hrr_suite, GB_ALL, GB_ALL)
+            ha, herr = check_hello_fields(&parsed, sh, sid, retried, hrr_suite, GB_ALL | GB_SECP384R1, shares)
             if ha != 0 {
                 parsed.alert = ha
                 perr = herr
@@ -966,7 +1011,7 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
         if string.equals(perr, "") != 1 {
             // The alert the ServerHello earned, in the clear (#3315).
             if parsed.alert != 0 { send_plain_alert(sock, parsed.alert) }
-            bytes.free(dk); bytes.free(p256_priv)
+            free_hello_keys(dk, p256_priv, p384_priv)
             if parsed.key_share != null { bytes.free(parsed.key_share) }
             bytes.free(sh); bytes.free(shrec)
             cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); close_drained(sock)
@@ -979,9 +1024,25 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
             _ha, _hk, halgo, _hh, _he = suite_params(parsed.cipher_suite)
             tr = transcript_retry(tr, bytes.view(ch)[0..ch_len], bytes.view(sh)[0..sh_msg_len], halgo)
             pch = tls13_hs.PskCh { buf: null, buf_len: 0, binder_off: 0, truncated_len: 0 }
-            empty = bytes.new(0)
-            tls13_hs.client_hello_retry(bytes.view(ch)[0..ch_len], 0, bytes.view(empty)[0..0], bytes.view(sh)[parsed.cookie_off..parsed.cookie_off + parsed.cookie_len], &pch)
-            bytes.free(empty)
+            // check_hello_fields let through only a group named without a
+            // share: secp384r1, whose share replaces the others (4.1.2).
+            share = bytes.new(0)
+            share_len = 0
+            if parsed.group == tls13_hs.GROUP_SECP384R1 {
+                p384_priv = fresh_p384_priv()
+                if p384_priv == null {
+                    bytes.free(share)
+                    free_hello_keys(dk, p256_priv, p384_priv)
+                    bytes.free(sh); bytes.free(shrec)
+                    cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); close_drained(sock)
+                    return null, "no randomness available for the handshake"
+                }
+                bytes.free(share)
+                share, share_len = keyshare_for_group(tls13_hs.GROUP_SECP384R1, p384_priv)
+                shares = GB_SECP384R1
+            }
+            tls13_hs.client_hello_retry(bytes.view(ch)[0..ch_len], parsed.group, bytes.view(share)[0..share_len], bytes.view(sh)[parsed.cookie_off..parsed.cookie_off + parsed.cookie_len], &pch)
+            bytes.free(share)
             bytes.free(ch)
             ch = pch.buf
             ch_len = pch.buf_len
@@ -993,7 +1054,7 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
             sh = null
             shrec = null
             if string.equals(serr2, "") != 1 {
-                bytes.free(dk); bytes.free(p256_priv)
+                free_hello_keys(dk, p256_priv, p384_priv)
                 cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); close_drained(sock)
                 return null, serr2
             }
@@ -1020,14 +1081,18 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
     } else if parsed.group == tls13_hs.GROUP_X25519MLKEM768 {
         shared, agerr = hybrid_shared(dk, x25519_priv, parsed.key_share, parsed.key_share_len)
         shared_len = 64
-    } else if parsed.group == tls13_hs.GROUP_X25519 || parsed.group == tls13_hs.GROUP_SECP256R1 {
+    } else if parsed.group == tls13_hs.GROUP_X25519 || parsed.group == tls13_hs.GROUP_SECP256R1 || parsed.group == tls13_hs.GROUP_SECP384R1 {
         priv = x25519_priv
         if parsed.group == tls13_hs.GROUP_SECP256R1 { priv = p256_priv }
+        if parsed.group == tls13_hs.GROUP_SECP384R1 {
+            priv = p384_priv
+            shared_len = 48
+        }
         shared, agerr = ecdhe_shared(parsed.group, priv, parsed.key_share, parsed.key_share_len)
     } else {
         agerr = "server chose a group we did not offer"
     }
-    bytes.free(dk); bytes.free(p256_priv)
+    free_hello_keys(dk, p256_priv, p384_priv)
     if string.equals(agerr, "") != 1 || shared == null {
         if string.equals(agerr, "") == 1 { agerr = "key exchange failed" }
         send_plain_alert(sock, ag_alert)
@@ -1038,9 +1103,10 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
         return null, agerr
     }
 
-    // Derive keys from the shared secret (32 bytes classical, 64 hybrid) and
-    // run the shared post-ServerHello handshake tail (flight read, auth,
-    // Finished). check_hello_fields made sure the suite is one offered.
+    // Derive keys from the shared secret (32 bytes classical, 48 for
+    // secp384r1, 64 hybrid) and run the shared post-ServerHello handshake
+    // tail (flight read, auth, Finished). check_hello_fields made sure the
+    // suite is one offered.
     offered = tls13_hs.OFFER_ALPN | tls13_hs.OFFER_STATUS
     if string.length(host) > 0 { offered = offered | tls13_hs.OFFER_SNI }
     result, result_err = run_handshake_tail(sock, rio, tr, host, bytes.view(shared)[0..shared_len], parsed.cipher_suite, client_cert, client_cert_len, client_key, insecure, cafile, offered, ccs_sent)
@@ -1059,16 +1125,19 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
 }
 
 // The groups a ClientHello names in supported_groups, and the ones it
-// carries a key share for, as bits (check_hello_fields).
+// carries a key share for, as bits (check_hello_fields). GB_ALL are the
+// full handshake's shares; it names GB_SECP384R1 without one (#3369).
 const GB_X25519MLKEM768 = 1
 const GB_X25519 = 2
 const GB_SECP256R1 = 4
 const GB_ALL = 7
+const GB_SECP384R1 = 8
 
 fn group_bit(g: int) -> int {
     if g == tls13_hs.GROUP_X25519MLKEM768 { return GB_X25519MLKEM768 }
     if g == tls13_hs.GROUP_X25519 { return GB_X25519 }
     if g == tls13_hs.GROUP_SECP256R1 { return GB_SECP256R1 }
+    if g == tls13_hs.GROUP_SECP384R1 { return GB_SECP384R1 }
     return 0
 }
 
@@ -1081,7 +1150,9 @@ fn group_bit(g: int) -> int {
 // sent; a suite the client did not offer; a second HelloRetryRequest
 // (unexpected_message); a HelloRetryRequest naming a group not offered or
 // one with a share already, or changing nothing; a ServerHello after one
-// with another suite.
+// with another suite, or whose key_share is for a group the ClientHello
+// has no share of: after a HelloRetryRequest that asked for a group, any
+// other (4.2.8, #3369).
 fn check_hello_fields(p: *ShParsed, sh: ptr, sid: ptr, retried: int, hrr_suite: int, named: int, shared: int) -> (int, string) {
     if p.session_id_len != 32 || bytes_equal(sid, bytes.view(sh)[p.session_id_off..p.session_id_off + 32]) != 1 {
         return ALERT_ILLEGAL_PARAMETER, "server hello: legacy_session_id_echo is not the session id the client sent"
@@ -1101,6 +1172,9 @@ fn check_hello_fields(p: *ShParsed, sh: ptr, sid: ptr, retried: int, hrr_suite: 
     }
     if retried == 1 && p.cipher_suite != hrr_suite {
         return ALERT_ILLEGAL_PARAMETER, "server hello: cipher suite ${p.cipher_suite}, not the HelloRetryRequest's ${hrr_suite}"
+    }
+    if p.key_share != null && (shared & group_bit(p.group)) == 0 {
+        return ALERT_ILLEGAL_PARAMETER, "server hello: group ${p.group} has no key share in the ClientHello"
     }
     return 0, ""
 }
@@ -1159,7 +1233,8 @@ fn hybrid_shared(dk: ptr, x25519_priv: ptr, server_ks: ptr, server_ks_len: int) 
 }
 
 // The key exchange group the handshake settled on: tls13_hs.GROUP_X25519MLKEM768
-// (0x11EC), GROUP_X25519 (0x001D) or GROUP_SECP256R1 (0x0017).
+// (0x11EC), GROUP_X25519 (0x001D), GROUP_SECP256R1 (0x0017) or, after a
+// HelloRetryRequest, GROUP_SECP384R1 (0x0018).
 conn_group(conn: ptr) -> int {
     if conn == null { return 0 }
     c = conn as *ClientConn

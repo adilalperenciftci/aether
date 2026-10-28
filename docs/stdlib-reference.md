@@ -2012,6 +2012,7 @@ described in its header comment):
 - `rsa.sign_pss_hash(k, algo, mhash, salt)` → `ptr`, `rsa.verify_pss_hash(k, algo, mhash, sig, slen)` → `int` - RSASSA-PSS with `algo` `"sha256"`, `"sha384"` or `"sha512"` for the message hash and MGF1; `sign_pss` and `verify_pss` are the `"sha256"` cases (#3357).
 - `tls13_cert.sign_server_cert_verify_rsa_pss_scheme(key, scheme, transcript_hash)` → `ptr` - A server CertificateVerify signature as rsa_pss_rsae_sha256, `SCHEME_RSA_PSS_RSAE_SHA384` or `SCHEME_RSA_PSS_RSAE_SHA512`, with a salt of the hash's length; null for another scheme (#3357).
 - `tls13_hs.ChParsed.alert` - The alert `parse_client_hello` says to send when it refuses a ClientHello (decode_error, illegal_parameter, missing_extension, unexpected_message, protocol_version, handshake_failure; #3357); `GROUPBIT_SECP256R1` and `SIGBIT_RSA_PSS_SHA384`, `SIGBIT_RSA_PSS_SHA512` join its `groups` and `sig_algs` bits.
+- `tls13_hs.client_hello_offer(random, session_id, group, pubkey, group2, pubkey2, group3, pubkey3, host, named_only)` → `ptr` - `client_hello_full`, with `named_only` (0 for none) last in supported_groups and no key share for it; `GROUP_SECP384R1` (0x0018) is the group the pure client names that way, and follows a HelloRetryRequest for (#3369).
 
 ---
 

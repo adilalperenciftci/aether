@@ -33,6 +33,8 @@
 #   #3365  a CertificateRequest's certificate_authorities and signature list.
 #   #3366  a server flight in 1-byte records; the bound is on its bytes.
 #   #3367  a message the server's flight cannot hold ends it at once.
+#   #3369  the client names secp384r1 without a share and follows a
+#          HelloRetryRequest for it; the ServerHello must be for that group.
 #   #3368  the client reads what the server sent before it closes a failed
 #          handshake, so a reset does not take its alert.
 #
@@ -343,7 +345,9 @@ SENV="SERVER_READ=1" POST=alertsx:0100 run_cf_case "server alert: close_notify" 
 run_case "HRR: a cookie, followed" "hrr=cookie" "OK" "FINISHED"
 run_case "HRR: x25519, which has a share" "hrr=group:001d" "ERR" "ALERT 47"
 run_case "HRR: secp256r1, which has a share" "hrr=group:0017" "ERR" "ALERT 47"
-run_case "HRR: secp384r1, never offered" "hrr=group:0018" "ERR" "ALERT 47"
+run_case "HRR: secp521r1, never offered" "hrr=group:0019" "ERR" "ALERT 47"
+run_case "HRR: secp384r1, named without a share, followed (#3369)" "hrr=group:0018" "OK" "FINISHED"
+run_case "HRR: secp384r1, then a ServerHello for x25519 (#3369)" "hrr=group:0018;sh_group=x25519" "ERR" "ALERT 47"
 run_case "HRR: asking for no change" "hrr=none" "ERR" "ALERT 47"
 run_case "HRR: an empty cookie" "hrr=emptycookie" "ERR" "ALERT 50"
 run_case "HRR: a second one" "hrr=cookie,twice" "ERR" "ALERT 10"

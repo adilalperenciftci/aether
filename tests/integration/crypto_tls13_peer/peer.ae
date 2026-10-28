@@ -19,7 +19,10 @@
 //   split_sh=N      the ServerHello in records of at most N bytes
 //   split_flight=N  each protected handshake message in records of at
 //                   most N bytes
-//   hrr=MODE        a HelloRetryRequest first (see hrr_msg)
+//   hrr=MODE        a HelloRetryRequest first (see hrr_msg); after
+//                   "group:0018" the ServerHello is for secp384r1, with the
+//                   client's new share
+//   sh_group=x25519 the ServerHello names x25519 whatever was agreed
 //   sh_version=HEX  the ServerHello's legacy_version
 //   sh_sid=bad      a ServerHello session id echo one bit off
 //   sh_comp=1       a ServerHello with compression method 1
@@ -52,6 +55,7 @@ import std.string
 import std.list
 import std.cryptography
 import std.cryptography.x25519
+import std.cryptography.p384
 import std.cryptography.mlkem
 import std.cryptography.tls13_hs
 import std.cryptography.tls13_ks
@@ -536,6 +540,8 @@ main() {
 
     // hrr=...: a HelloRetryRequest first (#3325), and the second
     // ClientHello in its place.
+    // The client's secp384r1 share, when a HelloRetryRequest asked for one.
+    p384_share = null
     hrrk = knob("hrr")
     if hrrk != "" {
         _ha, _hk, halgo, hhl = suite_params(chp.cipher_suite)
@@ -584,6 +590,7 @@ main() {
             exit(0)
         }
         tls13_hs.free_ch(&chp)
+        if string.contains(hrrk, "group:0018") == 1 { p384_share = find_share(ch2, 0x0018) }
         perr2 = tls13_hs.parse_client_hello(bytes.view(ch2)[0..ch2l], &chp)
         if perr2 != "" {
             println("FAIL: second ClientHello: ${perr2}")
@@ -628,11 +635,28 @@ main() {
         bytes.copy_from_bytes(shared, 0, mss, 0, 32)
         bytes.copy_from_bytes(shared, 32, xss, 0, 32)
         bytes.free(ek); bytes.free(cx); bytes.free(ct); bytes.free(mss); bytes.free(xss)
+    } else if p384_share != null {
+        // secp384r1, which the HelloRetryRequest asked for (#3369).
+        shared, ks = p384_exchange(p384_share)
+        bytes.free(p384_share)
+        if shared == null {
+            println("FAIL: the client's secp384r1 share is not a point")
+            exit(1)
+        }
+        chp.group = 0x0018
     } else {
         xss2, _xerr2 = x25519.agree(xpriv, chp.key_share)
         shared = xss2
         ks = bytes.new(32)
         bytes.copy_from_bytes(ks, 0, xpub, 0, 32)
+    }
+    if knob("sh_group") == "x25519" {
+        // A ServerHello naming x25519, with a share of it the client never
+        // asked for (#3369).
+        bytes.free(ks)
+        ks = bytes.new(32)
+        bytes.copy_from_bytes(ks, 0, xpub, 0, 32)
+        chp.group = tls13_hs.GROUP_X25519
     }
     aead, klen, algo, hl = suite_params(chp.cipher_suite)
 
@@ -1184,6 +1208,64 @@ fn has_cookie(ch: ptr, hex: string) -> int {
     }
     bytes.free(want)
     return found
+}
+
+// The key of the ClientHello `ch`'s share for `group` (fresh bytes), or
+// null when key_share holds none for it.
+fn find_share(ch: ptr, group: int) -> ptr {
+    n = bytes.length(ch)
+    p = 4 + 2 + 32
+    p = p + 1 + (bytes.get(ch, p) & 0xFF)
+    p = p + 2 + (((bytes.get(ch, p) & 0xFF) << 8) | (bytes.get(ch, p + 1) & 0xFF))
+    p = p + 1 + (bytes.get(ch, p) & 0xFF)
+    p = p + 2
+    while p + 4 <= n {
+        t = ((bytes.get(ch, p) & 0xFF) << 8) | (bytes.get(ch, p + 1) & 0xFF)
+        el = ((bytes.get(ch, p + 2) & 0xFF) << 8) | (bytes.get(ch, p + 3) & 0xFF)
+        if t == 51 {
+            q = p + 6
+            while q + 4 <= p + 4 + el {
+                g = ((bytes.get(ch, q) & 0xFF) << 8) | (bytes.get(ch, q + 1) & 0xFF)
+                kl = ((bytes.get(ch, q + 2) & 0xFF) << 8) | (bytes.get(ch, q + 3) & 0xFF)
+                if g == group {
+                    k = bytes.new(kl)
+                    bytes.copy_from_bytes(k, 0, ch, q + 4, kl)
+                    return k
+                }
+                q = q + 4 + kl
+            }
+        }
+        p = p + 4 + el
+    }
+    return null
+}
+
+// secp384r1 with the client's 97-byte uncompressed point `share`: (the
+// shared x coordinate, our own point), or (null, null) when it is not one.
+fn p384_exchange(share: ptr) -> (ptr, ptr) {
+    if bytes.length(share) != 97 || (bytes.get(share, 0) & 0xFF) != 4 { return null, null }
+    k = null
+    while k == null {
+        kb, _ke = cryptography.random_buffer(48)
+        if p384.private_key_valid(kb) == 1 { k = kb } else { bytes.free(kb) }
+    }
+    cx = bytes.new(48)
+    bytes.copy_from_bytes(cx, 0, share, 1, 48)
+    cy = bytes.new(48)
+    bytes.copy_from_bytes(cy, 0, share, 49, 48)
+    shared = p384.ecdh(k, cx, cy)
+    px, py = p384.scalar_mult_base(k)
+    bytes.free(cx); bytes.free(cy); bytes.free(k)
+    if shared == null {
+        bytes.free(px); bytes.free(py)
+        return null, null
+    }
+    pt = bytes.new(97)
+    bytes.set(pt, 0, 4)
+    bytes.copy_from_bytes(pt, 1, px, 0, 48)
+    bytes.copy_from_bytes(pt, 49, py, 0, 48)
+    bytes.free(px); bytes.free(py)
+    return shared, pt
 }
 
 // The Ed25519 key (key=ed25519): its 32-byte seed, and a self-signed
