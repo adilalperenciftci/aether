@@ -1,14 +1,19 @@
 # The runtime a cooperative-scheduler, freestanding build links beside its
-# generated C. ci-wasm (Makefile COOP_RUNTIME_SOURCES) and ci-esp32
-# (tests/esp32/project/main/CMakeLists.txt) both read this one list: each
-# used to keep its own copy, the copies drifted, and neither had
+# generated C. `ae build --target=wasm` (tools/ae.c, from the installed
+# share/aether/runtime/ copy), ci-wasm (Makefile COOP_RUNTIME_SOURCES) and
+# ci-esp32 (tests/esp32/project/main/CMakeLists.txt) all read this one list:
+# each used to keep its own copy, the copies drifted, and none had
 # runtime/aether_resource_caps.c, which std/string's release path calls
 # (aether_caps_free), so the first program that freed a counted string did
-# not link on either target. The list is closed under reference: every
+# not link on any of them. The list is closed under reference: every
 # runtime function a listed file calls is defined by a listed file (std/string
 # calls std/collections/aether_stringseq.c, std/collections calls
-# std/alloc), so a program links whichever of them it reaches. One path per
-# line, from the repository root; a line that starts with # is a comment.
+# std/alloc), so a program links whichever of them it reaches. The C of
+# the modules a program reaches only from Aether (std.intarr, std.longarr,
+# std.floatarr, std.strarr, the StringList of std.collections) is here for
+# the same reason (#3383: ae listed floatarr and stringlist, this file did
+# not, and strarr was in neither). One path per line, from the repository
+# root; a line that starts with # is a comment.
 runtime/scheduler/aether_scheduler_coop.c
 runtime/scheduler/scheduler_optimizations.c
 runtime/config/aether_optimization_config.c
@@ -50,6 +55,9 @@ std/collections/aether_set.c
 std/collections/aether_pqueue.c
 std/collections/aether_intarr.c
 std/collections/aether_longarr.c
+std/collections/aether_floatarr.c
+std/collections/aether_strarr.c
+std/collections/aether_stringlist.c
 std/collections/aether_bits.c
 std/collections/aether_stringseq.c
 std/alloc/aether_alloc.c

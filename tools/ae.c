@@ -5240,6 +5240,48 @@ void build_gcc_cmd(char* cmd, size_t size,
     free(opt);
 }
 
+/* The runtime sources of a wasm build, as emcc arguments: each path
+ * runtime/coop_runtime_sources.txt lists, under the source root (share/aether
+ * on an installed tree), one per line of the file, comments (#) and blank
+ * lines skipped. Malloc'd; NULL, said, when the file cannot be read. */
+static char* wasm_runtime_sources(void) {
+    char* list_path = ae_path_printf("%s/runtime/coop_runtime_sources.txt", tc.src_root);
+    FILE* f = list_path ? fopen(list_path, "r") : NULL;
+    if (!f) {
+        fprintf(stderr, "Error: cannot read %s, the runtime list of a wasm build.\n",
+                list_path ? list_path : "runtime/coop_runtime_sources.txt");
+        free(list_path);
+        return NULL;
+    }
+    size_t cap = 4096, len = 0;
+    char* out = malloc(cap);
+    char line[1024];
+    while (out && fgets(line, sizeof(line), f)) {
+        size_t n = strlen(line);
+        while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r' || line[n - 1] == ' ' ||
+                         line[n - 1] == '\t'))
+            line[--n] = '\0';
+        if (n == 0 || line[0] == '#') continue;
+        size_t need = len + strlen(tc.src_root) + 1 + n + 2;
+        if (need > cap) {
+            while (cap < need) cap *= 2;
+            char* grown = realloc(out, cap);
+            if (!grown) { free(out); out = NULL; break; }
+            out = grown;
+        }
+        len += (size_t)snprintf(out + len, cap - len, "%s/%s ", tc.src_root, line);
+    }
+    fclose(f);
+    if (!out) fprintf(stderr, "Error: out of memory reading %s.\n", list_path);
+    else if (len == 0) {
+        fprintf(stderr, "Error: %s lists no runtime sources.\n", list_path);
+        free(out);
+        out = NULL;
+    }
+    free(list_path);
+    return out;
+}
+
 static int build_wasm_cmd(char* cmd, size_t size,
                           const char* c_file, const char* out_file) {
     // Build include paths from toolchain root
@@ -5282,70 +5324,13 @@ static int build_wasm_cmd(char* cmd, size_t size,
         }
     }
 
-    // Runtime source files (cooperative scheduler, not multicore)
-    static const char* wasm_runtime_files[] = {
-        "runtime/scheduler/aether_scheduler_coop.c",
-        "runtime/scheduler/scheduler_optimizations.c",
-        "runtime/config/aether_optimization_config.c",
-        "runtime/memory/aether_arena.c",
-        "runtime/memory/aether_pool.c",
-        "runtime/memory/aether_memory_stats.c",
-        "runtime/utils/aether_bounds_check.c",
-        "runtime/utils/aether_test.c",
-        "runtime/utils/aether_spawn.c",
-        "runtime/memory/aether_arena_optimized.c",
-        "runtime/aether_runtime_types.c",
-        "runtime/utils/aether_cpu_detect.c",
-        "runtime/utils/aether_simd_vectorized.c",
-        "runtime/aether_runtime.c",
-        "runtime/aether_numa.c",
-        "runtime/actors/aether_send_buffer.c",
-        "runtime/actors/aether_send_message.c",
-        "runtime/actors/aether_actor_thread.c",
-        "runtime/actors/aether_panic.c",
-        "runtime/actors/aether_unwind.c",
-        "runtime/aether_callbacks.c",
-        "std/string/aether_string.c",
-        "std/math/aether_math.c",
-        "std/net/aether_http.c",
-        "std/net/aether_http_server.c",
-        "std/net/aether_http_pool.c",
-        "std/net/aether_net.c",
-        "std/net/aether_actor_bridge.c",
-        "std/collections/aether_collections.c",
-        "std/json/aether_json.c",
-        "std/fs/aether_fs.c",
-        "std/log/aether_log.c",
-        "std/io/aether_io.c",
-        "std/os/aether_os.c",
-        "std/collections/aether_set.c",
-        "std/collections/aether_pqueue.c",
-        "std/collections/aether_intarr.c",
-        "std/collections/aether_floatarr.c",
-        "std/collections/aether_longarr.c",
-        "std/collections/aether_bits.c",
-        "std/collections/aether_stringlist.c",
-        "std/collections/aether_stringseq.c",
-        NULL
-    };
-    char runtime[8192];
-    size_t rlen = 0;
-    runtime[0] = '\0';
-    for (int i = 0; wasm_runtime_files[i]; i++) {
-        /* src_root, not root — this bare tc.root was the bug: on an installed
-         * tree it composed <prefix>/runtime/... and emcc failed on every file. */
-        int w = snprintf(runtime + rlen, sizeof(runtime) - rlen, "%s/%s ",
-                         tc.src_root, wasm_runtime_files[i]);
-        if (w < 0 || (size_t)w >= sizeof(runtime) - rlen) {
-            /* Refused rather than cut (#2537): a cut list compiles a
-             * runtime missing the files past it. */
-            fprintf(stderr, "Error: the wasm runtime sources under %s do not fit "
-                            "%zu bytes; build from a shorter path.\n",
-                    tc.src_root, sizeof(runtime));
-            return 0;
-        }
-        rlen += (size_t)w;
-    }
+    /* The runtime it links: runtime/coop_runtime_sources.txt, the one list the
+     * ci-wasm and ESP32 builds read too, installed with the runtime (#3383).
+     * ae kept a copy of its own, which drifted: it lacked
+     * aether_resource_caps.c, which every string release calls, so no program
+     * linked. */
+    char* runtime = wasm_runtime_sources();
+    if (!runtime) return 0;   /* said */
 
     /* --emit=lib: a side-effect-free module with named exports rather than a
      * program. Emscripten spells that -sEXPORTED_FUNCTIONS (leading underscore
@@ -5361,7 +5346,7 @@ static int build_wasm_cmd(char* cmd, size_t size,
     if (g_emit_lib && !g_emit_exe) {
         int n;
         char* names = wasm_collect_export_names(c_file, g_wasm_exports, &n);
-        if (!names) return 0;   /* out of memory, said */
+        if (!names) { free(runtime); return 0; }   /* out of memory, said */
         static const char base[] = "--no-entry -sEXPORTED_RUNTIME_METHODS=ccall,cwrap "
                                    "-sALLOW_MEMORY_GROWTH=1 -sEXPORTED_FUNCTIONS=_malloc,_free";
         size_t cap = sizeof(base) + strlen(names) + (size_t)n;
@@ -5369,6 +5354,7 @@ static int build_wasm_cmd(char* cmd, size_t size,
         if (!lib_flags) {
             free(names);
             fprintf(stderr, "Error: out of memory listing the wasm exports.\n");
+            free(runtime);
             return 0;
         }
         size_t p = (size_t)snprintf(lib_flags, cap, "%s", base);
@@ -5388,6 +5374,7 @@ static int build_wasm_cmd(char* cmd, size_t size,
         "-Wno-unused-variable -Wno-missing-field-initializers -Wno-unused-label",
         lib_flags ? lib_flags : "", includes, c_file, runtime, out_file);
     free(lib_flags);
+    free(runtime);
     if (w >= (int)size) {
         cmd_too_long(cmd, size, w);
         return 0;

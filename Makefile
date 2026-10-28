@@ -1633,6 +1633,7 @@ test-release-archive: compiler ae stdlib check-archive-exports
 	  test -f "$$verdir/include/aether/$$(basename "$$h")" || { echo "  FAIL: include/aether/$$(basename "$$h") missing (#1420)"; exit 1; }; \
 	done && \
 	test -d "$$verdir/share/aether/runtime"  || (echo "  FAIL: share/aether/runtime missing"; exit 1) && \
+	test -f "$$verdir/share/aether/runtime/coop_runtime_sources.txt" || (echo "  FAIL: the runtime list ae build --target=wasm reads is missing (#3383)"; exit 1) && \
 	test -d "$$verdir/share/aether/std"      || (echo "  FAIL: share/aether/std missing"; exit 1) && \
 	test -f "$$verdir/share/aether/tools/ae-fetch/main.ae" || (echo "  FAIL: the package fetcher's source is missing (#1362)"; exit 1) && \
 	test -f "$$verdir/share/aether/contrib/sqlite/amalgamation/sqlite3.c" || (echo "  FAIL: the SQLite amalgamation is missing (#1372)"; exit 1) && \
@@ -3701,7 +3702,7 @@ ci-wasm: clean compiler ae
 	@echo "  WebAssembly (Emscripten) CI"
 	@echo "==================================="
 	@echo ""
-	@echo "[1/3] Generating C from test programs..."
+	@echo "[1/4] Generating C from test programs..."
 	@mkdir -p $(BUILD_DIR)/wasm
 	@pass=0; fail=0; \
 	for src in $(WASM_CI_PROGRAMS); do \
@@ -3723,7 +3724,7 @@ ci-wasm: clean compiler ae
 # signature (an int64_t where the definition takes a 32-bit size_t), and
 # links a stub that traps when the call runs: --fatal-warnings makes that
 # the build error it is.
-	@echo "[2/3] Compiling runtime + generated C with emcc..."
+	@echo "[2/4] Compiling runtime + generated C with emcc..."
 	@WASM_CFLAGS="-O2 -DAETHER_NO_THREADING -DAETHER_NO_FILESYSTEM -DAETHER_NO_NETWORKING \
 		-Iruntime -Iruntime/actors -Iruntime/scheduler -Iruntime/utils -Iruntime/memory \
 		-Iruntime/config -Istd -Istd/string -Istd/io -Istd/math -Istd/net -Istd/collections -Istd/json \
@@ -3747,7 +3748,7 @@ ci-wasm: clean compiler ae
 	echo "  $$pass compiled, $$fail failed"; \
 	if [ "$$fail" -gt 0 ]; then exit 1; fi
 	@echo ""
-	@echo "[3/3] Running WASM programs with Node.js..."
+	@echo "[3/4] Running WASM programs with Node.js..."
 	@pass=0; fail=0; \
 	for src in $(WASM_CI_PROGRAMS); do \
 		name=$$(basename $$src .ae); \
@@ -3763,6 +3764,24 @@ ci-wasm: clean compiler ae
 	done; \
 	echo "  $$pass passed, $$fail failed"; \
 	if [ "$$fail" -gt 0 ]; then exit 1; fi
+	@echo ""
+# The steps above compile with this Makefile's own command; a user's
+# `ae build --target=wasm` composes its own, from the runtime list ae reads
+# (#3383: ae's copy of the list had drifted, and nothing here built a
+# program the way a user does).
+	@echo "[4/4] ae build --target=wasm, as a user builds..."
+	@if ! command -v emcc > /dev/null 2>&1; then echo "  emcc not on PATH, skipped"; exit 0; fi; \
+	printf '  %-40s ' "ae build 02-state"; \
+	if ./$(BUILD_DIR)/ae build --target=wasm examples/02-actors/02-state.ae \
+			-o "$(BUILD_DIR)/wasm/ae_state" > /tmp/ae_wasm_build.txt 2>&1 && \
+	   node "$(BUILD_DIR)/wasm/ae_state.js" > /tmp/ae_wasm_run.txt 2>&1 && \
+	   grep -q "counter: Current value: 18 after 3 changes" /tmp/ae_wasm_run.txt; then \
+		echo "PASS"; \
+	else \
+		echo "FAIL"; \
+		cat /tmp/ae_wasm_build.txt /tmp/ae_wasm_run.txt | head -20; \
+		exit 1; \
+	fi
 	@echo ""
 	@echo "==================================="
 	@echo "  WebAssembly CI PASSED"
