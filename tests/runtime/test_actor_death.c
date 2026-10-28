@@ -281,6 +281,68 @@ static void test_kill_before_start(void) {
     ASSERT_TRUE(strcmp(reason, "killed") == 0);
 }
 
+/* #3394 follow-up: a panic that leaves a link's drain leaves the thread's
+ * later links working. Ending an actor drops what waits for it, and a
+ * dropped message's release is the program's code for a field of an owned
+ * type (its drop function), which may panic: the jump went past the drain
+ * and left the thread marked as ending, so every end a link passed on
+ * there afterwards was queued and never made. The threaded scheduler,
+ * stopped, finalizes a death where it is seen, as the cooperative one
+ * does: a kills b's link, b's kills c's, and c holds a message whose
+ * release panics; then x's death must still end y. */
+static int g_release_panics = 0;
+
+static void release_that_panics(int type, void* payload) {
+    (void)type;
+    (void)payload;
+    if (g_release_panics) {
+        g_release_panics = 0;
+        aether_panic("a release panicked");
+    }
+}
+
+static void test_link_end_after_panic(void) {
+    scheduler_init(1);
+    DeathActor* a = death_actor(0);
+    DeathActor* b = death_actor(0);
+    DeathActor* c = death_actor(0);
+    DeathActor* x = death_actor(0);
+    DeathActor* y = death_actor(0);
+    aether_step_actor_set(b);   // as from b's handler: b links a
+    aether_actor_link(a);
+    aether_step_actor_set(c);
+    aether_actor_link(b);
+    aether_step_actor_set(y);
+    aether_actor_link(x);
+    aether_step_actor_set(NULL);
+    scheduler_shutdown();
+    c->release_message = release_that_panics;
+    Message m;
+    memset(&m, 0, sizeof m);
+    m.type = 9;
+    m.payload_ptr = malloc(16);
+    int queued = mailbox_send(&c->mailbox, m);
+    g_release_panics = 1;
+    int caught = 0;
+    AetherJmpFrame* f = aether_try_push();
+    if (AETHER_SIGSETJMP(f->buf, 1) == 0) {
+        aether_actor_kill(a);
+    } else {
+        caught = 1;
+    }
+    aether_try_pop();
+    int b_ended = (atomic_load(&b->dead) & AETHER_ACTOR_KILLED) != 0;
+    aether_actor_kill(x);
+    int y_ended = (atomic_load(&y->dead) & AETHER_ACTOR_KILLED) &&
+                  (atomic_load(&y->exit_flags) & AETHER_EXIT_FINALIZED);
+    scheduler_cleanup();
+
+    ASSERT_TRUE(queued);
+    ASSERT_TRUE(caught);
+    ASSERT_TRUE(b_ended);
+    ASSERT_TRUE(y_ended);
+}
+
 /* #3298: an actor with a thread of its own panics on its first message with
  * 200 more in its inbox. Its thread took 32 into its mailbox; the rest waited
  * in the inbox, never credited, and the shutdown's wait for every message
@@ -318,4 +380,6 @@ void register_actor_death_tests(void) {
         test_actor_thread_panic_drains_inbox, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Death: a kill before scheduler_start is finalized at once (#3399)",
         test_kill_before_start, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Death: a panic out of a link's end leaves later links working (#3394)",
+        test_link_end_after_panic, TEST_CATEGORY_RUNTIME);
 }

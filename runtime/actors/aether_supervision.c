@@ -144,7 +144,20 @@ static void send_down(ActorBase* to, ActorBase* dead, const char* reason, int id
  * The queue is a stack whose entries each end pushed are turned round, so
  * the ends are made in the order the recursion made them: an actor's links
  * in their list's order, each one's own links before the next. The queue
- * goes when it is empty. */
+ * goes when it is empty.
+ *
+ * A panic can leave the drain. Ending an actor drops what waits for it, and
+ * a dropped message runs its release, which is the program's own code for a
+ * field of an owned type (its drop function, #3142) and may panic. The jump
+ * goes to the nearest frame below (the step barrier of the handler whose
+ * kill started the chain, or a `try`), past the drain, and the thread would
+ * keep `t_link_ending` set: every later end a link passed on there would be
+ * queued and never made. So the outermost end journals the queue with the
+ * unwind journal, as a step journals what a panic must release
+ * (aether_unwind.h): a panic that leaves it puts the queue back as it was
+ * before the end, empty and not ending. The ends still queued are given up
+ * with the rest of the work the panic cut short, as the recursion's unwind
+ * gave them up. */
 typedef struct {
     ActorBase* to;
     char* reason;
@@ -154,6 +167,25 @@ static AETHER_TLS AetherLinkEnd* t_link_ends = NULL;
 static AETHER_TLS int t_link_end_count = 0;
 static AETHER_TLS int t_link_end_cap = 0;
 static AETHER_TLS int t_link_ending = 0;
+static AETHER_TLS char* t_link_end_reason = NULL;   // the reason of the end being made
+
+/* The queue as it is before an outermost end: empty, nothing held. */
+static void link_end_reset(void) {
+    for (int i = 0; i < t_link_end_count; i++) free(t_link_ends[i].reason);
+    free(t_link_ends);
+    t_link_ends = NULL;
+    t_link_end_count = 0;
+    t_link_end_cap = 0;
+    free(t_link_end_reason);
+    t_link_end_reason = NULL;
+    t_link_ending = 0;
+}
+
+/* The journal's release, run by a panic that leaves the drain. */
+static void link_end_unwind(const void* p) {
+    (void)p;
+    link_end_reset();
+}
 
 /* 1 when the end of `to` is queued; 0 out of memory. */
 static int link_end_queue(ActorBase* to, const char* reason) {
@@ -190,16 +222,17 @@ static void link_end(ActorBase* to, const char* reason) {
         return;
     }
     t_link_ending = 1;
+    aether_unwind_track(&t_link_ending, link_end_unwind);
     link_end_make(to, reason, 0);
     while (t_link_end_count > 0) {
         AetherLinkEnd e = t_link_ends[--t_link_end_count];
+        t_link_end_reason = e.reason;   // the journal's to free, should the end panic
         link_end_make(e.to, e.reason, t_link_end_count);
+        t_link_end_reason = NULL;
         free(e.reason);
     }
-    free(t_link_ends);
-    t_link_ends = NULL;
-    t_link_end_cap = 0;
-    t_link_ending = 0;
+    aether_unwind_forget(&t_link_ending);
+    link_end_reset();
 }
 
 /* `dead` ended with `reason`, and `to` was linked to it: `to` gets a Down
