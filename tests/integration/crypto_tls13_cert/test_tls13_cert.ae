@@ -352,6 +352,71 @@ main() {
     if string.equals(tls13_cert.chain_verify_path(&cint, cempty, canchors), "") == 1 {
         println("ok   intermediate chains directly to root")
     } else { println("FAIL intermediate->root rejected"); total_ok = 0 }
+    if tls13_cert.leaf_is_ca(&cint) == 1 {
+        println("ok   intermediate has basicConstraints cA=TRUE")
+    } else { println("FAIL intermediate missing cA=TRUE"); total_ok = 0 }
+    if tls13_cert.leaf_key_cert_sign(&cint) == 1 {
+        println("ok   intermediate has keyCertSign asserted")
+    } else { println("FAIL intermediate missing keyCertSign"); total_ok = 0 }
+    if tls13_cert.leaf_is_ca(&cleaf) == 0 {
+        println("ok   leaf has cA=FALSE")
+    } else { println("FAIL leaf unexpectedly marked as CA"); total_ok = 0 }
+    // --- an issuing certificate must be a CA (#3303) ---
+    // Each signer below is issued by the trusted root and signs a certificate
+    // for victim.example. Every name and signature in all three chains is
+    // valid; only the signer's extensions differ. `openssl verify` rejects the
+    // first two ("invalid CA certificate") and accepts the third.
+    //   x_notca:  basicConstraints cA=FALSE, keyUsage digitalSignature
+    //   x_nosign: basicConstraints cA=TRUE,  keyUsage digitalSignature only
+    //   x_noku:   basicConstraints cA=TRUE,  no keyUsage extension
+    d_root = from_hex("3082019030820135a00302010202140a29bbd366ff167d9ef9737d0e2dfd40287e352d300a06082a8648ce3d04030230153113301106035504030c0a4c696d626f20526f6f74301e170d3236313032383038333432335a170d3336313032353038333432335a30153113301106035504030c0a4c696d626f20526f6f743059301306072a8648ce3d020106082a8648ce3d030107034200047b78035b3243d3ea5ef621847f566fca7edb77021ca4bc3a903cd2922a25a6d1da874bb3e4f6c55d46c6c7e3a0a66759cf070c07d42cab4ec48a41221b6c2004a3633061301d0603551d0e04160414eeb9488716c940c6c5e6acca374b0cebf67443ff301f0603551d23041830168014eeb9488716c940c6c5e6acca374b0cebf67443ff300f0603551d130101ff040530030101ff300e0603551d0f0101ff040403020106300a06082a8648ce3d04030203490030460221008504165db5d46eb5ddb9460118a4de58bcc702e8a609e3658902a4482d7f79cd022100b6631f1596e1388f5574b1c17544ba6604a6cf499e0b86a5cdd027b44d73bc8f")
+    d_notca = from_hex("3082018b30820130a00302010202144662f7daf9691a8da0fc009950887d4c5683f36e300a06082a8648ce3d04030230153113301106035504030c0a4c696d626f20526f6f74301e170d3236313032383038333432335a170d3336313032353038333432335a30133111300f06035504030c084e6f7420412043413059301306072a8648ce3d020106082a8648ce3d03010703420004633bd9956861abf27e87f1589f581ef568389acc0da5212fc5fa8b3b3be02fd0aa984a0709652768af34dd3f90e1cca23597b0522587ef563c45eba4b6ce6a9aa360305e300c0603551d130101ff04023000300e0603551d0f0101ff040403020780301d0603551d0e04160414f37f47d890d9595a9429c94cf3f2799addcbaa17301f0603551d23041830168014eeb9488716c940c6c5e6acca374b0cebf67443ff300a06082a8648ce3d0403020349003046022100ae3fa9d6f34a73aa605ce0cd1e6f9a7064187e5957ecf51f8b5d60ee9a8ce2cd022100978a87651d3437666ec80560574885e1b76103f21d29efd9ac9fa5a125369ea4")
+    d_nosign = from_hex("3082019b30820141a00302010202144662f7daf9691a8da0fc009950887d4c5683f36f300a06082a8648ce3d04030230153113301106035504030c0a4c696d626f20526f6f74301e170d3236313032383038333432335a170d3336313032353038333432335a3021311f301d06035504030c16434120576974686f7574206b6579436572745369676e3059301306072a8648ce3d020106082a8648ce3d03010703420004aa5b417204f2d5dec33578340e6e1bae6dbecbe2a988f401c3438de49c23f51addbccf8361af9098551479830c21067e2c1d5cb80bf287df76a1a93d29ec2fb3a3633061300f0603551d130101ff040530030101ff300e0603551d0f0101ff040403020780301d0603551d0e04160414d921689daf000065be7b0328159a31434ae1d03c301f0603551d23041830168014eeb9488716c940c6c5e6acca374b0cebf67443ff300a06082a8648ce3d04030203480030450220403b9f6b0e7dff614a3170d1d3dfbc404866e2dfed9a9ac69f798f03480db34b02210082aaf387afa585aa054f91b337c391e3869ff5756531dbfbe1ec0e556a67f6e4")
+    d_noku = from_hex("308201883082012ea00302010202144662f7daf9691a8da0fc009950887d4c5683f370300a06082a8648ce3d04030230153113301106035504030c0a4c696d626f20526f6f74301e170d3236313032383038333433335a170d3336313032353038333433335a301e311c301a06035504030c13434120576974686f7574206b657955736167653059301306072a8648ce3d020106082a8648ce3d030107034200044509036cbbdb675cbdcb8eb833d65e4a97ac7ee460b722519a1aeff3aceccfeb40d61fc0aba47b91222905bcaf6bba47a00d4257d3c3a1e3dc65c53ce4a8fff6a3533051300f0603551d130101ff040530030101ff301d0603551d0e0416041442c54459f4b5ed925cb9a9af7271a09db5d0f099301f0603551d23041830168014eeb9488716c940c6c5e6acca374b0cebf67443ff300a06082a8648ce3d0403020348003045022100b9962f8dd30ccd29dc77df5c787234346812b2af843b035dbeb2eca9c27f87f702200e3f2a27a55d1ff906fd0e2ff7939d181b9eb729b8acc742a5baaeb618e9f8cd")
+    d_v_notca = from_hex("308201953082013ca00302010202141a95e24f105b25e80a6c673d6da1198307acdbb2300a06082a8648ce3d04030230133111300f06035504030c084e6f742041204341301e170d3236313032383038333432335a170d3336313032353038333432335a30193117301506035504030c0e76696374696d2e6578616d706c653059301306072a8648ce3d020106082a8648ce3d030107034200048a901e5f945b30dcdd2a6bbe4b7264e2f23957205be8d417169229d9080eb34fe72ac26868368db6535cbbf04990f45ec4204018cc1cc49e1bc5433bcef2d090a368306630190603551d1104123010820e76696374696d2e6578616d706c6530090603551d1304023000301d0603551d0e041604143381c29c605befd4602cb6fb81e1b91d11670337301f0603551d23041830168014f37f47d890d9595a9429c94cf3f2799addcbaa17300a06082a8648ce3d0403020347003044022005c900c5194ef208bf5e547e9d20de3d27571e694d0f8b0df765099f6a3050690220573843af3382dd7deb897c21044398794656c3abc99d258328ab296f8c17c0b2")
+    d_v_nosign = from_hex("308201a53082014aa0030201020214649c59edd6e759909f5ec28a3960d10aa35fa5dd300a06082a8648ce3d0403023021311f301d06035504030c16434120576974686f7574206b6579436572745369676e301e170d3236313032383038333432335a170d3336313032353038333432335a30193117301506035504030c0e76696374696d2e6578616d706c653059301306072a8648ce3d020106082a8648ce3d030107034200048a901e5f945b30dcdd2a6bbe4b7264e2f23957205be8d417169229d9080eb34fe72ac26868368db6535cbbf04990f45ec4204018cc1cc49e1bc5433bcef2d090a368306630190603551d1104123010820e76696374696d2e6578616d706c6530090603551d1304023000301d0603551d0e041604143381c29c605befd4602cb6fb81e1b91d11670337301f0603551d23041830168014d921689daf000065be7b0328159a31434ae1d03c300a06082a8648ce3d04030203490030460221008ad087e744e7e69fa9282f110aac599e9c77fae7134a3dfb0b24616c8c55721e022100bdf2cf8f3768c8ddaa56acb800f218bbc0cd16530ffa27ac3386282a6164abef")
+    d_v_noku = from_hex("308201a130820147a00302010202140f6e21e025af85138dc88ce1d39336b414849adc300a06082a8648ce3d040302301e311c301a06035504030c13434120576974686f7574206b65795573616765301e170d3236313032383038333433335a170d3336313032353038333433335a30193117301506035504030c0e76696374696d2e6578616d706c653059301306072a8648ce3d020106082a8648ce3d030107034200048a901e5f945b30dcdd2a6bbe4b7264e2f23957205be8d417169229d9080eb34fe72ac26868368db6535cbbf04990f45ec4204018cc1cc49e1bc5433bcef2d090a368306630190603551d1104123010820e76696374696d2e6578616d706c6530090603551d1304023000301d0603551d0e041604143381c29c605befd4602cb6fb81e1b91d11670337301f0603551d2304183016801442c54459f4b5ed925cb9a9af7271a09db5d0f099300a06082a8648ce3d04030203480030450221008ef54af85a4ed3267509480a98ae46240bec2adba6ae978e9ff0505f89b64a890220086de65a5a1aa0a5c9db8cb310df8a10eb11da9758dddf94c6540c536b12a2d9")
+    x_root = tls13_cert.LeafCert { tbs: null, tbs_len: 0, sig_alg_oid: null, signature: null, signature_len: 0, spki_algo_oid: null, spki_key: null, spki_key_len: 0, issuer: null, issuer_len: 0, subject: null, subject_len: 0, not_before: null, not_before_len: 0, not_after: null, not_after_len: 0, dns_names: null }
+    x_notca = tls13_cert.LeafCert { tbs: null, tbs_len: 0, sig_alg_oid: null, signature: null, signature_len: 0, spki_algo_oid: null, spki_key: null, spki_key_len: 0, issuer: null, issuer_len: 0, subject: null, subject_len: 0, not_before: null, not_before_len: 0, not_after: null, not_after_len: 0, dns_names: null }
+    x_nosign = tls13_cert.LeafCert { tbs: null, tbs_len: 0, sig_alg_oid: null, signature: null, signature_len: 0, spki_algo_oid: null, spki_key: null, spki_key_len: 0, issuer: null, issuer_len: 0, subject: null, subject_len: 0, not_before: null, not_before_len: 0, not_after: null, not_after_len: 0, dns_names: null }
+    x_noku = tls13_cert.LeafCert { tbs: null, tbs_len: 0, sig_alg_oid: null, signature: null, signature_len: 0, spki_algo_oid: null, spki_key: null, spki_key_len: 0, issuer: null, issuer_len: 0, subject: null, subject_len: 0, not_before: null, not_before_len: 0, not_after: null, not_after_len: 0, dns_names: null }
+    x_v_notca = tls13_cert.LeafCert { tbs: null, tbs_len: 0, sig_alg_oid: null, signature: null, signature_len: 0, spki_algo_oid: null, spki_key: null, spki_key_len: 0, issuer: null, issuer_len: 0, subject: null, subject_len: 0, not_before: null, not_before_len: 0, not_after: null, not_after_len: 0, dns_names: null }
+    x_v_nosign = tls13_cert.LeafCert { tbs: null, tbs_len: 0, sig_alg_oid: null, signature: null, signature_len: 0, spki_algo_oid: null, spki_key: null, spki_key_len: 0, issuer: null, issuer_len: 0, subject: null, subject_len: 0, not_before: null, not_before_len: 0, not_after: null, not_after_len: 0, dns_names: null }
+    x_v_noku = tls13_cert.LeafCert { tbs: null, tbs_len: 0, sig_alg_oid: null, signature: null, signature_len: 0, spki_algo_oid: null, spki_key: null, spki_key_len: 0, issuer: null, issuer_len: 0, subject: null, subject_len: 0, not_before: null, not_before_len: 0, not_after: null, not_after_len: 0, dns_names: null }
+    tls13_cert.parse_certificate(bytes.view(d_root), &x_root)
+    tls13_cert.parse_certificate(bytes.view(d_notca), &x_notca)
+    tls13_cert.parse_certificate(bytes.view(d_nosign), &x_nosign)
+    tls13_cert.parse_certificate(bytes.view(d_noku), &x_noku)
+    tls13_cert.parse_certificate(bytes.view(d_v_notca), &x_v_notca)
+    tls13_cert.parse_certificate(bytes.view(d_v_nosign), &x_v_nosign)
+    tls13_cert.parse_certificate(bytes.view(d_v_noku), &x_v_noku)
+    xanchors = list_new(); _ = list.add(xanchors, &x_root)
+    if tls13_cert.leaf_is_ca(&x_notca) == 0 {
+        println("ok   critical cA=FALSE parsed as not a CA")
+    } else { println("FAIL cA=FALSE certificate marked as CA"); total_ok = 0 }
+    if tls13_cert.leaf_is_ca(&x_nosign) == 1 && tls13_cert.leaf_key_cert_sign(&x_nosign) == 0 {
+        println("ok   cA=TRUE without keyCertSign parsed")
+    } else { println("FAIL cA/keyCertSign misparsed on x_nosign"); total_ok = 0 }
+    xi_notca = list_new(); _ = list.add(xi_notca, &x_notca)
+    if string.equals(tls13_cert.chain_verify_path(&x_v_notca, xi_notca, xanchors), "") != 1 {
+        println("ok   non-CA certificate rejected as an issuer")
+    } else { println("FAIL a non-CA certificate issued a trusted certificate"); total_ok = 0 }
+    xi_nosign = list_new(); _ = list.add(xi_nosign, &x_nosign)
+    if string.equals(tls13_cert.chain_verify_path(&x_v_nosign, xi_nosign, xanchors), "") != 1 {
+        println("ok   CA without keyCertSign rejected as an issuer")
+    } else { println("FAIL a CA without keyCertSign issued a trusted certificate"); total_ok = 0 }
+    xi_noku = list_new(); _ = list.add(xi_noku, &x_noku)
+    if string.equals(tls13_cert.chain_verify_path(&x_v_noku, xi_noku, xanchors), "") == 1 {
+        println("ok   CA with no keyUsage extension accepted as an issuer")
+    } else { println("FAIL a CA with no keyUsage extension was rejected"); total_ok = 0 }
+    list_free(xi_notca); list_free(xi_nosign); list_free(xi_noku); list_free(xanchors)
+    tls13_cert.free_leaf(&x_root); bytes.free(d_root)
+    tls13_cert.free_leaf(&x_notca); bytes.free(d_notca)
+    tls13_cert.free_leaf(&x_nosign); bytes.free(d_nosign)
+    tls13_cert.free_leaf(&x_noku); bytes.free(d_noku)
+    tls13_cert.free_leaf(&x_v_notca); bytes.free(d_v_notca)
+    tls13_cert.free_leaf(&x_v_nosign); bytes.free(d_v_nosign)
+    tls13_cert.free_leaf(&x_v_noku); bytes.free(d_v_noku)
     list_free(canchors); list_free(cinters); list_free(cempty)
     tls13_cert.free_leaf(&croot); tls13_cert.free_leaf(&cint); tls13_cert.free_leaf(&cleaf)
     bytes.free(cp_root); bytes.free(cp_int); bytes.free(cp_leaf)
