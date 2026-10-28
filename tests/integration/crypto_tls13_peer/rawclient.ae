@@ -1,6 +1,7 @@
 // Sends the bytes RAW (hex) to 127.0.0.1 PEER_PORT and prints what came
 // back: "ALERT <description>" for a plaintext alert, "SERVERHELLO" for a
-// handshake record, "CLOSED", or "OTHER". RAW=split_ch sends a real
+// handshake record ("SERVERHELLO+CCS" when a change_cipher_spec follows
+// it), "CLOSED", or "OTHER". RAW=split_ch sends a real
 // ClientHello split over two records instead.
 
 import std.os
@@ -71,13 +72,31 @@ main() {
     }
     _s, _werr = tcp.write_all(sock, bytes.view(b)[0..n])
     bytes.free(b)
-    buf = bytes.new(64)
-    bytes.set(buf, 63, 0)
-    got, rerr = tcp.read_into(sock, bytes.view(buf)[0..64])
+    buf = bytes.new(4096)
+    bytes.set(buf, 4095, 0)
+    got, rerr = tcp.read_into(sock, bytes.view(buf)[0..4096])
+    // A ServerHello record: read on until the record after it has its header.
+    if rerr == "" && got >= 5 && (bytes.get(buf, 0) & 0xFF) == 0x16 {
+        need = 5 + (((bytes.get(buf, 3) & 0xFF) << 8) | (bytes.get(buf, 4) & 0xFF)) + 5
+        tries = 0
+        while got < need && got < 4000 && tries < 50 {
+            ready, _pe = tcp.poll(sock, 100)
+            if ready {
+                more, merr = tcp.read_into(sock, bytes.view(buf)[got..4096])
+                if merr != "" || more <= 0 { tries = 50 } else { got = got + more }
+            }
+            tries = tries + 1
+        }
+    }
     if rerr != "" || got <= 0 {
         println("CLOSED")
     } else if (bytes.get(buf, 0) & 0xFF) == 0x16 {
-        println("SERVERHELLO")
+        shl = 5 + (((bytes.get(buf, 3) & 0xFF) << 8) | (bytes.get(buf, 4) & 0xFF))
+        if got > shl && (bytes.get(buf, shl) & 0xFF) == 0x14 {
+            println("SERVERHELLO+CCS")
+        } else {
+            println("SERVERHELLO")
+        }
     } else if got >= 7 && (bytes.get(buf, 0) & 0xFF) == 0x15 {
         println("ALERT ${bytes.get(buf, 6) & 0xFF}")
     } else {

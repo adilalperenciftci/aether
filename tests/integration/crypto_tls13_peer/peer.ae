@@ -404,25 +404,28 @@ fn suite_params(cs: int) -> (int, int, string, int) {
 // What the client sent back, read under `cli_ctx`: "ALERT n", "FINISHED",
 // "DATA" or "CLOSED".
 fn client_answer(r: *Reader, cli_ctx: ptr) -> string {
+    // "CCS+" before the answer when a change_cipher_spec came first.
+    pre = ""
     while 1 == 1 {
         rec = next_record(r)
-        if rec == null { return "CLOSED" }
+        if rec == null { return "${pre}CLOSED" }
         ct = bytes.get(rec, 0) & 0xFF
         if ct == 0x14 {
             bytes.free(rec)
+            pre = "CCS+"
         } else if ct == 0x15 {
             d = bytes.get(rec, 6) & 0xFF
             bytes.free(rec)
-            return "ALERT ${d}"
+            return "${pre}ALERT ${d}"
         } else {
             if cli_ctx == null {
                 bytes.free(rec)
-                return "ENCRYPTED"
+                return "${pre}ENCRYPTED"
             }
             opened = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0 }
             oerr = tls13_record.open_record(cli_ctx, bytes.view(rec)[0..bytes.length(rec)], &opened)
             bytes.free(rec)
-            if oerr != "" { return "UNREADABLE" }
+            if oerr != "" { return "${pre}UNREADABLE" }
             res = "DATA"
             if opened.content_type == tls13_record.CONTENT_ALERT && opened.plaintext_len >= 2 {
                 res = "ALERT ${bytes.get(opened.plaintext, 1) & 0xFF}"
@@ -430,7 +433,7 @@ fn client_answer(r: *Reader, cli_ctx: ptr) -> string {
                 if (bytes.get(opened.plaintext, 0) & 0xFF) == 20 { res = "FINISHED" } else { res = "HANDSHAKE" }
             }
             if opened.plaintext != null { bytes.free(opened.plaintext) }
-            return res
+            return "${pre}${res}"
         }
     }
 }
@@ -628,7 +631,7 @@ main() {
     answer = client_answer(&r, cli_ctx)
     println(answer)
     post = knob("post")
-    if post != "" && answer == "FINISHED" {
+    if post != "" && string.ends_with(answer, "FINISHED") == 1 {
         th_sf = tls13_client.transcript_hash_algo(tr, algo)
         ms = tls13_ks.master_secret(algo, hsec)
         c_ap = tls13_ks.traffic_secret(algo, ms, "c ap traffic", bytes.view(th_sf)[0..hl])

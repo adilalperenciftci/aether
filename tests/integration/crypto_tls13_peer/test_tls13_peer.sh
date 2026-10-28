@@ -11,6 +11,7 @@
 #   #3317  the record layer (RFC 8446 5): limits, types, change_cipher_spec,
 #          empty records; client and server.
 #   #3321  handshake messages split across records, client and server.
+#   #3322  the dummy change_cipher_spec of middlebox compatibility mode.
 #   #3316  CertificateEntry extensions (RFC 8446 4.4.2): the same alerts,
 #          and decode_error for a status_request that is not one OCSP
 #          response.
@@ -151,6 +152,13 @@ run_case "SH: split into 8-byte records" "split_sh=8" "OK" "FINISHED"
 run_case "SH: split into 1-byte records" "split_sh=1" "OK" "FINISHED"
 run_case "SH: more handshake bytes after it in its record" "pack_sh=1" "ERR" "ALERT 10"
 run_server_case "server: a ClientHello split over two records" "split_ch" "SERVERHELLO"
+
+# #3322: middlebox compatibility (RFC 8446 D.4): the client's dummy
+# change_cipher_spec before its second flight, an alert included, and the
+# server's right after its ServerHello.
+run_case "CCS: before the client's Finished" "" "OK" "CCS+FINISHED"
+run_case "CCS: before the client's alert" "ee_ext=fafa0000" "ERR" "CCS+ALERT 110"
+run_server_case "server: a change_cipher_spec after the ServerHello" "split_ch" "SERVERHELLO+CCS"
 
 [ "$fails" = 0 ] || fail "$fails case(s)"
 echo "  [PASS] $NAME"

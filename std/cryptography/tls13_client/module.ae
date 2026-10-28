@@ -611,6 +611,24 @@ fn cli_send_view(sock: ptr, rec: byte[]) -> int {
     return sent
 }
 
+// The dummy change_cipher_spec record of middlebox compatibility mode (RFC
+// 8446 D.4): 14 03 03 00 01 01. The client always sends a non-empty
+// legacy_session_id, which 4.1.2 ties to that mode, so it sends this record
+// too: right after the ClientHello when it offers early data, else right
+// before its second flight, which is an alert when it refuses the server's
+// flight (#3322). BoringSSL refuses a client that does not.
+fn send_dummy_ccs(sock: ptr) {
+    ccs = bytes.new(6)
+    bytes.set(ccs, 0, 0x14)
+    bytes.set(ccs, 1, 0x03)
+    bytes.set(ccs, 2, 0x03)
+    bytes.set(ccs, 3, 0x00)
+    bytes.set(ccs, 4, 0x01)
+    bytes.set(ccs, 5, 0x01)
+    cli_send_view(sock, bytes.view(ccs)[0..6])
+    bytes.free(ccs)
+}
+
 // Send a plaintext handshake record: type 0x16 (handshake), legacy version
 // 0x0301 for the very first flight (RFC 8446 §5.1 allows 0x0301/0x0303).
 fn send_plaintext_handshake(sock: ptr, msg: byte[]) -> string {
@@ -983,6 +1001,9 @@ fn run_handshake_tail(sock: @keep ptr, rio: @keep ptr, tr: ptr, host: string, sh
     _svd_len = 0
     ferr = ""
     fllen, ferr, falert = read_flight(rio, srv_ctx, fl)
+    // The second flight, an alert or the client's own, starts with the
+    // dummy change_cipher_spec (RFC 8446 D.4, #3322).
+    send_dummy_ccs(sock)
     if string.equals(ferr, "") != 1 && falert != 0 {
         fa_ctx = tls13_record.new_aead(rec_aead, bytes.view(hs_client_key(keys))[0..rec_key_len], hs_client_iv(keys))
         send_alert_hs(sock, fa_ctx, ALERT_LEVEL_FATAL, falert)
@@ -1918,6 +1939,10 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
         return null, serr
     }
 
+    // Middlebox compatibility (D.4, #3322): with early data, the dummy
+    // change_cipher_spec goes right after the ClientHello.
+    if want_0rtt == 1 { send_dummy_ccs(sock) }
+
     // 0-RTT: immediately send the early data as application_data records under
     // the client_early_traffic_secret = Derive-Secret(early, "c e traffic",
     // Transcript-Hash(ClientHello)). We need the record AEAD/key-len for the
@@ -1992,6 +2017,9 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
     fllen = 0
     ferr = ""
     fllen, ferr, falert = read_flight(rio, srv_ctx, fl)
+    // Without early data the second flight starts with the dummy
+    // change_cipher_spec (D.4, #3322); with it, that went after the ClientHello.
+    if want_0rtt != 1 { send_dummy_ccs(sock) }
     if string.equals(ferr, "") != 1 && falert != 0 {
         fa_ctx = tls13_record.new_aead(rec_aead, bytes.view(hs_client_key(keys))[0..rec_key_len], hs_client_iv(keys))
         send_alert_hs(sock, fa_ctx, ALERT_LEVEL_FATAL, falert)

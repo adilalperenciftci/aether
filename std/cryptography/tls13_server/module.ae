@@ -212,7 +212,6 @@ fn recio_next_client_hello(r: *RecordIO) -> (ptr, int, string) {
     }
 }
 
-
 fn recio_next_hs(r: *RecordIO) -> (ptr, int, string) {
     looking = 1
     rec = null
@@ -512,6 +511,20 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
         return null, sherr
     }
     tls13_client.transcript_add(tr, bytes.view(sh)[0..sh_len])
+    // Middlebox compatibility (RFC 8446 D.4, #3322): a client that sends a
+    // legacy_session_id gets a dummy change_cipher_spec right after the
+    // ServerHello, as BoringSSL and OpenSSL send it.
+    if ch_parsed.session_id_len > 0 {
+        ccs = bytes.new(6)
+        bytes.set(ccs, 0, 0x14)
+        bytes.set(ccs, 1, 0x03)
+        bytes.set(ccs, 2, 0x03)
+        bytes.set(ccs, 3, 0x00)
+        bytes.set(ccs, 4, 0x01)
+        bytes.set(ccs, 5, 0x01)
+        send_record_raw(sock, ccs)
+        bytes.free(ccs)
+    }
 
     // 4. Key Schedule
     rec_aead, rec_key_len, hash_algo, hash_len, suite_err = suite_params(ch_parsed.cipher_suite)
@@ -722,7 +735,6 @@ conn_recv(conn: ptr) -> (ptr, int, string) {
         }
     }
 }
-
 
 close_conn(conn: ptr) {
     c = conn as *ServerConn
