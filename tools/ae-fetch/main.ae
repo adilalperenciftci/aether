@@ -19,10 +19,11 @@
 //
 // A failure writes `error <why>` to <info> and exits 1.
 //
-// The hash: "sha256-" and the hex SHA-256 of, for each regular file under
-// the package root in byte order of its path (relative, `/`-separated), the
-// path, a NUL, the hex SHA-256 of its bytes and a newline. Directories and
-// file modes are not part of it, so a package hashes the same on every OS.
+// The hash: "sha256-" and the hex SHA-256 of, for each regular file and
+// symlink under the package root in byte order of its path (relative,
+// `/`-separated), the path, a NUL, then the hex SHA-256 of a file's bytes
+// or `symlink ` and a link's target, and a newline. Directories and file
+// modes are not part of it, so a package hashes the same on every OS.
 
 import std.bytes
 import std.cryptography
@@ -42,11 +43,12 @@ fail(info: string, why: string) {
     exit(1)
 }
 
-// Every regular file under `root`, as paths relative to it, sorted.
+// Every regular file and symlink under `root` (a symlink is listed, never
+// followed), as paths relative to it, sorted.
 files_under(root: string) -> string[] {
     count = 0
     fs.walk(root, |path: string, kind: int, depth: int| {
-        if kind == fs.STAT_KIND_FILE {
+        if kind == fs.STAT_KIND_FILE || kind == fs.STAT_KIND_SYMLINK {
             count = count + 1
         }
         return fs.WALK_CONTINUE
@@ -55,7 +57,7 @@ files_under(root: string) -> string[] {
     i = 0
     prefix = string.length(root) + 1
     fs.walk(root, |path: string, kind: int, depth: int| {
-        if kind == fs.STAT_KIND_FILE && i < count {
+        if (kind == fs.STAT_KIND_FILE || kind == fs.STAT_KIND_SYMLINK) && i < count {
             rel = string.substring(path, prefix, string.length(path))
             names[i] = string.replace(rel, "\\", "/")
             i = i + 1
@@ -77,6 +79,19 @@ tree_hash(root: string) -> (string, string) {
     listing = ""
     k = 0
     while k < names.len {
+        // A symlink is its target, as the archive spelled it (Zig's rule),
+        // so it hashes the same wherever the link points on this disk.
+        if fs.is_symlink("${root}/${names[k]}") == 1 {
+            target, lerr = fs.readlink("${root}/${names[k]}")
+            if lerr != "" {
+                why = "cannot read the link ${names[k]}: ${lerr}"
+                free(names)
+                return "", why
+            }
+            listing = "${listing}${names[k]}\x00symlink ${string.replace(target, "\\", "/")}\n"
+            k = k + 1
+            continue
+        }
         data, n, err = fs.read_binary("${root}/${names[k]}")
         if err != "" {
             why = "cannot read ${names[k]}: ${err}"
@@ -181,10 +196,18 @@ fetch_into(url: string, dest: string) -> string {
         fs.remove_tree(stage)
         return werr
     }
-    xerr = tar.extract(archive, stage, tar.default_extract_options())
+    // A repository's symlinks are part of it (#3306). std.tar refuses one
+    // whose target leaves the destination, and an entry under a symlinked
+    // directory.
+    opts = tar.default_extract_options()
+    opts.allow_symlinks = 1
+    xerr = tar.extract(archive, stage, opts)
     fs.delete(archive)
     if xerr != "" {
         fs.remove_tree(stage)
+        if string.contains(xerr, "failed to create symlink") == 1 && os.platform() == "windows" {
+            return "cannot extract: ${xerr}. The package holds a symlink, and Windows creates one only with Developer Mode on (Settings, System, For developers) or as an administrator"
+        }
         return "cannot extract: ${xerr}"
     }
     top = single_top(stage)

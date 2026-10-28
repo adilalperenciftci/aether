@@ -25,15 +25,20 @@ the same tree, whichever server it got it from.
 ```
 
 The hash is `sha256-` and the hex SHA-256 of a listing of the tree: for each
-regular file under the package root, in byte order of its path (relative,
-`/`-separated), the path, a NUL byte, the hex SHA-256 of the file's bytes and
-a newline. Directories and file modes are not part of it, so a package hashes
-the same on every OS, and the listing can be recomputed with standard tools:
+regular file and symlink under the package root, in byte order of its path
+(relative, `/`-separated), the path, a NUL byte, then the hex SHA-256 of a
+file's bytes, or `symlink ` and a link's target as the archive spells it,
+and a newline. A symlink is listed, never followed, so a link and the file
+it names are two entries. Directories and file modes are not part of it, so
+a package hashes the same on every OS, and the listing can be recomputed
+with standard tools:
 
 ```sh
-find . -type f | sed 's|^\./||' | LC_ALL=C sort |
-  while IFS= read -r f; do printf '%s\0%s\n' "$f" "$(sha256sum "$f" | cut -d' ' -f1)"; done |
-  sha256sum
+find . \( -type f -o -type l \) | sed 's|^\./||' | LC_ALL=C sort |
+  while IFS= read -r f; do
+    if [ -L "$f" ]; then printf '%s\0symlink %s\n' "$f" "$(readlink "$f")"
+    else printf '%s\0%s\n' "$f" "$(sha256sum "$f" | cut -d' ' -f1)"; fi
+  done | sha256sum
 ```
 
 ## Where the bytes come from
@@ -78,8 +83,12 @@ The fetching is done by `ae-fetch`, an Aether program (`tools/ae-fetch`):
 std.http fetches (OpenSSL, or the pure-Aether TLS where there is none),
 std.zlib inflates, std.tar unpacks and std.cryptography hashes. std.tar reads
 the pax and GNU archives forges produce, and refuses an entry whose path
-leaves the destination. It also refuses symlinks, so a package whose
-repository holds a symlink cannot be installed this way yet (#3306).
+leaves the destination. A repository's symlinks are installed as symlinks
+(#3306), and std.tar refuses one whose target leaves the package and any
+entry under a symlinked directory. Windows creates a symlink only with
+Developer Mode on (Settings, System, For developers) or as an administrator.
+Elsewhere, a package that holds a symlink fails to install with that
+reason, and leaves nothing.
 
 Every install ships the fetcher's source (`share/aether/tools/ae-fetch`), not
 a binary per platform. The first `ae add` builds it with the installed

@@ -1,0 +1,73 @@
+// Part of: test_ae_add_hash_pin.sh
+//
+// Writes a gzipped tar the way a forge serves one, with symlink entries
+// whether or not this machine can create symlinks (MSYS's `ln -s` copies, or
+// fails, without Developer Mode). Arguments: the output .tar.gz, then one
+// entry each:
+//   d:<name>            a directory
+//   f:<name>=<source>   a regular file with <source>'s bytes
+//   l:<name>=<target>   a symlink to <target>
+import std.fs
+import std.os
+import std.string
+import std.tar
+import std.zlib
+
+extern exit(code: int)
+
+die(why: string) {
+    println("mkarchive: ${why}")
+    exit(1)
+}
+
+main() {
+    argc = os.args_count()
+    if argc < 3 {
+        die("usage: mkarchive <out.tar.gz> <entry>...")
+    }
+    out = os.args_get(1)
+    plain = "${out}.tar"
+    w, err = tar.writer_create(plain)
+    if err != "" {
+        die(err)
+    }
+    i = 2
+    while i < argc {
+        spec = os.args_get(i)
+        kind = string.substring(spec, 0, 2)
+        rest = string.substring(spec, 2, string.length(spec))
+        eq = string.index_of(rest, "=")
+        aerr = ""
+        if kind == "d:" {
+            aerr = tar.writer_add_directory(w, rest, 493, 0 as long)
+        } else if kind == "f:" && eq > 0 {
+            aerr = tar.writer_add_file(w, string.substring(rest, 0, eq), string.substring(rest, eq + 1, string.length(rest)))
+        } else if kind == "l:" && eq > 0 {
+            aerr = tar.writer_add_symlink(w, string.substring(rest, 0, eq), string.substring(rest, eq + 1, string.length(rest)), 511, 0 as long)
+        } else {
+            aerr = "bad entry '${spec}'"
+        }
+        if aerr != "" {
+            tar.writer_abort(w)
+            die(aerr)
+        }
+        i = i + 1
+    }
+    ferr = tar.writer_finish(w)
+    if ferr != "" {
+        die(ferr)
+    }
+    data, n, rerr = fs.read_binary(plain)
+    if rerr != "" {
+        die(rerr)
+    }
+    gz, gn, gerr = zlib.gzip_deflate(string.bytes(data)[0..n], 6)
+    if gerr != "" {
+        die(gerr)
+    }
+    werr = fs.write_binary(out, string.bytes(gz)[0..gn])
+    fs.delete(plain)
+    if werr != "" {
+        die(werr)
+    }
+}

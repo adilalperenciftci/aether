@@ -23,7 +23,11 @@
 #   7. without a version the default branch is installed and pinned,
 #   8. editing the manifest keeps every other line and section in place,
 #   9. `..` in a package name is refused, and nothing is written (#3304); so
-#      is a version that is not a tag name, typed or read from aether.toml.
+#      is a version that is not a tag name, typed or read from aether.toml,
+#  10. a package's symlinks are installed as symlinks and their targets are
+#      part of its hash; a link out of the package is refused (#3306).
+#      Where the host cannot create a symlink (Windows without Developer
+#      Mode) the add says so and leaves nothing.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -177,4 +181,54 @@ rm -rf "$CACHE" "$CACHE.fetched"
 grep -q "not a version" "$TMP/oddver.log" || fail "no diagnostic for the manifest's version" "$TMP/oddver.log"
 [ ! -e "$CACHE" ] || fail "a refused version installed a tree" "$TMP/oddver.log"
 
-echo "  [PASS] ae_add_hash_pin: the tree's hash is pinned, checked on add and build, moved only by --update; .. and non-versions refused"
+# --- 10. symlinks (#3306) -------------------------------------------------
+# The archives come from mkarchive.ae (std.tar's writer), so they hold real
+# symlink entries on every host, whether or not it can create a symlink.
+native() { if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s\n' "$1"; fi; }
+mkarchive() {
+    ( cd "$TMP" && "$AE" run "$(native "$SCRIPT_DIR/mkarchive.ae")" -- "$@" ) > "$TMP/mk.log" 2>&1 \
+        || fail "mkarchive could not build a fixture" "$TMP/mk.log"
+}
+LPKG="example.com/acme/linked"
+EPKG="example.com/acme/escape"
+mkdir -p "$TMP/mirror/$LPKG/archive" "$TMP/mirror/$EPKG/archive"
+printf 'hello\n' > "$TMP/readme.src"
+SRC="$(native "$TMP/readme.src")"
+mkarchive "$(native "$TMP/mirror/$LPKG/archive/v1.tar.gz")" d:linked-v1 d:linked-v1/docs \
+    "f:linked-v1/docs/README.md=$SRC" l:linked-v1/README.md=docs/README.md l:linked-v1/alldocs=docs
+# The same tree, but one link names its target another way: another package.
+mkarchive "$(native "$TMP/mirror/$LPKG/archive/v2.tar.gz")" d:linked-v2 d:linked-v2/docs \
+    "f:linked-v2/docs/README.md=$SRC" l:linked-v2/README.md=./docs/README.md l:linked-v2/alldocs=docs
+mkarchive "$(native "$TMP/mirror/$EPKG/archive/v1.tar.gz")" d:escape-v1 "f:escape-v1/a=$SRC" \
+    l:escape-v1/out=../../../outside
+L="$TMP/links"
+mkdir -p "$L"
+printf '[package]\nname = "l"\n' > "$L/aether.toml"
+LCACHE="$HOME/.aether/packages/$LPKG"
+if ( cd "$L" && "$AE" add "$LPKG@v1" ) > "$TMP/link.log" 2>&1; then
+    [ -L "$LCACHE/README.md" ] && [ -L "$LCACHE/alldocs" ] || fail "the symlinks were not installed as symlinks" "$TMP/link.log"
+    [ "$(cat "$LCACHE/README.md")" = hello ] || fail "the installed link does not reach its target" "$TMP/link.log"
+    H1=$(sed -n "s|^\"$LPKG\" = \"\(sha256-[0-9a-f]*\)\"|\1|p" "$L/aether.toml")
+    ( cd "$L" && "$AE" add "$LPKG@v2" --update ) > "$TMP/link2.log" 2>&1 || fail "the second linked package did not install" "$TMP/link2.log"
+    H2=$(sed -n "s|^\"$LPKG\" = \"\(sha256-[0-9a-f]*\)\"|\1|p" "$L/aether.toml")
+    [ -n "$H1" ] && [ -n "$H2" ] && [ "$H1" != "$H2" ] || fail "a link's target is not part of the hash ($H1, $H2)" "$L/aether.toml"
+else
+    # Windows creates a symlink only with Developer Mode or as an
+    # administrator: the add must say so and leave nothing.
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*)
+            grep -q "Developer Mode" "$TMP/link.log" || fail "no Windows symlink diagnostic" "$TMP/link.log"
+            [ ! -e "$LCACHE" ] && [ ! -e "$LCACHE.fetched" ] || fail "a failed linked add left a tree" "$TMP/link.log" ;;
+        *) fail "a package holding symlinks did not install" "$TMP/link.log" ;;
+    esac
+fi
+# A link out of the package is refused everywhere, and nothing is left.
+( cd "$L" && "$AE" add "$EPKG@v1" ) > "$TMP/esc.log" 2>&1 && fail "a symlink out of the package was accepted" "$TMP/esc.log"
+[ ! -e "$HOME/.aether/packages/$EPKG" ] && [ ! -e "$HOME/.aether/packages/$EPKG.fetched" ] \
+    || fail "a refused escaping link left a tree" "$TMP/esc.log"
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) ;;
+    *) grep -q "escapes extraction root" "$TMP/esc.log" || fail "the escaping link was not named as the reason" "$TMP/esc.log" ;;
+esac
+
+echo "  [PASS] ae_add_hash_pin: the tree's hash is pinned, checked on add and build, moved only by --update; .. and non-versions refused; symlinks kept, escaping ones refused"

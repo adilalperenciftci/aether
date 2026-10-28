@@ -16,4 +16,6 @@
   lists needs `--update` (it used to print "Already in dependencies." and
   change nothing). A package cached by git before this keeps working and is
   not checked; `ae add <package> --update` refetches it and pins its hash.
-  A repository that holds a symlink cannot be installed this way yet (#3306).
+  A repository's symlinks are installed as symlinks and their targets are
+  part of the hash; one whose target leaves the package is refused, and on
+  Windows a symlink needs Developer Mode, as git needs it (#3306).
