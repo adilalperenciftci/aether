@@ -37,7 +37,7 @@ header comment is the authoritative description.
 | `std.floatarr` | Fixed-size packed-double buffer. | 15 | [guide](../std/floatarr/README.md) · [source](../std/floatarr/module.ae) |
 | `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 150 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
 | `std.hash` | Fast non-cryptographic hashes and checksums: FNV, MurmurHash3, SipHash, CRC-32. | 6 | [guide](../std/hash/README.md) · [source](../std/hash/module.ae) |
-| `std.host` | Primitives for Aether scripts embedded in a host application. | 14 | [guide](../std/host/README.md) · [source](../std/host/module.ae) |
+| `std.host` | Primitives for Aether scripts embedded in a host application. | 22 | [guide](../std/host/README.md) · [source](../std/host/module.ae) |
 | `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 146 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
 | `std.http1` | Pure-Aether HTTP/1.1 response reader (RFC 9112). | 14 | [guide](../std/http1/README.md) · [source](../std/http1/module.ae) |
 | `std.intarr` | Fixed-size packed-int buffer. | 15 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
@@ -4620,6 +4620,7 @@ export process_order(order_id: long) -> int {
 - `host.notify(event, id)` → `int` - 1 if the host had a handler for `event`, 0 if not
 - `host.caller_identity()` → `string`, `host.caller_attribute(key)` → `string`, `host.caller_deadline_ms()` → `long` - `""` / 0 outside a host call
 - `host.describe`, `host.input`, `host.event`, `host.bindings`, and the per-language `java` / `python` / `ruby` / `go` helpers - The manifest DSL a namespace's `manifest.ae` uses to describe its ABI
+- `host.last_outcome()` → `int`, `host.last_outcome_text()` → `string` - How the last call into a library export on this thread ended: `host.OK`, `host.PANICKED`, `host.DEADLINE`, `host.CANCELLED`, `host.MEMORY_CAP` or `host.OUT_OF_MEMORY`, and its reason (`""` for OK). A program importing a library in binary form gets a failed call raised again as a panic; these read it without one (#2956)
 
 ## See Also
 

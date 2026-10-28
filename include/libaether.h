@@ -67,6 +67,36 @@ AETHER_API void aether_set_call_deadline(int64_t ms);
  * error string the entry returns. */
 AETHER_API int aether_deadline_tripped(void);
 
+/* How the last call into an export on this thread ended (#2956). Every
+ * aether_<name> export runs inside an execution frame: a panic the export
+ * does not catch ends the call, not the process, and the export returns
+ * the zero value of its result (NULL for a string, which the release
+ * accepts). A zero value with an outcome other than AETHER_OK is not a
+ * result; release only what an AETHER_OK call returned. The library is
+ * usable again at once; nothing done before the failure is rolled back.
+ *
+ * Nested calls (an export calls a host service, which calls an export)
+ * each have their own outcome, and the outer call's caller info,
+ * deadline and sandbox grants are back when the inner one returns, on
+ * every exit. The frame costs a context save per call (about 5.8 ns on
+ * Windows MinGW for an export that calls a function; none for one that
+ * can neither panic, allocate, loop nor call anything): docs/emit-lib.md,
+ * "Failures and nested calls at the boundary". */
+#ifndef AETHER_OK
+#define AETHER_OK             0   /* returned normally */
+#define AETHER_PANICKED       1   /* a panic the export did not catch */
+#define AETHER_DEADLINE       2   /* its deadline passed (see above) */
+#define AETHER_CANCELLED      3   /* cancelled from another thread */
+#define AETHER_MEMORY_CAP     4   /* past the memory cap */
+#define AETHER_OUT_OF_MEMORY  5   /* an allocation failed */
+#endif
+AETHER_API int aether_last_outcome(void);
+
+/* The last outcome's reason: "" for AETHER_OK, the panic's message (cut at
+ * 1023 bytes) or a fixed description otherwise. Borrowed: valid until the
+ * next call into the library on this thread. */
+AETHER_API const char* aether_last_outcome_text(void);
+
 #ifdef __cplusplus
 }
 #endif

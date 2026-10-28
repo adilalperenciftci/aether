@@ -9,6 +9,7 @@
 
 #include "aether_host.h"
 #include "utils/aether_compiler.h"
+#include "aether_exec.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -205,8 +206,59 @@ typedef struct {
  * Initial-Exec TLS model emits R_X86_64_TPOFF32 relocations that
  * the linker rejects when building a shared object; the
  * Global-Dynamic model in AETHER_TLS_SHARED works in both contexts
- * with a sub-nanosecond extra GOT indirection per access. */
+ * with a sub-nanosecond extra GOT indirection per access.
+ *
+ * tls_caller is the setting: what aether_set_caller wrote last, what the
+ * next execution entered sees, and what code outside any execution
+ * reads. An execution reads the setting it was entered with: tls_caller
+ * itself, until a host service it called sets another while it runs. Then
+ * the running executions that still read tls_caller get a copy of it
+ * first (t_view, one block shared by them, counted), and when an
+ * execution with a copy returns, the copy is the setting again (#2955).
+ * The copy is made only on that path: an export call costs nothing here. */
 static AETHER_TLS_SHARED AetherCallerInfo tls_caller = { .identity_off = -1 };
+
+typedef struct {
+    int refs;
+    AetherCallerInfo info;
+} CallerView;
+
+static AETHER_TLS_SHARED CallerView* t_view[AETHER_EXEC_MAX_DEPTH + 1];
+
+static const AetherCallerInfo* caller_seen(void) {
+    int d = aether_exec_depth();
+    if (d > 0 && d <= AETHER_EXEC_MAX_DEPTH && t_view[d]) return &t_view[d]->info;
+    return &tls_caller;
+}
+
+/* Before the setting changes while executions run: each that reads it
+ * keeps what it saw. 0 when there was no room for the copy. */
+static int caller_keep_views(void) {
+    int d = aether_exec_depth();
+    if (d > AETHER_EXEC_MAX_DEPTH) d = AETHER_EXEC_MAX_DEPTH;
+    int need = 0;
+    for (int k = 1; k <= d; k++) if (!t_view[k]) need++;
+    if (need == 0) return 1;
+    CallerView* v = (CallerView*)malloc(sizeof(CallerView));
+    if (!v) return 0;
+    v->refs = need;
+    v->info = tls_caller;
+    for (int k = 1; k <= d; k++) {
+        if (t_view[k]) continue;
+        t_view[k] = v;
+        aether_exec_mark_view(k);
+    }
+    return 1;
+}
+
+void aether_caller_leave(int depth) {
+    if (depth < 1 || depth > AETHER_EXEC_MAX_DEPTH) return;
+    CallerView* v = t_view[depth];
+    if (!v) return;
+    t_view[depth] = NULL;
+    tls_caller = v->info;
+    if (--v->refs == 0) free(v);
+}
 
 /* Append a NUL-terminated copy of `s` to the arena. Returns the
  * starting offset on success, or -1 if there isn't room. */
@@ -250,33 +302,40 @@ int aether_set_caller(const char* identity,
     staged.attr_count = (int)n;
     staged.present    = 1;
 
+    /* The running executions keep what they were entered with. */
+    if (!caller_keep_views()) return -1;
     /* Commit. Single struct copy, no torn write across fields. */
     tls_caller = staged;
     return 0;
 }
 
 void aether_clear_caller(void) {
+    /* Without room to keep the running executions' views, nothing changes. */
+    if (!caller_keep_views()) return;
     AetherCallerInfo empty = { .identity_off = -1 };
     tls_caller = empty;
 }
 
 const char* aether_caller_identity(void) {
-    if (!tls_caller.present || tls_caller.identity_off < 0) return "";
-    return tls_caller.arena + tls_caller.identity_off;
+    const AetherCallerInfo* ci = caller_seen();
+    if (!ci->present || ci->identity_off < 0) return "";
+    return ci->arena + ci->identity_off;
 }
 
 const char* aether_caller_attribute(const char* key) {
-    if (!key || !tls_caller.present) return "";
-    for (int i = 0; i < tls_caller.attr_count; i++) {
-        const char* k = tls_caller.arena + tls_caller.key_off[i];
+    const AetherCallerInfo* ci = caller_seen();
+    if (!key || !ci->present) return "";
+    for (int i = 0; i < ci->attr_count; i++) {
+        const char* k = ci->arena + ci->key_off[i];
         if (strcmp(k, key) == 0) {
-            return tls_caller.arena + tls_caller.val_off[i];
+            return ci->arena + ci->val_off[i];
         }
     }
     return "";
 }
 
 int64_t aether_caller_deadline_ms(void) {
-    if (!tls_caller.present) return 0;
-    return tls_caller.deadline_ms;
+    const AetherCallerInfo* ci = caller_seen();
+    if (!ci->present) return 0;
+    return ci->deadline_ms;
 }

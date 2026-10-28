@@ -29,6 +29,14 @@
     <li><a href="#caller_identity">caller_identity</a></li>
     <li><a href="#caller_attribute">caller_attribute</a></li>
     <li><a href="#caller_deadline_ms">caller_deadline_ms</a></li>
+    <li><a href="#last_outcome">last_outcome</a></li>
+    <li><a href="#last_outcome_text">last_outcome_text</a></li>
+    <li><a href="#OK">OK</a></li>
+    <li><a href="#PANICKED">PANICKED</a></li>
+    <li><a href="#DEADLINE">DEADLINE</a></li>
+    <li><a href="#CANCELLED">CANCELLED</a></li>
+    <li><a href="#MEMORY_CAP">MEMORY_CAP</a></li>
+    <li><a href="#OUT_OF_MEMORY">OUT_OF_MEMORY</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -203,6 +211,40 @@
     <div class="function" id="caller_deadline_ms" data-name="caller_deadline_ms">
       <h3 class="function-name">caller_deadline_ms <span class="kind">fn</span></h3>
       <pre class="usage"><code>caller_deadline_ms() <span class="arrow">-&gt;</span> long</code></pre>
+    </div>
+    <div class="function" id="last_outcome" data-name="last_outcome">
+      <h3 class="function-name">last_outcome <span class="kind">fn</span></h3>
+      <pre class="usage"><code>last_outcome() <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="doc">host.OK, or what ended the last call: host.PANICKED, host.DEADLINE, ...</p>
+    </div>
+    <div class="function" id="last_outcome_text" data-name="last_outcome_text">
+      <h3 class="function-name">last_outcome_text <span class="kind">fn</span></h3>
+      <pre class="usage"><code>last_outcome_text() <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="doc">&quot;&quot; for host.OK, else the reason (a panic's message, cut at 1023 bytes).</p>
+    </div>
+    <div class="function" id="OK" data-name="OK">
+      <h3 class="function-name">OK <span class="kind">const</span></h3>
+      <pre class="usage"><code>OK = 0</code></pre>
+    </div>
+    <div class="function" id="PANICKED" data-name="PANICKED">
+      <h3 class="function-name">PANICKED <span class="kind">const</span></h3>
+      <pre class="usage"><code>PANICKED = 1</code></pre>
+    </div>
+    <div class="function" id="DEADLINE" data-name="DEADLINE">
+      <h3 class="function-name">DEADLINE <span class="kind">const</span></h3>
+      <pre class="usage"><code>DEADLINE = 2</code></pre>
+    </div>
+    <div class="function" id="CANCELLED" data-name="CANCELLED">
+      <h3 class="function-name">CANCELLED <span class="kind">const</span></h3>
+      <pre class="usage"><code>CANCELLED = 3</code></pre>
+    </div>
+    <div class="function" id="MEMORY_CAP" data-name="MEMORY_CAP">
+      <h3 class="function-name">MEMORY_CAP <span class="kind">const</span></h3>
+      <pre class="usage"><code>MEMORY_CAP = 4</code></pre>
+    </div>
+    <div class="function" id="OUT_OF_MEMORY" data-name="OUT_OF_MEMORY">
+      <h3 class="function-name">OUT_OF_MEMORY <span class="kind">const</span></h3>
+      <pre class="usage"><code>OUT_OF_MEMORY = 5</code></pre>
     </div>
   </div>
 </main>

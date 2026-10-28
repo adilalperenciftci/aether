@@ -4,6 +4,7 @@
  * still resolves. */
 #include "../../std/string/aether_string.h"
 #include "../aether_sandbox.h"
+#include "aether_frames.h"
 
 #include <signal.h>
 #include <stdio.h>
@@ -16,8 +17,8 @@
 //   - glibc / macOS:  backtrace() + backtrace_symbols() from
 //                     <execinfo.h>. Already in libc, no extra link.
 //   - Windows / MinGW: CaptureStackBackTrace from kernel32 plus
-//                     SymInitialize + SymFromAddr from dbghelp.dll.
-//                     The Makefile + ae.c link `-ldbghelp`.
+//                     SymInitialize + SymFromAddr from dbghelp.dll,
+//                     loaded when a trace is printed (no link flag).
 //   - Everything else (musl, wasm, freestanding): no-op stubs.
 //
 // Each path captures into the same TLS slot at the call site
@@ -46,19 +47,24 @@
 // Per-thread jmp frame stack
 // ---------------------------------------------------------------------------
 
-typedef struct {
-    AetherJmpFrame frames[AETHER_PANIC_MAX_DEPTH];
-    int depth;  // number of frames currently live; innermost is frames[depth-1]
-} AetherJmpStack;
 
-/* AETHER_TLS_SHARED rather than AETHER_TLS: aether_panic.o is
- * pulled into both the main `ae` executable AND `--emit=lib` .so
- * outputs (codegen emits aether_panic_capture_stack + aether_panic
- * at every user `panic("...")` call site). Initial-Exec TLS
- * relocations don't work inside shared objects; Global-Dynamic
- * works in both contexts with a tiny GOT-indirection overhead.
- * See AETHER_TLS_SHARED in runtime/utils/aether_compiler.h. */
-static AETHER_TLS_SHARED AetherJmpStack tls_stack = { .depth = 0 };
+/* The frames live in the per-thread block aether_frames.h describes,
+ * with the executions and the allocation journal. */
+
+/* To the frame a panic was raised for: an execution frame by the
+ * __builtin_setjmp buffer in its export stub, any other by its own. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noreturn))
+#endif
+static void aether_jump_to(AetherJmpFrame* f) {
+#if AETHER_EXEC_BUILTIN_SJLJ
+    if (f->exec_buf) __builtin_longjmp(f->exec_buf, 1);
+#endif
+    AETHER_SIGLONGJMP(f->buf, 1);
+#if !(defined(__GNUC__) || defined(__clang__))
+    abort();
+#endif
+}
 
 AETHER_TLS_SHARED int g_aether_in_actor_step = 0;
 AETHER_TLS_SHARED int g_aether_current_actor_id = -1;
@@ -80,35 +86,39 @@ int aether_fnptr_claim(const void* r) {
 static AetherDeathHook death_hook = NULL;
 
 AetherJmpFrame* aether_try_push(void) {
-    if (tls_stack.depth >= AETHER_PANIC_MAX_DEPTH) {
+    AetherFrames* F = &aether_frames;
+    if (F->depth >= AETHER_PANIC_MAX_DEPTH) {
         fprintf(stderr, "aether: try/catch nesting exceeded %d, aborting\n",
                 AETHER_PANIC_MAX_DEPTH);
         abort();
     }
-    AetherJmpFrame* f = &tls_stack.frames[tls_stack.depth++];
+    AetherJmpFrame* f = &F->frames[F->depth++];
     f->reason = NULL;
     f->reason_release = NULL;
-    aether_unwind_enter_frame();
+    f->exec_buf = NULL;
     return f;
 }
 
 void aether_try_pop(void) {
-    if (tls_stack.depth <= 0) {
+    AetherFrames* F = &aether_frames;
+    if (F->depth <= 0) {
         // Defensive: popping an empty stack means codegen/runtime mismatch.
         fprintf(stderr, "aether: aether_try_pop on empty stack\n");
         abort();
     }
-    aether_unwind_exit_frame();
-    tls_stack.depth--;
+    /* The journal's entries of this frame move to its parent (or go, at
+     * depth zero): only when it has any. */
+    if (F->journal_count) aether_unwind_exit_frame();
+    F->depth--;
 }
 
 AetherJmpFrame* aether_current_frame(void) {
-    if (tls_stack.depth == 0) return NULL;
-    return &tls_stack.frames[tls_stack.depth - 1];
+    if (aether_frames.depth == 0) return NULL;
+    return &aether_frames.frames[aether_frames.depth - 1];
 }
 
 int aether_try_depth(void) {
-    return tls_stack.depth;
+    return aether_frames.depth;
 }
 
 // ---------------------------------------------------------------------------
@@ -297,8 +307,8 @@ static void aether_print_stack_trace_to_stderr(void) {
 #elif AETHER_STACK_TRACE_WIN32
 
 // Windows path: CaptureStackBackTrace lives in kernel32 (always
-// linked), SymFromAddr lives in dbghelp.dll (Makefile + ae.c add
-// -ldbghelp). The shape mirrors the POSIX path — TLS-buffered
+// linked), SymFromAddr lives in dbghelp.dll (loaded below when a
+// trace is printed). The shape mirrors the POSIX path, TLS-buffered
 // frames captured at the call site, walked + pretty-printed in the
 // fallback printer — so the rest of the panic plumbing is identical.
 
@@ -306,6 +316,34 @@ static void aether_print_stack_trace_to_stderr(void) {
 static AETHER_TLS_SHARED PVOID tls_panic_trace[AETHER_PANIC_TRACE_MAX];
 static AETHER_TLS_SHARED USHORT tls_panic_trace_n = 0;
 static AETHER_TLS_SHARED int tls_panic_sym_initialised = 0;
+
+/* dbghelp is loaded when a trace is printed, not linked: every export runs
+ * in a panic frame (#2956), so this object is in every library, and a C
+ * host linking one with libaether.a would otherwise need -ldbghelp. */
+typedef DWORD (WINAPI *aether_sym_get_options_fn)(void);
+typedef DWORD (WINAPI *aether_sym_set_options_fn)(DWORD);
+typedef BOOL (WINAPI *aether_sym_initialize_fn)(HANDLE, PCSTR, BOOL);
+typedef BOOL (WINAPI *aether_sym_from_addr_fn)(HANDLE, DWORD64, PDWORD64, PSYMBOL_INFO);
+static aether_sym_from_addr_fn aether_sym_from_addr = NULL;
+
+static void aether_load_dbghelp(HANDLE proc) {
+    HMODULE h = LoadLibraryA("dbghelp.dll");
+    if (!h) return;
+    FARPROC get = GetProcAddress(h, "SymGetOptions");
+    FARPROC set = GetProcAddress(h, "SymSetOptions");
+    FARPROC init = GetProcAddress(h, "SymInitialize");
+    FARPROC from = GetProcAddress(h, "SymFromAddr");
+    if (!get || !set || !init || !from) return;
+    aether_sym_get_options_fn get_options;
+    aether_sym_set_options_fn set_options;
+    aether_sym_initialize_fn initialize;
+    memcpy(&get_options, &get, sizeof(get_options));
+    memcpy(&set_options, &set, sizeof(set_options));
+    memcpy(&initialize, &init, sizeof(initialize));
+    set_options(get_options() | SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+    initialize(proc, NULL, TRUE);
+    memcpy(&aether_sym_from_addr, &from, sizeof(aether_sym_from_addr));
+}
 
 void aether_panic_capture_stack(void) {
     // Skip 1 frame (this function itself); the next frame is the
@@ -351,8 +389,7 @@ static void aether_print_stack_trace_to_stderr(void) {
         // safe to call once per thread that actually needs symbols.
         // SYMOPT_LOAD_LINES could be added for line numbers; deferred
         // (PDB availability is implementation-defined under MinGW).
-        SymSetOptions(SymGetOptions() | SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
-        SymInitialize(proc, NULL, TRUE);
+        aether_load_dbghelp(proc);
         tls_panic_sym_initialised = 1;
     }
 
@@ -375,7 +412,7 @@ static void aether_print_stack_trace_to_stderr(void) {
         sym->SizeOfStruct = sizeof(SYMBOL_INFO);
         sym->MaxNameLen   = NAME_MAX;
         DWORD64 disp = 0;
-        BOOL ok = SymFromAddr(proc, addr, &disp, sym);
+        BOOL ok = aether_sym_from_addr ? aether_sym_from_addr(proc, addr, &disp, sym) : FALSE;
 
         if (ok && sym->Name[0] != '\0') {
             // Skip our own panic-handler frames so the first thing
@@ -467,7 +504,7 @@ void aether_panic_owned(const char* reason, void (*release)(const void*)) {
         // Free the innermost frame's still-live journaled allocations
         // before the jump skips their deferred frees (aether_unwind.c).
         aether_unwind_drain_current();
-        AETHER_SIGLONGJMP(f->buf, 1);
+        aether_jump_to(f);
         // unreachable
     }
 
@@ -539,7 +576,7 @@ static void aether_sig_handler(int sig, siginfo_t* info, void* ucontext) {
 #ifdef AETHER_HAS_SANDBOX
     aether_sandbox_unwind_to_frame(aether_try_depth());
 #endif
-    AETHER_SIGLONGJMP(f->buf, 1);
+    aether_jump_to(f);
 }
 
 void aether_panic_install_signal_handlers(void) {

@@ -120,6 +120,28 @@ void __aether_abort_call(void) {
     g_tripped = 1;
 }
 
+void aether_caps_deadline_save(AetherDeadlineState* out) {
+    out->at_ns = g_deadline_at_ns;
+    out->tripped = g_tripped;
+}
+
+void aether_caps_deadline_restore(const AetherDeadlineState* s) {
+    if (s->at_ns || s->tripped) aether_caps_armed = 1;
+    g_deadline_at_ns = s->at_ns;
+    g_tripped = s->tripped;
+}
+
+AetherDeadlineState aether_caps_deadline_for_ms(int64_t ms) {
+    AetherDeadlineState s;
+    s.at_ns = ms > 0 ? now_ns() + ms * 1000000LL : 0;
+    s.tripped = 0;
+    return s;
+}
+
+int aether_caps_deadline_flag(void) {
+    return g_tripped;
+}
+
 uint64_t aether_caps_used_bytes(void) {
     return atomic_load_explicit(&g_mem_used, memory_order_relaxed);
 }

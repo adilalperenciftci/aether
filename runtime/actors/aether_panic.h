@@ -121,6 +121,22 @@ typedef jmp_buf aether_sigjmp_buf;
   #define AETHER_SIGLONGJMP(buf, val)     _longjmp((buf), (val))
 #endif
 
+// An export's execution frame (aether_exec.h) saves its context with GCC's
+// __builtin_setjmp, which keeps the frame pointer, stack pointer and resume
+// address (the compiler saves the rest in the stub's own frame), where the
+// C library's setjmp saves every callee-saved register and, on Win64, ten
+// XMM registers: 0.57 ns against 2.85 ns on MinGW. A panic reaches it with
+// __builtin_longjmp. x86 and x86-64 only: clang has no such builtins on
+// AArch64 (macOS arm64), where the C library's setjmp is cheap anyway, and
+// wasm has no unwinding; there the stub uses AETHER_SIGSETJMP on a frame's
+// buf instead.
+#if (defined(__GNUC__) || defined(__clang__)) && (defined(__x86_64__) || defined(__i386__)) && \
+    !defined(__wasm__) && !defined(__EMSCRIPTEN__)
+  #define AETHER_EXEC_BUILTIN_SJLJ 1
+#else
+  #define AETHER_EXEC_BUILTIN_SJLJ 0
+#endif
+
 // Maximum nesting depth of try/catch (and scheduler step barriers) per
 // thread. 32 covers any realistic handler; the limit lets the stack live
 // in TLS without dynamic allocation.
@@ -135,6 +151,12 @@ typedef struct AetherJmpFrame {
     // aether_panic_owned(); the catch lowering adopts it as the binding's
     // heap flag, and the actor barrier releases it after the death hook.
     void (*reason_release)(const void*);
+    // An execution frame entered by aether_exec_enter_at (aether_exec.h):
+    // the __builtin_setjmp buffer in the export stub's own frame, which a
+    // panic reaches with __builtin_longjmp. NULL for every other frame,
+    // which a panic reaches through `buf`. Appended: the fields above keep
+    // their offsets.
+    void** exec_buf;
 } AetherJmpFrame;
 
 // Push a new frame onto the current thread's stack and return it. The

@@ -637,6 +637,72 @@ truncated. Retrying a tripped deadline is the host's policy:
 re-arm + call again with a more generous budget, or surface
 `Deadline` to the user.
 
+## Failures and nested calls at the boundary
+
+Every `aether_<name>` export (and every package builder export) runs inside
+an execution frame (#2955, #2956). How each call ended is its outcome:
+
+```c
+#include <libaether.h>
+
+int r = aether_parse(text);
+switch (aether_last_outcome()) {
+case AETHER_OK:        use(r); break;
+case AETHER_PANICKED:  log("script failed: %s", aether_last_outcome_text()); break;
+case AETHER_DEADLINE:  /* cut by its deadline: r is not a result */ break;
+}
+```
+
+- **A panic ends the call, not the process.** A panic the export does not
+  catch used to print "panic outside any try/catch or actor" and abort the
+  host. It now ends the call with `AETHER_PANICKED`, the export returns
+  the zero value of its result (NULL for a string, which the release
+  accepts), and `aether_last_outcome_text()` gives the panic's message
+  (copied into a fixed buffer, cut at 1023 bytes: nothing is allocated to
+  report it). The library takes the next call at once. Nothing done before
+  the failure is rolled back: host effects, module state, messages sent.
+- **A zero value with an outcome other than `AETHER_OK` is not a result.**
+  Release only what an `AETHER_OK` call returned. `AETHER_DEADLINE` means a
+  tripwire saw the call's deadline pass, so a value it returned is partial.
+- **Nested calls.** An export that calls a host service, which calls an
+  export again on the same thread, runs two executions. The inner one sees
+  what the service set for it (caller info, `aether_set_call_deadline`),
+  has its own outcome, and whatever it leaves behind is undone when it
+  returns, on every exit: the outer one's caller info, deadline (and trip
+  flag) and sandbox levels are as they were
+  ([lib-caller-info.md](lib-caller-info.md#nested-calls-2955),
+  [containment-sandbox.md](containment-sandbox.md#threads-libraries-and-panics)).
+  Executions nest up to 32 deep on one thread.
+- **An Aether program importing the library in binary form** gets a failed
+  call raised again as a panic in its own runtime, with the same reason, so
+  a `try` around the call catches it; `host.last_outcome()` and
+  `host.last_outcome_text()` in std.host read the outcome without one. The
+  stub reads it from the library's own runtime through the accessor the
+  catalog names (`outcome`, schema 1.10), since a library with a runtime of
+  its own records it there.
+- **What a call costs.** Catching a panic needs the stub to save its
+  context, where a panic can return to, on every call; nothing else is paid
+  unless something asks for it (a nested call, a deadline ever armed, a
+  sandbox level on some thread, caller info changed during the call). On
+  x86 and x86-64 the stub saves it with `__builtin_setjmp` (0.57 ns; the C
+  library's setjmp is 2.85 ns on Windows), elsewhere with setjmp. Measured
+  on Windows MinGW, a C host calling in a loop (medians of 9 interleaved
+  rounds against main): an export that calls a function costs 5.8 ns a call
+  against 0.4 ns, about 2 ns of it the registers Win64 makes the stub keep
+  (rbx, rbp, rsi, rdi, r12 to r15, xmm6 to xmm15) for a panic's return;
+  fib(30) through its stub is 0.699 ms against 0.701 ms, the difference
+  lost in the recursion. An export that can neither panic, allocate, loop
+  nor call anything (scalar parameters and locals, `+ - *`, comparisons,
+  if/else, return) gets no frame and records its OK outcome only: 0.38 ns
+  against 0.19 ns.
+- **The host API is in every library.** A library built with its own
+  runtime carries `aether_set_call_deadline`, `aether_deadline_tripped`,
+  `aether_set_memory_cap`, `aether_set_caller`, `aether_clear_caller`,
+  `aether_last_outcome` and `aether_last_outcome_text` even when its code
+  calls none of them, so a host that loads it can call them in its runtime
+  (a library DLL had no `aether_set_call_deadline` before). On the shared
+  runtime they are the shared runtime's.
+
 ## What's out of scope for v1
 
 1. **Callbacks held live**, a host can't pass a closure into Aether and
@@ -776,7 +842,11 @@ those fields were always present, just NULL before). `schema_version` is
 "1.0" for function-only artifacts, "1.1" once closure records are
 present, "1.2" once exported-constant records
 (`constant_count`/`constants`, of type `AetherLibConstant`) are present,
-and "1.3" once struct records or source signatures are (below). A reader
+and "1.3" once struct records or source signatures are (below), and so on
+up to "1.9" (runtime/aether_lib_meta.h lists them). Since "1.10" every
+catalog has `outcome`, the library's outcome accessor
+([above](#failures-and-nested-calls-at-the-boundary)), so every library
+built now is "1.10". A reader
 touches a field only when the artifact's minor version is at least the one
 that appended it: an older artifact's struct ends before the newer slots.
 The function table includes every

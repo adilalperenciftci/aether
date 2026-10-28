@@ -81,6 +81,23 @@ The runtime does **not** auto-clear on export return. Hosts that
 multiplex multiple guests on one thread should call
 `aether_clear_caller` between invocations themselves.
 
+### Nested calls (#2955)
+
+Each call into an export (an execution, [emit-lib.md](emit-lib.md#failures-and-nested-calls-at-the-boundary))
+sees the caller info that was set when it was entered. A host service the
+export calls may set another, for the exports it calls in turn: the
+running export keeps its own, so `host.caller_identity()` after the
+service returns is still the outer caller's. When the export that was
+running returns, however it ends, the setting it was entered with is back,
+so the host that called it finds its own again. `aether_set_call_deadline`
+from a host service works the same way: the deadline is for the exports it
+enters, and the running one keeps its own.
+
+Copying is done only then: a set or clear while an export runs keeps a
+copy of what the running exports see. When there is no memory for that
+copy, `aether_set_caller` returns `-1` and `aether_clear_caller` does
+nothing, so a running export never loses its view.
+
 ## Storage limits
 
 Default caps:

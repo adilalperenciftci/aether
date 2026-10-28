@@ -56,7 +56,8 @@ run_pass() {
 
     for lib in crowd relay; do
         INFO="$(AETHER_HOME="$ROOT" "$AE" lib-info "./lib$lib$SO_EXT" 2>&1)" || { echo "$INFO"; fail "$label: ae lib-info lib$lib"; }
-        echo "$INFO" | grep -q "Schema:[[:space:]]*1\.7" || { echo "$INFO"; fail "$label: lib$lib's schema is not 1.7"; }
+        # 1.10: every catalog has the outcome slot (#2956); `actors` (1.7) is in it.
+        echo "$INFO" | grep -q "Schema:[[:space:]]*1\.10" || { echo "$INFO"; fail "$label: lib$lib's schema is not 1.10"; }
         echo "$INFO" | grep -q "Actors:[[:space:]]*yes" || { echo "$INFO"; fail "$label: lib$lib's catalog does not say it runs actors"; }
     done
 

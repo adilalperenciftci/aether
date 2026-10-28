@@ -261,6 +261,14 @@ const char* aether_caller_identity(void);
 const char* aether_caller_attribute(const char* key);
 int64_t     aether_caller_deadline_ms(void);
 
+/* Nesting (#2955): each execution (a call into an export, runtime/
+ * aether_exec.h) sees the caller info that was set when it was entered.
+ * A host service the execution calls may set another for the executions
+ * it enters in turn; the running one keeps its own, and when it returns
+ * the setting it was entered with is back. aether_exec.c calls this as an
+ * execution at `depth` returns. */
+void aether_caller_leave(int depth);
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif

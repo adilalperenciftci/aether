@@ -14,7 +14,9 @@ exports(
     notify, describe, input, event, bindings,
     java, python, ruby, go,
     manifest_get, manifest_clear,
-    caller_identity, caller_attribute, caller_deadline_ms
+    caller_identity, caller_attribute, caller_deadline_ms,
+    last_outcome, last_outcome_text,
+    OK, PANICKED, DEADLINE, CANCELLED, MEMORY_CAP, OUT_OF_MEMORY
 )
 
 // Emit an event to the host process. Returns 1 if a handler was found
@@ -109,4 +111,33 @@ caller_attribute(key: string) -> string {
 
 caller_deadline_ms() -> long {
     return aether_caller_deadline_ms()
+}
+
+// ---------------------------------------------------------------------------
+// Outcomes (#2956): how the last call into a library export on this thread
+// ended. Every export runs in an execution frame, so a panic in it ends
+// the call, not the process. A program that imports a library in binary
+// form gets a failed call raised again as a panic, with the same reason,
+// which a `try` around the call catches; these read the same outcome
+// without one, as a C host reads aether_last_outcome() (libaether.h).
+// ---------------------------------------------------------------------------
+
+const OK = 0
+const PANICKED = 1
+const DEADLINE = 2
+const CANCELLED = 3
+const MEMORY_CAP = 4
+const OUT_OF_MEMORY = 5
+
+extern aether_last_outcome() -> int
+extern aether_last_outcome_text() -> string
+
+// host.OK, or what ended the last call: host.PANICKED, host.DEADLINE, ...
+last_outcome() -> int {
+    return aether_last_outcome()
+}
+
+// "" for host.OK, else the reason (a panic's message, cut at 1023 bytes).
+last_outcome_text() -> string {
+    return "${aether_last_outcome_text()}"
 }

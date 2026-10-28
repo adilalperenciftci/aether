@@ -3209,13 +3209,12 @@ static int lib_const_identity(ASTNode* cd, const char** name, const char** modul
 // Functions with unsupported types (tuples, structs, closures) are skipped
 // with a compile-time warning so the user knows the function won't be
 // exposed across the FFI boundary.
-/* #2931: the function a caller gives a string an export returned back to,
- * so the library's own runtime, which made it, releases it. Named for the
- * library (the name it is given, else its package, else its entry file's
- * stem, so every target's build agrees), and recorded in the
- * catalog, so an importer never derives it. */
-const char* lib_string_release_symbol_for(const char* lib_id, const char* package,
-                                          const char* source_file) {
+/* aether_<library id>_<suffix>: the library's own name for a function an
+ * importer binds. Named for the library (the name it is given, else its
+ * package, else its entry file's stem, so every target's build agrees),
+ * and recorded in the catalog, so an importer never derives it. */
+static const char* lib_symbol_for(const char* lib_id, const char* package,
+                                  const char* source_file, const char* suffix) {
     const char* base = lib_id ? lib_id : package;
     const char* end = NULL;
     if (!base) {
@@ -3230,11 +3229,105 @@ const char* lib_string_release_symbol_for(const char* lib_id, const char* packag
     for (const char* p = base; p < end && n + 1 < sizeof(id); p++)
         id[n++] = isalnum((unsigned char)*p) ? *p : '_';
     id[n] = '\0';
-    return cg_internf("aether_%s_string_release", n ? id : "lib");
+    return cg_internf("aether_%s_%s", n ? id : "lib", suffix);
+}
+
+/* #2931: the function a caller gives a string an export returned back to,
+ * so the library's own runtime, which made it, releases it. */
+const char* lib_string_release_symbol_for(const char* lib_id, const char* package,
+                                          const char* source_file) {
+    return lib_symbol_for(lib_id, package, source_file, "string_release");
+}
+
+/* #2956: how the library's last call on this thread ended, read by an
+ * Aether importer after each call (the library may run on a runtime of its
+ * own, whose outcome the importer's aether_last_outcome cannot see), with
+ * <symbol>_text for the reason. */
+static const char* lib_outcome_symbol(CodeGenerator* gen) {
+    return lib_symbol_for(gen->lib_id, module_lib_package(), gen->source_file, "outcome");
 }
 
 static const char* lib_string_release_symbol(CodeGenerator* gen) {
     return lib_string_release_symbol_for(gen->lib_id, module_lib_package(), gen->source_file);
+}
+
+/* #2956: an export that can neither panic, allocate, loop nor call anything
+ * needs no execution frame: nothing can end it from outside its code, and
+ * it changes nothing a frame gives back. Its stub calls it and records the
+ * OK outcome (one runtime call) instead of saving the context for a panic
+ * (about 5 ns a call on Windows MinGW). Kept narrow on purpose: scalar
+ * locals and parameters, literals, + - * and comparisons (division can
+ * trap), `!` and unary `-`, if/else, declarations, assignments to a local
+ * and return. Anything else, and any doubt, gets the frame. */
+static int lib_scalar_type(const Type* t) {
+    if (!t) return 1;
+    switch (t->kind) {
+    case TYPE_INT: case TYPE_INT64: case TYPE_UINT64: case TYPE_UINT32: case TYPE_UINT16:
+    case TYPE_UINT8: case TYPE_FLOAT: case TYPE_FLOAT32: case TYPE_BOOL: case TYPE_BYTE:
+    case TYPE_VOID:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int lib_node_cannot_fail(const ASTNode* n) {
+    if (!n) return 1;
+    switch (n->type) {
+    case AST_BLOCK: case AST_RETURN_STATEMENT: case AST_IF_STATEMENT:
+    case AST_IF_EXPRESSION: case AST_EXPRESSION_STATEMENT: case AST_VARIABLE_DECLARATION:
+    case AST_IDENTIFIER: case AST_LITERAL:
+        break;
+    case AST_ASSIGNMENT:
+        if (n->child_count < 1 || !n->children[0] || n->children[0]->type != AST_IDENTIFIER) return 0;
+        break;
+    case AST_UNARY_EXPRESSION:
+        if (!n->value || (strcmp(n->value, "-") != 0 && strcmp(n->value, "!") != 0)) return 0;
+        break;
+    case AST_BINARY_EXPRESSION: {
+        static const char* const ok_ops[] = { "+", "-", "*", "<", ">", "<=", ">=", "==", "!=",
+                                              "&&", "||" };
+        int ok = 0;
+        for (size_t k = 0; n->value && k < sizeof(ok_ops) / sizeof(ok_ops[0]); k++)
+            if (strcmp(n->value, ok_ops[k]) == 0) ok = 1;
+        if (!ok) return 0;
+        break;
+    }
+    default:
+        return 0;
+    }
+    if (!lib_scalar_type(n->node_type)) return 0;
+    for (int i = 0; i < n->child_count; i++)
+        if (!lib_node_cannot_fail(n->children[i])) return 0;
+    return 1;
+}
+
+static int lib_export_frameless(CodeGenerator* gen, ASTNode* program, ASTNode* fn, const Type* result) {
+    if (fn_c_callback_def(gen, fn)) return 0;
+    if (!lib_scalar_type(result)) return 0;
+    /* A clause set's members dispatch through generated code: framed. */
+    int same_name = 0;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (c && c->type == AST_EXPORT_STATEMENT && c->child_count > 0) c = c->children[0];
+        if (c && c->type == AST_FUNCTION_DEFINITION && c->value && strcmp(c->value, fn->value) == 0)
+            same_name++;
+    }
+    if (same_name != 1) return 0;
+    ASTNode* body = NULL;
+    for (int i = 0; i < fn->child_count; i++) {
+        ASTNode* c = fn->children[i];
+        if (!c) continue;
+        if (c->type == AST_VARIABLE_DECLARATION || c->type == AST_PATTERN_VARIABLE) {
+            /* A named parameter; a literal or struct pattern makes a clause. */
+            if (!lib_scalar_type(c->node_type)) return 0;
+        } else if (c->type == AST_BLOCK && i == fn->child_count - 1) {
+            body = c;
+        } else {
+            return 0;   /* guards, contracts, pattern parameters */
+        }
+    }
+    return body && lib_node_cannot_fail(body);
 }
 
 static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
@@ -3304,6 +3397,73 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
                 "const char* aether_string_data(const void* s);\n"
                 "size_t aether_string_length(const void* s);\n"
                 "void %s(const void* s);\n\n", release_sym);
+
+    /* #2955, #2956: every export runs inside an execution frame
+     * (runtime/aether_exec.h). An uncaught panic ends the call, not the
+     * process, and the export returns its result's zero value; the caller
+     * info, deadline and sandbox levels a nested call changes are back when
+     * it returns; the outcome says how it ended. Through the generated
+     * functions below an Aether importer reads the outcome of the library's
+     * own runtime, which may not be its own. */
+    const char* outcome_sym = lib_outcome_symbol(gen);
+    /* The entry every stub makes, `fail` being how it returns its zero
+     * value: the context saved with __builtin_setjmp in the stub's own
+     * frame where the compiler has it (0.57 ns, against 2.85 for the C
+     * library's setjmp on MinGW: aether_panic.h), else a frame's buf. */
+    fprintf(gen->output,
+            "extern AetherJmpFrame* aether_exec_enter(void);\n"
+            "extern void aether_exec_leave(void);\n"
+            "extern void aether_exec_failed(void);\n"
+            "extern void aether_exec_ok(void);\n"
+            "#ifndef AETHER_EXEC_STUB_ENTER\n"
+            "#if AETHER_EXEC_BUILTIN_SJLJ\n"
+            "extern void aether_exec_enter_at(void** buf);\n"
+            "#define AETHER_EXEC_STUB_ENTER(fail) void* _aether_xb[5]; \\\n"
+            "    if (__builtin_setjmp(_aether_xb)) { aether_exec_failed(); fail; } \\\n"
+            "    aether_exec_enter_at(_aether_xb)\n"
+            "#else\n"
+            "#define AETHER_EXEC_STUB_ENTER(fail) AetherJmpFrame* _aether_x = aether_exec_enter(); \\\n"
+            "    if (AETHER_SIGSETJMP(_aether_x->buf, 1)) { aether_exec_failed(); fail; }\n"
+            "#endif\n"
+            "#endif\n"
+            "extern int aether_last_outcome(void);\n"
+            "extern const char* aether_last_outcome_text(void);\n"
+            "AETHER_WEAK_DEF int %s(void) { return aether_last_outcome(); }\n"
+            "AETHER_WEAK_DEF const char* %s_text(void) { return aether_last_outcome_text(); }\n\n",
+            outcome_sym, outcome_sym);
+    /* The host API (libaether.h, aether_host.h) of the runtime this library
+     * runs on. A C host sets a call's deadline, memory cap and caller, and
+     * reads its outcome, in that runtime: a library with a runtime of its
+     * own must carry them even when its code calls none of them, as the
+     * static archive links only what is called (a DLL had no
+     * aether_set_call_deadline). Referenced from a kept table, through
+     * assembler names, so no C declaration meets one the program makes of
+     * the same function as an extern of its own. */
+    static const char* const host_api[] = {
+        "aether_set_memory_cap", "aether_set_call_deadline", "aether_deadline_tripped",
+        "aether_set_caller", "aether_clear_caller", "aether_last_outcome",
+        "aether_last_outcome_text",
+    };
+    int host_api_n = (int)(sizeof(host_api) / sizeof(host_api[0]));
+    fprintf(gen->output,
+            "#if defined(__GNUC__) || defined(__clang__)\n"
+            "#define _AE_API_STR2(x) #x\n"
+            "#define _AE_API_STR(x) _AE_API_STR2(x)\n");
+    for (int k = 0; k < host_api_n; k++)
+        fprintf(gen->output,
+                "extern void _aether_api_%d(void) __asm__(_AE_API_STR(__USER_LABEL_PREFIX__) \"%s\");\n",
+                k, host_api[k]);
+    fprintf(gen->output, "__attribute__((used)) static void (* const _aether_lib_host_api[])(void) = {");
+    for (int k = 0; k < host_api_n; k++)
+        fprintf(gen->output, "%s_aether_api_%d", k ? ", " : " ", k);
+    fprintf(gen->output, " };\n#endif\n\n");
+    if (gen->csrc_header_file)
+        fprintf(gen->csrc_header_file,
+                "/* How the last call into an export on this thread ended: a zero\n"
+                " * result with an outcome other than AETHER_OK (0) is not a result.\n"
+                " * The constants are in libaether.h; see docs/embedding.md. */\n"
+                "int aether_last_outcome(void);\n"
+                "const char* aether_last_outcome_text(void);\n\n");
 
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* child = program->children[i];
@@ -3415,7 +3575,13 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
             fprintf(gen->csrc_header_file, ");\n");
         }
 
-        // Emit: RET aether_NAME(PARAMS) { [return] NAME(args); }
+        /* Emit, in an execution frame (#2955, #2956):
+         *   RET aether_NAME(PARAMS) {
+         *       AETHER_EXEC_STUB_ENTER(return (RET){0});
+         *       RET _aether_r = NAME(args);
+         *       aether_exec_leave();
+         *       return _aether_r;
+         *   } */
         fprintf(gen->output, "%s %s(", ret_abi, alias);
         if (param_count == 0) {
             fprintf(gen->output, "void");
@@ -3425,8 +3591,17 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
                 fprintf(gen->output, "%s %s", param_types[k], param_names[k]);
             }
         }
-        fprintf(gen->output, ") {\n    ");
-        if (strcmp(ret_abi, "void") != 0) fprintf(gen->output, "return ");
+        fprintf(gen->output, ") {\n");
+        int stub_returns = strcmp(ret_abi, "void") != 0;
+        int frameless = lib_export_frameless(gen, program, fn, result);
+        if (frameless)
+            ;   /* nothing can end it from outside its code */
+        else if (stub_returns)
+            fprintf(gen->output, "    AETHER_EXEC_STUB_ENTER(return (%s){0});\n", ret_abi);
+        else
+            fprintf(gen->output, "    AETHER_EXEC_STUB_ENTER(return);\n");
+        fprintf(gen->output, "    ");
+        if (stub_returns) fprintf(gen->output, "%s _aether_r = ", ret_abi);
         /* #2297: a typed struct pointer returns as the opaque AetherValue*;
          * cast, as the parameter side does, or GCC 14+ rejects the
          * incompatible pointer under -Werror. */
@@ -3450,7 +3625,8 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
                 fprintf(gen->output, "%s", param_names[k]);
             }
         }
-        fprintf(gen->output, ");\n}\n");
+        fprintf(gen->output, ");\n    %s;\n%s}\n", frameless ? "aether_exec_ok()" : "aether_exec_leave()",
+                stub_returns ? "    return _aether_r;\n" : "");
     }
 
     /* #2349: an exported builder of a package module. A builder's ABI is its
@@ -3489,9 +3665,11 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
         Type* rt = b->node_type;
         int unannotated = (!rt || rt->kind == TYPE_VOID || rt->kind == TYPE_UNKNOWN);
         int returns = 1;
-        if (unannotated && has_return_value(b)) fprintf(gen->output, "int");
-        else if (unannotated) { fprintf(gen->output, "void"); returns = 0; }
-        else fprintf(gen->output, "%s", c_result_type(rt));
+        const char* bret = "void";
+        if (unannotated && has_return_value(b)) bret = "int";
+        else if (unannotated) returns = 0;
+        else bret = c_result_type(rt);
+        fprintf(gen->output, "%s", bret);
         fprintf(gen->output, " %s(", sym);
         int np = 0;
         for (int p = 0; p < b->child_count; p++) {
@@ -3506,15 +3684,22 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
                 fprintf(gen->output, " %s", c->value);
             }
         }
-        fprintf(gen->output, "%svoid* _builder) {\n    %s%s(", np ? ", " : "",
-                returns ? "return " : "", b->value);
+        /* In an execution frame, as the alias stubs (#2955, #2956). */
+        fprintf(gen->output, "%svoid* _builder) {\n", np ? ", " : "");
+        if (returns)
+            fprintf(gen->output, "    AETHER_EXEC_STUB_ENTER(return (%s){0});\n", bret);
+        else
+            fprintf(gen->output, "    AETHER_EXEC_STUB_ENTER(return);\n");
+        if (returns) fprintf(gen->output, "    %s _aether_r = %s(", bret, b->value);
+        else fprintf(gen->output, "    %s(", b->value);
         for (int p = 0; p < b->child_count; p++) {
             ASTNode* c = b->children[p];
             if (!c || c->type == AST_GUARD_CLAUSE) continue;
             if (c->type == AST_BLOCK) break;
             fprintf(gen->output, "%s, ", c->value);
         }
-        fprintf(gen->output, "_builder);\n}\n");
+        fprintf(gen->output, "_builder);\n    aether_exec_leave();\n%s}\n",
+                returns ? "    return _aether_r;\n" : "");
     }
 
     /* #996 --emit=csrc: close the header guard. */
@@ -4224,7 +4409,8 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         "    const char* const* closure_modules;\n"
         "    int actors;\n"
         "    const unsigned char* closure_config_unused;\n"
-        "    const char* string_release; };\n\n");
+        "    const char* string_release;\n"
+        "    const char* outcome; };\n\n");
 
     fprintf(gen->output,
         "static const struct _AetherLibFn _aether_lib_fns[] = {\n");
@@ -4593,8 +4779,6 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
     /* #2349: in a package library each closure record belongs to a module
      * too (a package builder's wrapper is aether_<module>__<name>);
      * parallel to the closure table, "" for the entry's own. */
-    int pkg_closures = 0;
-    for (int r = 0; r < clo_count; r++) if (rec_mod[r] && rec_mod[r][0]) pkg_closures = 1;
     if (pkg_lib && clo_count > 0) {
         fprintf(gen->output, "static const char* const _aether_lib_closure_modules[] = {\n");
         for (int r = 0; r < clo_count; r++) {
@@ -4636,16 +4820,14 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
     }
     fprintf(gen->output,
         "static const struct _AetherLibMeta _aether_lib_meta = {\n");
-    /* Schema is the highest feature level present: "1.2" once any constant
-     * record exists, else "1.1" with closures, else "1.0" — which keeps a
-     * function-only artifact byte-identical to v1 for existing readers. The
-     * trailing slots are always written (the struct always has them); older
-     * readers stop at the count/pointer they know. */
-    /* "1.5": the library links the shared runtime (#2297). */
-    /* "1.6": a package library's builder records carry their module. */
-    /* "1.7": the library runs actors, its own or an imported library's. */
-    /* "1.8": a builder record says its builder never uses its config. */
-    /* "1.9": an export returns a string, given back through string_release. */
+    /* The schema was the highest feature level present ("1.0" functions,
+     * "1.1" closures, "1.2" constants, "1.3" structs or source signatures,
+     * "1.4" a package, "1.5" the shared runtime, "1.6" package builders,
+     * "1.7" actors, "1.8" a builder that never uses its config, "1.9" a
+     * returned string). Every library now has the last slot, `outcome`, the
+     * accessor an importer reads after each call (#2956), so every catalog
+     * is "1.10". The trailing slots are always written (the struct always
+     * has them); older readers stop at the count/pointer they know. */
     int strings_returned = 0;
     for (int i = 0; i < fn_count && !strings_returned; i++) {
         LibSig rs;
@@ -4661,16 +4843,7 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
             rs.result->kind == TYPE_STRING) strings_returned = 1;
     }
     int lib_runs_actors = gen->actor_count > 0 || gen->lib_actors;
-    const char* schema = strings_returned ? "1.9"
-                       : config_unused_any ? "1.8"
-                       : lib_runs_actors ? "1.7"
-                       : (pkg_lib && pkg_closures) ? "1.6"
-                       : gen->lib_shared_runtime ? "1.5"
-                       : pkg_lib ? "1.4"
-                       : (struct_count > 0 || src_sig_needed) ? "1.3"
-                       : (const_count > 0) ? "1.2"
-                       : (clo_count > 0)   ? "1.1"
-                       : "1.0";
+    const char* schema = "1.10";
     fprintf(gen->output, "    \"%s\", \"", schema);
     fprintf(gen->output, "%s", "0.0.0-dev");  /* version string filled in by build glue if available */
     fprintf(gen->output, "\", ");
@@ -4693,8 +4866,9 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
     else                          fprintf(gen->output, "NULL, ");
     fprintf(gen->output, "%d, %s, ", lib_runs_actors ? 1 : 0,
             config_unused_any ? "_aether_lib_closure_config_unused" : "NULL");
-    if (strings_returned) fprintf(gen->output, "\"%s\"\n};\n\n", lib_string_release_symbol(gen));
-    else fprintf(gen->output, "NULL\n};\n\n");
+    if (strings_returned) fprintf(gen->output, "\"%s\", ", lib_string_release_symbol(gen));
+    else fprintf(gen->output, "NULL, ");
+    fprintf(gen->output, "\"%s\"\n};\n\n", lib_outcome_symbol(gen));
 
     /* #996 --emit=csrc: serialize the identical catalog as JSON alongside the
      * C struct. Driven by the same fns[]/closure/const tables emitted above, so
@@ -4711,6 +4885,9 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
             fputs("  \"runtime\": ", j); emit_json_string(j, "shared"); fputs(",\n", j);
         }
         if (lib_runs_actors) fputs("  \"actors\": true,\n", j);
+        fputs("  \"outcome\": ", j);
+        emit_json_string(j, lib_outcome_symbol(gen));
+        fputs(",\n", j);
         if (strings_returned) {
             fputs("  \"string_release\": ", j);
             emit_json_string(j, lib_string_release_symbol(gen));

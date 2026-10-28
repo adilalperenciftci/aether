@@ -25,10 +25,12 @@
 // LINK-SURFACE WARNING: this journal lives in its OWN translation unit
 // on purpose. The emitted C prologue references the track/forget
 // symbols from every program, so whatever object provides them is
-// pulled from libaether.a unconditionally. aether_panic.o drags the
-// Windows DbgHelp stack-trace imports (-ldbghelp) with it; keeping the
-// journal here means programs without try/catch never inherit that
-// link requirement. Do not move these definitions into aether_panic.c.
+// pulled from libaether.a unconditionally. Keeping the journal here (and
+// the per-thread frames block it shares with aether_panic.c, aether_frames.h)
+// means programs without try/catch never pull aether_panic.o in. (It used
+// to drag the Windows DbgHelp imports, -ldbghelp, with it; it loads
+// dbghelp at run time now.) Do not move these definitions into
+// aether_panic.c.
 //
 // All calls are branch-cheap no-ops while no frame is live; the
 // scheduler's per-step barrier cost discipline (see aether_panic.h's
@@ -48,13 +50,14 @@ void aether_unwind_forget(const void* p);
 // the place's address (aether_unwind_forget) where the slot goes out of scope.
 void aether_unwind_track_place(const void* place, const void* owned, AetherUnwindFree release);
 
-// Frame lifecycle, called by aether_try_push / aether_try_pop /
-// aether_panic. enter increments the journal's own frame depth; exit
-// re-tags the popped depth's surviving entries to the parent frame
-// (their owning locals are still live) or empties the journal at
-// depth zero; drain_current frees the innermost frame's still-live
-// entries (the panic path, just before the longjmp).
-void aether_unwind_enter_frame(void);
+// Frame lifecycle, called by aether_try_pop / aether_panic and the
+// execution frames (aether_exec.c). The journal's depth is the frame depth
+// itself (runtime/actors/aether_frames.h), so pushing a frame costs it
+// nothing. exit, called with the frame about to go and only while the
+// journal holds entries, re-tags the popped depth's surviving entries to
+// the parent frame (their owning locals are still live) or empties the
+// journal at depth zero; drain_current frees the innermost frame's
+// still-live entries (the panic path, just before the longjmp).
 void aether_unwind_exit_frame(void);
 void aether_unwind_drain_current(void);
 

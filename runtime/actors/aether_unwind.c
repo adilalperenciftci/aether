@@ -4,13 +4,14 @@
 
 #include "aether_unwind.h"
 #include "../utils/aether_compiler.h"
+#include "aether_frames.h"
 #include <stdlib.h>
 
 /* An entry is a value (`free_fn(ptr)` on a drain) or a place (#2923): `ptr`
  * is the address of a slot holding a value, `owned` the address of the flag
  * that says the slot owns it (NULL: it owns whatever it holds), and a drain
  * releases what the slot holds then, leaving it empty. */
-typedef struct {
+typedef struct AetherUnwindEntry {
     const void* ptr;
     const void* owned;
     AetherUnwindFree free_fn;
@@ -18,38 +19,30 @@ typedef struct {
     int place;
 } AetherUnwindEntry;
 
-typedef struct {
-    AetherUnwindEntry* items;
-    int count;
-    int capacity;
-} AetherUnwindJournal;
 
-/* AETHER_TLS_SHARED, not AETHER_TLS: this object is pulled into both
+/* The per-thread frames block (aether_frames.h), with the journal in it.
+ * AETHER_TLS_SHARED, not AETHER_TLS: this object is pulled into both
  * executables and --emit=lib shared objects (the emitted prologue
  * references the track/forget symbols from every program). Initial-Exec
- * TLS relocations do not work inside shared objects; Global-Dynamic
- * works in both contexts. Same rationale as aether_panic.c's stack. */
-static AETHER_TLS_SHARED AetherUnwindJournal tls_journal = { NULL, 0, 0 };
-static AETHER_TLS_SHARED int tls_depth = 0;
-
-void aether_unwind_enter_frame(void) {
-    tls_depth++;
-}
+ * TLS relocations do not work inside shared objects; Global-Dynamic works
+ * in both contexts. Defined here rather than in aether_panic.c, so that
+ * journaling pulls in no more than this file. */
+AETHER_TLS_SHARED AetherFrames aether_frames;
 
 static void journal_at(const void* p, AetherUnwindFree free_fn, int depth);
 
 void aether_unwind_track(const void* p, AetherUnwindFree free_fn) {
-    if (tls_depth == 0 || !p || !free_fn) return;
-    journal_at(p, free_fn, tls_depth);
+    if (aether_frames.depth == 0 || !p || !free_fn) return;
+    journal_at(p, free_fn, aether_frames.depth);
 }
 
 void aether_unwind_track_place(const void* place, const void* owned, AetherUnwindFree release) {
-    if (tls_depth == 0 || !place || !release) return;
-    journal_at(place, release, tls_depth);
-    for (int i = tls_journal.count - 1; i >= 0; i--) {
-        if (tls_journal.items[i].ptr == place) {
-            tls_journal.items[i].owned = owned;
-            tls_journal.items[i].place = 1;
+    if (aether_frames.depth == 0 || !place || !release) return;
+    journal_at(place, release, aether_frames.depth);
+    for (int i = aether_frames.journal_count - 1; i >= 0; i--) {
+        if (aether_frames.journal[i].ptr == place) {
+            aether_frames.journal[i].owned = owned;
+            aether_frames.journal[i].place = 1;
             return;
         }
     }
@@ -59,44 +52,44 @@ static void journal_at(const void* p, AetherUnwindFree free_fn, int depth) {
     // Re-tracking an already-journaled pointer updates in place: the
     // ownership handoff shapes (callee returns, caller re-arms its own
     // defer) must never accumulate two entries for one allocation.
-    for (int i = tls_journal.count - 1; i >= 0; i--) {
-        if (tls_journal.items[i].ptr == p) {
-            tls_journal.items[i].free_fn = free_fn;
-            tls_journal.items[i].depth = depth;
+    for (int i = aether_frames.journal_count - 1; i >= 0; i--) {
+        if (aether_frames.journal[i].ptr == p) {
+            aether_frames.journal[i].free_fn = free_fn;
+            aether_frames.journal[i].depth = depth;
             return;
         }
     }
-    if (tls_journal.count == tls_journal.capacity) {
-        int cap = tls_journal.capacity ? tls_journal.capacity * 2 : 32;
+    if (aether_frames.journal_count == aether_frames.journal_capacity) {
+        int cap = aether_frames.journal_capacity ? aether_frames.journal_capacity * 2 : 32;
         AetherUnwindEntry* grown =
-            (AetherUnwindEntry*)realloc(tls_journal.items,
+            (AetherUnwindEntry*)realloc(aether_frames.journal,
                                         (size_t)cap * sizeof(AetherUnwindEntry));
         if (!grown) return;  // OOM: skip journaling; worst case is the old leak
-        tls_journal.items = grown;
-        tls_journal.capacity = cap;
+        aether_frames.journal = grown;
+        aether_frames.journal_capacity = cap;
     }
-    tls_journal.items[tls_journal.count].ptr = p;
-    tls_journal.items[tls_journal.count].owned = NULL;
-    tls_journal.items[tls_journal.count].free_fn = free_fn;
-    tls_journal.items[tls_journal.count].depth = depth;
-    tls_journal.items[tls_journal.count].place = 0;
-    tls_journal.count++;
+    aether_frames.journal[aether_frames.journal_count].ptr = p;
+    aether_frames.journal[aether_frames.journal_count].owned = NULL;
+    aether_frames.journal[aether_frames.journal_count].free_fn = free_fn;
+    aether_frames.journal[aether_frames.journal_count].depth = depth;
+    aether_frames.journal[aether_frames.journal_count].place = 0;
+    aether_frames.journal_count++;
 }
 
 void aether_unwind_forget(const void* p) {
-    if (tls_journal.count == 0 || !p) return;
+    if (aether_frames.journal_count == 0 || !p) return;
     // Scan newest-first: frees are overwhelmingly LIFO.
-    for (int i = tls_journal.count - 1; i >= 0; i--) {
-        if (tls_journal.items[i].ptr == p) {
-            tls_journal.items[i] = tls_journal.items[tls_journal.count - 1];
-            tls_journal.count--;
+    for (int i = aether_frames.journal_count - 1; i >= 0; i--) {
+        if (aether_frames.journal[i].ptr == p) {
+            aether_frames.journal[i] = aether_frames.journal[aether_frames.journal_count - 1];
+            aether_frames.journal_count--;
             return;
         }
     }
 }
 
 int aether_unwind_journal_size(void) {
-    return tls_journal.count;
+    return aether_frames.journal_count;
 }
 
 // Free every entry tagged at the innermost depth and remove it. Runs
@@ -109,19 +102,19 @@ int aether_unwind_journal_size(void) {
 // may forget or track other entries, which must not move under the loop.
 void aether_unwind_drain_current(void) {
     int n = 0;
-    for (int i = 0; i < tls_journal.count; i++)
-        if (tls_journal.items[i].depth >= tls_depth) n++;
+    for (int i = 0; i < aether_frames.journal_count; i++)
+        if (aether_frames.journal[i].depth >= aether_frames.depth) n++;
     if (n == 0) return;
     AetherUnwindEntry* drained = (AetherUnwindEntry*)malloc((size_t)n * sizeof(AetherUnwindEntry));
     int w = 0, d = 0;
-    for (int i = 0; i < tls_journal.count; i++) {
-        if (tls_journal.items[i].depth < tls_depth) {
-            tls_journal.items[w++] = tls_journal.items[i];
+    for (int i = 0; i < aether_frames.journal_count; i++) {
+        if (aether_frames.journal[i].depth < aether_frames.depth) {
+            aether_frames.journal[w++] = aether_frames.journal[i];
         } else if (drained) {
-            drained[d++] = tls_journal.items[i];
+            drained[d++] = aether_frames.journal[i];
         }
     }
-    tls_journal.count = w;
+    aether_frames.journal_count = w;
     /* Newest first, as scope exits run: a deferred statement still sees the
      * locals declared before it. */
     for (int i = d - 1; i >= 0; i--) {
@@ -146,17 +139,15 @@ void aether_unwind_drain_current(void) {
 // protection. With no parent frame nothing can unwind past them; their
 // deferred frees run normally, so the entries just leave the journal.
 void aether_unwind_exit_frame(void) {
-    if (tls_depth <= 1) {
-        tls_journal.count = 0;
-        tls_depth = 0;
+    if (aether_frames.depth <= 1) {
+        aether_frames.journal_count = 0;
         return;
     }
-    for (int i = 0; i < tls_journal.count; i++) {
-        if (tls_journal.items[i].depth >= tls_depth) {
-            tls_journal.items[i].depth = tls_depth - 1;
+    for (int i = 0; i < aether_frames.journal_count; i++) {
+        if (aether_frames.journal[i].depth >= aether_frames.depth) {
+            aether_frames.journal[i].depth = aether_frames.depth - 1;
         }
     }
-    tls_depth--;
 }
 
 typedef void (*AetherTeardown)(void* obj);
@@ -188,10 +179,10 @@ void aether_teardown(void* obj) {
 }
 
 void aether_unwind_thread_cleanup(void) {
-    free(tls_journal.items);
-    tls_journal.items = NULL;
-    tls_journal.count = 0;
-    tls_journal.capacity = 0;
+    free(aether_frames.journal);
+    aether_frames.journal = NULL;
+    aether_frames.journal_count = 0;
+    aether_frames.journal_capacity = 0;
     free(tls_teardown_queue);
     tls_teardown_queue = NULL;
     tls_teardown_capacity = 0;

@@ -468,6 +468,7 @@ typedef struct {
     int         actors;                    /* schema >= 1.7: the library runs actors */
     const unsigned char* closure_config_unused; /* schema >= 1.8, parallel to closures */
     const char* string_release;            /* schema >= 1.9: gives back a returned string */
+    const char* outcome;                   /* schema >= 1.10: the outcome accessor (#2956) */
 } _AeLibInfoMeta;
 
 /* The catalog's schema minor ("1.<minor>"). A reader may touch a field only
@@ -5475,23 +5476,52 @@ static void ae_param_names(const char* params, char* args, size_t acap) {
  * own made it in that runtime, which alone may free it: the stub copies it
  * into the program's (aether_string_import) and gives the library's back
  * through the release its catalog names. `kind` is "" or "builder ". */
+/* #2956: set while a stub is written for a library whose catalog names its
+ * outcome accessor (schema >= 1.10): each call is followed by __aeo_check(),
+ * which raises a failed call again as a panic in the program. */
+static int s_aeo_check = 0;
+
 static void ae_emit_string_export(FILE* out, const char* kind, const char* csym,
                                   const char* ext_name, const char* name,
                                   const char* ext_params, const char* params,
                                   const char* call_args, int shared) {
+    const char* check = s_aeo_check ? "    __aeo_check()\n" : "";
     if (shared) {
+        /* The call needs a wrapper to be checked: the extern takes another name. */
+        char ext_own[300];
+        if (s_aeo_check && !strcmp(ext_name, name)) {
+            snprintf(ext_own, sizeof(ext_own), "__aex_%s", name);
+            ext_name = ext_own;
+        }
         fprintf(out, "@extern(\"%s\") %s(%s) -> string @heap\n", csym, ext_name, ext_params);
         if (!strcmp(ext_name, name)) return;
-        fprintf(out, "%s%s(%s) {\n    return %s(%s)\n}\n", kind, name, params, ext_name,
-                call_args);
+        fprintf(out, "%s%s(%s)%s {\n    _aes_s = %s(%s)\n%s    return _aes_s\n}\n", kind, name,
+                params, kind[0] ? "" : " -> string", ext_name, call_args, check);
         return;
     }
     fprintf(out, "@extern(\"%s\") __aes_%s(%s) -> ptr\n", csym, name, ext_params);
     fprintf(out, "%s%s(%s)%s {\n", kind, name, params, kind[0] ? "" : " -> string");
     fprintf(out, "    _aes_h = __aes_%s(%s)\n", name, call_args);
+    fprintf(out, "%s", check);
     fprintf(out, "    _aes_s = __aes_import(_aes_h)\n");
     fprintf(out, "    __aes_release(_aes_h)\n");
     fprintf(out, "    return _aes_s\n}\n");
+}
+
+/* #2956: a function export, its call followed by the outcome check. */
+static void ae_emit_checked_export(FILE* out, const char* csym, const char* name,
+                                   const char* params, const char* ret) {
+    char args[700];
+    ae_param_names(params, args, sizeof(args));
+    int is_void = strcmp(ret, "void") == 0;
+    if (is_void) {
+        fprintf(out, "@extern(\"%s\") __aex_%s(%s)\n", csym, name, params);
+        fprintf(out, "%s(%s) {\n    __aex_%s(%s)\n    __aeo_check()\n}\n", name, params, name, args);
+    } else {
+        fprintf(out, "@extern(\"%s\") __aex_%s(%s) -> %s\n", csym, name, params, ret);
+        fprintf(out, "%s(%s) -> %s {\n    _aex_r = __aex_%s(%s)\n    __aeo_check()\n    return _aex_r\n}\n",
+                name, params, ret, name, args);
+    }
 }
 
 // Split a rendered signature "(A, B) -> R" into an Aether parameter list
@@ -5787,6 +5817,26 @@ static int ae_generate_binimport_stub(const char* so_path, const char* module, F
         fprintf(out, "@extern(\"%s\") __aes_release(s: @aether ptr)\n\n", m->string_release);
     }
 
+    /* #2956: every export runs in an execution frame, so a panic in it ends
+     * the call with an outcome instead of the process. After each call the
+     * stub reads the outcome from the library's own runtime (which may not
+     * be the program's), records it in the program's (std.host's
+     * last_outcome) and raises a failure again as a panic with the same
+     * reason, which a `try` around the call catches. */
+    s_aeo_check = minor >= 10 && m->outcome && m->outcome[0];
+    if (s_aeo_check) {
+        fprintf(out, "@extern(\"%s\") __aeo_code() -> int\n", m->outcome);
+        fprintf(out, "@extern(\"%s_text\") __aeo_text() -> string\n", m->outcome);
+        fprintf(out, "@extern(\"aether_exec_note_outcome\") __aeo_note(outcome: int, text: string)\n");
+        fprintf(out, "fn __aeo_check() {\n"
+                     "    oc = __aeo_code()\n"
+                     "    __aeo_note(oc, __aeo_text())\n"
+                     "    if oc != 0 {\n"
+                     "        panic(\"${__aeo_text()}\")\n"
+                     "    }\n"
+                     "}\n\n");
+    }
+
     // Function-table exports → `@extern("<c_symbol>") <name>(params) -> ret`.
     for (int i = 0; i < m->function_count && m->functions; i++) {
         const _AeLibInfoFn* f = &m->functions[i];
@@ -5820,7 +5870,10 @@ static int ae_generate_binimport_stub(const char* so_path, const char* module, F
                                           params, params, args, shared_rt);
                     continue;
                 }
-                if (strcmp(rt, "void") == 0) {
+                if (s_aeo_check) {
+                    snprintf(params, sizeof(params), "%.*s", plen, ssig + 1);
+                    ae_emit_checked_export(out, f->c_symbol, f->aether_name, params, rt);
+                } else if (strcmp(rt, "void") == 0) {
                     fprintf(out, "@extern(\"%s\") %s(%.*s)\n",
                             f->c_symbol, f->aether_name, plen, ssig + 1);
                 } else {
@@ -5835,6 +5888,8 @@ static int ae_generate_binimport_stub(const char* so_path, const char* module, F
         if (strings_handed && strcmp(ret, "string") == 0) {
             ae_emit_string_export(out, "", f->c_symbol, f->aether_name, f->aether_name,
                                   params, params, args, shared_rt);
+        } else if (s_aeo_check) {
+            ae_emit_checked_export(out, f->c_symbol, f->aether_name, params, ret);
         } else if (strcmp(ret, "void") == 0) {
             fprintf(out, "@extern(\"%s\") %s(%s)\n", f->c_symbol, f->aether_name, params);
         } else {
@@ -5909,11 +5964,18 @@ static int ae_generate_binimport_stub(const char* so_path, const char* module, F
                 csym, c->name, params, comma,
                 is_void ? "" : " -> ", is_void ? "" : ret);
         fprintf(out, "builder %s(%s) {\n", c->name, params);
-        fprintf(out, "    %s__aeb_%s(%s%s%s)\n",
-                is_void ? "" : "return ", c->name, args, acomma,
-                config_unused ? "null" : "_builder");
+        if (s_aeo_check) {
+            fprintf(out, "    %s__aeb_%s(%s%s%s)\n    __aeo_check()\n%s",
+                    is_void ? "" : "_aex_r = ", c->name, args, acomma,
+                    config_unused ? "null" : "_builder", is_void ? "" : "    return _aex_r\n");
+        } else {
+            fprintf(out, "    %s__aeb_%s(%s%s%s)\n",
+                    is_void ? "" : "return ", c->name, args, acomma,
+                    config_unused ? "null" : "_builder");
+        }
         fprintf(out, "}\n");
     }
+    s_aeo_check = 0;
 
     ae_lib_close(h);  // m points into the library; everything was emitted above.
     return 0;
@@ -13016,6 +13078,9 @@ static int cmd_lib_info(int argc, char** argv) {
     }
     if (minor >= 7) {
         printf("  Actors:        %s\n", m->actors ? "yes" : "no");
+    }
+    if (minor >= 10 && m->outcome && m->outcome[0]) {
+        printf("  Outcome:       %s\n", m->outcome);
     }
     printf("\n");
 

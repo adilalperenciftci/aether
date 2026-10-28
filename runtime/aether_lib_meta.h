@@ -89,6 +89,15 @@
  * library's runtime, which made it, releases it. Set only when some export
  * returns a string.
  *
+ * v11 (schema "1.10", #2956) appends `outcome`: the name of the function
+ * `int <name>(void)` the library exports, with `const char* <name>_text(void)`
+ * beside it: the outcome of the library's last call on the calling thread,
+ * in the library's own runtime (aether_last_outcome, libaether.h). Every
+ * export runs in an execution frame, so a panic ends the call with
+ * AETHER_PANICKED instead of the process; an Aether importer reads the
+ * outcome after each call and raises a failure again as a panic in its own
+ * runtime. Every library has it, so every catalog is "1.10".
+ *
  * Schema versioning: `schema_version` is "1.0" for function-only
  * artifacts, "1.1" once closure records are present, "1.2" once
  * constant records are present, "1.3" once struct records or source
@@ -227,6 +236,9 @@ typedef struct {
     const char*               string_release;    /* schema >= 1.9: the symbol
                                                     a caller gives a returned
                                                     string back through     */
+    const char*               outcome;           /* schema >= 1.10: the symbol
+                                                    of the library's outcome
+                                                    accessor (#2956)        */
 } AetherLibMeta;
 
 /* The single entry point. Every `--emit=lib` artifact exports this

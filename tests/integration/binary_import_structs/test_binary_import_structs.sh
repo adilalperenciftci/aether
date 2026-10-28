@@ -113,7 +113,8 @@ if [ -d "$ROOT/build/shared" ]; then
     run_pass "$WORK/shared" "--shared-runtime" "shared runtime"
     cd "$WORK/shared"
     INFO="$(AETHER_HOME="$ROOT" "$AE" lib-info "./libengine$SO_EXT" 2>&1)"
-    echo "$INFO" | grep -q "Schema:[[:space:]]*1\.5" || { echo "$INFO"; fail "shared runtime: schema is not 1.5"; }
+    # 1.10: every catalog has the outcome slot (#2956); `runtime` (1.5) is in it.
+    echo "$INFO" | grep -q "Schema:[[:space:]]*1\.10" || { echo "$INFO"; fail "shared runtime: schema is not 1.10"; }
     echo "$INFO" | grep -q "Runtime:[[:space:]]*shared" || { echo "$INFO"; fail "shared runtime: the catalog does not say so"; }
     cd "$WORK"
     panic_check "$WORK/shared" "shared runtime"

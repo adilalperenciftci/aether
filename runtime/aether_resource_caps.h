@@ -79,6 +79,22 @@ int aether_caps_deadline_tripped(void);
  * deadline (which clears the flag). */
 void __aether_abort_call(void);
 
+/* The deadline in force on this thread, as an execution frame keeps it
+ * (runtime/aether_exec.c, #2955): a nested execution gets its own and the
+ * outer one's is put back when it returns. */
+typedef struct {
+    int64_t at_ns;     /* 0: none */
+    int     tripped;   /* the sticky flag */
+} AetherDeadlineState;
+
+void aether_caps_deadline_save(AetherDeadlineState* out);
+void aether_caps_deadline_restore(const AetherDeadlineState* s);
+/* The state aether_caps_set_deadline_ms(ms) would make, without making it. */
+AetherDeadlineState aether_caps_deadline_for_ms(int64_t ms);
+/* The sticky flag alone: whether a tripwire saw the deadline pass (or
+ * __aether_abort_call ran), without reading the clock. */
+int aether_caps_deadline_flag(void);
+
 /* Snapshot of currently-accounted bytes: what the cap-aware allocators
  * above (collections, arenas, pools, the actor registry) hold, and only
  * those. heap.new, strings and closure environments are plain mallocs the

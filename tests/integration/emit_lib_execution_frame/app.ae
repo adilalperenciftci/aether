@@ -1,0 +1,17 @@
+// An Aether host of the library in binary form (#2956): a failed call is
+// raised again as a panic with the same reason, and std.host reads its
+// outcome.
+import frames
+import std.host
+
+main() {
+    got = ""
+    try {
+        _v = frames.boom(1)
+    } catch e {
+        got = e
+    }
+    println("caught: ${got}, outcome ${host.last_outcome()} \"${host.last_outcome_text()}\"")
+    v = frames.boom(0)
+    println("then: ${v}, outcome ${host.last_outcome()}")
+}
