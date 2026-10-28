@@ -352,6 +352,20 @@ main() {
     if string.equals(tls13_cert.chain_verify_path(&cint, cempty, canchors), "") == 1 {
         println("ok   intermediate chains directly to root")
     } else { println("FAIL intermediate->root rejected"); total_ok = 0 }
+    if tls13_cert.leaf_is_ca(&cint) == 1 {
+        println("ok   intermediate has basicConstraints cA=TRUE")
+    } else { println("FAIL intermediate missing cA=TRUE"); total_ok = 0 }
+    if tls13_cert.leaf_key_cert_sign(&cint) == 1 {
+        println("ok   intermediate has keyCertSign asserted")
+    } else { println("FAIL intermediate missing keyCertSign"); total_ok = 0 }
+    if tls13_cert.leaf_is_ca(&cleaf) == 0 {
+        println("ok   leaf has cA=FALSE")
+    } else { println("FAIL leaf unexpectedly marked as CA"); total_ok = 0 }
+    cinters_fake = list_new(); _ = list.add(cinters_fake, &cleaf)
+    if string.equals(tls13_cert.chain_verify_path(&cleaf, cinters_fake, canchors), "") != 1 {
+        println("ok   leaf certificate rejected as intermediate CA")
+    } else { println("FAIL leaf accepted as intermediate CA"); total_ok = 0 }
+    list_free(cinters_fake)
     list_free(canchors); list_free(cinters); list_free(cempty)
     tls13_cert.free_leaf(&croot); tls13_cert.free_leaf(&cint); tls13_cert.free_leaf(&cleaf)
     bytes.free(cp_root); bytes.free(cp_int); bytes.free(cp_leaf)

@@ -59,6 +59,7 @@ exports(
     leaf_not_before, leaf_not_before_len, leaf_not_after, leaf_not_after_len,
     leaf_dns_count, leaf_dns_name,
     leaf_tbs_len, leaf_subject_len, leaf_issuer_len,
+    leaf_is_ca, leaf_key_cert_sign,
     SCHEME_ECDSA_P256_SHA256, SCHEME_ECDSA_P384_SHA384, SCHEME_ED25519, SCHEME_RSA_PSS_RSAE_SHA256,
     check_validity, time_to_key, check_hostname,
     chain_verify, chain_verify_path, verify_cert_signature, find_issuer_cert,
@@ -442,6 +443,9 @@ struct LeafCert {
     not_after_len: int
     dns_names: ptr // std.list of dNSName BYTES buffers (SAN), or null
     ip_addrs: ptr // std.list of iPAddress SAN BYTES buffers (4 or 16 bytes), or null
+    is_ca: int
+    has_key_usage: int
+    key_cert_sign: int
 }
 
 // Parse a DER Certificate into `out`. Returns "" on success or an error.
@@ -470,6 +474,9 @@ parse_certificate(der: byte[], out: *LeafCert) -> string {
     out.not_after_len = 0
     out.dns_names = null
     out.ip_addrs = null
+    out.is_ca = 0
+    out.has_key_usage = 0
+    out.key_cert_sign = 0
 
     view = bytes.new(len)
     if len > 0 { bytes.set(view, len - 1, 0) }
@@ -690,6 +697,40 @@ fn parse_extensions_for_san(ext_wrapper: @keep ptr, out: *LeafCert) {
                     }
                 }
             }
+            if string.equals(oid, "2.5.29.19") == 1 {
+                nx, nxerr = asn1.read_tlv(xr)
+                ntag = asn1.last_tag(xr)
+                if string.equals(nxerr, "") == 1 {
+                    if ntag == 0x01 {
+                        bytes.free(nx)
+                        os2, os2e = asn1.read_tlv(xr)
+                        if string.equals(os2e, "") == 1 {
+                            decode_basic_constraints(os2, out)
+                            bytes.free(os2)
+                        }
+                    } else {
+                        decode_basic_constraints(nx, out)
+                        bytes.free(nx)
+                    }
+                }
+            }
+            if string.equals(oid, "2.5.29.15") == 1 {
+                nx, nxerr = asn1.read_tlv(xr)
+                ntag = asn1.last_tag(xr)
+                if string.equals(nxerr, "") == 1 {
+                    if ntag == 0x01 {
+                        bytes.free(nx)
+                        os2, os2e = asn1.read_tlv(xr)
+                        if string.equals(os2e, "") == 1 {
+                            decode_key_usage(os2, out)
+                            bytes.free(os2)
+                        }
+                    } else {
+                        decode_key_usage(nx, out)
+                        bytes.free(nx)
+                    }
+                }
+            }
             string.release(oid)
         }
         asn1.reader_free(xr)
@@ -697,6 +738,48 @@ fn parse_extensions_for_san(ext_wrapper: @keep ptr, out: *LeafCert) {
     }
     asn1.reader_free(er)
     bytes.free(seq_content)
+}
+
+fn decode_basic_constraints(octet_content: @keep ptr, out: *LeafCert) {
+    bcr = asn1.reader_new(octet_content)
+    seq_content, serr = asn1.read_tlv(bcr)
+    asn1.reader_free(bcr)
+    if string.equals(serr, "") != 1 { return }
+    sr = asn1.reader_new(seq_content)
+    if asn1.reader_eof(sr) != 1 {
+        val, verr = asn1.read_tlv(sr)
+        tag = asn1.last_tag(sr)
+        if string.equals(verr, "") == 1 {
+            if tag == 0x01 {
+                if bytes.length(val) > 0 {
+                    if bytes.get(val, 0) != 0 {
+                        out.is_ca = 1
+                    }
+                }
+            }
+            bytes.free(val)
+        }
+    }
+    asn1.reader_free(sr)
+    bytes.free(seq_content)
+}
+
+fn decode_key_usage(octet_content: @keep ptr, out: *LeafCert) {
+    kur = asn1.reader_new(octet_content)
+    ku_content, kerr = asn1.read_tlv(kur)
+    tag = asn1.last_tag(kur)
+    asn1.reader_free(kur)
+    if string.equals(kerr, "") != 1 { return }
+    if tag == 0x03 {
+        out.has_key_usage = 1
+        if bytes.length(ku_content) >= 2 {
+            b = bytes.get(ku_content, 1)
+            if (b & 0x04) != 0 {
+                out.key_cert_sign = 1
+            }
+        }
+    }
+    bytes.free(ku_content)
 }
 
 // The SAN extnValue OCTET STRING wraps GeneralNames ::= SEQUENCE OF GeneralName.
@@ -768,6 +851,8 @@ leaf_not_after_len(c: *LeafCert) -> int { return c.not_after_len }
 leaf_tbs_len(c: *LeafCert) -> int { return c.tbs_len }
 leaf_subject_len(c: *LeafCert) -> int { return c.subject_len }
 leaf_issuer_len(c: *LeafCert) -> int { return c.issuer_len }
+leaf_is_ca(c: *LeafCert) -> int { return c.is_ca }
+leaf_key_cert_sign(c: *LeafCert) -> int { return c.key_cert_sign }
 
 leaf_dns_count(c: *LeafCert) -> int {
     if c.dns_names == null { return 0 }
@@ -1851,9 +1936,13 @@ fn find_issuer_unused(cert: *LeafCert, intermediates: ptr, used: ptr) -> int {
         m = list.at(intermediates, i) as *LeafCert
         if m != null {
             if is_in_list(intermediates, i, used) == 0 {
-                if dn_equal(bytes.view(cert.issuer)[0..cert.issuer_len], bytes.view(m.subject)[0..m.subject_len]) == 1 {
-                    if verify_cert_signature(cert, m) == 1 {
-                        return i
+                if m.is_ca == 1 {
+                    if m.has_key_usage == 0 || m.key_cert_sign == 1 {
+                        if dn_equal(bytes.view(cert.issuer)[0..cert.issuer_len], bytes.view(m.subject)[0..m.subject_len]) == 1 {
+                            if verify_cert_signature(cert, m) == 1 {
+                                return i
+                            }
+                        }
                     }
                 }
             }
@@ -2049,6 +2138,9 @@ init_leaf(l: *LeafCert) {
     l.not_after = null; l.not_after_len = 0
     l.dns_names = null
     l.ip_addrs = null
+    l.is_ca = 0
+    l.has_key_usage = 0
+    l.key_cert_sign = 0
 }
 
 // Free a trust-anchor list built by trust_store_load: each *LeafCert's buffers,
