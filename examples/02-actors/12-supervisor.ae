@@ -1,0 +1,74 @@
+// Supervision: a crashed actor is restarted, under the ref its clients hold.
+//
+// std.supervise starts each child from a factory (a closure that spawns
+// it), links it, and when it dies restarts it in place: the factory runs
+// again and its spawn takes the dead child's block, so every ref to the
+// child reaches the new one. A one_for_one supervisor restarts the dead
+// child alone; past its restart budget it gives up and ends itself, and
+// whoever monitors it gets a Down that says why.
+//
+// Run: ae run examples/02-actors/12-supervisor.ae
+// See: std/supervise/README.md, docs/actor-concurrency.md#supervisors
+
+import std.actors
+import std.supervise
+
+message Divide {
+    a: int
+    b: int
+}
+message Handled {}
+message Watch { who: actor_ref }
+
+divide(a: int, b: int) -> int {
+    if b == 0 {
+        panic("division by zero")
+    }
+    return a / b
+}
+
+actor Calculator {
+    state handled = 0
+    receive {
+        Divide(a, b) -> {
+            println("calculator: ${a} / ${b} = ${divide(a, b)}")
+            handled = handled + 1
+        }
+        Handled() -> { reply handled }
+    }
+}
+
+actor Watcher {
+    receive {
+        Watch(who) -> { _id = actors.monitor(who) }
+        Down(ref, reason) -> { println("watcher: the supervisor ended: ${reason}") }
+    }
+}
+
+main() {
+    sup = supervise.start(strategy: "one_for_one", max_restarts: 2, within_secs: 60) {
+        supervise.child("calculator", || -> spawn(Calculator()))
+    }
+    watcher = spawn(Watcher())
+    watcher ! Watch { who: sup }
+    calc = supervise.which(sup, "calculator")
+
+    calc ! Divide { a: 10, b: 2 }
+    calc ! Divide { a: 1, b: 0 } // panics: the calculator is restarted
+    wait_for_idle()
+    calc ! Divide { a: 9, b: 3 } // the same ref reaches the new one
+    wait_for_idle()
+    int n = calc ? Handled {}
+    println("restarts: ${supervise.restarts(sup)}, handled since: ${n}")
+
+    calc ! Divide { a: 1, b: 0 } // restart 2
+    wait_for_idle()
+    calc ! Divide { a: 1, b: 0 } // a third crash within the minute: it gives up
+    wait_for_idle()
+}
+
+// Output:
+// calculator: 10 / 2 = 5
+// calculator: 9 / 3 = 3
+// restarts: 1, handled since: 1
+// watcher: the supervisor ended: supervisor gave up: more than 2 restarts within 60 s (calculator: division by zero)

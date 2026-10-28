@@ -229,6 +229,15 @@ Like the mailbox, the overflow is touched only by the thread that runs the actor
 
 An ask that was answered or failed returns only once its reply slot is freed. The replier lets go of the slot a few instructions after it wakes the asker, so the asker waits for that and frees the slot itself (#3245). What an ask allocated is gone when it returns, which a program that counts its heap around asks relies on. A timed-out ask does not wait; its replier frees the slot when it comes.
 
+## The delivery contract
+
+What a send promises, on both schedulers (#2974):
+
+1. **Per sender, in order.** Two messages one sender sends one receiver are handled in the order they were sent, on any core and across the receiver's moves between cores (#3090, #3093, #3240, #3241). Nothing is promised between two senders.
+2. **At most once.** A message is handled once, or dropped once. A message to an actor that has ended (panicked, killed, stopped), or that its death or a restart in place drops, is released through `aether_message_drop` (what its fields own included) and counted by `scheduler_dead_sends()` (`actors.dead_sends()`); one to a released actor by `scheduler_released_sends()`, one sent while the scheduler is stopped by `scheduler_stopped_sends()`. An ask that no reply can come for fails with the reason as soon as that is known (the actor is dead, dies with it, or its mailbox is full), not at its timeout (#3151).
+3. **Unbounded by default, as a decision.** A send never blocks its sender. The sender is often a core's own thread, and one blocked on a full mailbox whose actor that same core, or a core in a cycle with it, must run would deadlock the scheduler. So what a mailbox cannot take waits in the core queues, the senders' deferred sends and the actor's overflow, and memory is the limit.
+4. **A bound when the actor asks for one.** `@mailbox(bound: N)` (above, "A bounded mailbox") caps what waits for an actor at N. A send past it is refused at once rather than blocked: counted for a plain `!`, reported to the caller of `try_send` and of an ask.
+
 ## The end of an actor
 
 An actor ends once (#2974), by the first of these: a panic in its handler (the step's barrier catches it), `actors.kill(ref)` from anywhere (or the death of an actor it is linked to), `actors.stop()` from its own handler, or a C host's `scheduler_release_actor`. Each sets a bit in `ActorBase.dead` (`PANICKED`, `KILLED`, `STOPPED`, `RELEASED`), and the first keeps its reason with its watch list (`aether_actor_death_reason`): the panic's reason, `"killed"` or `"normal"`. From then on a send to it is dropped.

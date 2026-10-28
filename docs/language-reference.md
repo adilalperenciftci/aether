@@ -3509,6 +3509,13 @@ A function can take or return a typed reference, `close_it(w:
 actor_ref[Writer])` or `-> actor_ref[Writer]`, and a `spawn` result passes
 where one is wanted.
 
+A send never blocks the sender. Two messages one sender sends one actor are
+handled in the order sent; a message is handled at most once, and one the
+actor never handles (it had ended, or its mailbox bound was reached) is
+released and counted. See "The delivery contract" in
+[actor-concurrency.md](actor-concurrency.md#the-delivery-contract), and
+"A bounded mailbox" below.
+
 ### Ask Pattern (Request-Reply)
 
 The `?` operator sends a message and blocks until the actor replies. The compiler
