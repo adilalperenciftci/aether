@@ -101,9 +101,26 @@ int aether_caps_deadline_flag(void);
  * deadline passed (AETHER_STOP_DEADLINE, the outcome AETHER_DEADLINE) or
  * it was cancelled (AETHER_STOP_CANCELLED, AETHER_CANCELLED); 0 for
  * neither. For callers that found aether_caps_armed set. */
-#define AETHER_STOP_DEADLINE  2
-#define AETHER_STOP_CANCELLED 3
+#define AETHER_STOP_DEADLINE      2
+#define AETHER_STOP_CANCELLED     3
+#define AETHER_STOP_MEMORY_CAP    4   /* the outcome AETHER_MEMORY_CAP */
+#define AETHER_STOP_OUT_OF_MEMORY 5   /* the outcome AETHER_OUT_OF_MEMORY */
 int aether_exec_stop_reason(void);
+
+/* An allocation its caller survives failed (it returns NULL, or an error),
+ * for the reason `why` (AETHER_STOP_MEMORY_CAP or AETHER_STOP_OUT_OF_MEMORY).
+ * Inside an execution the execution ends with that outcome at its next safe
+ * point or its return (#2956); outside one nothing changes. The cap-aware
+ * allocators below call it; so does any runtime allocation that reports
+ * its failure instead of stopping the process. Allocates nothing. */
+void aether_alloc_failed(int why);
+
+/* Test hook (runtime C tests and C hosts of tests only; generated code never
+ * calls it): the n-th cap-aware allocation from now on this thread fails as
+ * if the allocator were out of memory, once; 0 turns it off. */
+void aether_test_fail_alloc_after(int n);
+/* Whether the hook refuses this allocation (it counts it). */
+int aether_alloc_test_refuses(void);
 
 /* For a C-backed std operation that runs long on its input: 1 when the
  * running execution should stop, so the operation returns early, cleanly

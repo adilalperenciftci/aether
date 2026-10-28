@@ -6,6 +6,9 @@
 #include <stdlib.h>
 #include "../utils/aether_thread.h"
 #include "../../std/string/aether_string.h"
+#include "../aether_resource_caps.h"
+#include "aether_frames.h"
+#include "aether_panic.h"
 
 // Thread-local core ID for optimization
 extern AETHER_TLS int current_core_id;
@@ -58,8 +61,16 @@ static Message payload_message(ActorBase* actor, void* message_data, size_t mess
     // TLS pools have thread affinity issues: a same-core actor may be migrated
     // to another core after the message is sent, causing the receiver to call
     // free() on pool memory (heap-use-after-free / free-on-non-malloc).
-    void* msg_copy = malloc(message_size);
+    void* msg_copy = aether_alloc_test_refuses() ? NULL : malloc(message_size);
     if (!msg_copy) {
+        /* Inside a library call (#2956): nothing is queued yet, so the
+         * message's own values are released (they moved into it) and the
+         * call ends with AETHER_OUT_OF_MEMORY. Elsewhere the process stops,
+         * as it always did: the send has no way to fail. */
+        if (aether_frames_here()->exec_depth > 0) {
+            if (actor->release_message) actor->release_message(*(int*)message_data, message_data);
+            aether_out_of_memory("out of memory copying a message");
+        }
         fprintf(stderr, "aether: malloc(%zu) failed for msg type %d to actor %d\n",
                 message_size, *(int*)message_data, actor->id);
         abort();

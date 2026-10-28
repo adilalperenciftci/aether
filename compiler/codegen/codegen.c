@@ -9253,7 +9253,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "typedef union { atomic_long _refs; long double _ld; void* _p; long long _ll; } _AeCellHeader;");
     print_line(gen, "static inline void* _aether_cell_new(size_t size) {");
     print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)calloc(1, sizeof(_AeCellHeader) + size);");
-    print_line(gen, "    if (!h) aether_panic(\"out of memory allocating a captured variable\");");
+    print_line(gen, "    if (!h) aether_out_of_memory(\"out of memory allocating a captured variable\");");
     print_line(gen, "    atomic_init(&h->_refs, 1);");
     print_line(gen, "    return (void*)(h + 1);");
     print_line(gen, "}");

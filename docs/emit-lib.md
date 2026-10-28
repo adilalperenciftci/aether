@@ -618,6 +618,23 @@ error-string convention; stdlib functions surface "out of memory:
 cap exceeded" up the call chain rather than aborting. Pass `0` to
 disable.
 
+**Allocation failure ends the call (#2956).** Inside an export, an
+allocation that fails, past the cap or with the allocator out of memory,
+still fails cleanly where it happens (the std operation returns its
+error, its own memory freed), and the call ends at its next safe point,
+or when it returns, with `AETHER_MEMORY_CAP` or `AETHER_OUT_OF_MEMORY`
+and the zero value: its defers run, and a `try` in the script does not
+catch it. The call does not unwind from inside the allocator, which would
+skip the C code between it and the safe point. An allocation the code
+cannot go on without (a message's payload copy, a captured variable's
+cell, `make([]T, n)`) ends the call at once with `AETHER_OUT_OF_MEMORY`;
+outside an export those still stop the process or panic, as before.
+Neither the outcome nor the unwind allocates: the reasons are static
+strings and the journal is drained in place. One failure still stops the
+process, inside an export or not: a message the scheduler has no memory to
+queue behind an actor's earlier messages, since it has no place that keeps
+their order.
+
 **Wall-clock deadline.** Per-thread monotonic (`CLOCK_MONOTONIC`).
 The codegen emits a safe point, `if (aether_caps_armed && aether_exec_poll())
 { __aether_abort_call(); break; }`, at every `for` / `while` loop head

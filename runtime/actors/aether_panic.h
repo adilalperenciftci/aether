@@ -193,6 +193,15 @@ __attribute__((noreturn))
 #endif
 void aether_panic_owned(const char* reason, void (*release)(const void*));
 
+// An allocation the code cannot go on without failed (#2956): inside a
+// library call's execution the call ends with AETHER_OUT_OF_MEMORY (a
+// `try` does not catch it, and nothing on the way allocates); elsewhere it
+// is aether_panic(what). Does not return.
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noreturn))
+#endif
+void aether_out_of_memory(const char* what);
+
 // Install SIGSEGV/SIGFPE/SIGBUS handlers that convert native faults into
 // panics. No-op unless AETHER_CATCH_SIGNALS=1 is set in the environment.
 // Call once at process init.

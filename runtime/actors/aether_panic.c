@@ -474,6 +474,19 @@ const char* aether_exec_reason(int outcome) {
     }
 }
 
+/* An allocation the code cannot go on without failed (#2956). Inside an
+ * execution the call ends with AETHER_OUT_OF_MEMORY, an interruption a
+ * `try` does not catch, its reason a static string: nothing on the way
+ * allocates. Outside one it is the panic `what` it always was. */
+void aether_out_of_memory(const char* what) {
+    AetherFrames* F = aether_frames_here();
+    if (F->exec_depth > 0) {
+        F->interrupting = AETHER_OUT_OF_MEMORY;
+        aether_panic(aether_exec_reason(AETHER_OUT_OF_MEMORY));
+    }
+    aether_panic(what);
+}
+
 /* A `try` caught an interruption (aether_exec_interrupting()): it has done
  * its cleanup, and the interruption goes on to the next frame out, which
  * ends with the execution's. Here, with the panic it raises again, since

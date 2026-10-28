@@ -73,7 +73,8 @@ void aether_unwind_thread_cleanup(void);
 // teardown function, `void (*)(void*)`. A teardown called while another runs
 // on this thread is queued and runs once that one returns, so a chain of
 // any length (a closure holding the closure it replaced, 50,000 deep) is
-// torn down in constant stack.
+// torn down in constant stack. With no memory to grow the queue, the
+// teardown runs at once instead, on the stack.
 void aether_teardown(void* obj);
 
 #ifdef __cplusplus

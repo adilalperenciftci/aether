@@ -91,6 +91,9 @@ tests/integration/emit_lib_deadline/
 # #2956: work.ae is a library with no main; the driver builds it and its C host
 # calls it under a deadline and a cancel from another thread.
 tests/integration/emit_lib_interrupt/
+# #2956: alloc.ae is a library with no main; the driver builds it and its C host
+# calls it past a memory cap and with allocations made to fail.
+tests/integration/emit_lib_alloc_failure/
 tests/integration/emit_lib_keeps_main/
 tests/integration/emit_lib_net/
 tests/integration/emit_lib_typed_ptr/

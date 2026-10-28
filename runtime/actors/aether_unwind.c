@@ -7,6 +7,7 @@
 #include "aether_frames.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 /* An entry is a value (`free_fn(ptr)` on a drain) or a place (#2923): `ptr`
  * is the address of a slot holding a value, `owned` the address of the flag
@@ -17,7 +18,8 @@ typedef struct AetherUnwindEntry {
     const void* owned;
     AetherUnwindFree free_fn;
     int depth;
-    int place;
+    unsigned char place;     /* a place, not a value */
+    unsigned char draining;  /* to be released by the drain running now */
 } AetherUnwindEntry;
 
 
@@ -127,6 +129,7 @@ static void journal_at(const void* p, AetherUnwindFree free_fn, int depth) {
     t_frames.journal[t_frames.journal_count].free_fn = free_fn;
     t_frames.journal[t_frames.journal_count].depth = depth;
     t_frames.journal[t_frames.journal_count].place = 0;
+    t_frames.journal[t_frames.journal_count].draining = 0;
     t_frames.journal_count++;
 }
 
@@ -152,40 +155,44 @@ int aether_unwind_journal_size(void) {
 // TLS, so intactness only matters for the free functions, which take
 // the raw pointer and touch nothing else).
 //
-// The entries are taken off the journal before any release runs: a release
-// may forget or track other entries, which must not move under the loop.
+// It allocates nothing (#2956): a panic may be the interruption of a call
+// whose allocation just failed. The entries to release are marked first;
+// then, newest first, each is taken out of the journal before its release
+// runs, since a release may forget or track other entries. An entry a
+// release forgets is not released again (it used to be, from a copy of the
+// journal the drain had taken); one a release tracks is not marked, and
+// stays in the journal for the frame that receives it.
 void aether_unwind_drain_current(void) {
     int n = 0;
-    for (int i = 0; i < t_frames.journal_count; i++)
-        if (t_frames.journal[i].depth >= t_frames.depth) n++;
-    if (n == 0) return;
-    AetherUnwindEntry* drained = (AetherUnwindEntry*)malloc((size_t)n * sizeof(AetherUnwindEntry));
-    int w = 0, d = 0;
     for (int i = 0; i < t_frames.journal_count; i++) {
-        if (t_frames.journal[i].depth < t_frames.depth) {
-            t_frames.journal[w++] = t_frames.journal[i];
-        } else if (drained) {
-            drained[d++] = t_frames.journal[i];
+        if (t_frames.journal[i].depth >= t_frames.depth) {
+            t_frames.journal[i].draining = 1;
+            n++;
         }
     }
-    t_frames.journal_count = w;
     /* Newest first, as scope exits run: a deferred statement still sees the
      * locals declared before it. */
-    for (int i = d - 1; i >= 0; i--) {
-        AetherUnwindEntry* e = &drained[i];
-        if (!e->place) {
-            e->free_fn(e->ptr);
+    while (n > 0) {
+        int i = t_frames.journal_count - 1;
+        while (i >= 0 && !t_frames.journal[i].draining) i--;
+        if (i < 0) break;   /* the rest were forgotten by a release */
+        AetherUnwindEntry e = t_frames.journal[i];
+        memmove(&t_frames.journal[i], &t_frames.journal[i + 1],
+                (size_t)(t_frames.journal_count - i - 1) * sizeof(AetherUnwindEntry));
+        t_frames.journal_count--;
+        n--;
+        if (!e.place) {
+            e.free_fn(e.ptr);
             continue;
         }
-        const void* volatile* slot = (const void* volatile*)e->ptr;
-        volatile int* owned = (volatile int*)e->owned;
+        const void* volatile* slot = (const void* volatile*)e.ptr;
+        volatile int* owned = (volatile int*)e.owned;
         const void* v = *slot;
         if (!v || (owned && !*owned)) continue;
         if (owned) *owned = 0;
         *slot = NULL;
-        e->free_fn(v);
+        e.free_fn(v);
     }
-    free(drained);
 }
 
 // Normal frame exit: surviving entries of the popped depth are owned by
@@ -216,7 +223,13 @@ void aether_teardown(void* obj) {
         if (tls_teardown_count == tls_teardown_capacity) {
             int cap = tls_teardown_capacity ? tls_teardown_capacity * 2 : 16;
             void** q = (void**)realloc(tls_teardown_queue, (size_t)cap * sizeof(void*));
-            if (!q) abort();
+            if (!q) {
+                /* No memory to queue it (#2956): torn down here instead, on
+                 * the stack. The process used to stop, and a library call
+                 * could not end with its outcome. */
+                (*(AetherTeardown*)obj)(obj);
+                return;
+            }
             tls_teardown_queue = q;
             tls_teardown_capacity = cap;
         }

@@ -44,6 +44,11 @@ extern "C" {
  * allocations are gated. Existing ones drain via their normal
  * free paths and decrement the counter.
  *
+ * Inside an export, a refused allocation (or one the allocator could
+ * not satisfy) also ends the call at its next safe point or its return,
+ * with the outcome AETHER_MEMORY_CAP (or AETHER_OUT_OF_MEMORY) and the
+ * zero value, its defers run (#2956); see aether_last_outcome().
+ *
  * Thread-safe: relaxed atomic store. */
 AETHER_API void aether_set_memory_cap(uint64_t bytes);
 
@@ -92,8 +97,8 @@ AETHER_API int aether_deadline_tripped(void);
 #define AETHER_PANICKED       1   /* a panic the export did not catch */
 #define AETHER_DEADLINE       2   /* its deadline passed (see above) */
 #define AETHER_CANCELLED      3   /* cancelled from another thread */
-#define AETHER_MEMORY_CAP     4   /* past the memory cap */
-#define AETHER_OUT_OF_MEMORY  5   /* an allocation failed */
+#define AETHER_MEMORY_CAP     4   /* an allocation went past the memory cap */
+#define AETHER_OUT_OF_MEMORY  5   /* the allocator could not satisfy one */
 #endif
 AETHER_API int aether_last_outcome(void);
 

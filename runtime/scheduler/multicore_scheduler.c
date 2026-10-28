@@ -30,6 +30,7 @@
 #include "../actors/aether_panic.h"
 #include "../actors/aether_actor_inbox.h"
 #include "../actors/aether_step_barrier.h"
+#include "../aether_resource_caps.h"
 
 
 // Forward declaration to avoid header cycle with aether_send_message.h
@@ -4160,7 +4161,13 @@ void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg
     if (atomic_load_explicit(&target->dead, memory_order_acquire)) return NULL;
 
     ActorReplySlot* slot = (ActorReplySlot*)calloc(1, sizeof(ActorReplySlot));
-    if (!slot) { *status = AETHER_ASK_NO_MEMORY; return NULL; }
+    if (!slot) {
+        /* The script gets the error; a library call ends at its next safe
+         * point with AETHER_OUT_OF_MEMORY (#2956). */
+        aether_alloc_failed(AETHER_STOP_OUT_OF_MEMORY);
+        *status = AETHER_ASK_NO_MEMORY;
+        return NULL;
+    }
 
     pthread_mutex_init(&slot->mutex, NULL);
     pthread_cond_init(&slot->cond, NULL);

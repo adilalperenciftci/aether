@@ -264,3 +264,116 @@ TEST_CATEGORY(caps_fs_read_denied_past_cap, TEST_CATEGORY_STDLIB) {
     ASSERT_EQ(headroom, used_after);        /* counter not drifted */
 }
 #endif
+
+/* #2956: an allocation that fails inside a library call's execution ends
+ * the call. A cap-aware allocation still returns NULL to its caller, and
+ * the call ends at its next safe point or its return with the outcome;
+ * outside an execution nothing changes. The test hook fails the n-th
+ * cap-aware allocation from now on this thread. */
+#include "../../runtime/aether_exec.h"
+#include "../../runtime/actors/aether_send_message.h"
+#include "../../runtime/scheduler/multicore_scheduler.h"
+
+TEST_CATEGORY(caps_alloc_failure_outside_an_execution_changes_nothing, TEST_CATEGORY_RUNTIME) {
+    caps_reset();
+    aether_exec_note_outcome(AETHER_OK, "");
+    aether_test_fail_alloc_after(1);
+    void* p = aether_caps_malloc(32);
+    void* q = aether_caps_malloc(32);
+    int outcome = aether_last_outcome();
+    aether_caps_free(q, 32);
+    ASSERT_TRUE(p == NULL);
+    ASSERT_TRUE(q != NULL);
+    ASSERT_EQ(AETHER_OK, outcome);
+    caps_reset();
+}
+
+/* The execution's frame, as an export stub makes it, around `body`. */
+static int run_in_execution(void (*body)(void)) {
+    AetherJmpFrame* x = aether_exec_enter();
+    if (AETHER_SIGSETJMP(x->buf, 1)) {
+        aether_exec_failed();
+    } else {
+        body();
+        aether_exec_leave();
+    }
+    return aether_last_outcome();
+}
+
+static void* g_alloc_result;
+static void alloc_past_cap(void) {
+    aether_caps_set_memory_cap(aether_caps_used_bytes() + 16);
+    g_alloc_result = aether_caps_malloc(4096);
+}
+static void alloc_refused(void) {
+    aether_test_fail_alloc_after(1);
+    g_alloc_result = aether_caps_malloc(32);
+}
+
+TEST_CATEGORY(caps_alloc_failure_ends_the_execution, TEST_CATEGORY_RUNTIME) {
+    caps_reset();
+    int cap = run_in_execution(alloc_past_cap);
+    void* past = g_alloc_result;
+    caps_reset();
+    int oom = run_in_execution(alloc_refused);
+    void* refused = g_alloc_result;
+    char text[64];
+    snprintf(text, sizeof(text), "%s", aether_last_outcome_text());
+    caps_reset();
+    ASSERT_TRUE(past == NULL);
+    ASSERT_EQ(AETHER_MEMORY_CAP, cap);
+    ASSERT_TRUE(refused == NULL);
+    ASSERT_EQ(AETHER_OUT_OF_MEMORY, oom);
+    ASSERT_STREQ("the call ran out of memory", text);
+}
+
+/* An allocation the code cannot go on without: inside an execution the
+ * call ends with AETHER_OUT_OF_MEMORY; elsewhere it is a panic with its own
+ * reason, which a try catches. */
+static void oom_now(void) { aether_out_of_memory("out of memory doing this"); }
+
+TEST_CATEGORY(out_of_memory_ends_an_execution_and_panics_elsewhere, TEST_CATEGORY_RUNTIME) {
+    int outcome = run_in_execution(oom_now);
+    char text[64];
+    snprintf(text, sizeof(text), "%s", aether_last_outcome_text());
+
+    char caught[64] = "";
+    AetherJmpFrame* f = aether_try_push();
+    if (AETHER_SIGSETJMP(f->buf, 1) == 0) {
+        oom_now();
+    }
+    snprintf(caught, sizeof(caught), "%s", f->reason ? f->reason : "");
+    aether_try_pop();
+
+    ASSERT_EQ(AETHER_OUT_OF_MEMORY, outcome);
+    ASSERT_STREQ("the call ran out of memory", text);
+    ASSERT_STREQ("out of memory doing this", caught);
+}
+
+/* A send whose payload copy fails inside an execution: nothing is queued,
+ * the message's own values are released (they had moved into it), and the
+ * call ends with AETHER_OUT_OF_MEMORY. The process used to stop. */
+static int g_released_type = -1;
+static void note_release(int type, void* payload) { (void)payload; g_released_type = type; }
+static ActorBase* g_oom_actor;
+static void send_refused(void) {
+    struct { int type; int value; } m = { 42, 7 };
+    aether_test_fail_alloc_after(1);
+    aether_send_message(g_oom_actor, &m, sizeof(m));
+}
+
+TEST_CATEGORY(send_payload_copy_failure_ends_the_execution, TEST_CATEGORY_RUNTIME) {
+    ActorBase* a = calloc(1, sizeof(ActorBase));
+    ASSERT_NOT_NULL(a);
+    a->id = 31;
+    mailbox_init(&a->mailbox);
+    a->release_message = note_release;
+    g_oom_actor = a;
+    g_released_type = -1;
+    int outcome = run_in_execution(send_refused);
+    int queued = a->mailbox.count;
+    free(a);
+    ASSERT_EQ(AETHER_OUT_OF_MEMORY, outcome);
+    ASSERT_EQ(42, g_released_type);
+    ASSERT_EQ(0, queued);
+}

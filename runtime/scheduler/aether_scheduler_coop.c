@@ -13,6 +13,7 @@
 #include "../actors/aether_send_message.h"
 #include "../actors/aether_actor_inbox.h"
 #include "../actors/aether_step_barrier.h"
+#include "../aether_resource_caps.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -783,7 +784,12 @@ void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg
 
     // Queued as any send is, and processed by the polls below
     void* msg_copy = malloc(msg_size);
-    if (!msg_copy) { g_pending_reply_slot = NULL; *status = AETHER_ASK_NO_MEMORY; return NULL; }
+    if (!msg_copy) {
+        g_pending_reply_slot = NULL;
+        aether_alloc_failed(AETHER_STOP_OUT_OF_MEMORY);   /* a library call ends (#2956) */
+        *status = AETHER_ASK_NO_MEMORY;
+        return NULL;
+    }
     memcpy(msg_copy, msg_data, msg_size);
 
     Message msg;

@@ -216,7 +216,10 @@ static void interrupt(AetherFrames* F, int why) {
 int aether_exec_poll(void) {
     AetherFrames* F = aether_frames_here();
     if (F->exec_depth > 0) {
-        int why = aether_exec_stop_reason();
+        /* A stop already noted (a failed allocation, a C-backed operation
+         * that stopped early), else the deadline or a cancel. */
+        int why = F->exec[F->exec_depth - 1].stop;
+        if (!why) why = aether_exec_stop_reason();
         if (why) interrupt(F, why);
         return 0;
     }

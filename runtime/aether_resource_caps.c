@@ -9,6 +9,7 @@
 #include "aether_resource_caps.h"
 #include "utils/aether_thread.h"
 #include "utils/aether_compiler.h"
+#include "actors/aether_frames.h"
 
 #include <stdatomic.h>
 #include <assert.h>
@@ -159,43 +160,106 @@ uint64_t aether_caps_used_bytes(void) {
 #include <stdlib.h>
 #include <string.h>
 
+/* ------------------------------------------------------------------
+ * Allocation failure inside an execution (#2956)
+ * ------------------------------------------------------------------
+ * A cap-aware allocation that fails, past the cap or with the allocator
+ * out of memory, returns NULL to its caller, which fails cleanly (an
+ * error, its own memory freed), as it does outside an execution. Inside
+ * one the failure is also noted on the innermost execution, and its next
+ * safe point, or its return, ends it with AETHER_MEMORY_CAP or
+ * AETHER_OUT_OF_MEMORY. The call does not unwind from inside the
+ * allocator: that would skip the C code between it and the safe point,
+ * which holds memory and may hold a lock. */
+
+/* aether_test_fail_alloc_after: one global load per allocation while no
+ * test has asked, the count per thread so a test is deterministic. */
+static _Atomic int g_alloc_test_armed = 0;
+static AETHER_TLS_SHARED int t_alloc_fail_after = 0;
+
+void aether_test_fail_alloc_after(int n) {
+    t_alloc_fail_after = n > 0 ? n : 0;
+    if (n > 0) atomic_store_explicit(&g_alloc_test_armed, 1, memory_order_relaxed);
+}
+
+int aether_alloc_test_refuses(void) {
+    if (!atomic_load_explicit(&g_alloc_test_armed, memory_order_relaxed)) return 0;
+    if (t_alloc_fail_after <= 0) return 0;
+    return --t_alloc_fail_after == 0;
+}
+
+void aether_alloc_failed(int why) {
+    AetherFrames* F = aether_frames_here();
+    if (F->exec_depth <= 0) return;
+    AetherExecRecord* x = &F->exec[F->exec_depth - 1];
+    if (!x->stop) x->stop = why;
+    caps_arm();
+}
+
 /* Libc-compatible wrappers: the returned pointer has no hidden
  * header, so libc free() is safe (loses cap accounting but no
  * heap corruption). For full cap accounting, callers free with
  * aether_caps_free(p, bytes) passing the original size. */
 
 void* aether_caps_malloc(size_t bytes) {
-    if (!aether_caps_check_alloc(bytes)) return NULL;
+    if (aether_alloc_test_refuses()) {
+        aether_alloc_failed(AETHER_STOP_OUT_OF_MEMORY);
+        return NULL;
+    }
+    if (!aether_caps_check_alloc(bytes)) {
+        aether_alloc_failed(AETHER_STOP_MEMORY_CAP);
+        return NULL;
+    }
     void* p = malloc(bytes);
     if (!p) {
         aether_caps_account_free(bytes);
+        aether_alloc_failed(AETHER_STOP_OUT_OF_MEMORY);
         return NULL;
     }
     return p;
 }
 
 void* aether_caps_calloc(size_t n, size_t size) {
-    if (size != 0 && n > (size_t)-1 / size) return NULL;
+    if (size != 0 && n > (size_t)-1 / size) {
+        aether_alloc_failed(AETHER_STOP_OUT_OF_MEMORY);
+        return NULL;
+    }
     size_t bytes = n * size;
-    if (!aether_caps_check_alloc(bytes)) return NULL;
+    if (aether_alloc_test_refuses()) {
+        aether_alloc_failed(AETHER_STOP_OUT_OF_MEMORY);
+        return NULL;
+    }
+    if (!aether_caps_check_alloc(bytes)) {
+        aether_alloc_failed(AETHER_STOP_MEMORY_CAP);
+        return NULL;
+    }
     void* p = calloc(n, size);
     if (!p) {
         aether_caps_account_free(bytes);
+        aether_alloc_failed(AETHER_STOP_OUT_OF_MEMORY);
         return NULL;
     }
     return p;
 }
 
 void* aether_caps_realloc(void* p, size_t old_bytes, size_t new_bytes) {
+    if (new_bytes > old_bytes && aether_alloc_test_refuses()) {
+        aether_alloc_failed(AETHER_STOP_OUT_OF_MEMORY);
+        return NULL;
+    }
     if (new_bytes > old_bytes) {
         size_t delta = new_bytes - old_bytes;
-        if (!aether_caps_check_alloc(delta)) return NULL;
+        if (!aether_caps_check_alloc(delta)) {
+            aether_alloc_failed(AETHER_STOP_MEMORY_CAP);
+            return NULL;
+        }
     }
     void* np = realloc(p, new_bytes);
     if (!np) {
         if (new_bytes > old_bytes) {
             aether_caps_account_free(new_bytes - old_bytes);
         }
+        if (new_bytes) aether_alloc_failed(AETHER_STOP_OUT_OF_MEMORY);
         return NULL;
     }
     if (new_bytes < old_bytes) {
@@ -217,7 +281,6 @@ void aether_caps_free(void* p, size_t bytes) {
  * frames (the compiler links the std objects and this file).
  * ------------------------------------------------------------------ */
 
-#include "actors/aether_frames.h"
 
 int aether_exec_stop_reason(void) {
     AetherFrames* F = aether_frames_here();
@@ -243,6 +306,8 @@ int aether_exec_should_stop(void) {
     if (!atomic_load_explicit(&aether_caps_armed, memory_order_relaxed)) return 0;
     AetherFrames* F = aether_frames_here();
     if (F->exec_depth <= 0) return 0;
+    /* Already stopping (an allocation failed, or an earlier check): stop. */
+    if (F->exec[F->exec_depth - 1].stop) return 1;
     int why = aether_exec_stop_reason();
     if (why) F->exec[F->exec_depth - 1].stop = why;
     return why != 0;
