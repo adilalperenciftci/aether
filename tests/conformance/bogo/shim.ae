@@ -1,0 +1,239 @@
+// A BoGo shim (BoringSSL's ssl/test/runner) for the pure-Aether TLS 1.3
+// stack: std.cryptography.tls13_client, and tls13_server with -server
+// (#1298).
+//
+// The runner starts one shim per connection test with flags saying what to
+// do. The shim dials the runner's port, sends its 64-bit shim id (little
+// endian), runs the handshake as client or server, writes "hello" first
+// when asked, then echoes every byte it reads back XORed with 0xFF until the
+// runner closes. Exit 0 is success, 1 a failure (the reason on stderr; the
+// runner runs with -loose-errors, so BoringSSL's error names are not
+// needed), and 89 "unimplemented": a flag this shim does not handle, which
+// the runner (with -allow-unimplemented) counts apart from passes and
+// failures. Everything not listed below is unimplemented:
+//
+//   -port N -shim-id N -ipv6          where to connect, and the id to send
+//   -server                           be the server (else the client)
+//   -cert-file P -key-file P          the server's chain and key; only a
+//                                     P-256 key (the pure server signs with
+//                                     ECDSA P-256 alone). A client
+//                                     certificate is unimplemented.
+//   -trust-cert P                     the client's trust anchor; the runner's
+//                                     certificates name "test", which is the
+//                                     host the client verifies
+//   -min-version N -max-version N     TLS 1.3 (772) must be in the range
+//   -expect-version N                 must be 772
+//   -shim-writes-first                write "hello" after the handshake
+//   -async -implicit-handshake        no effect here (I/O is blocking)
+//   -is-handshaker-supported          answers "No"
+//
+// run.sh builds this and the runner; config.json lists the tests that are
+// disabled and why.
+
+import std.os
+import std.io
+import std.list
+import std.fs
+import std.tcp
+import std.bytes
+import std.string
+import std.cryptography
+import std.cryptography.tls13_client
+import std.cryptography.tls13_server
+import std.cryptography.tls13_cert
+
+extern exit(code: int)
+
+const TLS13 = 772
+
+fn unimplemented(why: string) {
+    _w = io.stderr_write("UNIMPLEMENTED: ${why}\n")
+    exit(89)
+}
+
+fn fail(why: string) {
+    _w = io.stderr_write("FAILED: ${why}\n")
+    exit(1)
+}
+
+// The flag's value, or exit 89 when it has none.
+fn value_of(i: int, n: int) -> string {
+    if i + 1 >= n { unimplemented("${os.args_get(i)} has no value") }
+    return os.args_get(i + 1)
+}
+
+fn int_of(s: string) -> int {
+    v = 0
+    n = string.length(s)
+    i = 0
+    while i < n {
+        c = string_char_at(s, i)
+        if c < 48 || c > 57 { unimplemented("not a number: ${s}") }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    return v
+}
+
+extern string_char_at(str: string, index: int) -> int
+
+// 64-bit little-endian of the decimal `s` (the runner's ids are small, but
+// all eight bytes are written).
+fn shim_id_bytes(s: string) -> ptr {
+    b = bytes.new(8)
+    v = 0
+    n = string.length(s)
+    i = 0
+    while i < n {
+        v = v * 10 + (string_char_at(s, i) - 48)
+        i = i + 1
+    }
+    k = 0
+    while k < 8 {
+        bytes.set(b, k, v & 0xFF)
+        v = v >> 8
+        k = k + 1
+    }
+    return b
+}
+
+// The pure server's credentials: a chain whose leaf has a P-256 key, and
+// that key.
+fn server_creds(cert_file: string, key_file: string) -> (ptr, ptr, ptr) {
+    cert_pem, cerr = fs.read(cert_file)
+    if cerr != "" { fail("cannot read ${cert_file}: ${cerr}") }
+    key_pem, kerr = fs.read(key_file)
+    if kerr != "" { fail("cannot read ${key_file}: ${kerr}") }
+    leaves = list_new()
+    tls13_cert.trust_store_add_pem(leaves, cert_pem)
+    p256 = 0
+    if list_size(leaves) > 0 {
+        leaf = list.at(leaves, 0) as *LeafCert
+        if leaf.spki_key_len == 65 { p256 = 1 }
+    }
+    tls13_cert.free_anchors(leaves)
+    if p256 == 0 { unimplemented("the server key is not P-256") }
+    chain, lens = tls13_server.parse_cert_chain_pem(cert_pem)
+    key = tls13_server.parse_ec_private_key_pem(key_pem)
+    if chain == null || key == null { unimplemented("cannot load the server credentials") }
+    return chain, lens, key
+}
+
+main() {
+    n = os.args_count()
+    port = 0
+    shim_id = "0"
+    host = "127.0.0.1"
+    server = 0
+    cert_file = ""
+    key_file = ""
+    trust = ""
+    writes_first = 0
+    i = 1
+    while i < n {
+        f = os.args_get(i)
+        if f == "-is-handshaker-supported" {
+            println("No")
+            exit(0)
+        } else if f == "-port" {
+            port = int_of(value_of(i, n))
+            i = i + 1
+        } else if f == "-shim-id" {
+            shim_id = value_of(i, n)
+            i = i + 1
+        } else if f == "-ipv6" {
+            host = "::1"
+        } else if f == "-server" {
+            server = 1
+        } else if f == "-cert-file" {
+            cert_file = value_of(i, n)
+            i = i + 1
+        } else if f == "-key-file" {
+            key_file = value_of(i, n)
+            i = i + 1
+        } else if f == "-trust-cert" {
+            trust = value_of(i, n)
+            i = i + 1
+        } else if f == "-min-version" {
+            if int_of(value_of(i, n)) > TLS13 { unimplemented("-min-version above TLS 1.3") }
+            i = i + 1
+        } else if f == "-max-version" {
+            if int_of(value_of(i, n)) < TLS13 { unimplemented("-max-version below TLS 1.3") }
+            i = i + 1
+        } else if f == "-expect-version" {
+            if int_of(value_of(i, n)) != TLS13 { unimplemented("-expect-version other than TLS 1.3") }
+            i = i + 1
+        } else if f == "-shim-writes-first" {
+            writes_first = 1
+        } else if f == "-async" || f == "-implicit-handshake" {
+            // Blocking I/O does what these ask of BoringSSL's shim.
+        } else {
+            unimplemented(f)
+        }
+        i = i + 1
+    }
+    if server == 0 && trust == "" { unimplemented("a client test without -trust-cert") }
+    if server == 1 && (cert_file == "" || key_file == "") { unimplemented("a server test without credentials") }
+    if server == 0 && (cert_file != "" || key_file != "") { unimplemented("a client certificate (connect_socket presents none)") }
+
+    chain = null
+    lens = null
+    key = null
+    if server == 1 {
+        chain, lens, key = server_creds(cert_file, key_file)
+    }
+
+    sock, derr = tcp.connect(host, port)
+    if derr != "" { fail("cannot connect to the runner: ${derr}") }
+    idb = shim_id_bytes(shim_id)
+    _sent, werr = tcp.write_all(sock, bytes.view(idb)[0..8])
+    bytes.free(idb)
+    if werr != "" { fail("cannot send the shim id: ${werr}") }
+
+    conn = null
+    herr = ""
+    if server == 1 {
+        xpriv, rerr = cryptography.random_buffer(32)
+        if rerr != "" { fail(rerr) }
+        conn, herr = tls13_server.accept(sock, chain, lens, key, xpriv)
+        bytes.free(xpriv)
+    } else {
+        conn, herr = tls13_client.connect_socket(sock, "test", trust)
+    }
+    if herr != "" || conn == null { fail("handshake: ${herr}") }
+
+    if writes_first == 1 {
+        hello = bytes.new(5)
+        bytes.set(hello, 0, 104); bytes.set(hello, 1, 101); bytes.set(hello, 2, 108)
+        bytes.set(hello, 3, 108); bytes.set(hello, 4, 111)
+        serr = ""
+        if server == 1 { serr = tls13_server.conn_send(conn, bytes.view(hello)[0..5]) } else { serr = tls13_client.conn_send(conn, bytes.view(hello)[0..5]) }
+        bytes.free(hello)
+        if serr != "" { fail("write: ${serr}") }
+    }
+
+    // Echo, each byte XORed with 0xFF, until the runner closes.
+    going = 1
+    while going == 1 {
+        buf = null
+        blen = 0
+        rerr2 = ""
+        if server == 1 { buf, blen, rerr2 = tls13_server.conn_recv(conn) } else { buf, blen, rerr2 = tls13_client.conn_recv(conn) }
+        if rerr2 != "" { fail("read: ${rerr2}") }
+        if buf == null {
+            going = 0
+        } else {
+            k = 0
+            while k < blen {
+                bytes.set(buf, k, (bytes.get(buf, k) ^ 0xFF) & 0xFF)
+                k = k + 1
+            }
+            serr2 = ""
+            if server == 1 { serr2 = tls13_server.conn_send(conn, bytes.view(buf)[0..blen]) } else { serr2 = tls13_client.conn_send(conn, bytes.view(buf)[0..blen]) }
+            bytes.free(buf)
+            if serr2 != "" { fail("write: ${serr2}") }
+        }
+    }
+    if server == 1 { tls13_server.close_conn(conn) } else { tls13_client.close_conn(conn) }
+    exit(0)
+}

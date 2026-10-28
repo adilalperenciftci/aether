@@ -183,6 +183,32 @@ AEAD tag verdict, whether a key is in range) may decide a branch, and the
 code says so with `ct.declassify(v)`, which the test hooks. Anything else
 that memcheck reports is a leak to fix, not to declassify.
 
+## TLS conformance corpora
+
+The pure TLS stack is measured against outside test suites, each fetched at a
+pinned commit into `$CONFORMANCE_CACHE` (default
+`~/.cache/aether-conformance`) and never committed (#1298):
+
+- **x509-limbo and bettertls** (`make conformance-x509`,
+  `tests/conformance/x509_limbo`): every path-validation case of
+  [x509-limbo](https://github.com/C2SP/x509-limbo), including the bettertls
+  name-constraint suite it imports, through `tls13_cert.validate_chain` and
+  `check_hostname`. `limbo.json` is checked against its SHA-256. The Linux
+  job `ci-crypto-ct` runs it. `expected.txt` lists each case that is skipped
+  or does not agree, with the reason and OpenSSL's verdict: the two TLS
+  backends of `std.http` accept the same chains, except where OpenSSL accepts
+  something unsafe, which the pure backend refuses.
+- **BoGo** (`make conformance-bogo`, `tests/conformance/bogo`): BoringSSL's
+  `ssl/test/runner` drives `shim.ae`, which runs `tls13_client` or
+  `tls13_server` for each test. It needs Go (1.27 at the pinned commit) and
+  git, takes about five minutes, and is not run in CI. Tests that need a flag
+  the shim does not handle count as unimplemented; `config.json` disables
+  each test that fails, with the reason. `BOGO_FLAGS="-test 'Basic-*'"`
+  narrows a run.
+
+A case that changes verdict fails its run, so a change to the TLS code that
+makes any of them pass or fail differently has to say so in the same commit.
+
 ## Review checklist
 
 For any diff touching crypto, TLS or authentication:

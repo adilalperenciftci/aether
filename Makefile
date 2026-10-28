@@ -1775,6 +1775,21 @@ bench-json-compare: $(BUILD_DIR)/run_json_bench $(BUILD_DIR)/run_yyjson_bench
 #                   ≥4.8 and every Clang (Linux + macOS).
 # test-json-valgrind — same under Valgrind on Linux (macOS skips if no
 #                      valgrind installed).
+# The TLS conformance corpora (#1298), fetched at pinned commits into
+# $(CONFORMANCE_CACHE) (default ~/.cache/aether-conformance), never committed.
+# conformance-x509: x509-limbo and the bettertls suite it imports, against
+# std.cryptography.tls13_cert (Linux CI runs it in ci-crypto-ct).
+# conformance-bogo: BoringSSL's ssl/test/runner (BoGo) against the pure TLS
+# client and server through tests/conformance/bogo/shim.ae; needs Go 1.27 and
+# git, takes about five minutes, and is not run in CI. BOGO_FLAGS passes runner
+# flags, e.g. BOGO_FLAGS="-test 'Basic-*'".
+.PHONY: conformance-x509 conformance-bogo
+conformance-x509: compiler ae stdlib
+	@sh tests/conformance/x509_limbo/run.sh all
+
+conformance-bogo: compiler ae stdlib
+	@sh tests/conformance/bogo/run.sh $(BOGO_FLAGS)
+
 # test-json-conformance — (Phase 4a) run JSONTestSuite if committed.
 
 .PHONY: test-json-asan test-json-valgrind test-json-conformance
@@ -2851,6 +2866,8 @@ help:
 	@echo "  make check-warnings      - Every .ae file under std and contrib type-checks without a warning"
 	@echo "  make check-examples      - Every example builds clean and prints the output it says it prints"
 	@echo "  make check-contrib-modules - Type-check every non-host contrib module"
+	@echo "  make conformance-x509 - x509-limbo and bettertls against tls13_cert (fetched, pinned)"
+	@echo "  make conformance-bogo - BoringSSL BoGo against the pure TLS stack (needs Go 1.27; not in CI)"
 	@echo "  make check-changelog  - Validate changelog fragments, catch a release-fold"
 	@echo "  make add-changelog    - Write a new_changelogs/ fragment (SECTION=, SLUG=)"
 	@echo "  make collect-changelogs - Fold settled fragments into CHANGELOG.md"

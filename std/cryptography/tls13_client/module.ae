@@ -138,7 +138,7 @@ exports(
     finished_key, finished_verify_data,
     hs_msg_type, hs_msg_len, hs_msg_total,
     HS_ENCRYPTED_EXTENSIONS, HS_CERTIFICATE, HS_CERTIFICATE_VERIFY, HS_FINISHED,
-    connect, connect_mtls, connect_pq, conn_group, connect_resume, connect_resume_0rtt, close_conn, conn_send, conn_recv,
+    connect, connect_mtls, connect_pq, connect_socket, conn_group, connect_resume, connect_resume_0rtt, close_conn, conn_send, conn_recv,
     conn_get_ticket, free_ticket, SessionTicket,
     ticket_len, ticket_nonce_len, ticket_lifetime, ticket_max_early_data,
     verify_flight_auth,
@@ -683,6 +683,25 @@ connect(host: string, port: int, x25519_priv: ptr) -> (ptr, string) {
 // connect() (the cert/key are simply unused).
 connect_mtls(host: string, port: int, x25519_priv: ptr, client_cert: ptr, client_cert_len: int, client_key: ptr) -> (ptr, string) {
     return connect_ex(host, port, x25519_priv, client_cert, client_cert_len, client_key)
+}
+
+// connect_socket(sock, host, cafile) -> (ClientConn ptr, "") or (null,
+// error): the handshake and verification of connect() for `host`, over
+// `sock`, an already-connected std.tcp socket that the connection then owns
+// (it is closed on failure too), trusting the PEM bundle `cafile` instead of
+// the system store when it is not "". For a program that puts its own bytes
+// on the connection before TLS starts, or runs TLS through a tunnel it
+// built; the BoGo shim (tests/conformance/bogo, #1298) is one.
+connect_socket(sock: @keep ptr, host: string, cafile: string) -> (ptr, string) {
+    if sock == null { return null, "connect_socket: the socket is null" }
+    priv = rand_into(32)
+    if priv == null {
+        tcp.close(sock)
+        return null, "no randomness for the key share"
+    }
+    conn, err = connect_full(host, 443, priv, null, 0, null, sock, 0, cafile)
+    bytes.free(priv)
+    return conn, err
 }
 
 fn connect_ex(host: string, port: int, x25519_priv: ptr, client_cert: ptr, client_cert_len: int, client_key: ptr) -> (ptr, string) {
