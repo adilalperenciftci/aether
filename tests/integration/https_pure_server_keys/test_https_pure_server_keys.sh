@@ -12,6 +12,10 @@
 #      encrypted key, a missing key file;
 #   3. a client that offers no scheme the key signs with (openssl s_client
 #      with only ECDSA-P256 against the RSA server) gets handshake_failure.
+#   4. the chain is exactly the certificate text's certificates: a key
+#      between certificates, or a combined key and certificate file, never
+#      goes on the wire, and a CERTIFICATE block that does not parse refuses
+#      the text (#3378).
 #
 # In a build without OpenSSL only the "aether" client cases run.
 
@@ -145,5 +149,34 @@ openssl s_client -connect "127.0.0.1:$S_PORT" -servername localhost -tls1_3 \
 grep -qi "handshake failure\|alert number 40" "$TMP/sclient.log" \
     || { sed -n '1,15p' "$TMP/sclient.log"; fail "no handshake_failure for a client without the key's scheme"; }
 echo "    ok: a client without the key's scheme gets handshake_failure"
+
+# 4. The chain is exactly the certificates in the certificate text (#3378):
+#    a key between two certificates, and a combined key-and-certificate file
+#    given as both, put only certificates on the wire; a CERTIFICATE block
+#    that does not parse refuses the text.
+cat "$TMP/p256.pem" "$TMP/p256.key" "$TMP/p384.pem" > "$TMP/mixed.pem"
+cp "$TMP/p256.key" "$TMP/mixed.key"
+cat "$TMP/p256.key" "$TMP/p256.pem" > "$TMP/combo.pem"
+cp "$TMP/combo.pem" "$TMP/combo.key"
+{ cat "$TMP/p256.pem"; printf -- '-----BEGIN CERTIFICATE-----\nMAMCAQA=\n-----END CERTIFICATE-----\n'; } > "$TMP/badcert.pem"
+cp "$TMP/p256.key" "$TMP/badcert.key"
+sent_chain() { # name count: the server for $1 sends $2 certificates, each one
+    start_server "$1" "$1"
+    [ -n "$S_PORT" ] || { echo "    got: $OUT"; fail "$1: the server did not start"; }
+    openssl s_client -connect "127.0.0.1:$S_PORT" -servername localhost -tls1_3 -showcerts \
+        </dev/null >"$TMP/chain_$1.log" 2>&1 || :
+    got=$(grep -c -- '-----BEGIN CERTIFICATE-----' "$TMP/chain_$1.log" || :)
+    grep -q '^Certificate chain' "$TMP/chain_$1.log" && [ "$got" = "$2" ] \
+        || { sed -n '1,20p' "$TMP/chain_$1.log"; fail "$1: expected exactly $2 certificates on the wire, got $got"; }
+    run env URL="https://localhost:$S_PORT/" CAFILE="$TMP/p256.pem" BACKEND=aether "$TMP/client"
+    case "$OUT" in
+        *"STATUS 200 BODY keys-ok"*) ;;
+        *) echo "    got: $OUT"; fail "$1: the pure client did not fetch" ;;
+    esac
+    echo "    ok: $1 sends exactly its $2 certificate(s)"
+}
+sent_chain mixed 2
+sent_chain combo 1
+refused_at_setup badcert badcert "certificate 2 of the chain does not parse" "a CERTIFICATE block that does not parse"
 
 echo "  [PASS] $NAME"

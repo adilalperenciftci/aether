@@ -51,7 +51,7 @@ extern tcp_socket_from_fd_owned(fd: int) -> ptr
 exports(
     accept, conn_send, conn_recv, close_conn, conn_key_update,
     ServerConn,
-    parse_cert_chain_pem, parse_ec_private_key_pem, load_private_key, free_private_key, ServerKey,
+    parse_cert_chain_pem, parse_cert_chain_pem_checked, parse_ec_private_key_pem, load_private_key, free_private_key, ServerKey,
     pure_tls_server_check, pure_tls_server_accept, pure_tls_server_send, pure_tls_server_recv, pure_tls_server_close
 )
 
@@ -1150,31 +1150,83 @@ close_conn(conn: ptr) {
 
 // ---- PEM helpers ----
 
+// The certificate chain in `pem_text`, the leaf first: the DER of every
+// BEGIN CERTIFICATE block, in order (#3378). Every other block (the private
+// key of a combined file, EC parameters) is skipped, as OpenSSL skips it,
+// and never goes into the chain: the chain is what the server sends every
+// client. (chain, lens) or (null, null); parse_cert_chain_pem_checked says
+// why.
 parse_cert_chain_pem(pem_text: string) -> (ptr, ptr) {
+    chain, lens, _err = parse_cert_chain_pem_checked(pem_text)
+    return chain, lens
+}
+
+// parse_cert_chain_pem, and why the text gives no chain: no certificate, a
+// block without its END line, or a certificate block that does not decode
+// or does not parse as a certificate, which refuses the whole text. Each
+// entry is parsed here, once, when the chain is loaded.
+parse_cert_chain_pem_checked(pem_text: string) -> (ptr, ptr, string) {
     chain = list_new()
     lens = list_new()
-    end_marker = "-----END CERTIFICATE-----"
+    begin = "-----BEGIN "
+    dashes = "-----"
     tlen = string_length(pem_text)
-    mlen = string_length(end_marker)
     pos = 0
-    while pos < tlen {
-        e = string.index_of_from(pem_text, end_marker, pos)
-        if e < 0 { break }
-        block_end = e + mlen
-        block = string.substring_n(pem_text, tlen, pos, block_end)
-        der, _label, perr = pem.parse(block)
-        if string.equals(perr, "") == 1 && der != null {
-            list.add(chain, der)
-            list.add(lens, null)
+    err = ""
+    going = 1
+    while going == 1 && pos < tlen {
+        b = string.index_of_from(pem_text, begin, pos)
+        if b < 0 {
+            going = 0
+        } else {
+            ls = b + string_length(begin)
+            le = string.index_of_from(pem_text, dashes, ls)
+            if le < 0 {
+                err = "a PEM BEGIN line has no closing dashes"
+                going = 0
+            } else {
+                label = string.substring_n(pem_text, tlen, ls, le)
+                end_line = "-----END ${label}-----"
+                e = string.index_of_from(pem_text, end_line, le + string_length(dashes))
+                if e < 0 {
+                    err = "the PEM block ${label} has no END line"
+                    going = 0
+                } else {
+                    block_end = e + string_length(end_line)
+                    if string.equals(label, "CERTIFICATE") == 1 {
+                        n = list_size(chain) + 1
+                        block = string.substring_n(pem_text, tlen, b, block_end)
+                        der, _label, perr = pem.parse(block)
+                        if string.equals(perr, "") != 1 || der == null {
+                            err = "certificate ${n} of the chain does not decode: ${perr}"
+                            going = 0
+                        } else {
+                            leaf = tls13_cert.LeafCert { tbs: null }
+                            tls13_cert.init_leaf(&leaf)
+                            cerr = tls13_cert.parse_certificate(bytes.view(der)[0..bytes.length(der)], &leaf)
+                            tls13_cert.free_leaf(&leaf)
+                            if string.equals(cerr, "") != 1 {
+                                bytes.free(der)
+                                err = "certificate ${n} of the chain does not parse: ${cerr}"
+                                going = 0
+                            } else {
+                                list.add(chain, der)
+                                list.add(lens, null)
+                            }
+                        }
+                    }
+                    pos = block_end
+                }
+            }
         }
-        pos = block_end
     }
-    if list_size(chain) == 0 {
-        list_free(chain)
+    if string.equals(err, "") == 1 && list_size(chain) == 0 { err = "no certificate (no BEGIN CERTIFICATE block)" }
+    if string.equals(err, "") != 1 {
+        free_cert_chain(chain)
         list_free(lens)
-        return null, null
+        return null, null, err
     }
-    return chain, lens
+    return chain, lens, ""
 }
 
 parse_ec_private_key_pem(pem_text: string) -> ptr {
@@ -1617,9 +1669,9 @@ struct ServerCreds {
 // The text is the caller's; nothing here keeps it.
 @c_callback("aether_pure_tls_server_load")
 pure_tls_server_load(cert_pem: string, key_pem: string) -> ptr {
-    chain_list, lens_list = parse_cert_chain_pem(cert_pem)
+    chain_list, lens_list, cerr = parse_cert_chain_pem_checked(cert_pem)
     if chain_list == null {
-        aether_pure_tls_server_set_error("no certificate in the TLS certificate (PEM)")
+        aether_pure_tls_server_set_error("the TLS certificate (PEM): ${cerr}")
         return null
     }
     key, perr = load_private_key(key_pem)
