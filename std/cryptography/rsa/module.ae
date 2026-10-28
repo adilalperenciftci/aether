@@ -146,7 +146,7 @@ key_free(k: @frees ptr) {
 }
 
 // Zero a std.bytes buffer, then free it.
-fn wipe_free(b: ptr) {
+fn wipe_free(b: @frees ptr) {
     int n = bytes.length(b)
     int i = 0
     while i < n {
@@ -265,7 +265,7 @@ fn limbs_new(nl: int) -> ptr {
     return p
 }
 
-fn limbs_wipe_free(p: ptr, nl: int) {
+fn limbs_wipe_free(p: @frees ptr, nl: int) {
     v = p as uint32[]
     int i = 0
     while i < nl {
@@ -446,7 +446,7 @@ fn mont_new(nbe: byte[]) -> *RsaMont {
     return M
 }
 
-fn mont_free(M: *RsaMont) {
+fn mont_free(M: @frees *RsaMont) {
     int nl = M.nl
     libc_free(M.m)
     libc_free(M.one)

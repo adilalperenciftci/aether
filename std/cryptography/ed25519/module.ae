@@ -46,7 +46,7 @@ fn sha512(b: byte[]) -> ptr {
     return sha2.final_bytes(ctx)
 }
 
-fn wipe_free(b: ptr) {
+fn wipe_free(b: @frees ptr) {
     if b == null {
         return
     }

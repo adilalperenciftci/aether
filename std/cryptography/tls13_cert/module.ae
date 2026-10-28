@@ -1053,7 +1053,7 @@ fn bytes_same(a: ptr, b: ptr) -> int {
 }
 
 // bytes.free on a buffer that may be null.
-fn free_opt(b: ptr) {
+fn free_opt(b: @frees ptr) {
     if b != null { bytes.free(b) }
 }
 
@@ -1568,7 +1568,7 @@ free_leaf(c: *LeafCert) {
 }
 
 // Free a std.list of std.bytes buffers (null-safe).
-fn free_bytes_list(l: ptr) {
+fn free_bytes_list(l: @frees ptr) {
     if l == null { return }
     n = list_size(l)
     i = 0

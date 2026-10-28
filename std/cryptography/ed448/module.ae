@@ -48,7 +48,7 @@ fn shake(b: byte[], out_len: int) -> ptr {
     return sha3.final_bytes(ctx, out_len)
 }
 
-fn wipe_free(b: ptr) {
+fn wipe_free(b: @frees ptr) {
     if b == null {
         return
     }

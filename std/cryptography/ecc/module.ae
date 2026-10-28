@@ -1042,7 +1042,7 @@ fn out_coord(c: *Curve, a: *Fe) -> ptr {
     return out
 }
 
-fn wipe_free(b: ptr) {
+fn wipe_free(b: @frees ptr) {
     if b == null {
         return
     }
@@ -1198,10 +1198,10 @@ fn drbg_step(algo: string, k: ptr, v: ptr, sep: int, x: ptr, h: ptr) -> (ptr, pt
     if hhl > 0 {
         bytes.copy_from_bytes(msg, hl + 1 + xl, h, 0, hhl)
     }
-    nk = hmac.hmac_bytes(algo, bytes.view(k), bytes.view(msg))
+    nk = hmac.bytes(algo, bytes.view(k), bytes.view(msg))
     wipe_free(msg)
     wipe_free(k)
-    nv = hmac.hmac_bytes(algo, bytes.view(nk), bytes.view(v))
+    nv = hmac.bytes(algo, bytes.view(nk), bytes.view(v))
     wipe_free(v)
     return nk, nv
 }
@@ -1267,7 +1267,7 @@ ecdsa_sign(curve: int, priv: ptr, hash: ptr) -> (ptr, ptr) {
         tt = bytes.new(tlen)
         int off = 0
         while off < tlen {
-            nv = hmac.hmac_bytes(algo, bytes.view(kk), bytes.view(vv))
+            nv = hmac.bytes(algo, bytes.view(kk), bytes.view(vv))
             wipe_free(vv)
             vv = nv
             bytes.copy_from_bytes(tt, off, vv, 0, hl)
