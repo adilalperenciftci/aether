@@ -47,16 +47,7 @@ fn sha512(b: byte[]) -> ptr {
 }
 
 fn wipe_free(b: @frees ptr) {
-    if b == null {
-        return
-    }
-    int n = bytes.length(b)
-    int i = 0
-    while i < n {
-        bytes.set(b, i, 0)
-        i = i + 1
-    }
-    bytes.free(b)
+    bytes.wipe_free(b)
 }
 
 // The secret scalar a (clamped SHA-512(seed)[0..32]) into a_le, and the

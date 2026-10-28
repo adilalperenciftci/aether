@@ -19,7 +19,7 @@ header comment is the authoritative description.
 | `std.bignum` | Arbitrary-precision integers. | 29 | [guide](../std/bignum/README.md) · [source](../std/bignum/module.ae) |
 | `std.bits` | Unsigned bit operations: rotates, shifts, popcount, leading zeros, unsigned divide. | 17 | [guide](../std/bits/README.md) · [source](../std/bits/module.ae) |
 | `std.brotli` | Brotli encoding and capped decoding, streaming and one-shot, for `Content-Encoding: br`. | 34 | [guide](../std/brotli/README.md) · [source](../std/brotli/module.ae) |
-| `std.bytes` | Mutable byte buffer with random access and overlap-safe copies. | 32 | [guide](../std/bytes/README.md) · [source](../std/bytes/module.ae) |
+| `std.bytes` | Mutable byte buffer with random access and overlap-safe copies. | 34 | [guide](../std/bytes/README.md) · [source](../std/bytes/module.ae) |
 | `std.capsicum` | FreeBSD Capsicum capability-mode bindings. | 28 | [guide](../std/capsicum/README.md) · [source](../std/capsicum/module.ae) |
 | `std.cas` | Content-addressed store keyed by the sha256 of file contents. | 7 | [guide](../std/cas/README.md) · [source](../std/cas/module.ae) |
 | `std.casper` | FreeBSD Casper service delegation. | 8 | [guide](../std/casper/README.md) · [source](../std/casper/module.ae) |
@@ -693,6 +693,8 @@ out = bytes.finish(b, 6)                  // "ABABAB"
 - `bytes.copy_within(b, dst, src, length)` → `int` - Self-copy, forward byte-by-byte (RLE-safe)
 - `bytes.finish(b, length)` → `string` - Hand off to refcounted AetherString; buffer is consumed
 - `bytes.free(b)` - Discard without finishing (idempotent on null)
+- `bytes.wipe(b)` - Zero every byte of the buffer's capacity, so that the writes happen even right before a free (a loop of `set` calls is a dead store the C compiler may drop once it inlines them). The buffer stays valid and keeps its length. For secrets: key material, nonces, the text of a private key. Nothing on null or a string. A buffer that grew left its earlier contents in the memory it moved out of, so give a secret a buffer of its final size (#3376).
+- `bytes.wipe_free(b)` - `wipe`, then `free` (idempotent on null).
 - `bytes.data(b)` → `ptr` - Borrowed pointer to the buffer's own memory, for handing the region to a foreign runtime (a WebAssembly `HEAPU8.set`, a C API) without copying it byte by byte. Valid until the next call that can grow the buffer, which may move the allocation and invalidate it.
 - `bytes.capacity(b)` → `int` - Bytes reserved, which is at least `length` and may be more.
 - `bytes.set_length(b, n)` → `int` - Publish how many bytes a direct write into `data()`'s region made live. Clamped to the capacity, and returns the length actually set.

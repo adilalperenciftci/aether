@@ -1304,14 +1304,7 @@ const KEY_LABEL_ENCRYPTED = "-----BEGIN ENCRYPTED PRIVATE KEY-----"
 
 // Zero a secret before giving it back.
 fn wipe_free(b: @frees ptr) {
-    if b == null { return }
-    n = bytes.length(b)
-    i = 0
-    while i < n {
-        bytes.set(b, i, 0)
-        i = i + 1
-    }
-    bytes.free(b)
+    bytes.wipe_free(b)
 }
 
 // The KEY_* a namedCurve OID names; KEY_NONE for any other.

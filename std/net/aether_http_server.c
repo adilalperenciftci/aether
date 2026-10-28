@@ -19,6 +19,7 @@
 #endif
 #include "../../runtime/config/aether_optimization_config.h"
 #include "../../runtime/aether_resource_caps.h"
+#include "../../runtime/utils/aether_wipe.h"
 #include "../../runtime/utils/aether_spawn.h"
 
 /* HTTP/2 (#260 Tier 2). Pull in the wrapper header up front so
@@ -2101,12 +2102,11 @@ const char* http_server_set_metrics_raw(HttpServer* server,
 static void loop_plan_changed(HttpServer* server);
 
 /* Zeroes a copy of a certificate or private key, then frees it: the key text
- * must not outlive its use (#3362). The volatile store keeps the compiler
- * from dropping the writes as dead before the free. */
+ * must not outlive its use (#3362). aether_wipe's writes are not dropped as
+ * dead before the free (#3376). */
 static void tls_text_wipe_free(char* p) {
     if (!p) return;
-    volatile char* v = p;
-    for (size_t i = 0, n = strlen(p); i < n; i++) v[i] = 0;
+    aether_wipe(p, strlen(p));
     free(p);
 }
 

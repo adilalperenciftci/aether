@@ -141,14 +141,7 @@ rekey(ctx: ptr, key: byte[], iv12: ptr) {
 // Zero a key buffer, then free it: a record key must not outlive its
 // context (RFC 8446 7.2 asks that keys replaced by a KeyUpdate be deleted).
 fn wipe_free(b: @frees ptr) {
-    if b == null { return }
-    int n = bytes.length(b)
-    int i = 0
-    while i < n {
-        bytes.set(b, i, 0)
-        i = i + 1
-    }
-    bytes.free(b)
+    bytes.wipe_free(b)
 }
 
 free_ctx(ctx: ptr) {

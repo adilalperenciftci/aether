@@ -37,6 +37,8 @@
     <li><a href="#finish">finish</a></li>
     <li><a href="#to_string">to_string</a></li>
     <li><a href="#free">free</a></li>
+    <li><a href="#wipe">wipe</a></li>
+    <li><a href="#wipe_free">wipe_free</a></li>
     <li><a href="#data">data</a></li>
     <li><a href="#capacity">capacity</a></li>
     <li><a href="#set_length">set_length</a></li>
@@ -280,6 +282,18 @@
       <pre class="usage"><code>free(b)</code></pre>
       <p class="signature"><span class="sig-params">b: ptr</span></p>
       <p class="doc">Discard the buffer without converting to a string. Idempotent on null. Use this for error paths that mid-way decide the buffer isn't needed.</p>
+    </div>
+    <div class="function" id="wipe" data-name="wipe">
+      <h3 class="function-name">wipe <span class="kind">fn</span></h3>
+      <pre class="usage"><code>wipe(b)</code></pre>
+      <p class="signature"><span class="sig-params">b: ptr</span></p>
+      <p class="doc">Zero every byte the buffer holds, its whole capacity, so that the writes happen even right before a free: a loop of `set` calls is a dead store the C compiler may drop once it inlines them (link-time optimization does) (#3376). The buffer stays valid and keeps its length. Use it on secrets: key material, nonces, the text of a private key. Nothing on null, or on a string, which is immutable and may be shared. A buffer that grew moved its contents, and the memory it moved out of was freed as it was, so give a secret a buffer of its final size.</p>
+    </div>
+    <div class="function" id="wipe_free" data-name="wipe_free">
+      <h3 class="function-name">wipe_free <span class="kind">fn</span></h3>
+      <pre class="usage"><code>wipe_free(b)</code></pre>
+      <p class="signature"><span class="sig-params">b: ptr</span></p>
+      <p class="doc">wipe, then free. Idempotent on null.</p>
     </div>
     <div class="function" id="data" data-name="data">
       <h3 class="function-name">data <span class="kind">fn</span></h3>

@@ -49,16 +49,7 @@ fn shake(b: byte[], out_len: int) -> ptr {
 }
 
 fn wipe_free(b: @frees ptr) {
-    if b == null {
-        return
-    }
-    int n = bytes.length(b)
-    int i = 0
-    while i < n {
-        bytes.set(b, i, 0)
-        i = i + 1
-    }
-    bytes.free(b)
+    bytes.wipe_free(b)
 }
 
 // dom4 prefix for pure Ed448 (phflag = 0, empty context):

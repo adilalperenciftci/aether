@@ -147,13 +147,7 @@ key_free(k: @frees ptr) {
 
 // Zero a std.bytes buffer, then free it.
 fn wipe_free(b: @frees ptr) {
-    int n = bytes.length(b)
-    int i = 0
-    while i < n {
-        bytes.set(b, i, 0)
-        i = i + 1
-    }
-    bytes.free(b)
+    bytes.wipe_free(b)
 }
 
 // Parse a PKCS#1 RSAPrivateKey DER (SEQUENCE { version, n, e, d, p, q,
