@@ -5772,8 +5772,11 @@ static void emit_main_prologue(CodeGenerator* gen, int runs_scheduler, int needs
          * carries neither the table nor the call. */
         emit_trace_message_name_table(gen);
         print_line(gen, "");
+        /* #3375: the runtime prints the configuration when AETHER_VERBOSE
+         * is in the environment; a program compiled with -DAETHER_VERBOSE
+         * asks too, and it is printed once either way. */
         print_line(gen, "#ifdef AETHER_VERBOSE");
-        print_line(gen, "aether_print_config();");
+        print_line(gen, "aether_print_config_once();");
         print_line(gen, "#endif");
         print_line(gen, "");
         print_line(gen, "scheduler_start();");

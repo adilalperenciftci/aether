@@ -89,19 +89,20 @@ void aether_runtime_configure(AetherOptFlags flags) {
     atomic_store(&g_aether_config.use_message_dedup, (flags & AETHER_OPT_MESSAGE_DEDUP) != 0);
     atomic_store(&g_aether_config.verbose, (flags & AETHER_OPT_VERBOSE) != 0);
     
-    // Print config if verbose
-    if (flags & AETHER_OPT_VERBOSE) {
-        aether_print_config();
-    }
+    if (flags & AETHER_OPT_VERBOSE) aether_print_config_once();
 }
 
 // Initialize runtime config from environment variables
 // Called once at scheduler init before any actors spawn
 void aether_init_from_env(void) {
 #if AETHER_HAS_GETENV
-    // Check verbose mode
+    // AETHER_VERBOSE: the configuration, printed when the scheduler starts
+    // (#3375), whatever the program was compiled with. It used to set a
+    // flag nothing read: only a program compiled with -DAETHER_VERBOSE
+    // printed it.
     if (getenv("AETHER_VERBOSE")) {
         atomic_store(&g_aether_config.verbose, true);
+        aether_print_config_once();
     }
 
     // Cooperative preemption (opt-in)
@@ -113,6 +114,13 @@ void aether_init_from_env(void) {
         }
     }
 #endif
+}
+
+// Once per process: the environment, the program and the flags may all ask.
+static atomic_int g_config_printed = 0;
+
+void aether_print_config_once(void) {
+    if (atomic_exchange(&g_config_printed, 1) == 0) aether_print_config();
 }
 
 // Print current configuration

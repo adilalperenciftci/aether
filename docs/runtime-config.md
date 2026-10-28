@@ -241,7 +241,7 @@ is still in the queues or its overflow, which it then goes behind
 | Variable | Effect |
 |----------|--------|
 | `AETHER_SINGLE_CORE` | Pins all actors to core 0 (eliminates cross-core overhead) |
-| `AETHER_VERBOSE` | Print optimization configuration at startup |
+| `AETHER_VERBOSE` | Print the runtime configuration once, when the scheduler starts (a program compiled with `-DAETHER_VERBOSE` prints it too, once) |
 | `AETHER_PREEMPT` | Enable cooperative preemption (time-based drain loop break, default 1ms) |
 | `AETHER_PREEMPT_MS` | Override preemption threshold in milliseconds (default 1) |
 | `BENCHMARK_MESSAGES` | Sets message count for benchmark programs |
@@ -295,7 +295,7 @@ All platform-dependent code is gated behind `AETHER_HAS_*` compile-time flags de
 make stdlib EXTRA_CFLAGS="-DAETHER_NO_FILESYSTEM -DAETHER_NO_NETWORKING"
 
 # Query capabilities at runtime
-AETHER_VERBOSE=1 ./program
+AETHER_VERBOSE=1 ./program   # a program with actors: printed when its scheduler starts
 ```
 
 **Apple Silicon Notes:**

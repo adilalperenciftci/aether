@@ -387,6 +387,11 @@ void aether_runtime_configure(AetherOptFlags flags);
 // Print current configuration
 void aether_print_config(void);
 
+// Print it once per process, however many ways ask (#3375): AETHER_VERBOSE in
+// the environment when the scheduler starts, a program compiled with
+// -DAETHER_VERBOSE, AETHER_OPT_VERBOSE.
+void aether_print_config_once(void);
+
 // ============================================================================
 // IMPLEMENTATION (inline for performance)
 // ============================================================================
@@ -426,7 +431,8 @@ static inline void aether_on_actor_terminate(void) {
     atomic_fetch_sub_explicit(&g_aether_config.actor_count, 1, memory_order_relaxed);
 }
 
-// Initialize the profile from env vars
+// Read the runtime settings from the environment (AETHER_VERBOSE,
+// AETHER_PREEMPT, AETHER_PREEMPT_MS)
 // Called once at runtime init
 void aether_init_from_env(void);
 

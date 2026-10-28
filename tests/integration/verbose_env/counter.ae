@@ -1,0 +1,27 @@
+// A program that starts the scheduler: what AETHER_VERBOSE prints for (#3375).
+
+message Add {
+    amount: int
+}
+
+message Show {}
+
+actor Counter {
+    state count = 0
+
+    receive {
+        Add(amount) -> {
+            count = count + amount
+        }
+        Show -> {
+            println("count ${count}")
+        }
+    }
+}
+
+main() {
+    c = spawn(Counter())
+    c ! Add { amount: 2 }
+    c ! Show {}
+    wait_for_idle()
+}
