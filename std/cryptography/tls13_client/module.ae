@@ -1010,14 +1010,11 @@ fn run_handshake_tail(sock: @keep ptr, rio: @keep ptr, tr: ptr, host: string, sh
         tls13_record.free_ctx(fa_ctx)
     }
 
-    // The EncryptedExtensions answer only what the ClientHello offered,
-    // each where it may appear (RFC 8446 4.2, #3315).
+    // The flight's messages in their order, each parsed to its last byte;
+    // the extensions answer only what the ClientHello offered, each where
+    // it may appear (RFC 8446 4.2, #3315, #3316, #3324).
     if string.equals(ferr, "") == 1 {
-        ee_alert, ee_err = check_flight_ee(fl, fllen, offered)
-        if ee_alert == 0 {
-            // Each CertificateEntry's extensions too (#3316).
-            ee_alert, ee_err = check_flight_certificate(fl, fllen, offered)
-        }
+        ee_alert, ee_err = check_flight(fl, fllen, offered, 1, hash_len)
         if ee_alert != 0 {
             ferr = ee_err
             ee_ctx = tls13_record.new_aead(rec_aead, bytes.view(hs_client_key(keys))[0..rec_key_len], hs_client_iv(keys))
@@ -1035,6 +1032,7 @@ fn run_handshake_tail(sock: @keep ptr, rio: @keep ptr, tr: ptr, host: string, sh
     result_err = ferr
     if string.equals(ferr, "") == 1 {
         auth_err = ""
+        auth_alert = 0
         if (insecure & 1) != 0 {
             // set_insecure parity: no chain, no validity window, no hostname
             // pin. The connection is encrypted but UNAUTHENTICATED, so an
@@ -1055,14 +1053,15 @@ fn run_handshake_tail(sock: @keep ptr, rio: @keep ptr, tr: ptr, host: string, sh
             } else {
                 purpose = tls13_cert.PURPOSE_SERVER
                 if (insecure & 2) != 0 { purpose = purpose | tls13_cert.TRUST_PARTIAL_CHAIN }
-                auth_err = authenticate_server(fl, fllen, th_through_cert, hash_len, host, anchors, purpose)
+                auth_alert, auth_err = authenticate_server(fl, fllen, th_through_cert, hash_len, host, anchors, purpose)
                 tls13_cert.free_anchors(anchors)
             }
         }
         if string.equals(auth_err, "") != 1 {
             result_err = auth_err
+            if auth_alert == 0 { auth_alert = alert_for_auth_error(auth_err) }
             alert_ctx = tls13_record.new_aead(rec_aead, bytes.view(hs_client_key(keys))[0..rec_key_len], hs_client_iv(keys))
-            send_alert_hs(sock, alert_ctx, ALERT_LEVEL_FATAL, alert_for_auth_error(auth_err))
+            send_alert_hs(sock, alert_ctx, ALERT_LEVEL_FATAL, auth_alert)
             tls13_record.free_ctx(alert_ctx)
         } else {
             expected = finished_verify_data_algo(hs_server_secret(keys), bytes.view(th_before_finished)[0..hash_len], hash_algo, hash_len)
@@ -1555,19 +1554,50 @@ fn check_flight_ee(fl: ptr, flen: int, offered: int) -> (int, string) {
     return 0, ""
 }
 
-// The server flight's Certificate message against what the ClientHello
-// offered (RFC 8446 4.4.2, #3316): (0, "") or the alert and why.
-fn check_flight_certificate(fl: ptr, flen: int, offered: int) -> (int, string) {
-    p = 0
-    while p + 4 <= flen {
+// The server's encrypted flight, message by message, in the order RFC 8446
+// 2 gives it: EncryptedExtensions; then, in a full handshake (`full` 1), an
+// optional CertificateRequest, the Certificate and the CertificateVerify;
+// then the Finished, which read_flight made sure ends the flight. (0, "")
+// or the alert and why: unexpected_message for a message out of its place
+// (#3324); decode_error for one that does not fill its body exactly, a
+// CertificateVerify whose signature leaves bytes over, a Finished whose
+// verify_data is not `hash_len` long (#3324); and what each message's own
+// checks say: the extensions answer only what the ClientHello `offered`
+// (#3315), and so do the Certificate's entries (#3316).
+fn check_flight(fl: ptr, flen: int, offered: int, full: int, hash_len: int) -> (int, string) {
+    a, err = check_flight_ee(fl, flen, offered)
+    if a != 0 { return a, err }
+    p = 4 + (((bytes.get(fl, 1) & 0xFF) << 16) | ((bytes.get(fl, 2) & 0xFF) << 8) | (bytes.get(fl, 3) & 0xFF))
+    // What came last: 0 EncryptedExtensions, 1 CertificateRequest,
+    // 2 Certificate, 3 CertificateVerify, 4 Finished.
+    last = 0
+    while p < flen {
+        if p + 4 > flen { return ALERT_DECODE_ERROR, "the server's flight is truncated" }
         mt = bytes.get(fl, p) & 0xFF
         ml = ((bytes.get(fl, p + 1) & 0xFF) << 16) | ((bytes.get(fl, p + 2) & 0xFF) << 8) | (bytes.get(fl, p + 3) & 0xFF)
         if p + 4 + ml > flen { return ALERT_DECODE_ERROR, "the server's flight is truncated" }
-        if mt == HS_CERTIFICATE {
-            return tls13_hs.check_certificate(bytes.view(fl)[p + 4..p + 4 + ml], offered)
+        if mt == HS_CERTIFICATE_REQUEST && full == 1 && last == 0 {
+            a, err = tls13_hs.check_certificate_request(bytes.view(fl)[p + 4..p + 4 + ml])
+            last = 1
+        } else if mt == HS_CERTIFICATE && full == 1 && last <= 1 {
+            a, err = tls13_hs.check_certificate(bytes.view(fl)[p + 4..p + 4 + ml], offered)
+            last = 2
+        } else if mt == HS_CERTIFICATE_VERIFY && last == 2 {
+            // algorithm(2) || signature<2>, nothing after.
+            if ml < 4 || 4 + (((bytes.get(fl, p + 6) & 0xFF) << 8) | (bytes.get(fl, p + 7) & 0xFF)) != ml {
+                return ALERT_DECODE_ERROR, "certificate verify: the signature does not fill the message"
+            }
+            last = 3
+        } else if mt == HS_FINISHED && (last == 3 || (full == 0 && last == 0)) {
+            if ml != hash_len { return ALERT_DECODE_ERROR, "finished: verify_data is ${ml} bytes, not ${hash_len}" }
+            last = 4
+        } else {
+            return ALERT_UNEXPECTED_MESSAGE, "handshake: a message of type ${mt} out of its place in the server's flight"
         }
+        if a != 0 { return a, err }
         p = p + 4 + ml
     }
+    if last != 4 { return ALERT_UNEXPECTED_MESSAGE, "handshake: the server's flight does not end with its Finished" }
     return 0, ""
 }
 
@@ -2026,13 +2056,14 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
         tls13_record.free_ctx(fa_ctx)
     }
 
-    // The EncryptedExtensions answer only what the resuming ClientHello
-    // offered (RFC 8446 4.2, #3315).
+    // EncryptedExtensions then Finished, nothing else (RFC 8446 2.2, #3324);
+    // the extensions answer only what the resuming ClientHello offered
+    // (4.2, #3315).
     if string.equals(ferr, "") == 1 {
         r_offered = tls13_hs.OFFER_ALPN | tls13_hs.OFFER_PSK
         if string.length(host) > 0 { r_offered = r_offered | tls13_hs.OFFER_SNI }
         if want_0rtt == 1 { r_offered = r_offered | tls13_hs.OFFER_EARLY }
-        ree_alert, ree_err = check_flight_ee(fl, fllen, r_offered)
+        ree_alert, ree_err = check_flight(fl, fllen, r_offered, 0, hash_len)
         if ree_alert != 0 {
             ferr = ree_err
             ree_ctx = tls13_record.new_aead(rec_aead, bytes.view(hs_client_key(keys))[0..rec_key_len], hs_client_iv(keys))
@@ -2058,6 +2089,9 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
         expected = finished_verify_data_algo(hs_server_secret(keys), bytes.view(th_before_finished)[0..hash_len], hash_algo, hash_len)
         if bytes_equal(expected, bytes.view(server_verify_data)[0..hash_len]) != 1 {
             result_err = "resume: server Finished MAC verification failed"
+            rf_ctx = tls13_record.new_aead(rec_aead, bytes.view(hs_client_key(keys))[0..rec_key_len], hs_client_iv(keys))
+            send_alert_hs(sock, rf_ctx, ALERT_LEVEL_FATAL, ALERT_DECRYPT_ERROR)
+            tls13_record.free_ctx(rf_ctx)
         } else {
             th_sf = transcript_hash_algo(tr, hash_algo)
             ms = tls13_ks.master_secret(hash_algo, hs_handshake_secret(keys))
@@ -2264,30 +2298,6 @@ fn parse_cert_verify(body: byte[]) -> (int, ptr, int, string) {
     return scheme, sig, sig_len, ""
 }
 
-// Split an uncompressed EC point (0x04 || X(32) || Y(32)) into pubx/puby.
-// Split an uncompressed EC point (0x04 || X || Y) from a leaf SPKI into its
-// affine coordinates. Handles P-256 (65-byte, 32-byte coords) and P-384
-// (97-byte, 48-byte coords). Returns (X, Y, coord_width, "") or (null,null,0,err).
-fn split_ec_point(spki_key: byte[]) -> (ptr, ptr, int, string) {
-    if spki_key.len < 0 { panic("tls13_client.split_ec_point: the `spki_key` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
-    int key_len = spki_key.len
-    coord = 0
-    if key_len == 65 { coord = 32 }
-    if key_len == 97 { coord = 48 }
-    if key_len == 133 { coord = 66 }
-    if coord == 0 { return null, null, 0, "spki: not a P-256, P-384 or P-521 uncompressed EC point" }
-    if (spki_key[0] & 0xFF) != 0x04 { return null, null, 0, "spki: not uncompressed (0x04)" }
-    px = bytes.new(coord)
-    py = bytes.new(coord)
-    bytes.set(px, coord - 1, 0)
-    bytes.set(py, coord - 1, 0)
-    bytes.copy_from_slice(px, 0, spki_key[1..1 + coord])
-    bytes.copy_from_slice(py, 0, spki_key[1 + coord..1 + coord + coord])
-    return px, py, coord, ""
-}
-
-// Authenticate the server: extract the leaf public key from Certificate and
-// verify the CertificateVerify signature over `th_thru_cert`. Fails closed.
 // Load the trust anchors a connection verifies against. Returns (anchors, "")
 // or (null, why) -- and connect() fails closed on null, so a store that cannot
 // be found is a refused connection, never an unauthenticated one.
@@ -2430,7 +2440,9 @@ fn add_cert_dir_list(anchors: ptr, list: string) -> string {
     return first_err
 }
 
-fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host: string, anchors: ptr, purpose: int) -> string {
+// Authenticate the server from its flight `fl`: (0, "") or the alert to send
+// and why.
+fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host: string, anchors: ptr, purpose: int) -> (int, string) {
     // The full parsed leaf is kept alive for the whole function so that, after
     // the CertificateVerify signature check, we can run RFC 5280/6125 policy
     // (validity window, hostname/SAN, chain to a trusted anchor) over it.
@@ -2439,8 +2451,6 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host:
     // Server-sent intermediate CAs (everything in the Certificate list after
     // the leaf). Heap-allocated *LeafCert entries; freed at function end.
     intermediates = list_new()
-    leaf_px = null
-    leaf_py = null
     cv_scheme = 0
     cv_sig = null
     cv_sig_len = 0
@@ -2450,6 +2460,7 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host:
     ocsp_staple_len = 0
     ocsp_status = tls13_cert.OCSP_ERROR
     err = ""
+    alert = 0
     p = 0
     cont = 1
     while cont == 1 {
@@ -2472,14 +2483,6 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host:
                             if string.equals(err, "") == 1 { err = perr }
                         } else {
                             have_leaf = 1
-                            // Extract the EC point only if the SPKI is one; a
-                            // non-EC (RSA) leaf leaves leaf_px null, which the
-                            // RSA-PSS dispatch handles. Not an error here.
-                            px, py, _coordw, sperr = split_ec_point(bytes.view(leaf.spki_key)[0..leaf.spki_key_len])
-                            if string.equals(sperr, "") == 1 {
-                                leaf_px = px
-                                leaf_py = py
-                            }
                         }
                         bytes.free(der)
                         // Parse the remaining certs into `intermediates`.
@@ -2523,30 +2526,15 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host:
         if have_leaf == 0 { err = "server did not send a usable Certificate" }
         else {
             if cv_sig == null { err = "server did not send CertificateVerify" }
-            else {
-                // Dispatch the CertificateVerify by SignatureScheme:
-                //   ECDSA-P256 (0x0403) / P-384 (0x0503) / P-521 (0x0603) -> EC point from
-                //     the leaf SPKI (verify_cert_verify picks the curve/hash)
-                //   RSA-PSS rsae SHA-256 (0x0804) -> RSA key from the leaf SPKI
-                is_ecdsa = 0
-                if cv_scheme == tls13_cert.SCHEME_ECDSA_P256_SHA256 { is_ecdsa = 1 }
-                if cv_scheme == tls13_cert.SCHEME_ECDSA_P384_SHA384 { is_ecdsa = 1 }
-                if cv_scheme == tls13_cert.SCHEME_ECDSA_P521_SHA512 { is_ecdsa = 1 }
-                if is_ecdsa == 1 {
-                    if leaf_px == null {
-                        err = "ECDSA CertificateVerify but leaf is not an EC cert"
-                    } else {
-                        ok = tls13_cert.verify_cert_verify(cv_scheme, leaf_px, leaf_py, bytes.view(th_thru_cert)[0..th_len], bytes.view(cv_sig)[0..cv_sig_len])
-                        if ok != 1 { err = "CertificateVerify signature invalid" }
-                    }
-                } else {
-                    if cv_scheme == tls13_cert.SCHEME_RSA_PSS_RSAE_SHA256 {
-                        ok = tls13_cert.verify_cert_verify_rsa_pss(bytes.view(leaf.spki_key)[0..leaf.spki_key_len], bytes.view(th_thru_cert)[0..th_len], bytes.view(cv_sig)[0..cv_sig_len])
-                        if ok != 1 { err = "CertificateVerify signature invalid" }
-                    } else {
-                        err = "unsupported CertificateVerify scheme (ECDSA-P256/P384 and RSA-PSS-SHA256 handled)"
-                    }
-                }
+            else if tls13_hs.offers_sig_scheme(cv_scheme) == 0 {
+                // A server signs with a scheme the ClientHello offered
+                // (RFC 8446 4.4.3, #3324).
+                alert = ALERT_ILLEGAL_PARAMETER
+                err = "CertificateVerify: signature scheme ${cv_scheme} was not offered"
+            } else {
+                // The scheme must fit the leaf's key, then the signature must
+                // verify (#3324); Ed25519 included (#3335).
+                alert, err = tls13_cert.check_leaf_cert_verify(&leaf, cv_scheme, bytes.view(th_thru_cert)[0..th_len], bytes.view(cv_sig)[0..cv_sig_len])
             }
         }
     }
@@ -2601,10 +2589,9 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host:
     if ocsp_staple != null { bytes.free(ocsp_staple) }
     if have_leaf == 1 { tls13_cert.free_leaf(&leaf) }
     free_intermediates(intermediates)
-    if leaf_px != null { bytes.free(leaf_px) }
-    if leaf_py != null { bytes.free(leaf_py) }
     if cv_sig != null { bytes.free(cv_sig) }
-    return err
+    if string.equals(err, "") != 1 && alert == 0 { alert = alert_for_auth_error(err) }
+    return alert, err
 }
 
 // Parse every certificate AFTER the leaf in a Certificate message body into
@@ -2691,7 +2678,8 @@ verify_flight_auth(fl: ptr, flen: int, th_thru_cert: ptr) -> string {
     // Signature-only mode (anchors == null): checks Certificate +
     // CertificateVerify but not the RFC 5280/6125 policy. connect() enforces
     // the full policy via a loaded trust store.
-    return authenticate_server(fl, flen, th_thru_cert, 32, "", null, tls13_cert.PURPOSE_SERVER)
+    _alert, err = authenticate_server(fl, flen, th_thru_cert, 32, "", null, tls13_cert.PURPOSE_SERVER)
+    return err
 }
 
 // ---- @c_callback bridge for std.http.client (#1849) -------------------------

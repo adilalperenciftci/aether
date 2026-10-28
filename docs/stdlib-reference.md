@@ -1993,6 +1993,9 @@ described in its header comment):
 - `tls13_client.connect_socket(sock, host, cafile)` → `(ptr, string)` - The verified TLS 1.3 handshake for `host` over an already-connected `std.tcp` socket, trusting the PEM bundle `cafile` (`""` for the system store); the connection owns the socket.
 - `tls13_hs.check_extensions(kind, exts, offered)` → `(int, string)` - `(0, "")` when the extensions block `exts` of a server message of `kind` (`MSG_SERVER_HELLO`, `MSG_ENCRYPTED_EXTENSIONS`, `MSG_CERTIFICATE_ENTRY`, ...) answers only what the ClientHello offered (`OFFER_*` bits) where RFC 8446 4.2 allows it, else the alert to send and why.
 - `tls13_hs.check_certificate(body, offered)` → `(int, string)` - The same for the body of a server's Certificate message: an empty request context, at least one entry, the list filling the message, each entry's extensions allowed, a status_request holding one OCSP response.
+- `tls13_hs.check_certificate_request(body)` → `(int, string)` - The same for the body of a CertificateRequest in the handshake: an empty request context, extensions that fill the message, signature_algorithms among them (missing_extension without, #3324).
+- `tls13_hs.offers_sig_scheme(scheme)` → `int` - 1 when `scheme` is one of the signature schemes every ClientHello here offers, the only ones a server may sign its CertificateVerify with (RFC 8446 4.4.3).
+- `tls13_cert.check_leaf_cert_verify(leaf, scheme, transcript_hash, sig)` → `(int, string)` - `(0, "")` when the CertificateVerify signature `sig` under `scheme` verifies with the key of the end-entity certificate `leaf`, else the alert and why: illegal_parameter for a scheme that does not fit the key, decrypt_error for a signature that does not verify (ECDSA P-256, P-384, P-521, rsa_pss_rsae_sha256, Ed25519; #3324, #3335).
 
 ---
 

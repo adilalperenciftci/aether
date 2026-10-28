@@ -16,6 +16,14 @@
 //   fin_trailing=1  bytes after the Finished, in its record
 //   split_sh=N      the ServerHello in records of at most N bytes
 //   pack_sh=1       handshake bytes after the ServerHello in its record
+//   extra=HEX       a raw handshake message right after EncryptedExtensions
+//   cr=HEX          a CertificateRequest with this body after it
+//   key=ed25519     an Ed25519 certificate and CertificateVerify (0x0807)
+//   cv_scheme=HEX   the CertificateVerify names this scheme instead
+//   cv_bad=1        a CertificateVerify signature with one bit flipped
+//   cv_trailing=1   one byte after the CertificateVerify's signature
+//   skip_cv=1       no CertificateVerify
+//   fin_long=1      a Finished one byte longer than the hash
 //   post=WHAT       after the handshake, under the application keys:
 //                   oversize, padded, bigcipher, emptyN, ccs, badtype,
 //                   innertype, badmac, emptyhs; then prints "POST <answer>"
@@ -595,6 +603,27 @@ main() {
     tls13_client.transcript_add(tr, bytes.view(ee)[0..bytes.length(ee)])
     answered_early(&r, cli_ctx, "")
 
+    // Messages the flight should not hold, or a CertificateRequest, sent as
+    // they are after EncryptedExtensions.
+    extra = knob("extra")
+    if extra != "" {
+        xm = from_hex(extra)
+        send_sealed(sock, srv_ctx, 22, xm)
+        tls13_client.transcript_add(tr, bytes.view(xm)[0..bytes.length(xm)])
+        answered_early(&r, cli_ctx, "")
+        bytes.free(xm)
+    }
+    crk = knob("cr")
+    if crk != "" {
+        crb = from_hex(crk)
+        crm = hs_msg(13, crb)
+        send_sealed(sock, srv_ctx, 22, crm)
+        tls13_client.transcript_add(tr, bytes.view(crm)[0..bytes.length(crm)])
+        answered_early(&r, cli_ctx, "")
+        bytes.free(crb)
+        bytes.free(crm)
+    }
+
     chain, _lens = tls13_server.parse_cert_chain_pem(peer_pem())
     der = list.at(chain, 0) as ptr
     cert = certificate(der)
@@ -602,17 +631,56 @@ main() {
     answered_early(&r, cli_ctx, "")
     tls13_client.transcript_add(tr, bytes.view(cert)[0..bytes.length(cert)])
 
-    key = tls13_server.parse_ec_private_key_pem(peer_key())
-    th_c = tls13_client.transcript_hash_algo(tr, algo)
-    sig = tls13_cert.sign_server_cert_verify_ecdsa_p256(key, bytes.view(th_c)[0..hl])
-    cv = tls13_hs.certificate_verify_msg(0x0403, bytes.view(sig)[0..bytes.length(sig)])
-    send_sealed(sock, srv_ctx, 22, cv)
-    answered_early(&r, cli_ctx, "")
-    tls13_client.transcript_add(tr, bytes.view(cv)[0..bytes.length(cv)])
+    if knob("skip_cv") == "" {
+        th_c = tls13_client.transcript_hash_algo(tr, algo)
+        sig = null
+        scheme = 0x0403
+        if knob("key") == "ed25519" {
+            seed = from_hex(ED25519_SEED)
+            sig = tls13_cert.sign_server_cert_verify_ed25519(seed, bytes.view(th_c)[0..hl])
+            bytes.free(seed)
+            scheme = 0x0807
+        } else {
+            key = tls13_server.parse_ec_private_key_pem(peer_key())
+            sig = tls13_cert.sign_server_cert_verify_ecdsa_p256(key, bytes.view(th_c)[0..hl])
+        }
+        cvs = knob("cv_scheme")
+        if cvs != "" {
+            sb = from_hex(cvs)
+            scheme = ((bytes.get(sb, 0) & 0xFF) << 8) | (bytes.get(sb, 1) & 0xFF)
+            bytes.free(sb)
+        }
+        sl = bytes.length(sig)
+        if knob("cv_bad") != "" {
+            bytes.set(sig, sl - 1, (bytes.get(sig, sl - 1) ^ 1) & 0xFF)
+        }
+        // algorithm || signature<2>, and one byte more with cv_trailing.
+        w = buf_new()
+        put16(w, scheme)
+        put16(w, sl)
+        put_bytes(w, sig, 0, sl)
+        if knob("cv_trailing") != "" { put8(w, 0) }
+        cvb = buf_take(w)
+        cv = hs_msg(15, cvb)
+        bytes.free(cvb)
+        send_sealed(sock, srv_ctx, 22, cv)
+        answered_early(&r, cli_ctx, "")
+        tls13_client.transcript_add(tr, bytes.view(cv)[0..bytes.length(cv)])
+    }
 
     th_v = tls13_client.transcript_hash_algo(tr, algo)
     svd = tls13_client.finished_verify_data_algo(s_hs, bytes.view(th_v)[0..hl], algo, hl)
     fin = tls13_hs.finished_msg(svd, hl)
+    if knob("fin_long") != "" {
+        // verify_data one byte longer than the hash.
+        w2 = buf_new()
+        put_bytes(w2, svd, 0, hl)
+        put8(w2, 0)
+        lv = buf_take(w2)
+        bytes.free(fin)
+        fin = hs_msg(20, lv)
+        bytes.free(lv)
+    }
     if knob("fin_trailing") != "" {
         // Bytes after the Finished, in its record: a handshake message may
         // not span the key change that follows it (RFC 8446 5.1).
@@ -649,7 +717,14 @@ main() {
     exit(0)
 }
 
+// The Ed25519 key (key=ed25519): its 32-byte seed, and a self-signed
+// certificate for peer.example (CA:FALSE, digitalSignature, 2026 to 2126).
+const ED25519_SEED = "9b2b46535fdf26252dc97d455e307d106b355aee79082fa6e866fe346c5b6512"
+
 fn peer_pem() -> string {
+    if knob("key") == "ed25519" {
+        return "-----BEGIN CERTIFICATE-----\nMIIBOjCB7aADAgECAgVQRUVSAjAFBgMrZXAwFzEVMBMGA1UEAwwMcGVlci5leGFt\ncGxlMCAXDTI2MDEwMTAwMDAwMFoYDzIxMjYwMTAxMDAwMDAwWjAXMRUwEwYDVQQD\nDAxwZWVyLmV4YW1wbGUwKjAFBgMrZXADIQAwue0/gcQ6Onbr/PNB7pQvUE+wyTdm\npW3upBzSsmLxAaNYMFYwDAYDVR0TAQH/BAIwADAOBgNVHQ8BAf8EBAMCB4AwFwYD\nVR0RBBAwDoIMcGVlci5leGFtcGxlMB0GA1UdDgQWBBTvT1C8YMlP+KC6lydkNwIv\nFUxijjAFBgMrZXADQQDcbJrUjo3xrEDnWDaKak8JCWarW76VW6CMRRtIFGgjq4ws\nO8Ph5oSpvp5ZIR0SVkX7nySGA+ocIyXz6P+1JjEG\n-----END CERTIFICATE-----\n"
+    }
     return "-----BEGIN CERTIFICATE-----\nMIIBezCCASGgAwIBAgIFUEVFUgEwCgYIKoZIzj0EAwIwFzEVMBMGA1UEAwwMcGVl\nci5leGFtcGxlMCAXDTI2MDEwMTAwMDAwMFoYDzIxMjYwMTAxMDAwMDAwWjAXMRUw\nEwYDVQQDDAxwZWVyLmV4YW1wbGUwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARv\n7S9eWT57ZTmAOztQD2+5EetBRQ+B+cOtLJCr7BVBQPQExOwo/jrT1ahb6i7ZxObZ\nFrq4KWW801ggO2EZ0SqXo1gwVjAMBgNVHRMBAf8EAjAAMA4GA1UdDwEB/wQEAwIH\ngDAXBgNVHREEEDAOggxwZWVyLmV4YW1wbGUwHQYDVR0OBBYEFH8HRengm5cRK0K4\na6DbxP8afdpfMAoGCCqGSM49BAMCA0gAMEUCIDCIjkFoXJK1RI1twupNRu+WcP5M\nrU1MCAQ84vwQWP4tAiEArDbfJRioR7QSSuE4iKxVCCFaHbJs/7eLq3CNJGUFXoM=\n-----END CERTIFICATE-----\n"
 }
 

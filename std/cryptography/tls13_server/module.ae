@@ -609,44 +609,12 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
     tls13_client.transcript_add(tr, bytes.view(fin_msg))
     bytes.free(th_cv); bytes.free(svd); bytes.free(fin_msg); bytes.free(fin_rec)
 
-    // 6. Read and verify Client Finished
+    // 6. Derive Application Traffic Keys, over the transcript through the
+    // server Finished (RFC 8446 7.1). They come before the client Finished
+    // is read: the client reads the server's records under them from its
+    // Finished on, so an alert about the client Finished goes under them
+    // too (#3324).
     th_sf = transcript_hash_algo(tr, hash_algo)
-
-    cf_rec, cf_rec_len, cf_err = recio_next_hs(rio)
-    if string.equals(cf_err, "") != 1 {
-    }
-    fin_ok = 0
-    if string.equals(cf_err, "") == 1 {
-        opened = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0 }
-        oerr = tls13_record.open_record(cli_hs_ctx, bytes.view(cf_rec)[0..cf_rec_len], &opened)
-        bytes.free(cf_rec)
-        if string.equals(oerr, "") == 1 {
-            if opened.content_type == 22 && opened.plaintext_len >= 4 {
-                if (bytes.get(opened.plaintext, 0) & 0xFF) == tls13_hs.HS_FINISHED {
-                    cvd_len = opened.plaintext_len - 4
-                    cvd = bytes.new(cvd_len)
-                    bytes.copy_from_bytes(cvd, 0, opened.plaintext, 4, cvd_len)
-                    expected_cvd = finished_verify_data_algo(hs_client_secret(keys), bytes.view(th_sf)[0..hash_len], hash_algo, hash_len)
-                    if bytes_equal(expected_cvd, bytes.view(cvd)[0..hash_len]) == 1 {
-                        fin_ok = 1
-                        tls13_client.transcript_add(tr, bytes.view(opened.plaintext)[0..opened.plaintext_len])
-                    }
-                    bytes.free(cvd); bytes.free(expected_cvd)
-                }
-            }
-            if opened.plaintext != null { bytes.free(opened.plaintext) }
-        }
-    }
-
-    if fin_ok == 0 {
-        bytes.free(th_sf); bytes.free(srnd); bytes.free(sh)
-        tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
-        tls13_record.free_ctx(srv_hs_ctx); tls13_record.free_ctx(cli_hs_ctx)
-        tls13_client.free_hs_keys(keys); bytes.free(th_chsh)
-        return null, "client Finished MAC verification failed"
-    }
-
-    // 7. Derive Application Traffic Keys
     ms = tls13_ks.master_secret(hash_algo, hs_handshake_secret(keys))
     c_ap = tls13_ks.traffic_secret(hash_algo, ms, "c ap traffic", bytes.view(th_sf)[0..hash_len])
     s_ap = tls13_ks.traffic_secret(hash_algo, ms, "s ap traffic", bytes.view(th_sf)[0..hash_len])
@@ -658,10 +626,23 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
 
     app_send = tls13_record.new_aead(rec_aead, bytes.view(sk)[0..rec_key_len], siv)
     app_recv = tls13_record.new_aead(rec_aead, bytes.view(ck)[0..rec_key_len], civ)
+    bytes.free(ck); bytes.free(civ); bytes.free(sk); bytes.free(siv)
+    bytes.free(ms); bytes.free(c_ap); bytes.free(s_ap)
+
+    // 7. Read and verify the client Finished.
+    cf_alert, cf_err = read_client_finished(rio, cli_hs_ctx, tr, hs_client_secret(keys), th_sf, hash_algo, hash_len)
+    if string.equals(cf_err, "") != 1 {
+        if cf_alert != 0 { send_hs_alert(sock, app_send as ptr, cf_alert) }
+        tls13_record.free_ctx(app_send as ptr); tls13_record.free_ctx(app_recv as ptr)
+        bytes.free(th_sf); bytes.free(srnd); bytes.free(sh)
+        tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
+        tls13_record.free_ctx(srv_hs_ctx); tls13_record.free_ctx(cli_hs_ctx)
+        tls13_client.free_hs_keys(keys); bytes.free(th_chsh)
+        return null, cf_err
+    }
 
     // Cleanup handshake state
-    bytes.free(ck); bytes.free(civ); bytes.free(sk); bytes.free(siv)
-    bytes.free(ms); bytes.free(c_ap); bytes.free(s_ap); bytes.free(th_sf)
+    bytes.free(th_sf)
     bytes.free(srnd); bytes.free(sh)
     tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr)
     tls13_record.free_ctx(srv_hs_ctx); tls13_record.free_ctx(cli_hs_ctx)
@@ -674,6 +655,88 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
     conn.app_recv = app_recv as ptr
 
     return conn as ptr, ""
+}
+
+// Read the client's second flight, its Finished alone (this server asks for
+// no certificate), under the client handshake keys `cli_hs_ctx`, and check
+// it against `th_sf`, the transcript through the server Finished; on
+// success it joins the transcript `tr`. (0, "") or the alert to send and
+// why (#3324): bad_record_mac for a record that does not open,
+// unexpected_message for a plaintext record, another record type or another
+// message (a Finished may span records but not share its last one, RFC
+// 8446 5.1), decode_error for verify_data that is not the hash's length,
+// decrypt_error for a MAC that does not match (4.4.4). An alert from the
+// client ends the read with its name and no answer.
+fn read_client_finished(rio: *RecordIO, cli_hs_ctx: ptr, tr: ptr, client_hs_secret: ptr, th_sf: ptr, hash_algo: string, hash_len: int) -> (int, string) {
+    want = 4 + hash_len
+    msg = bytes.new(want)
+    mlen = 0
+    while mlen < want {
+        rec, rlen, err = recio_next_hs(rio)
+        if string.equals(err, "") != 1 {
+            bytes.free(msg)
+            return rio.alert, err
+        }
+        ct = bytes.get(rec, 0) & 0xFF
+        if ct != 0x17 {
+            bytes.free(rec); bytes.free(msg)
+            return tls13_record.ALERT_UNEXPECTED_MESSAGE, "handshake: a plaintext record of type ${ct} where the client Finished belongs"
+        }
+        opened = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0, alert: 0 }
+        oerr = tls13_record.open_record(cli_hs_ctx, bytes.view(rec)[0..rlen], &opened)
+        bytes.free(rec)
+        if string.equals(oerr, "") != 1 {
+            bytes.free(msg)
+            return opened.alert, oerr
+        }
+        t = opened.content_type
+        n = opened.plaintext_len
+        if t == tls13_record.CONTENT_ALERT && n >= 2 {
+            d = bytes.get(opened.plaintext, 1) & 0xFF
+            bytes.free(opened.plaintext); bytes.free(msg)
+            return 0, "the client sent alert ${tls13_client.alert_name(d)}"
+        }
+        if t != tls13_record.CONTENT_HANDSHAKE || n == 0 {
+            if opened.plaintext != null { bytes.free(opened.plaintext) }
+            bytes.free(msg)
+            return tls13_record.ALERT_UNEXPECTED_MESSAGE, "handshake: a record of type ${t} (or an empty one) where the client Finished belongs"
+        }
+        // The record joins what came before (#3321); the buffer grows to
+        // hold it, and is judged as soon as the header is in.
+        bytes.copy_from_bytes(msg, mlen, opened.plaintext, 0, n)
+        mlen = mlen + n
+        bytes.free(opened.plaintext)
+        if mlen >= 4 {
+            mt = bytes.get(msg, 0) & 0xFF
+            ml = ((bytes.get(msg, 1) & 0xFF) << 16) | ((bytes.get(msg, 2) & 0xFF) << 8) | (bytes.get(msg, 3) & 0xFF)
+            fa = 0
+            fe = ""
+            if mt != tls13_hs.HS_FINISHED {
+                fa = tls13_record.ALERT_UNEXPECTED_MESSAGE
+                fe = "handshake: a message of type ${mt} where the client Finished belongs"
+            } else if ml != hash_len {
+                fa = tls13_record.ALERT_DECODE_ERROR
+                fe = "finished: verify_data is ${ml} bytes, not ${hash_len}"
+            } else if mlen > want {
+                fa = tls13_record.ALERT_UNEXPECTED_MESSAGE
+                fe = "handshake: data after the client Finished in its record"
+            }
+            if fa != 0 {
+                bytes.free(msg)
+                return fa, fe
+            }
+        }
+    }
+    expected = finished_verify_data_algo(client_hs_secret, bytes.view(th_sf)[0..hash_len], hash_algo, hash_len)
+    ok = bytes_equal(expected, bytes.view(msg)[4..want])
+    bytes.free(expected)
+    if ok != 1 {
+        bytes.free(msg)
+        return ALERT_DECRYPT_ERROR, "client Finished MAC verification failed"
+    }
+    tls13_client.transcript_add(tr, bytes.view(msg)[0..want])
+    bytes.free(msg)
+    return 0, ""
 }
 
 // Send application data as one encrypted record.
@@ -692,8 +755,12 @@ conn_send(conn: ptr, data: byte[]) -> string {
 // refuses the stream as a denial of service (#3317), as BoringSSL bounds them.
 const MAX_EMPTY_RECORDS = 32
 
-// A fatal alert under the server's handshake-traffic keys, after
-// ServerHello (#3326). Best effort, as send_plaintext_alert.
+// decrypt_error (RFC 8446 6.2): a Finished whose MAC does not match.
+const ALERT_DECRYPT_ERROR = 51
+
+// A fatal alert under `ctx`: the server's handshake-traffic keys after
+// ServerHello (#3326), its application-traffic keys after its Finished
+// (#3324). Best effort, as send_plaintext_alert.
 fn send_hs_alert(sock: ptr, ctx: ptr, desc: int) {
     a = bytes.new(2)
     bytes.set(a, 0, 2)

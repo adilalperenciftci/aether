@@ -69,6 +69,7 @@ exports(
     check_validity, time_to_key, check_hostname,
     chain_verify, chain_verify_path, verify_cert_signature, find_issuer_cert,
     validate_chain, check_validity_at, PURPOSE_SERVER, PURPOSE_CLIENT, TRUST_PARTIAL_CHAIN,
+    check_leaf_cert_verify,
     trust_store_load, trust_store_add, trust_store_add_pem, free_anchors,
     parse_ocsp_status, verify_ocsp_signature, verify_ocsp_signature_at, OCSP_GOOD, OCSP_REVOKED, OCSP_UNKNOWN, OCSP_ERROR
 )
@@ -465,6 +466,51 @@ verify_cert_verify_rsa_pss(spki_key: byte[], transcript_hash: byte[], sig: byte[
     bytes.free(content)
     bytes.free(digest)
     return result
+}
+
+// Check a peer's CertificateVerify (RFC 8446 4.4.3) with the key of its
+// end-entity certificate `leaf`: `scheme` and `sig` as the message carries
+// them, `transcript_hash` through the Certificate. (0, "") when the
+// signature holds, else the alert and why: bad_certificate (42) for a key
+// no scheme is accepted with (KEY_NONE), illegal_parameter (47) for a
+// scheme this module does not verify or one that does not fit the key (an
+// ECDSA scheme names its curve and hash, an RSA key signs rsa_pss_rsae,
+// Ed25519 its own), decrypt_error (51) for a signature that does not
+// verify (#3324, #3335).
+check_leaf_cert_verify(leaf: *LeafCert, scheme: int, transcript_hash: byte[], sig: byte[]) -> (int, string) {
+    if transcript_hash.len < 0 { panic("tls13_cert.check_leaf_cert_verify: the `transcript_hash` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    if sig.len < 0 { panic("tls13_cert.check_leaf_cert_verify: the `sig` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    want = KEY_NONE
+    if scheme == SCHEME_ECDSA_P256_SHA256 { want = KEY_P256 }
+    if scheme == SCHEME_ECDSA_P384_SHA384 { want = KEY_P384 }
+    if scheme == SCHEME_ECDSA_P521_SHA512 { want = KEY_P521 }
+    if scheme == SCHEME_RSA_PSS_RSAE_SHA256 { want = KEY_RSA }
+    if scheme == SCHEME_ED25519 { want = KEY_ED25519 }
+    if leaf.key_kind == KEY_NONE { return 42, "CertificateVerify: the certificate's key is not one this client accepts" }
+    if want == KEY_NONE { return 47, "CertificateVerify: signature scheme ${scheme} is not one this client verifies" }
+    if leaf.key_kind != want { return 47, "CertificateVerify: signature scheme ${scheme} does not fit the certificate's key" }
+    key = bytes.view(leaf.spki_key)[0..leaf.spki_key_len]
+    ok = 0
+    if want == KEY_RSA {
+        ok = verify_cert_verify_rsa_pss(key, transcript_hash, sig)
+    } else if want == KEY_ED25519 {
+        ok = verify_cert_verify(scheme, leaf.spki_key, null, transcript_hash, sig)
+    } else {
+        // An uncompressed point of the curve's size, as spki_key_check
+        // made sure: 0x04 || X || Y.
+        w = (leaf.spki_key_len - 1) / 2
+        px = bytes.new(w)
+        py = bytes.new(w)
+        bytes.set(px, w - 1, 0)
+        bytes.set(py, w - 1, 0)
+        bytes.copy_from_bytes(px, 0, leaf.spki_key, 1, w)
+        bytes.copy_from_bytes(py, 0, leaf.spki_key, 1 + w, w)
+        ok = verify_cert_verify(scheme, px, py, transcript_hash, sig)
+        bytes.free(px)
+        bytes.free(py)
+    }
+    if ok != 1 { return 51, "CertificateVerify signature invalid" }
+    return 0, ""
 }
 
 // ---- X.509 structural parse ----

@@ -15,6 +15,13 @@
 #   #3316  CertificateEntry extensions (RFC 8446 4.4.2): the same alerts,
 #          and decode_error for a status_request that is not one OCSP
 #          response.
+#   #3324  the right alert: illegal_parameter for a CertificateVerify
+#          scheme not offered or not fitting the key, decrypt_error for a
+#          bad signature, decode_error for trailing data, unexpected_message
+#          for a message out of its place; and the pure server's alerts
+#          about the client Finished (peerclient.ae), under its
+#          application keys.
+#   #3335  a server with an Ed25519 certificate.
 #
 # No network beyond loopback, no openssl: the peer's certificate is built in.
 
@@ -38,7 +45,7 @@ cleanup() {
 trap cleanup EXIT
 fail() { echo "  [FAIL] $NAME: $1"; exit 1; }
 
-for p in peer client server rawclient; do
+for p in peer client server rawclient peerclient; do
     "$AE" build "$SCRIPT_DIR/$p.ae" -o "$TMP/$p" >"$TMP/b_$p.log" 2>&1 \
         || { sed -n '1,12p' "$TMP/b_$p.log"; fail "$p did not build"; }
 done
@@ -159,6 +166,70 @@ run_server_case "server: a ClientHello split over two records" "split_ch" "SERVE
 run_case "CCS: before the client's Finished" "" "OK" "CCS+FINISHED"
 run_case "CCS: before the client's alert" "ee_ext=fafa0000" "ERR" "CCS+ALERT 110"
 run_server_case "server: a change_cipher_spec after the ServerHello" "split_ch" "SERVERHELLO+CCS"
+
+
+# #3324 and #3335: the server's CertificateVerify (RFC 8446 4.4.3): a
+# scheme the client offered and one that fits the key, else
+# illegal_parameter; a signature that verifies, else decrypt_error;
+# Ed25519 among them.
+run_case "CV: an Ed25519 certificate" "key=ed25519" "OK" "FINISHED"
+run_case "CV: rsa_pkcs1_sha256, never offered" "cv_scheme=0401" "ERR" "ALERT 47"
+run_case "CV: the P-384 scheme for a P-256 key" "cv_scheme=0503" "ERR" "ALERT 47"
+run_case "CV: Ed25519 for a P-256 key" "cv_scheme=0807" "ERR" "ALERT 47"
+run_case "CV: the P-256 scheme for an Ed25519 key" "key=ed25519;cv_scheme=0403" "ERR" "ALERT 47"
+run_case "CV: a signature that does not verify" "cv_bad=1" "ERR" "ALERT 51"
+run_case "CV: an Ed25519 signature that does not verify" "key=ed25519;cv_bad=1" "ERR" "ALERT 51"
+
+# #3324: trailing data is decode_error (RFC 8446 6.2), a message out of
+# its place unexpected_message.
+run_case "trailing: a byte after the CertificateVerify's signature" "cv_trailing=1" "ERR" "ALERT 50"
+run_case "trailing: a Finished one byte long" "fin_long=1" "ERR" "ALERT 50"
+run_case "trailing: a byte after EncryptedExtensions' extensions" "ee_body=000000" "ERR" "ALERT 50"
+run_case "order: no CertificateVerify" "skip_cv=1" "ERR" "ALERT 10"
+run_case "order: a NewSessionTicket inside the flight" "extra=0400000d0000012c000000000000000000" "ERR" "ALERT 10"
+run_case "order: an unknown message inside the flight" "extra=fe000000" "ERR" "ALERT 10"
+run_case "CertificateRequest: accepted, an empty Certificate answers" "cr=000008000d000400020403" "OK" "HANDSHAKE"
+run_case "CertificateRequest: a byte after its extensions" "cr=000008000d00040002040300" "ERR" "ALERT 50"
+run_case "CertificateRequest: a certificate_request_context" "cr=01aa0008000d000400020403" "ERR" "ALERT 50"
+run_case "CertificateRequest: no signature_algorithms" "cr=000000" "ERR" "ALERT 109"
+
+# run_cf_case <name> <PEER_CF> <answer expected> <server says>
+run_cf_case() {
+    rm -f "$TMP/port" "$TMP/server.out"
+    PEER_PORT_OUT="$TMP/port" "$TMP/server" >"$TMP/server.out" 2>&1 &
+    spid=$!
+    PIDS="$PIDS $spid"
+    i=0
+    while [ "$i" -lt 100 ] && [ ! -s "$TMP/port" ]; do sleep 0.1; i=$((i + 1)); done
+    [ -s "$TMP/port" ] || { cat "$TMP/server.out"; fail "$1: the server never listened"; }
+    got=$(PEER_CF="$2" PEER_PORT="$(cat "$TMP/port")" "$TMP/peerclient" 2>&1 | grep -v 'warning' || :)
+    n=0
+    while server_alive "$spid" && [ "$n" -lt 100 ]; do sleep 0.1; n=$((n + 1)); done
+    stop_server "$spid"
+    said=$(cat "$TMP/server.out")
+    ok=1
+    case "$got" in *"$3"*) ;; *) ok=0 ;; esac
+    case "$said" in *"$4"*) ;; *) ok=0 ;; esac
+    if [ "$ok" = 1 ]; then
+        echo "    ok: $1"
+    else
+        echo "    FAIL: $1: the server answered [$got] and said [$said]; want [$3] and [$4]"
+        fails=$((fails + 1))
+    fi
+}
+
+# #3324, the pure server: the client Finished, its alerts under the
+# server's application keys.
+run_cf_case "server: the right Finished" "ok" "CLOSED" "ACCEPTED"
+run_cf_case "server: the Finished over two records" "split" "CLOSED" "ACCEPTED"
+run_cf_case "server: a Finished MAC that does not match" "badmac" "ALERT 51 (app)" "REFUSED"
+run_cf_case "server: verify_data one byte short" "short" "ALERT 50 (app)" "REFUSED"
+run_cf_case "server: verify_data one byte long" "long" "ALERT 50 (app)" "REFUSED"
+run_cf_case "server: a byte after the Finished in its record" "trailing" "ALERT 10 (app)" "REFUSED"
+run_cf_case "server: a Certificate instead of the Finished" "wrongtype" "ALERT 10 (app)" "REFUSED"
+run_cf_case "server: a record that does not authenticate" "badrecord" "ALERT 20 (app)" "REFUSED"
+run_cf_case "server: the Finished in the clear" "plain" "ALERT 10 (app)" "REFUSED"
+run_cf_case "server: application data before the Finished" "appdata" "ALERT 10 (app)" "REFUSED"
 
 [ "$fails" = 0 ] || fail "$fails case(s)"
 echo "  [PASS] $NAME"

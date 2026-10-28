@@ -39,7 +39,7 @@ extern string_char_at_n(str: string, known_length: int, index: int) -> int
 exports(
     ChParsed, parse_client_hello, free_ch, server_hello,
     client_hello, client_hello_sni, client_hello_full, client_hello_pq, client_hello_psk, PskCh, parse_server_hello,
-    ShParsed, check_extensions, check_certificate,
+    ShParsed, check_extensions, check_certificate, check_certificate_request, offers_sig_scheme,
     MSG_SERVER_HELLO, MSG_HELLO_RETRY, MSG_ENCRYPTED_EXTENSIONS, MSG_CERTIFICATE_ENTRY,
     MSG_NEW_SESSION_TICKET, MSG_CERTIFICATE_REQUEST,
     OFFER_SNI, OFFER_ALPN, OFFER_STATUS, OFFER_PSK, OFFER_EARLY,
@@ -172,6 +172,15 @@ fn put_sig_algs(buf: ptr, at: int) -> int {
     off = put16(buf, off, SIG_RSA_PSS_RSAE_SHA256)
     off = put16(buf, off, SIG_ED25519)
     return off
+}
+
+// 1 when `scheme` is one put_sig_algs offers, the only schemes a server may
+// sign its CertificateVerify with (RFC 8446 4.4.3), else 0.
+offers_sig_scheme(scheme: int) -> int {
+    if scheme == SIG_ECDSA_P256_SHA256 || scheme == SIG_ECDSA_P384_SHA384 { return 1 }
+    if scheme == SIG_ECDSA_P521_SHA512 || scheme == SIG_RSA_PSS_RSAE_SHA256 { return 1 }
+    if scheme == SIG_ED25519 { return 1 }
+    return 0
 }
 
 client_hello(random: ptr, session_id: byte[], x25519_pub: ptr) -> ptr {
@@ -870,6 +879,7 @@ const OFFER_EARLY = 16 // early_data
 
 const ALERT_DECODE_ERROR = 50
 const ALERT_ILLEGAL_PARAMETER = 47
+const ALERT_MISSING_EXTENSION = 109
 const ALERT_UNSUPPORTED_EXTENSION = 110
 
 // 1 when the ClientHello (with `offered`) carried extension `t`.
@@ -1020,6 +1030,28 @@ check_certificate(body: byte[], offered: int) -> (int, string) {
         p = q + 2 + el
     }
     return 0, ""
+}
+
+// check_certificate_request(body) -> (alert, error) for the body of a
+// CertificateRequest in the handshake (RFC 8446 4.3.2): an empty
+// certificate_request_context (only post-handshake authentication, which
+// this client does not offer, fills it) and extensions that fill the rest,
+// each once, are decode_error and illegal_parameter otherwise; without
+// signature_algorithms, missing_extension (109) (#3324).
+check_certificate_request(body: byte[]) -> (int, string) {
+    if body.len < 0 { panic("tls13_hs.check_certificate_request: the `body` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int n = body.len
+    if n < 3 { return ALERT_DECODE_ERROR, "certificate request: truncated" }
+    if get8(body, 0) != 0 { return ALERT_DECODE_ERROR, "certificate request: a handshake's certificate_request_context must be empty" }
+    if 3 + get16(body, 1) != n { return ALERT_DECODE_ERROR, "certificate request: the extensions do not fill the message" }
+    a, err = check_extensions(MSG_CERTIFICATE_REQUEST, body[3..n], 0)
+    if a != 0 { return a, "certificate request: ${err}" }
+    p = 3
+    while p + 4 <= n {
+        if get16(body, p) == 13 { return 0, "" }
+        p = p + 4 + get16(body, p + 2)
+    }
+    return ALERT_MISSING_EXTENSION, "certificate request: no signature_algorithms"
 }
 
 // parse_server_hello(msg, out) -> "" or why the ServerHello (or
