@@ -2744,6 +2744,17 @@ static int value_path_through_pointer(ASTNode* obj) {
     return 0;
 }
 
+/* #3398: does a store into the place `lv` publish what it takes? One rule
+ * for every store emitter (#2919): a place reached through a pointer, a
+ * slice or an actor's reference is memory another actor can reach, so the
+ * strings stored there, whichever part of the place takes them (a string,
+ * a struct, an element, a whole array, an optional, at any depth), count
+ * atomically from then on. Only the string field paths published; the
+ * other parts took their references plain. */
+static int store_publishes(ASTNode* lv) {
+    return value_path_through_pointer(lv);
+}
+
 static int struct_array_local_owns(CodeGenerator* gen, const char* name);
 static ASTNode* actor_state_decl(CodeGenerator* gen, const char* name);
 
@@ -2880,7 +2891,7 @@ static int emit_nested_field_heap_assign(CodeGenerator* gen, ASTNode* lhs,
     emit_string_take_owned(gen, rhs, 0);
     fprintf(gen->output, ";");
     if (release_old) fprintf(gen->output, " aether_heap_str_free(_tmp_old);");
-    if (!by_value || value_path_through_pointer(obj))
+    if (store_publishes(lhs))
         fprintf(gen->output, " aether_string_publish(%s->%s);", tgt, lhs->value);
     fprintf(gen->output, " }\n");
     return 1;
@@ -2941,19 +2952,24 @@ static int emit_struct_valued_field_store(CodeGenerator* gen, ASTNode* lhs, ASTN
     } else {
         return 0;
     }
+    /* The place is evaluated once, and through a pointer what it takes is
+     * published (#3398). */
+    int vol = lvalue_may_be_volatile(gen, lhs);
     print_indent(gen);
+    fprintf(gen->output, "{ %s%s* _ae_sv = &(", get_c_type(lhs->node_type), vol ? " volatile" : "");
+    generate_expression(gen, lhs);
+    fprintf(gen->output, "); ");
     if (trusted) {
-        fprintf(gen->output, "%s(&(", struct_replace_fn(fs, lvalue_may_be_volatile(gen, lhs)));
-        generate_expression(gen, lhs);
-        fprintf(gen->output, "), ");
+        fprintf(gen->output, "%s(_ae_sv, ", struct_replace_fn(fs, vol));
         emit_struct_take(gen, rhs, fs, NULL);
-        fprintf(gen->output, ");\n");
+        fprintf(gen->output, ");");
     } else {
-        generate_expression(gen, lhs);
-        fprintf(gen->output, " = ");
+        fprintf(gen->output, "*_ae_sv = ");
         emit_struct_take(gen, rhs, fs, NULL);
-        fprintf(gen->output, ";\n");
+        fprintf(gen->output, ";");
     }
+    if (store_publishes(lhs)) fprintf(gen->output, " %s_publish((%s*)_ae_sv);", fs, get_c_type(lhs->node_type));
+    fprintf(gen->output, " }\n");
     return 1;
 }
 
@@ -3168,21 +3184,30 @@ static void emit_whole_array_store_begin(CodeGenerator* gen, int kind, const cha
 }
 
 static void emit_whole_array_store_end(CodeGenerator* gen, int kind, const char* es, Type* at,
-                                       int release) {
+                                       int release, int publish) {
     fprintf(gen->output, "); for (int _ae_k = 0; _ae_k < %d; _ae_k++) ", at->array_size);
     if (!release || kind == AF_PLAIN) {
-        fprintf(gen->output, "_ae_fdst[_ae_k] = _ae_farr[_ae_k]; }\n");
+        fprintf(gen->output, "_ae_fdst[_ae_k] = _ae_farr[_ae_k];");
     } else if (kind == AF_STRING) {
         fprintf(gen->output, "{ const char* _ae_old = _ae_fdst[_ae_k]; _ae_fdst[_ae_k] = _ae_farr[_ae_k]; "
-                             "if (_ae_old) aether_heap_str_free(_ae_old); } }\n");
+                             "if (_ae_old) aether_heap_str_free(_ae_old); }");
     } else if (kind == AF_CLOSURE) {
         fprintf(gen->output, "{ void* _ae_old = _ae_fdst[_ae_k].env; _ae_fdst[_ae_k] = _ae_farr[_ae_k]; "
-                             "_aether_closure_env_release(_ae_old); } }\n");
+                             "_aether_closure_env_release(_ae_old); }");
     } else {
         /* The destination is reached through a volatile pointer, which
          * accepts a field of a volatile local (#2690) as well. */
-        fprintf(gen->output, "_aether_vstore_%s(&_ae_fdst[_ae_k], _ae_farr[_ae_k]); }\n", es);
+        fprintf(gen->output, "_aether_vstore_%s(&_ae_fdst[_ae_k], _ae_farr[_ae_k]);", es);
     }
+    /* #3398: through a pointer, the elements it took are published. */
+    if (publish && kind == AF_STRING) {
+        fprintf(gen->output, " for (int _ae_k = 0; _ae_k < %d; _ae_k++) "
+                             "aether_string_publish(_ae_fdst[_ae_k]);", at->array_size);
+    } else if (publish && kind == AF_STRUCT) {
+        fprintf(gen->output, " for (int _ae_k = 0; _ae_k < %d; _ae_k++) %s_publish((%s*)&_ae_fdst[_ae_k]);",
+                at->array_size, es, es);
+    }
+    fprintf(gen->output, " }\n");
 }
 
 /* #2688: `names = arr` / `names = [...]` into an actor's fixed-size array
@@ -3202,7 +3227,7 @@ static int emit_state_array_store(CodeGenerator* gen, ASTNode* sdecl, ASTNode* r
     int kind = oak == 1 ? AF_STRING : oak == 2 ? AF_CLOSURE : es ? AF_STRUCT : AF_PLAIN;
     emit_whole_array_store_begin(gen, kind, es, sdecl->node_type, rhs);
     fprintf(gen->output, "self->%s", sdecl->value);
-    emit_whole_array_store_end(gen, kind, es, sdecl->node_type, 1);
+    emit_whole_array_store_end(gen, kind, es, sdecl->node_type, 1, 0);
     return 1;
 }
 
@@ -3232,7 +3257,7 @@ static int emit_array_field_store(CodeGenerator* gen, ASTNode* lhs, ASTNode* rhs
     int kind = array_field_elem_kind(gen, sname, fdef, &es);
     emit_whole_array_store_begin(gen, kind, es, fdef->node_type, rhs);
     generate_expression(gen, lhs);
-    emit_whole_array_store_end(gen, kind, es, fdef->node_type, trusted);
+    emit_whole_array_store_end(gen, kind, es, fdef->node_type, trusted, store_publishes(lhs));
     return 1;
 }
 
@@ -3259,7 +3284,7 @@ static int emit_struct_element_store(CodeGenerator* gen, ASTNode* lhs, ASTNode* 
         generate_expression(gen, lhs);
         fprintf(gen->output, ");\n");
         print_indent(gen);
-        emit_owning_store(gen, "(*_ae_ep)", et, rhs, 0);
+        emit_owning_store(gen, "(*_ae_ep)", et, rhs, store_publishes(lhs));
         print_indent(gen);
         fprintf(gen->output, "}\n");
         return 1;
@@ -3309,30 +3334,31 @@ static int emit_struct_element_store(CodeGenerator* gen, ASTNode* lhs, ASTNode* 
         return 0;
     }
     if (!trusted) return 0;
+    /* The element's address is taken once (its index evaluated once), and
+     * through a pointer what it takes is published (#3398). */
+    int vol = lvalue_may_be_volatile(gen, lhs);
     print_indent(gen);
+    fprintf(gen->output, "{ %s%s* _ae_ep = &(", get_c_type(et), vol ? " volatile" : "");
+    generate_expression(gen, lhs);
+    fprintf(gen->output, "); ");
     if (kind == 3) {
-        fprintf(gen->output, "%s(&(", struct_replace_fn(es, lvalue_may_be_volatile(gen, lhs)));
-        generate_expression(gen, lhs);
-        fprintf(gen->output, "), ");
+        fprintf(gen->output, "%s(_ae_ep, ", struct_replace_fn(es, vol));
         emit_struct_take(gen, rhs, es, NULL);
-        fprintf(gen->output, ");\n");
+        fprintf(gen->output, ");");
+        if (store_publishes(lhs)) fprintf(gen->output, " %s_publish((%s*)_ae_ep);", es, es);
     } else if (kind == 1) {
-        fprintf(gen->output, "{ const char* _ae_old = ");
-        generate_expression(gen, lhs);
-        fprintf(gen->output, "; ");
-        generate_expression(gen, lhs);
-        fprintf(gen->output, " = ");
+        fprintf(gen->output, "const char* _ae_old = *_ae_ep; *_ae_ep = ");
         emit_owned_string_element(gen, rhs);
-        fprintf(gen->output, "; if (_ae_old) aether_heap_str_free(_ae_old); }\n");
+        fprintf(gen->output, "; if (_ae_old) aether_heap_str_free(_ae_old);");
+        if (store_publishes(lhs)) fprintf(gen->output, " aether_string_publish(*_ae_ep);");
     } else {
-        fprintf(gen->output, "{ _AeClosure _ae_cv = ");
+        /* A closure's environment counts atomically already. */
+        fprintf(gen->output, "_AeClosure _ae_cv = ");
         emit_closure_take(gen, rhs);
-        fprintf(gen->output, "; void* _ae_old = (");
-        generate_expression(gen, lhs);
-        fprintf(gen->output, ").env; ");
-        generate_expression(gen, lhs);
-        fprintf(gen->output, " = _ae_cv; _aether_closure_env_release(_ae_old); }\n");
+        fprintf(gen->output, "; void* _ae_old = _ae_ep->env; *_ae_ep = _ae_cv; "
+                             "_aether_closure_env_release(_ae_old);");
     }
+    fprintf(gen->output, " }\n");
     return 1;
 }
 
@@ -3377,9 +3403,9 @@ static int emit_actor_ref_state_store(CodeGenerator* gen, ASTNode* lhs, ASTNode*
     print_indent(gen);
     if (sized && !element) {
         emit_owning_array_store(gen, "_ae_sp", st, rhs);
-        own_emit_part(gen, st, "_ae_sp", OWN_PUBLISH);
+        if (store_publishes(lhs)) own_emit_part(gen, st, "_ae_sp", OWN_PUBLISH);
     } else {
-        emit_owning_store(gen, "(*_ae_sp)", t, rhs, 1);
+        emit_owning_store(gen, "(*_ae_sp)", t, rhs, store_publishes(lhs));
     }
     print_indent(gen);
     fprintf(gen->output, "}\n");
@@ -3490,7 +3516,7 @@ static int emit_struct_field_heap_assign(CodeGenerator* gen, ASTNode* lhs, ASTNo
             objs, acc, lhs->value, objs, acc, lhs->value);
     emit_string_take_owned(gen, rhs, 0);
     fprintf(gen->output, "; aether_heap_str_free(_tmp_old);");
-    if (acc[0] == '-')
+    if (store_publishes(lhs))
         fprintf(gen->output, " aether_string_publish(%s%s%s);", objs, acc, lhs->value);
     fprintf(gen->output, " }\n");
     return 1;
@@ -3763,7 +3789,7 @@ static int emit_composite_field_store(CodeGenerator* gen, ASTNode* lhs, ASTNode*
     generate_expression(gen, lhs);
     fprintf(gen->output, ");\n");
     print_indent(gen);
-    emit_owning_store(gen, "(*_ae_fp)", ft, rhs, ot->kind == TYPE_PTR);
+    emit_owning_store(gen, "(*_ae_fp)", ft, rhs, store_publishes(lhs));
     print_indent(gen);
     fprintf(gen->output, "}\n");
     return 1;
@@ -3799,7 +3825,7 @@ static int emit_slice_element_store(CodeGenerator* gen, ASTNode* lhs, ASTNode* r
     generate_expression(gen, lhs);
     fprintf(gen->output, ");\n");
     print_indent(gen);
-    emit_owning_store(gen, "(*_ae_ep)", at->element_type, rhs, 0);
+    emit_owning_store(gen, "(*_ae_ep)", at->element_type, rhs, store_publishes(lhs));
     print_indent(gen);
     fprintf(gen->output, "}\n");
     return 1;

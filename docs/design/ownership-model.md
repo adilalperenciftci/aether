@@ -227,9 +227,12 @@ shared; its retain and release are atomic from then on, every other count is
 plain. `aether_string_publish` sets it and leaves pinned strings alone.
 Published where it is stored: a module variable, a closure's captured string
 or shared cell, a container element (list, map, string sequence, strarr:
-`string_retain_shared`), and a struct field reached through a pointer. A
-message does not share: a send deep-copies its strings (#466), so it needs no
-publish. A value read from a published place carries the bit with it.
+`string_retain_shared`), and any part of a value reached through a pointer, a
+slice or an actor's reference, by one rule for every store (#3398: only
+the string fields were, and a struct, an element, a whole array or a nested
+optional took its strings plain). A message does not share: a send
+deep-copies its strings (#466), so it needs no publish. A value read from a
+published place carries the bit with it.
 
 **Within the budgets (#2925).** Measured on an Apple M1 Pro, each
 `benchmarks/ownership/` program built by #2916's merge (c5f20025) and by its

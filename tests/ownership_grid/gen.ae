@@ -856,7 +856,7 @@ catch_lines() -> string {
 // Places.
 
 place_count() -> int {
-    return 26
+    return 27
 }
 
 place_at(i: int) -> string {
@@ -867,25 +867,26 @@ place_at(i: int) -> string {
         3 -> "P3B"
         4 -> "P3E"
         5 -> "P4"
-        6 -> "P5"
-        7 -> "P5L"
-        8 -> "P6"
-        9 -> "P7"
-        10 -> "P8"
-        11 -> "P9"
-        12 -> "P9W"
-        13 -> "P10L"
-        14 -> "P10M"
-        15 -> "P11"
-        16 -> "P12K"
-        17 -> "P12D"
-        18 -> "P13G"
-        19 -> "P13D"
-        20 -> "P13F"
-        21 -> "P14"
-        22 -> "P15"
-        23 -> "P16"
-        24 -> "P17"
+        6 -> "P4H"
+        7 -> "P5"
+        8 -> "P5L"
+        9 -> "P6"
+        10 -> "P7"
+        11 -> "P8"
+        12 -> "P9"
+        13 -> "P9W"
+        14 -> "P10L"
+        15 -> "P10M"
+        16 -> "P11"
+        17 -> "P12K"
+        18 -> "P12D"
+        19 -> "P13G"
+        20 -> "P13D"
+        21 -> "P13F"
+        22 -> "P14"
+        23 -> "P15"
+        24 -> "P16"
+        25 -> "P17"
         _ -> "P18"
     }
 }
@@ -899,6 +900,7 @@ place_title(pid: string) -> string {
         "P3B" -> "local bound and used inside one branch of an if"
         "P3E" -> "local bound and used inside each branch of an if/else"
         "P4" -> "field of a local struct"
+        "P4H" -> "field of a struct in a heap box, reached through a pointer"
         "P5" -> "element of a fixed-size array local"
         "P5L" -> "element of a fixed-size array local rebound in a loop body"
         "P6" -> "slot of a tuple local"
@@ -1047,6 +1049,15 @@ place_setup(g: *GridGen, pid: string, kid: string) -> string {
         gen_decl(g, "struct PtrBox", "struct PtrBox {\n    p: ptr\n}")
         return ""
     }
+    if pid == "P4H" {
+        // #3398: every store goes through the pointer; the box's free
+        // releases what its field holds.
+        if kid == "K5" || kid == "K8" {
+            need_doc(g)
+        }
+        gen_decl(g, "struct Box", "struct Box {\n    v: ${kind_ty(kid)}\n}")
+        return "h = heap.new(Box)\ndefer heap.free(h)"
+    }
     return ""
 }
 
@@ -1107,6 +1118,10 @@ place_bind(g: *GridGen, pid: string, kid: string, tag: string) -> string {
         pre, e = fresh(g, kid, tag)
         return lines_cat(pre, "h = Box { v: ${e} }")
     }
+    if pid == "P4H" {
+        pre, e = fresh(g, kid, tag)
+        return lines_cat(pre, "h.v = ${e}")
+    }
     if pid == "P5" || pid == "P5L" {
         pre, e = fresh(g, kid, tag)
         pz, ez = fresh(g, kid, "z")
@@ -1150,7 +1165,7 @@ place_bind(g: *GridGen, pid: string, kid: string, tag: string) -> string {
 }
 
 place_store(g: *GridGen, pid: string, kid: string, tag: string) -> string {
-    if pid == "P4" {
+    if pid == "P4" || pid == "P4H" {
         pre, e = fresh(g, kid, tag)
         return lines_cat(pre, "h.v = ${e}")
     }
@@ -1196,7 +1211,7 @@ place_store(g: *GridGen, pid: string, kid: string, tag: string) -> string {
 
 // (statements, expression) reading the place.
 place_read(g: *GridGen, pid: string, kid: string) -> (string, string) {
-    if pid == "P4" {
+    if pid == "P4" || pid == "P4H" {
         return "", "h.v"
     }
     if pid == "P5" || pid == "P5L" {
@@ -1544,6 +1559,9 @@ simple_cell(kid: string, pid: string, t: string) -> string {
 // Why a simple place does not take a transfer; "" when it does.
 simple_skip(kid: string, pid: string, t: string) -> string {
     ptr_place = pid == "P10L" || pid == "P10M" || pid == "P13G" || pid == "P13F"
+    if pid == "P4H" && !in_words("T1 T2 T12", t) {
+        return "a field through a pointer is a store place (#3398): measured for the store, the overwrite and the alias; it is left as P4's field is"
+    }
     if t == "T13" {
         if !(kid == "K3" && pid == "P2") {
             return "the chain is a closure local rebound in a loop: K3-P2 only"

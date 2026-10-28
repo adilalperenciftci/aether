@@ -1,0 +1,48 @@
+// Regression (#3398): a store into an element of an array field that owns
+// its elements evaluates the element's place once.
+//
+// The store of a string or a closure element read what the element held and
+// then stored into it, spelling the place twice in the generated C, so an
+// index with a side effect ran twice: `o.names[next()] = s` called next()
+// twice, released the string of one element and stored into the other. The
+// store now takes the element's address once, as the struct element store
+// does.
+
+import std.string
+
+extern exit(code: int)
+
+struct Shelf {
+    names: string[3]
+    cbs: fn[3]
+}
+
+var calls = 0
+
+next() -> int {
+    calls = calls + 1
+    return calls - 1
+}
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    w = "w"
+    o = Shelf { names: ["", "", ""], cbs: [|| { return 0 }, || { return 0 }, || { return 0 }] }
+    calls = 0
+    o.names[next()] = string.concat(w, "a")
+    check(calls == 1, "the string element's index ran ${calls} times")
+    check(o.names[0] == "wa" && o.names[1] == "", "the string went to element 0 (${o.names[0]}, ${o.names[1]})")
+    calls = 0
+    o.cbs[next()] = || { return 7 }
+    check(calls == 1, "the closure element's index ran ${calls} times")
+    int a = call(o.cbs[0])
+    int b = call(o.cbs[1])
+    check(a == 7 && b == 0, "the closure went to element 0 (${a}, ${b})")
+    println("OK")
+}

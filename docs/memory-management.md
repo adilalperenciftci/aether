@@ -78,8 +78,10 @@ call's result, another local, a field read. `string.free(s)` or
 empty; on a parameter it is refused (E0901), since the function does not own
 it. Strings are immutable once made, so two places sharing one counted
 string is safe; a string stored where other threads can read it (a module
-`var`, a closure environment, a value reached through a pointer) is
-published, and its count becomes atomic from then on.
+`var`, a closure environment, any part of a value reached through a
+pointer, a slice or another actor's reference: a field, an element, a whole
+array, an optional, at any depth) is published, and its count becomes
+atomic from then on.
 
 ### Reading a string out of a container or a `ptr`
 

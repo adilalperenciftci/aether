@@ -1,0 +1,126 @@
+// A value stored through a pointer, a slice or an actor's reference is
+// published (#3398, #2919): the place is memory another actor can reach,
+// so the strings it takes count atomically from then on, and the retains
+// and releases of two actors do not race. Each store below takes a string
+// of its own, made at run time (two literals concatenated fold into a
+// pinned literal, which is never counted), and the probe reads its header
+// through shim.c.
+//
+// A string field reached through a pointer was published (`p.name = s`,
+// `p.inner.name = s`), but a struct, an element of an array field, a whole
+// array field, an optional nested in a struct and a slice's element were
+// stored without it, and so were the same parts of another actor's state
+// reached through its reference.
+
+import std.string
+
+extern probe_published(s: @aether ptr) -> int
+extern exit(code: int)
+
+struct Doc {
+    name: string
+    n: int
+}
+
+struct Inner {
+    doc: Doc
+    docs: Doc[2]
+    names: string[2]
+    tag: string?
+}
+
+struct Box {
+    label: string
+    doc: Doc
+    docs: Doc[2]
+    names: string[2]
+    inner: Inner
+}
+
+message Get {}
+
+actor Keeper {
+    state Inner kept
+    receive {
+        Get() -> { reply 1 }
+    }
+}
+
+// 1, said, when `s` is not published.
+unpublished(s: string, what: string) -> int {
+    if probe_published(s) != 1 {
+        println("FAIL: ${what} is not published")
+        return 1
+    }
+    return 0
+}
+
+fresh(w: string) -> string {
+    return string.concat(w, "#")
+}
+
+doc(w: string) -> Doc {
+    return Doc { name: fresh(w), n: 1 }
+}
+
+// A slice's element is the element of the array it views.
+store_first(xs: Doc[], d: Doc) {
+    xs[0] = d
+}
+
+main() {
+    fails = 0
+    p = heap.new(Box)
+    // Published before #3398 too: the probe sees a published string.
+    s0 = fresh("z")
+    p.label = s0
+    fails = fails + unpublished(p.label, "a string field through a pointer (p.label = s)")
+    d1 = doc("a")
+    p.doc = d1
+    fails = fails + unpublished(p.doc.name, "a struct field through a pointer (p.doc = d)")
+    d2 = doc("b")
+    p.docs[0] = d2
+    fails = fails + unpublished(p.docs[0].name, "an element of a struct array field (p.docs[0] = d)")
+    s1 = fresh("c")
+    p.names[0] = s1
+    fails = fails + unpublished(p.names[0], "an element of a string array field (p.names[0] = s)")
+    string[2] arr = [fresh("d"), fresh("e")]
+    p.names = arr
+    fails = fails + unpublished(p.names[1], "a whole array field (p.names = arr)")
+    d3 = doc("f")
+    p.inner.doc = d3
+    fails = fails + unpublished(p.inner.doc.name, "a struct in a struct (p.inner.doc = d)")
+    s2 = fresh("g")
+    p.inner.tag = s2
+    t = p.inner.tag!
+    fails = fails + unpublished(t, "an optional in a struct (p.inner.tag = s)")
+    s3 = fresh("h")
+    p.inner.names[1] = s3
+    fails = fails + unpublished(p.inner.names[1], "an element of an array in a struct (p.inner.names[1] = s)")
+    heap.free(p)
+
+    k = spawn(Keeper())
+    int r = k ? Get {}
+    d4 = doc("i")
+    k.kept.doc = d4
+    fails = fails + unpublished(k.kept.doc.name, "a struct in another actor's state (k.kept.doc = d)")
+    d5 = doc("j")
+    k.kept.docs[1] = d5
+    fails = fails + unpublished(k.kept.docs[1].name, "an element in another actor's state (k.kept.docs[1] = d)")
+    s4 = fresh("k")
+    k.kept.names[0] = s4
+    fails = fails + unpublished(k.kept.names[0], "a string element in another actor's state (k.kept.names[0] = s)")
+    s5 = fresh("l")
+    k.kept.tag = s5
+    u = k.kept.tag!
+    fails = fails + unpublished(u, "an optional in another actor's state (k.kept.tag = s)")
+
+    Doc[2] local = [doc("m"), doc("n")]
+    d6 = doc("o")
+    store_first(local, d6)
+    fails = fails + unpublished(local[0].name, "a slice's element (xs[0] = d)")
+    if fails > 0 || r != 1 {
+        exit(1)
+    }
+    println("PASS")
+}

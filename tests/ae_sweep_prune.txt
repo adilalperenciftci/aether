@@ -331,3 +331,5 @@ tests/integration/crypto_random_failure/
 tests/integration/crypto_tls13_mtls_signature/
 # #3382: probe.ae links probe_shim.c (aether.toml); test_key_wipe.sh builds and runs it.
 tests/integration/crypto_key_wipe/
+# #3398: probe.ae links shim.c (aether.toml); test_pointer_store_published.sh builds and runs it.
+tests/integration/pointer_store_published/
