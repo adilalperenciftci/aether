@@ -119,6 +119,7 @@ int http_request_set_timeout_ns_raw(HttpClientRequest* r, int64_t ns) { (void)r;
 int http_request_set_follow_redirects_raw(HttpClientRequest* r, int n) { (void)r; (void)n; return -1; }
 int http_request_set_insecure_raw(HttpClientRequest* r, int on) { (void)r; (void)on; return -1; }
 int http_request_set_cafile_raw(HttpClientRequest* r, const char* p) { (void)r; (void)p; return -1; }
+int http_request_set_partial_chain_raw(HttpClientRequest* r, int on) { (void)r; (void)on; return -1; }
 int http_request_set_tls_backend_raw(HttpClientRequest* r, const char* n) { (void)r; (void)n; return -1; }
 int http_request_use_env_proxy_raw(HttpClientRequest* r, int on) { (void)r; (void)on; return -1; }
 int http_request_use_http_proxy_raw(HttpClientRequest* r, const char* u) { (void)r; (void)u; return -1; }
@@ -205,7 +206,9 @@ void http_client_pool_size_for_proxy(void) {}
  * connection or a forward-proxy CONNECT tunnel -- http_dial completes the
  * tunnel before calling this, so proxying needs no separate path.
  *
- * verify_mode: 0 = full verification, 1 = skip it (set_insecure).
+ * verify_mode: a bit set. 0 = full verification; 1 = skip it (set_insecure);
+ * 2 = any certificate in the trust store ends a path, not only a self-signed
+ * root (set_partial_chain, #3311).
  * cafile: a pinned CA bundle path (set_cafile), or NULL for the default store.
  * Returns an opaque connection, or NULL on failure. */
 AETHER_WEAK void* aether_pure_tls_client_connect(int fd, const char* host,
@@ -853,11 +856,12 @@ static int64_t http_now_ms(void) { return (int64_t)http_clock_ms(); }
 /* Everything that makes two connections non-interchangeable: the origin, the
  * endpoint actually dialled (proxy or origin), TLS and which backend carries
  * it (`use_tls` is 0 plain, 1 OpenSSL, 2 pure-Aether), and the verification the
- * caller asked for. A connection opened with a pinned CA or with verification
- * off must never be handed to a request that did not ask for that. */
+ * caller asked for (`verify`: http_req_verify_mode's bits). A connection
+ * opened with a pinned CA, with verification off or with partial chains
+ * trusted must never be handed to a request that did not ask for that. */
 static void http_pool_key(char* out, size_t n, const char* host, int port,
                           int use_tls, const char* dial_host, int dial_port,
-                          int insecure, const char* cafile) {
+                          int verify, const char* cafile) {
     const char* h  = host      ? host      : "";
     const char* dh = dial_host ? dial_host : "";
     const char* ca = cafile    ? cafile    : "";
@@ -870,7 +874,7 @@ static void http_pool_key(char* out, size_t n, const char* host, int port,
     if (port < 0 || dial_port < 0 || hl + dhl + cal + 48 > n) {
         snprintf(out, n, "%s:%d|%s:%d|%d|%d|%s",
                  h, port, dh, dial_port,
-                 use_tls, insecure ? 1 : 0, ca);
+                 use_tls, verify & 3, ca);
         return;
     }
 
@@ -885,7 +889,7 @@ static void http_pool_key(char* out, size_t n, const char* host, int port,
     *p++ = '|';
     *p++ = (char)('0' + (use_tls >= 0 && use_tls <= 9 ? use_tls : 1));
     *p++ = '|';
-    *p++ = insecure ? '1' : '0';
+    *p++ = (char)('0' + (verify & 3));
     *p++ = '|';
     memcpy(p, ca, cal); p += cal;
     *p = '\0';
@@ -1357,6 +1361,11 @@ struct HttpClientRequest {
                           * verification on. Applied per-connection via a
                           * per-SSL X509_STORE, never on the shared SSL_CTX
                           * (#1107). */
+    int   partial_chain; /* 1: any certificate in the trust store (the system
+                          * one, or set_cafile's) ends a path, not only a
+                          * self-signed root: OpenSSL's X509_V_FLAG_PARTIAL_CHAIN
+                          * and the pure client's TRUST_PARTIAL_CHAIN (#3311).
+                          * Off by default; per-SSL, never on a shared CTX. */
     int   stream;        /* 0 = buffer the whole body (default); 1 = streaming:
                           * read only the header block and hand the open
                           * transport to an HttpStream for incremental reads (#1004). */
@@ -1583,6 +1592,28 @@ int http_request_set_insecure_raw(HttpClientRequest* req, int on) {
     if (!req) return -1;
     req->insecure = on ? 1 : 0;
     return 0;
+}
+
+/* Trust partial chains for THIS request (#3311): any certificate in the trust
+ * store, the system one or set_cafile's, ends a path, not only a self-signed
+ * root. For a deployment that distributes an intermediate CA alone (a private
+ * PKI that hands out the issuing CA, or pinning one CA below a public root).
+ * Peer and hostname verification stay on, and a trusted certificate that is
+ * not a root must still be a CA. Both backends: OpenSSL's
+ * X509_V_FLAG_PARTIAL_CHAIN, set per SSL, and the pure client's
+ * TRUST_PARTIAL_CHAIN. `on` non-zero enables it; 0 (the default) does not. */
+int http_request_set_partial_chain_raw(HttpClientRequest* req, int on) {
+    if (!req) return -1;
+    req->partial_chain = on ? 1 : 0;
+    return 0;
+}
+
+/* The verification a request asked for, as the bridge's verify_mode bit set
+ * (1 = skip, 2 = partial chains). It is part of a pooled connection's
+ * identity as well. */
+static int http_req_verify_mode(const HttpClientRequest* req) {
+    if (!req) return 0;
+    return (req->insecure ? 1 : 0) | (req->partial_chain ? 2 : 0);
 }
 
 /* Pin a custom CA for THIS request: verify the peer certificate against the PEM
@@ -2537,7 +2568,7 @@ static int http_dial(HttpClientRequest* req, AetherAddrList* addrs,
         }
         aether_pure_tls_client_set_error(NULL);
         void* pc = pt_client_connect(sockfd, host,
-                                     req && req->insecure ? 1 : 0,
+                                     http_req_verify_mode(req),
                                      req ? req->cafile : NULL);
         if (!pc) {
             /* Not close(sockfd): the descriptor was handed over, and the pure
@@ -2652,6 +2683,11 @@ static int http_dial(HttpClientRequest* req, AetherAddrList* addrs,
             // cover the presented cert.
             X509_VERIFY_PARAM* vpm = SSL_get0_param(ssl);
             X509_VERIFY_PARAM_set_hostflags(vpm, AETHER_HOSTFLAGS);
+            // set_partial_chain (#3311): any trusted certificate ends a
+            // path, as on the pure backend; this SSL's param only.
+            if (req->partial_chain) {
+                X509_VERIFY_PARAM_set_flags(vpm, X509_V_FLAG_PARTIAL_CHAIN);
+            }
             struct in_addr in4;
             struct in6_addr in6;
             if (inet_pton(AF_INET, host, &in4) == 1 ||
@@ -3633,7 +3669,7 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
      * that asked for the pure client, or the reverse. */
     int tls_kind = use_tls ? (http_client_use_pure_tls(req) ? 2 : 1) : 0;
     http_pool_key(pool_key, sizeof(pool_key), host, port, tls_kind,
-                  dial_host, dial_port, req->insecure, req->cafile);
+                  dial_host, dial_port, http_req_verify_mode(req), req->cafile);
     /* A streaming response hands the transport to the caller, who may abandon
      * it mid-body, so those connections are never pooled in either direction.
      * A caller who set their own Connection header gets exactly that, and a

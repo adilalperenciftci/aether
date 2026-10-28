@@ -283,6 +283,11 @@ int http_request_set_insecure_raw(HttpClientRequest* req, int on);
 // verification ON. Strictly stronger than set_insecure. Per-connection (never
 // touches the shared SSL_CTX); NULL/empty clears the pin. `path` is copied.
 int http_request_set_cafile_raw(HttpClientRequest* req, const char* path);
+// Trust partial chains for THIS request (#3311): any certificate in the trust
+// store ends a path, not only a self-signed root (an intermediate CA pinned
+// alone). Verification stays on; a trusted non-root must still be a CA. Both
+// backends. 0 on success, -1 null request.
+int http_request_set_partial_chain_raw(HttpClientRequest* req, int on);
 /* "aether" / "openssl" / "" (default) for this request (#1298). 0 on success;
  * -1 null request, -2 unknown name, -3 no OpenSSL in this build, -4 the
  * pure-Aether client is not linked. */

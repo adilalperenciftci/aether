@@ -168,6 +168,7 @@ tests/integration/http_server_sse/
 tests/integration/https_pure_tls_vertical/
 tests/integration/https_client_pure_tls/
 tests/integration/https_windows_trust/
+tests/integration/https_partial_chain/
 tests/integration/http_server_tls/
 tests/integration/http_server_websocket/
 tests/integration/http_ipv6/

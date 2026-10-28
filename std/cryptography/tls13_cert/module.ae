@@ -2623,7 +2623,9 @@ const PURPOSE_SERVER = 1
 const PURPOSE_CLIENT = 2
 
 // OR'd into validate_chain's `purpose`: any trusted certificate may end a
-// path, as with OpenSSL's X509_V_FLAG_PARTIAL_CHAIN (set_partial_chain, #3311).
+// path, not only a self-signed root, as with OpenSSL's
+// X509_V_FLAG_PARTIAL_CHAIN (set_partial_chain, #3311). Off by default on
+// both backends.
 const TRUST_PARTIAL_CHAIN = 256
 
 const CHAIN_NO_PATH = 1
@@ -2660,7 +2662,8 @@ struct ChainCtx {
     intermediates: ptr // std.list of *LeafCert, or null
     anchors: ptr // std.list of *LeafCert
     path: ptr // std.list of *LeafCert: leaf, intermediates, anchor
-    purpose: int
+    purpose: int // PURPOSE_SERVER or PURPOSE_CLIENT
+    partial: int // 1: any anchor ends a path (TRUST_PARTIAL_CHAIN)
     max_depth: int
     err: int // the most specific CHAIN_* failure seen
     budget: int // signature verifications left (path building is bounded)
@@ -2687,6 +2690,12 @@ fn chain_error(code: int) -> string {
 
 fn chain_note(cx: *ChainCtx, code: int) {
     if cx.err == CHAIN_NO_PATH || cx.err == CHAIN_TOO_LONG { cx.err = code }
+//   - only a self-signed root ends a path (#3310), unless `purpose` has
+//     TRUST_PARTIAL_CHAIN or'd in (#3311, OpenSSL's
+//     X509_V_FLAG_PARTIAL_CHAIN): then any anchor ends one, an anchor that
+//     is not a self-signed root held to the rules of an intermediate (a v3
+//     CA with keyCertSign), and a leaf that is itself an anchor is trusted
+//     as it stands whether self-signed or not;
 }
 
 // 1 if `at` is within c's validity period (both times well formed).
@@ -2699,8 +2708,9 @@ fn cert_time_ok(c: *LeafCert, at: string) -> int {
     if string_compare(at, na) > 0 { return 0 }
     return 1
 }
-
 fn ext_code(c: *LeafCert) -> int {
+// The purpose bits of `purpose`, without the options or'd in.
+const PURPOSE_MASK = 3
     if (c.ext_bits & EXT_UNKNOWN_CRITICAL) != 0 { return CHAIN_CRITICAL }
     if (c.ext_bits & (EXT_DUPLICATE | EXT_MALFORMED | EXT_SAN_EMPTY)) != 0 { return CHAIN_BAD_EXT }
     if c.key_kind == KEY_NONE { return CHAIN_BAD_KEY }
@@ -3052,13 +3062,18 @@ fn chain_dfs(cx: *ChainCtx, cert: *LeafCert, at: string, depth: int) -> int {
     i = 0
     while i < na {
         a = list.at(cx.anchors, i) as *LeafCert
-        // Only a self-signed root ends a path (#3310).
-        if a != null && (a.ext_bits & EXT_SELF_SIGNED) == 0 {
+        // Only a self-signed root ends a path (#3310), unless the caller
+        // trusts partial chains (#3311). An anchor that is not a root is
+        // then held to an intermediate's rules: trusting it does not make a
+        // certificate that is not a CA one.
+        root = 0
+        if a != null && (a.ext_bits & EXT_SELF_SIGNED) != 0 { root = 1 }
+        if a != null && root == 0 && cx.partial == 0 {
             if dn_equal(bytes.view(cert.issuer)[0..cert.issuer_len], bytes.view(a.subject)[0..a.subject_len]) == 1 {
                 chain_note(cx, CHAIN_ANCHOR_NOT_ROOT)
             }
         } else if a != null && issued_by(cx, cert, a) == 1 {
-            code = issuer_code(a, at, cx.purpose, 1)
+            code = issuer_code(a, at, cx.purpose, root)
             if code == 0 {
                 list.add(cx.path, a)
                 code = path_code(cx)
@@ -3116,25 +3131,27 @@ fn pinned_anchor(anchors: ptr, c: *LeafCert) -> int {
 // "" when there is a valid path from `leaf` through `intermediates` (a
 // std.list of *LeafCert, or null) to one of `anchors` at `at` (a
 // "YYYYMMDDHHMMSS" key, "" for now) for `purpose` (PURPOSE_SERVER or
-// PURPOSE_CLIENT), with at most `max_depth` intermediates that are not
-// self-issued (negative: MAX_CHAIN_DEPTH); else why not. The rules are in
-// the comment above PURPOSE_SERVER.
+// PURPOSE_CLIENT, with TRUST_PARTIAL_CHAIN or'd in to let any anchor end a
+// path), with at most `max_depth` intermediates that are not self-issued
+// (negative: MAX_CHAIN_DEPTH); else why not. The rules are in the comment
+// above PURPOSE_SERVER.
 validate_chain(leaf: *LeafCert, intermediates: ptr, anchors: ptr, at: string, purpose: int, max_depth: int) -> string {
     if anchors == null || list_size(anchors) == 0 { return "no trust anchors" }
     at_key = at
     if string.equals(at_key, "") == 1 { at_key = now_key() }
     e = ext_code(leaf)
     if e != 0 { return chain_error(e) }
-    if purpose_ok(leaf, purpose) == 0 { return chain_error(CHAIN_PURPOSE) }
+    if purpose_ok(leaf, want) == 0 { return chain_error(CHAIN_PURPOSE) }
     if leaf.has_key_usage == 1 && (leaf.key_usage & KU_DIGITAL_SIGNATURE) == 0 { return chain_error(CHAIN_LEAF_KEY_USAGE) }
     if cert_time_ok(leaf, at_key) == 0 { return chain_error(CHAIN_VALIDITY) }
     // A self-signed leaf that is itself one of the anchors (a pinned
     // certificate) is trusted as it stands, as OpenSSL trusts it: it has no
-    // issuer to check, so basicConstraints cA FALSE does not refuse it.
-    if (leaf.ext_bits & EXT_SELF_SIGNED) != 0 && pinned_anchor(anchors, leaf) == 1 { return "" }
+    // issuer to check, so basicConstraints cA FALSE does not refuse it. With
+    // partial chains any leaf that is an anchor is (#3311).
+    if ((leaf.ext_bits & EXT_SELF_SIGNED) != 0 || partial == 1) && pinned_anchor(anchors, leaf) == 1 { return "" }
     md = max_depth
     if md < 0 { md = MAX_CHAIN_DEPTH }
-    cx = ChainCtx { intermediates: intermediates, anchors: anchors, path: list_new(), purpose: purpose, max_depth: md, err: CHAIN_NO_PATH, budget: CHAIN_SIG_BUDGET, nc_budget: CHAIN_NC_BUDGET }
+    cx = ChainCtx { intermediates: intermediates, anchors: anchors, path: list_new(), purpose: want, partial: partial, max_depth: md, err: CHAIN_NO_PATH, budget: CHAIN_SIG_BUDGET, nc_budget: CHAIN_NC_BUDGET }
     list.add(cx.path, leaf)
     found = chain_dfs(&cx, leaf, at_key, 0)
     list_free(cx.path)
@@ -3197,6 +3214,9 @@ import std.cryptography.pem
 // carry an `openssl x509 -text` dump after the PEM).
 //
 // Returns (list, "") when at least one certificate loaded, or (null, err) when
+    want = purpose & PURPOSE_MASK
+    partial = 0
+    if (purpose & TRUST_PARTIAL_CHAIN) != 0 { partial = 1 }
 // the path cannot be read or yields no certificate at all -- an empty store
 // would only fail later, at chain building, with a message about the server's
 // certificate rather than about the missing store.

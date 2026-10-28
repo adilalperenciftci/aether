@@ -55,7 +55,7 @@ import std.string
 
 exports(
     request, set_header, set_body, set_timeout, set_follow_redirects, set_insecure,
-    set_cafile, set_tls_backend, set_stream, use_env_proxy, use_http_proxy, ignore_http_proxy, request_free,
+    set_cafile, set_partial_chain, set_tls_backend, set_stream, use_env_proxy, use_http_proxy, ignore_http_proxy, request_free,
     send_request, send_stream,
     response_status, response_body, response_body_bytes, response_error, response_redirect_error,
     response_is_stream, response_read,
@@ -78,6 +78,7 @@ extern http_request_set_timeout_ns_raw(req: ptr, timeout: Duration) -> int
 extern http_request_set_follow_redirects_raw(req: ptr, max_hops: int) -> int
 extern http_request_set_insecure_raw(req: ptr, on: int) -> int
 extern http_request_set_cafile_raw(req: ptr, path: string) -> int
+extern http_request_set_partial_chain_raw(req: ptr, on: int) -> int
 extern http_request_set_tls_backend_raw(req: ptr, name: string) -> int
 extern http_request_set_stream_raw(req: ptr, on: int) -> int
 extern http_request_use_env_proxy_raw(req: ptr, on: int) -> int
@@ -195,6 +196,20 @@ set_insecure(req: ptr, on: int) -> string {
 set_cafile(req: ptr, path: string) -> string {
     rc = http_request_set_cafile_raw(req, path)
     if rc != 0 { return "set_cafile failed (null req)" }
+    return ""
+}
+
+// Trust partial chains for this request (#3311): any certificate in the trust
+// store (the system one, or set_cafile's) ends a certification path, not only
+// a self-signed root. For a CA file holding an intermediate CA alone: a
+// private PKI that hands out its issuing CA, or pinning one CA below a public
+// root. Peer and hostname verification stay on, and a trusted certificate
+// that is not a root must still be a CA (v3, cA, keyCertSign). Off by
+// default, as on curl and OpenSSL; the same on both TLS backends (OpenSSL's
+// X509_V_FLAG_PARTIAL_CHAIN). Pooled connections are kept apart by it.
+set_partial_chain(req: ptr, on: int) -> string {
+    rc = http_request_set_partial_chain_raw(req, on)
+    if rc != 0 { return "set_partial_chain failed (null req)" }
     return ""
 }
 
