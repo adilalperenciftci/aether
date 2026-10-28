@@ -535,7 +535,7 @@ static void relay_step(void* self) {
         atomic_fetch_add_explicit(&schedulers[a->assigned_core].messages_processed, 1,
                                   memory_order_relaxed);
         Message fwd = {1, 0, 0, NULL, {NULL, 0, 0}, NULL};
-        scheduler_send_local(a->target, fwd);   // steps the target right here
+        scheduler_send_local(a->target, fwd);   // the core steps the target (#3246)
         atomic_store(&a->stepped, 1);
         while (!atomic_load(a->gate)) sleep_ms(1);
         // Through the core's queue, not inline: the core steps echo, which
@@ -589,7 +589,9 @@ void test_scheduler_actor_thread_holds_released_actor(void) {
     ASSERT_NOT_NULL(echo);
     atomic_init(&echo->count, 0);
 
-    atomic_int gate;
+    // Static: the relay's thread reads it until its step ends, which may
+    // be after a failed assertion has returned from this function.
+    static atomic_int gate;
     atomic_init(&gate, 0);
     RelayActor* relay = (RelayActor*)scheduler_spawn_actor(-1, relay_step, sizeof(RelayActor));
     ASSERT_NOT_NULL(relay);
@@ -607,7 +609,10 @@ void test_scheduler_actor_thread_holds_released_actor(void) {
     scheduler_send_remote((ActorBase*)relay, msg, -1);
     for (int w = 0; w < 5000 && !atomic_load(&relay->stepped); w++) sleep_ms(1);
     ASSERT_EQ(1, atomic_load(&relay->stepped));
-    ASSERT_EQ(1, atomic_load(&g_churn_handled));   // the target ran, on the relay's thread
+    // The relay's thread sends as a foreign thread (#3246), so the core runs
+    // the target, after the send: waited for, not read at once.
+    for (int w = 0; w < 5000 && atomic_load(&g_churn_handled) < 1; w++) sleep_ms(1);
+    ASSERT_EQ(1, atomic_load(&g_churn_handled));
     ASSERT_EQ(1, scheduler_released_actors_pending());
 
     // Further releases move the epoch on; the core publishes each move and
