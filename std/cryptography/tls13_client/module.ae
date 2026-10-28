@@ -754,9 +754,10 @@ fn connect_ex(host: string, port: int, x25519_priv: ptr, client_cert: ptr, clien
 //               drive this over a forward-proxy CONNECT tunnel (#1849): the
 //               tunnel is established in C, and the handshake then runs
 //               end-to-end against `host` through it.
-//   insecure    1 skips certificate verification entirely. Present for parity
-//               with the OpenSSL backend's set_insecure; it is exactly as
-//               dangerous here as there.
+//   insecure    a bit set (the bridge's verify_mode): 1 skips certificate
+//               verification entirely, for parity with the OpenSSL backend's
+//               set_insecure, exactly as dangerous here as there; 2 lets any
+//               trusted certificate end a path (set_partial_chain, #3311).
 //   cafile      a PEM bundle to trust INSTEAD of the system store (parity with
 //               set_cafile), or "" for the normal resolution.
 fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, client_cert_len: int, client_key: ptr, adopt_sock: @keep ptr, insecure: int, cafile: string) -> (ptr, string) {
@@ -962,7 +963,8 @@ connect_pq(host: string, port: int) -> (ptr, string) {
 // cleanup; on success ownership of sock+rio moves into the returned conn.
 // Returns (conn, "") or (null, err). Does NOT free `shared`, `tr`, sh/shrec,
 // or the ClientHello — the caller does.
-// insecure: 1 skips server authentication entirely (set_insecure parity).
+// insecure: the verify_mode bits (connect_full): 1 skips server
+// authentication entirely (set_insecure parity), 2 asks for partial chains.
 // cafile:   a PEM bundle to trust instead of the system store, or "".
 fn run_handshake_tail(sock: @keep ptr, rio: @keep ptr, tr: ptr, host: string, shared: byte[], cipher_suite: int, client_cert: ptr, client_cert_len: int, client_key: ptr, insecure: int, cafile: string, offered: int) -> (ptr, string) {
     rec_aead, rec_key_len, hash_algo, hash_len, suite_err = suite_params(cipher_suite)
@@ -1012,7 +1014,7 @@ fn run_handshake_tail(sock: @keep ptr, rio: @keep ptr, tr: ptr, host: string, sh
     result_err = ferr
     if string.equals(ferr, "") == 1 {
         auth_err = ""
-        if insecure == 1 {
+        if (insecure & 1) != 0 {
             // set_insecure parity: no chain, no validity window, no hostname
             // pin. The connection is encrypted but UNAUTHENTICATED, so an
             // active attacker is undetectable -- exactly as dangerous as the
@@ -1030,7 +1032,9 @@ fn run_handshake_tail(sock: @keep ptr, rio: @keep ptr, tr: ptr, host: string, sh
                     auth_err = "cannot load trust store: ${tsErr}"
                 }
             } else {
-                auth_err = authenticate_server(fl, fllen, th_through_cert, hash_len, host, anchors)
+                purpose = tls13_cert.PURPOSE_SERVER
+                if (insecure & 2) != 0 { purpose = purpose | tls13_cert.TRUST_PARTIAL_CHAIN }
+                auth_err = authenticate_server(fl, fllen, th_through_cert, hash_len, host, anchors, purpose)
                 tls13_cert.free_anchors(anchors)
             }
         }
@@ -1671,7 +1675,6 @@ conn_recv(conn: ptr) -> (ptr, int, string) {
         }
     }
 }
-
 
 close_conn(conn: ptr) {
     c = conn as *ClientConn
@@ -2398,7 +2401,7 @@ fn add_cert_dir_list(anchors: ptr, list: string) -> string {
     return first_err
 }
 
-fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host: string, anchors: ptr) -> string {
+fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host: string, anchors: ptr, purpose: int) -> string {
     // The full parsed leaf is kept alive for the whole function so that, after
     // the CertificateVerify signature check, we can run RFC 5280/6125 policy
     // (validity window, hostname/SAN, chain to a trusted anchor) over it.
@@ -2539,7 +2542,7 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host:
                     // validity, basicConstraints / keyUsage / pathLen on the
                     // issuers, extendedKeyUsage, critical extensions and name
                     // constraints, searching every candidate path.
-                    cerr = tls13_cert.validate_chain(&leaf, intermediates, anchors, "", tls13_cert.PURPOSE_SERVER, -1)
+                    cerr = tls13_cert.validate_chain(&leaf, intermediates, anchors, "", purpose, -1)
                     if string.equals(cerr, "") != 1 { err = cerr }
                     else {
                         // Revocation (RFC 6960): now that the chain is trusted,
@@ -2658,7 +2661,7 @@ verify_flight_auth(fl: ptr, flen: int, th_thru_cert: ptr) -> string {
     // Signature-only mode (anchors == null): checks Certificate +
     // CertificateVerify but not the RFC 5280/6125 policy. connect() enforces
     // the full policy via a loaded trust store.
-    return authenticate_server(fl, flen, th_thru_cert, 32, "", null)
+    return authenticate_server(fl, flen, th_thru_cert, 32, "", null, tls13_cert.PURPOSE_SERVER)
 }
 
 // ---- @c_callback bridge for std.http.client (#1849) -------------------------

@@ -66,7 +66,7 @@ exports(
     SCHEME_ECDSA_P256_SHA256, SCHEME_ECDSA_P384_SHA384, SCHEME_ED25519, SCHEME_RSA_PSS_RSAE_SHA256,
     check_validity, time_to_key, check_hostname,
     chain_verify, chain_verify_path, verify_cert_signature, find_issuer_cert,
-    validate_chain, check_validity_at, PURPOSE_SERVER, PURPOSE_CLIENT,
+    validate_chain, check_validity_at, PURPOSE_SERVER, PURPOSE_CLIENT, TRUST_PARTIAL_CHAIN,
     trust_store_load, trust_store_add, trust_store_add_pem, free_anchors,
     parse_ocsp_status, verify_ocsp_signature, verify_ocsp_signature_at, OCSP_GOOD, OCSP_REVOKED, OCSP_UNKNOWN, OCSP_ERROR
 )
@@ -2621,6 +2621,10 @@ const MAX_CHAIN_DEPTH = 8
 
 const PURPOSE_SERVER = 1
 const PURPOSE_CLIENT = 2
+
+// OR'd into validate_chain's `purpose`: any trusted certificate may end a
+// path, as with OpenSSL's X509_V_FLAG_PARTIAL_CHAIN (set_partial_chain, #3311).
+const TRUST_PARTIAL_CHAIN = 256
 
 const CHAIN_NO_PATH = 1
 const CHAIN_TOO_LONG = 2
