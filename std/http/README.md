@@ -101,15 +101,17 @@ knowing before debugging a handshake:
 - the server key is **ECDSA P-256, P-384 or P-521, Ed25519, or RSA** of 2048
   to 16384 bits (PKCS#8, SEC1 or PKCS#1 PEM, not encrypted), and
   CertificateVerify is signed with the key's own scheme (RSA as
-  rsa_pss_rsae_sha256): a client that offers none of the key's schemes gets
-  `handshake_failure` (#3326). `server_set_tls` checks the certificate and key
-  when the server is set up and says why it cannot serve them, as the OpenSSL
-  backend does (#3328)
+  rsa_pss_rsae_sha256, or rsa_pss_rsae_sha384 or rsa_pss_rsae_sha512 for a
+  client that offers only those, #3357): a client that offers none of the
+  key's schemes gets `handshake_failure` (#3326). `server_set_tls` checks the
+  certificate and key when the server is set up and says why it cannot serve
+  them, as the OpenSSL backend does (#3328)
 - key exchange is **X25519MLKEM768** (the post-quantum hybrid, preferred
-  when the client offers it) **or X25519**
-- **HelloRetryRequest is not implemented**, so a client offering only other
-  groups (a P-256-only client, say) is refused with a `handshake_failure`
-  alert rather than renegotiated
+  when the client offers it), **X25519 or secp256r1** (P-256, which RFC 8446
+  9.1 requires, #3357); a client that names one of them in supported_groups
+  but sends no key share for it gets a **HelloRetryRequest** asking for that
+  share (#3325), and a client offering none of them (a P-384-only client,
+  say) is refused with a `handshake_failure` alert
 
 The client side is the mirror, and is now wired the same way (#1849):
 `std.http.client` does HTTPS through OpenSSL where it is compiled in, and
