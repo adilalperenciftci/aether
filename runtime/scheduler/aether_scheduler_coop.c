@@ -728,9 +728,36 @@ int aether_scheduler_poll(int max_per_actor) {
 // Ask/Reply — simplified synchronous version
 // ============================================================================
 
+/* An ask that ends before its message is handled (#3330): the message, still
+ * in the target's mailbox or inbox, points at the asker's slot, which lives
+ * on the asker's stack and is gone once the ask returns. Its handler would
+ * write the reply, or the step's end its failure, into whatever is there
+ * then, another ask's slot as like as not. The message stays, as a plain
+ * send: it is handled, and its reply goes nowhere, as a late reply does
+ * with threads. One step takes one message, so a message the asker no
+ * longer waits for is either handled or in one of these two places. */
+static void coop_forget_slot(ActorBase* target, ActorReplySlot* slot) {
+    Mailbox* mb = &target->mailbox;
+    int n = atomic_load_explicit(&mb->count, memory_order_relaxed);
+    for (int i = 0; i < n; i++) {
+        Message* m = &mb->messages[(mb->head + i) & MAILBOX_MASK];
+        if (m->_reply_slot == slot) { m->_reply_slot = NULL; return; }
+    }
+    ActorInbox* ib = atomic_load_explicit(&target->inbox, memory_order_relaxed);
+    if (!ib) return;
+    actor_inbox_lock(ib);
+    for (int i = 0; i < ib->ring_count; i++) {
+        Message* m = &ib->ring[(ib->head + i) % AETHER_INBOX_RING];
+        if (m->_reply_slot == slot) { m->_reply_slot = NULL; actor_inbox_unlock(ib); return; }
+    }
+    for (ActorInboxNode* node = ib->first; node; node = node->next) {
+        if (node->msg._reply_slot == slot) { node->msg._reply_slot = NULL; break; }
+    }
+    actor_inbox_unlock(ib);
+}
+
 void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg_size,
                                    int timeout_ms, int* status) {
-    (void)timeout_ms;
     int why_dummy;
     if (!status) status = &why_dummy;
     *status = AETHER_ASK_DEAD;
@@ -745,6 +772,11 @@ void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg
     slot.reply_ready = 0;
     slot.timed_out = 0;
     atomic_store(&slot.refcount, 1);
+    // The asker's timeout (#3330): one thread runs the handler inside the
+    // polls below, so a handler slower than the timeout cannot be left; its
+    // reply, past the deadline, is late, and the ask has timed out, as with
+    // threads, where the asker stops waiting at the deadline.
+    slot.deadline_ns = timeout_ms > 0 ? aether_now_ns() + (uint64_t)timeout_ms * 1000000ULL : 0;
 
     // Set pending reply slot
     g_pending_reply_slot = &slot;
@@ -767,14 +799,34 @@ void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg
     coop_send(target, msg);
     g_pending_reply_slot = NULL;
 
-    // Process messages until reply is ready, or none can come. An asker
-    // killed meanwhile still gets its answer here: the slot is on this stack
-    // and the message in the target's mailbox points to it, and one thread
-    // runs both, so the answer comes within these polls (#2974).
-    int max_rounds = 100000;
-    while (!slot.reply_ready && !slot.failed && max_rounds-- > 0) {
-        aether_scheduler_poll(1);
+    // Process messages until the reply is ready, the deadline passes, or none
+    // can come: a poll that handled nothing, with no countdown armed, leaves
+    // every mailbox as empty for the next one. The deadline is the only
+    // bound in time; a count of polls ended an ask behind a long queue
+    // before its timeout (#3330). With no timeout the wait is bounded as
+    // scheduler_wait's (100 s). An asker killed meanwhile still gets its
+    // answer, or its timeout, here: the slot is on this stack and the
+    // message in the target's mailbox points to it, and one thread runs
+    // both (#2974).
+    uint64_t give_up = slot.deadline_ns ? slot.deadline_ns
+                                        : aether_now_ns() + 100ULL * 1000000000ULL;
+    while (!slot.reply_ready && !slot.failed && !slot.timed_out) {
+        int handled = aether_scheduler_poll(1);
+        if (slot.reply_ready || slot.failed || slot.timed_out) break;
+        if (aether_now_ns() >= give_up) { slot.timed_out = 1; break; }
+        if (handled > 0) continue;
+        if (!coop_timeout_armed()) break;
+        // Nothing to handle while a countdown runs: wait for it as
+        // scheduler_wait does, a millisecond at a time.
+        #ifdef _WIN32
+        Sleep(1);
+        #elif !defined(__EMSCRIPTEN__)
+        usleep(1000);
+        #endif
     }
+    // Ended with its message maybe still queued (the deadline passed behind
+    // a slower handler): the message must not keep pointing at this stack.
+    if (!slot.reply_ready && !slot.failed) coop_forget_slot(target, &slot);
 
     if (slot.reply_ready) *status = AETHER_ASK_REPLIED;
     else if (slot.failed) *status = slot.failed;
@@ -793,6 +845,9 @@ void scheduler_reply_owned(ActorBase* self, void* data, size_t data_size,
     ActorReplySlot* slot = (ActorReplySlot*)g_current_reply_slot;
     g_current_reply_slot = NULL;   /* answered: the step's end has nothing to fail */
     int delivered = 0;
+    // A reply past the asker's deadline is late (#3330): the ask timed out.
+    if (slot && !slot->timed_out && slot->deadline_ns && aether_now_ns() > slot->deadline_ns)
+        slot->timed_out = 1;
     if (slot && !slot->timed_out) {
         slot->reply_data = malloc(data_size);
         if (slot->reply_data) {

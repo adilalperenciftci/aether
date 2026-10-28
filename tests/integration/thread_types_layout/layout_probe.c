@@ -43,6 +43,7 @@ int main(void) {
     AT(ActorReplySlot, mutex);
     AT(ActorReplySlot, cond);
     AT(ActorReplySlot, refcount);
+    AT(ActorReplySlot, deadline_ns);
     SIZE(Scheduler);
     AT(Scheduler, thread);
     AT(Scheduler, actor_table);

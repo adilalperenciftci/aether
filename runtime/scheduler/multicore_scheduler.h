@@ -46,6 +46,7 @@ typedef struct {
     pthread_mutex_t    mutex;        // protects reply_ready / timed_out / cond
     pthread_cond_t     cond;         // signalled by scheduler_reply()
     atomic_int         refcount;     // starts at 2 (asker + actor); freed when hits 0
+    uint64_t           deadline_ns;  // the cooperative ask's: a reply after it is late, 0 = none (#3330)
 } ActorReplySlot;
 
 // I/O readiness message — delivered to actor when the poller reports fd ready.

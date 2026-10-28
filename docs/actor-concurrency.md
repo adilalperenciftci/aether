@@ -388,6 +388,8 @@ In single-core mode, actors run cooperatively. The scheduler processes actors in
 
 Each step runs inside the same panic barrier the multi-core scheduler uses (`runtime/actors/aether_step_barrier.h`, #2974), so a panic in a handler ends that actor, not the program: its death is finalized on the spot (or when its handler returns, for a kill or a stop that came during it) and its watchers get a `Down`, as above. Where the target has no setjmp (wasi), a panic still ends the program, and watching a death is refused at compile time.
 
+An ask polls the actors until its reply comes, on the one thread. Its timeout holds as with threads (#3330): the polls stop at the deadline, and a handler slower than the timeout, which the poll cannot leave while it runs, has its reply discarded as late, so the ask ends with `"ask timed out after N ms"`. The deadline is the only bound: an ask behind a long queue gets its reply once the queue ahead of it is handled, as with threads. An ask whose message is still queued at its deadline leaves it there as a plain send: it is handled later and its reply goes nowhere. An ask nothing can answer (no actor has a message left and no receive timeout is armed) ends at once with the same reason.
+
 ## Multi-Core Runtime
 
 The multi-core scheduler uses core partitioning with locality-aware placement:

@@ -12,7 +12,10 @@ message Name {}
 message Boom {}
 message Never {}
 message Slow {}
+message Stall {}
 message Value { v: int }
+message Tick {}
+message Count {}
 
 extern exit(code: int)
 
@@ -36,6 +39,20 @@ actor Server {
             sleep(5300)
             reply Value { v: n }
         }
+        // Sent, not asked: holds what is queued behind it past a timeout.
+        Stall() -> {
+            sleep(5300)
+        }
+    }
+}
+
+// Handles a long queue before the ask that counts it.
+actor Tally {
+    state ticks = 0
+
+    receive {
+        Tick() -> { ticks = ticks + 1 }
+        Count() -> { reply Value { v: ticks } }
     }
 }
 
@@ -102,10 +119,34 @@ main() {
         nv == 0 && nerr == "the handler returned without replying")
     fails = fails + at_once("at once", never_ms)
 
+    // Behind a queue longer than the 100 000 polls the cooperative
+    // scheduler gave an ask: the reply comes, within the timeout (#3330).
+    tally = spawn(Tally())
+    queued = 120000
+    i = 0
+    while i < queued {
+        tally ! Tick {}
+        i = i + 1
+    }
+    qv, qerr = tally ? Count {}
+    fails = fails + check("behind ${queued} messages: (${queued}, \"\"), got (${qv}, \"${qerr}\")",
+        qv == queued && qerr == "")
+
     // A reply later than the timeout: the timeout, and its reason.
     sv, serr = live ? Slow {}
     fails = fails + check("too late: (0, \"ask timed out after 5000 ms\"), got (${sv}, \"${serr}\")",
         sv == 0 && serr == "ask timed out after 5000 ms")
+
+    // An ask still queued at its timeout, behind a slower handler: the
+    // timeout; its message is handled later, its reply going nowhere, and
+    // the next ask gets its own reply, not that one (#3330).
+    live ! Stall {}
+    pv, perr = live ? Get {}
+    fails = fails + check("queued past the timeout: (0, \"ask timed out after 5000 ms\"), got (${pv}, \"${perr}\")",
+        pv == 0 && perr == "ask timed out after 5000 ms")
+    nm, nerr2 = live ? Name {}
+    fails = fails + check("the next ask gets its own reply: (\"primary\", \"\"), got (\"${nm}\", \"${nerr2}\")",
+        nm == "primary" && nerr2 == "")
 
     if fails > 0 {
         println("FAIL: ${fails} case(s)")
