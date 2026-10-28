@@ -287,3 +287,11 @@ tests/integration/extern_fnptr_bare_function/
 tests/integration/local_named_after_called_function/
 # #3113: reject_*.ae must not compile and panic_shadowed.ae must panic; the driver checks each.
 tests/integration/array_index_checked/
+# #1298, #3311, #3326: the TLS peers, servers and probes take certificates,
+# ports and a shim from their drivers, which run them against each other.
+tests/integration/crypto_ct_valgrind/
+tests/integration/crypto_tls13_peer/
+tests/integration/https_openssl_policy/
+tests/integration/https_tls_backend_select/
+# #2955: inner.ae and outer.ae are libraries its C host loads one inside the other.
+tests/integration/sandbox_nested_libraries/
