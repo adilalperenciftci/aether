@@ -389,6 +389,13 @@ AETHER_WEAK int aether_pure_tls_server_recv(void* pure_conn, void* buf, int len)
     (void)pure_conn; (void)buf; (void)len;
     return -1;
 }
+/* What the pure server holds that a read returns without waiting on the
+ * socket (#3384): the bytes of a record a recv could not hand over whole,
+ * or 1 for a whole record already read. poll(2) sees neither. */
+AETHER_WEAK int aether_pure_tls_server_pending(void* pure_conn) {
+    (void)pure_conn;
+    return 0;
+}
 /* 1 when std.cryptography.tls13_server is linked (its @c_callback overrides
  * this), so server_set_tls_backend("aether") can refuse up front instead of
  * every handshake failing (#1298). */
@@ -427,6 +434,7 @@ AETHER_WEAK void aether_pure_tls_server_free_creds(void* creds) {
 typedef void* (*pt_server_accept_fn)(int, void*);
 typedef int   (*pt_server_send_fn)(void*, const void*, int);
 typedef int   (*pt_server_recv_fn)(void*, void*, int);
+typedef int   (*pt_server_pending_fn)(void*);
 typedef void  (*pt_server_close_fn)(void*);
 typedef int   (*pt_server_available_fn)(void);
 static int pt_server_available(void) {
@@ -444,6 +452,10 @@ static int pt_server_send(void* c, const void* buf, int len) {
 static int pt_server_recv(void* c, void* buf, int len) {
     pt_server_recv_fn f = (pt_server_recv_fn)aether_callback_lookup("aether_pure_tls_server_recv");
     return f ? f(c, buf, len) : aether_pure_tls_server_recv(c, buf, len);
+}
+static int pt_server_pending(void* c) {
+    pt_server_pending_fn f = (pt_server_pending_fn)aether_callback_lookup("aether_pure_tls_server_pending");
+    return f ? f(c) : aether_pure_tls_server_pending(c);
 }
 static void pt_server_close(void* c) {
     pt_server_close_fn f = (pt_server_close_fn)aether_callback_lookup("aether_pure_tls_server_close");
@@ -4378,11 +4390,9 @@ static int ws_ready_now(HttpConn* conn, int timeout_ms) {
 #ifdef AETHER_HAS_OPENSSL
     if (conn->ssl && SSL_pending((SSL*)conn->ssl) > 0) return 1;
 #endif
-    /* The pure-Aether TLS backend buffers per record too, but exposes no
-     * pending count, so we cannot answer "ready" for it without consuming.
-     * Report not-ready and let the caller's timeout drive; a bounded recv
-     * still makes progress because the socket wakes when the next record
-     * lands. */
+    /* The pure-Aether TLS backend buffers too: what it has decrypted and
+     * not handed over, and whole records it has read (#3384). */
+    if (conn->pure_tls && pt_server_pending(conn->pure_tls) > 0) return 1;
 
     if (conn->fd < 0) return -1;
 
@@ -6775,6 +6785,9 @@ static int conn_next_request_imminent(HttpConn* conn) {
 #ifdef AETHER_HAS_OPENSSL
     if (conn->ssl && SSL_pending((SSL*)conn->ssl) > 0) return 1;
 #endif
+    /* The pure server's own buffered plaintext and records, as SSL_pending
+     * (#3384). */
+    if (conn->pure_tls && pt_server_pending(conn->pure_tls) > 0) return 1;
 
 #if !defined(_WIN32)
     /* Take the next request rather than asking whether one is there.
@@ -6791,8 +6804,9 @@ static int conn_next_request_imminent(HttpConn* conn) {
      * MSG_DONTWAIT rather than switching the socket to non-blocking: the flag
      * is free, where fcntl would cost two more syscalls than the poll it
      * replaces. TLS keeps the poll — SSL_read against a socket the library
-     * believes is blocking is a different contract. */
-    if (!conn->ssl && conn_buf_ensure(conn, HTTP_CONN_BUF_CAP) == 0) {
+     * believes is blocking is a different contract, and a pure-TLS socket
+     * carries records, which a plain recv would take as plaintext. */
+    if (!conn->ssl && !conn->pure_tls && conn_buf_ensure(conn, HTTP_CONN_BUF_CAP) == 0) {
         int space = conn->buf_cap - conn->write_pos - 1;
         if (space > 0) {
             ssize_t n = recv(conn->fd, conn->buf + conn->write_pos,

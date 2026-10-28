@@ -1,0 +1,73 @@
+// A pipelined pair over the pure TLS client, for
+// test_https_pure_server_keys.sh (#3381, #3384): to localhost PORT, trusting
+// CAFILE, one record with the headers of a POST to /len with a 10-byte
+// body, then one record with that body and a whole GET of / behind it.
+// Reads until both answers came or the connection ends, and prints each
+// response's body marker it saw: "GOT len-10 keys-ok" for both. The
+// test's watchdog ends it when an answer never comes.
+
+import std.os
+import std.tcp
+import std.bytes
+import std.string
+import std.cryptography.tls13_client
+
+extern string_char_at(str: string, index: int) -> int
+
+fn text_bytes(s: string) -> ptr {
+    n = string.length(s)
+    b = bytes.new(n)
+    i = 0
+    while i < n {
+        bytes.set(b, i, string_char_at(s, i))
+        i = i + 1
+    }
+    return b
+}
+
+fn send_text(conn: ptr, s: string) -> string {
+    b = text_bytes(s)
+    err = tls13_client.conn_send(conn, bytes.view(b)[0..bytes.length(b)])
+    bytes.free(b)
+    return err
+}
+
+main() {
+    port, _pe = string.to_int(os.getenv("PORT"))
+    sock, derr = tcp.connect("127.0.0.1", port)
+    if derr != "" {
+        println("ERR: connect: ${derr}")
+        return
+    }
+    conn, herr = tls13_client.connect_socket(sock, "localhost", os.getenv("CAFILE"))
+    if herr != "" {
+        println("ERR: ${herr}")
+        return
+    }
+    e1 = send_text(conn, "POST /len HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\n")
+    e2 = send_text(conn, "0123456789GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    if e1 != "" || e2 != "" {
+        println("ERR: send: ${e1}${e2}")
+        tls13_client.close_conn(conn)
+        return
+    }
+    got = ""
+    saw_len = 0
+    saw_ok = 0
+    going = 1
+    while going == 1 && (saw_len == 0 || saw_ok == 0) {
+        buf, n, rerr = tls13_client.conn_recv(conn)
+        if rerr != "" || buf == null {
+            going = 0
+        } else {
+            s = bytes.to_string(buf, n)
+            if string.contains(s, "len-10") == 1 { saw_len = 1 }
+            if string.contains(s, "keys-ok") == 1 { saw_ok = 1 }
+            bytes.free(buf)
+        }
+    }
+    if saw_len == 1 { got = "${got} len-10" }
+    if saw_ok == 1 { got = "${got} keys-ok" }
+    println("GOT${got}")
+    tls13_client.close_conn(conn)
+}

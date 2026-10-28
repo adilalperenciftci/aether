@@ -54,7 +54,7 @@ exports(
     accept, conn_send, conn_recv, close_conn, conn_key_update,
     ServerConn,
     parse_cert_chain_pem, parse_cert_chain_pem_checked, parse_ec_private_key_pem, load_private_key, free_private_key, ServerKey,
-    pure_tls_server_check, pure_tls_server_accept, pure_tls_server_send, pure_tls_server_recv, pure_tls_server_close
+    pure_tls_server_check, pure_tls_server_accept, pure_tls_server_send, pure_tls_server_recv, pure_tls_server_pending, pure_tls_server_close
 )
 
 struct ServerConn {
@@ -1830,6 +1830,26 @@ pure_tls_server_recv(sconn: ptr, buf: ptr, len: int) -> int {
         bytes.free(p)
     }
     return take
+}
+
+// Is there something to read without waiting on the socket (#3384)? The
+// bytes of a record the last pure_tls_server_recv could not hand over
+// whole, else 1 when the record reader holds a whole record it has already
+// read from the socket, else 0. std.http asks before it parks a connection
+// or waits on its descriptor: neither shows on poll(2), as OpenSSL's
+// buffered plaintext does not, which SSL_pending answers there.
+@c_callback("aether_pure_tls_server_pending")
+pure_tls_server_pending(sconn: ptr) -> int {
+    if sconn == null { return 0 }
+    c = sconn as *ServerConn
+    if c.recv_pend != null { return c.recv_pend_len - c.recv_pend_off }
+    r = c.rio as *RecordIO
+    avail = r.len - r.off
+    if avail >= 5 {
+        plen = ((bytes.get(r.buf, r.off + 3) & 0xFF) << 8) | (bytes.get(r.buf, r.off + 4) & 0xFF)
+        if avail >= 5 + plen { return 1 }
+    }
+    return 0
 }
 
 @c_callback("aether_pure_tls_server_close")

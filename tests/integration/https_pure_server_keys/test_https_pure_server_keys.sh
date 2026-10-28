@@ -20,7 +20,9 @@
 #      server serves the next connection, and a 40000-byte response is
 #      whole (#3380);
 #   6. a request body of 16384 bytes or more reaches the handler whole
-#      (#3381).
+#      (#3381);
+#   7. a pipelined request in the record that ends a body is answered on a
+#      keep-alive connection, not parked unseen (#3384).
 #
 # In a build without OpenSSL only the "aether" client cases run.
 
@@ -72,7 +74,7 @@ cert weak
 ssl openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$TMP/other.key"
 ssl openssl pkey -in "$TMP/p256.key" -aes256 -passout pass:secret -out "$TMP/enc.key"
 
-for p in server client; do
+for p in server client pipe; do
     "$AE" build "$SCRIPT_DIR/$p.ae" -o "$TMP/$p" >"$TMP/b_$p.log" 2>&1 \
         || { sed -n '1,12p' "$TMP/b_$p.log"; fail "$p did not build"; }
 done
@@ -230,5 +232,19 @@ for b in $BACKENDS; do
     done
     echo "    ok: request bodies of 16384 and 40000 bytes, client \"$b\""
 done
+
+
+# 7. Pipelining (#3384): a GET in the record that ends a POST body, on a
+#    keep-alive connection with the park lot running. The server reads the
+#    body, keeps the GET in the pure server's tail (#3381), answers the
+#    POST, and must see that tail before it parks the connection, as it
+#    sees OpenSSL's buffered plaintext with SSL_pending.
+start_server p256 p256
+[ -n "$S_PORT" ] || { echo "    got: $OUT"; fail "the P-256 server did not start"; }
+run env PORT="$S_PORT" CAFILE="$TMP/p256.pem" "$TMP/pipe"
+case "$OUT" in
+    *"GOT len-10 keys-ok"*) echo "    ok: a pipelined request in the record that ends a body" ;;
+    *) echo "    got: $OUT"; fail "a pipelined request in the record that ends a body: not answered" ;;
+esac
 
 echo "  [PASS] $NAME"
