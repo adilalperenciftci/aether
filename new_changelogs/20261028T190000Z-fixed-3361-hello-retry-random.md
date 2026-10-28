@@ -1,4 +1,4 @@
-- **The pure TLS stack knows a HelloRetryRequest when it sees one (#3325).**
+- **The pure TLS stack knows a HelloRetryRequest when it sees one (#3361).**
   `std.cryptography.tls13_hs` compared a ServerHello's random against a
   mistyped copy of RFC 8446's HelloRetryRequest value (the second half was
   wrong), so the client read a real server's HelloRetryRequest as a broken
