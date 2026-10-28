@@ -64,7 +64,10 @@ the key to disk to hand it over, gives them as PEM text instead:
 `server_set_tls_pem(server, cert_pem, key_pem)` makes the same checks with
 the same results (#3362). Either way the first certificate is the server's
 own and the rest are the chain it sends with it, so a CA's bundle (leaf, then
-intermediates) serves as issued on both backends (#3370). The server keeps
+intermediates) serves as issued on both backends (#3370). Only the
+`BEGIN CERTIFICATE` blocks form the chain: any other block in the text, such
+as the key in a file that holds both, is skipped, and a certificate block
+that does not parse refuses the whole text (#3378). The server keeps
 its own copy of the text, for a later `server_set_tls_backend`, and wipes it
 when it is replaced or the server is freed.
 
