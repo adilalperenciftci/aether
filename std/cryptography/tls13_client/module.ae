@@ -745,7 +745,7 @@ fn fresh_p384_priv() -> ptr {
 }
 
 // Free the key exchange secrets of a full handshake (each may be null).
-fn free_hello_keys(dk: ptr, p256_priv: ptr, p384_priv: ptr) {
+fn free_hello_keys(dk: @frees ptr, p256_priv: @frees ptr, p384_priv: @frees ptr) {
     if dk != null { bytes.free(dk) }
     if p256_priv != null { bytes.free(p256_priv) }
     if p384_priv != null { bytes.free(p384_priv) }
