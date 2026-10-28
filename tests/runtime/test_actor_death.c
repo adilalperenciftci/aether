@@ -247,6 +247,40 @@ static void test_down_after_last_messages(void) {
     ASSERT_TRUE(strcmp(reason, "boom") == 0);
 }
 
+/* #3399: a kill after scheduler_init and before scheduler_start (a C host
+ * that starts later, or never) is finalized at once: no core thread is
+ * there to take a request. It was posted to the cores as if they ran,
+ * since init already says initialized, so the death waited for a start:
+ * the actor stayed unfinalized, and an actor linked to it lived on. The
+ * watcher's Down is sent at the kill and handled once the cores run. */
+static void test_kill_before_start(void) {
+    scheduler_init(2);
+    DeathActor* t = death_actor(0);
+    DeathActor* w = death_actor(1);
+    DeathActor* l = death_actor(0);   // linked to t, does not trap exits
+    aether_step_actor_set(w);         // as from w's handler
+    aether_actor_monitor(t);
+    aether_step_actor_set(l);
+    aether_actor_link(t);
+    aether_step_actor_set(NULL);
+    aether_actor_kill(t);
+    int t_final = (atomic_load(&t->exit_flags) & AETHER_EXIT_FINALIZED) != 0;
+    int l_ended = (atomic_load(&l->dead) & AETHER_ACTOR_KILLED) &&
+                  (atomic_load(&l->exit_flags) & AETHER_EXIT_FINALIZED);
+    scheduler_start();
+    int down = death_wait(&w->downs, 1, 3000);
+    scheduler_wait();
+    char reason[64];
+    memcpy(reason, w->down_reason, sizeof reason);
+    scheduler_shutdown();
+    scheduler_cleanup();
+
+    ASSERT_TRUE(t_final);
+    ASSERT_TRUE(l_ended);
+    ASSERT_TRUE(down);
+    ASSERT_TRUE(strcmp(reason, "killed") == 0);
+}
+
 /* #3298: an actor with a thread of its own panics on its first message with
  * 200 more in its inbox. Its thread took 32 into its mailbox; the rest waited
  * in the inbox, never credited, and the shutdown's wait for every message
@@ -282,4 +316,6 @@ void register_actor_death_tests(void) {
         test_down_after_last_messages, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Death: an actor thread's panic drops its inbox (#3298)",
         test_actor_thread_panic_drains_inbox, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Death: a kill before scheduler_start is finalized at once (#3399)",
+        test_kill_before_start, TEST_CATEGORY_RUNTIME);
 }

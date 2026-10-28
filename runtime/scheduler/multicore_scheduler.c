@@ -739,11 +739,19 @@ int scheduler_actor_end(ActorBase* actor, const char* reason, int bit) {
     }
     wake_ended_asker(actor);
     int core = atomic_load_explicit(&actor->assigned_core, memory_order_acquire);
-    if (core >= 0 && core < num_cores && atomic_load(&g_sched_state) == 2) {
+    /* #3399: posted only where a core thread will take the request, once
+     * the scheduler is initialized and its threads started. Initialized
+     * is not running: scheduler_init sets the state before
+     * scheduler_start makes the threads, and a request posted between the
+     * two waited for a start that a C host may never make, so the death
+     * was never finalized, no Down went out and no link took it. */
+    if (core >= 0 && core < num_cores && atomic_load(&g_sched_state) == 2 &&
+        atomic_load_explicit(&g_threads_started, memory_order_acquire)) {
         control_post(core, actor);
     } else {
-        // No core runs it (the scheduler is not running): nothing steps it
-        // or delivers to it, so it is finalized here.
+        // No core runs it (the scheduler is not running, or its threads are
+        // not started): nothing steps it or delivers to it, so it is
+        // finalized here.
         actor_finalize(actor);
     }
     return 1;

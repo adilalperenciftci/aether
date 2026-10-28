@@ -252,7 +252,7 @@ Its death is then finalized, once, on the thread that owns its mailbox and while
 
 - a panic: in the step barrier, as the step unwinds;
 - a stop, and a kill that lands while its handler runs: when the handler returns (the barrier checks the bits after every step);
-- a kill of an actor that is not stepping: its core finalizes it at the top of its loop, from a request the kill posts (`Scheduler.control`), or from its relief while it waits in an ask. `scheduler_wait` counts the requests, so `wait_for_idle()` returns only once the Downs are sent;
+- a kill of an actor that is not stepping: its core finalizes it at the top of its loop, from a request the kill posts (`Scheduler.control`), or from its relief while it waits in an ask. `scheduler_wait` counts the requests, so `wait_for_idle()` returns only once the Downs are sent. Where no core thread runs (a C host between `scheduler_init` and `scheduler_start`, or one that never starts the cores, and a scheduler that has stopped), the kill finalizes it at once, on the killing thread (#3399: before the start it was posted to cores that did not run yet, and never finalized if they never did);
 - an actor with a thread of its own: on that thread, at the end of its loop (#3298: its inbox is dropped and credited too, and a sender that pushes after that drain drops what it pushed).
 
 So a `Down` never comes while the actor's handler still runs, and it comes after the last messages the actor sent its watcher, on the same core's path. A killed actor whose handler is waiting in an ask has that ask end at once, with `"the asking actor was killed"`; the handler then runs to its end, and the actor ends after it (a handler is never cut short).
