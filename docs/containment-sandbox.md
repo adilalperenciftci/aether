@@ -1584,7 +1584,8 @@ same permissions registry and LD_PRELOAD checker either way.
   `notify(event, id)`, host calls back through the typed downcall
   API for detail. See [`embedded-namespaces-and-host-bindings.md`](embedded-namespaces-and-host-bindings.md)
   (typed-SDK story) and [`aether-embedded-in-host-applications.md`](aether-embedded-in-host-applications.md)
-  (rationale + YAML/HCL/Pkl/Jsonnet/Starlark comparison).
+  (rationale + YAML/HCL/Pkl/Jsonnet/Starlark comparison), and
+  [`aether-vs-hcl.md`](aether-vs-hcl.md) for HCL side by side.
 - **Aether as host**, an Aether `main()` executable embeds
   `contrib.host.<lang>.run_sandboxed(perms, code)` for Lua, Python
   (CPython), Perl, Ruby, Tcl, JavaScript in-process. Java, Go, and

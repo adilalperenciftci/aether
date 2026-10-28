@@ -71,6 +71,9 @@ computed cache key, a quick `if hostname matches X` you reach for
 shell or templating around the DSL, and you're back at Level 1's
 problems.
 
+For HCL in particular (what it does well, where it stops, and the same
+configuration written both ways) see [aether-vs-hcl.md](aether-vs-hcl.md).
+
 ### Level 3, Config IS code
 
 ```python
