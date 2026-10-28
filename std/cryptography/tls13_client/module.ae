@@ -2274,7 +2274,8 @@ fn split_ec_point(spki_key: byte[]) -> (ptr, ptr, int, string) {
     coord = 0
     if key_len == 65 { coord = 32 }
     if key_len == 97 { coord = 48 }
-    if coord == 0 { return null, null, 0, "spki: not a P-256/P-384 uncompressed EC point" }
+    if key_len == 133 { coord = 66 }
+    if coord == 0 { return null, null, 0, "spki: not a P-256, P-384 or P-521 uncompressed EC point" }
     if (spki_key[0] & 0xFF) != 0x04 { return null, null, 0, "spki: not uncompressed (0x04)" }
     px = bytes.new(coord)
     py = bytes.new(coord)
@@ -2524,12 +2525,13 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host:
             if cv_sig == null { err = "server did not send CertificateVerify" }
             else {
                 // Dispatch the CertificateVerify by SignatureScheme:
-                //   ECDSA-P256 (0x0403) / ECDSA-P384 (0x0503) -> EC point from
+                //   ECDSA-P256 (0x0403) / P-384 (0x0503) / P-521 (0x0603) -> EC point from
                 //     the leaf SPKI (verify_cert_verify picks the curve/hash)
                 //   RSA-PSS rsae SHA-256 (0x0804) -> RSA key from the leaf SPKI
                 is_ecdsa = 0
                 if cv_scheme == tls13_cert.SCHEME_ECDSA_P256_SHA256 { is_ecdsa = 1 }
                 if cv_scheme == tls13_cert.SCHEME_ECDSA_P384_SHA384 { is_ecdsa = 1 }
+                if cv_scheme == 0x0603 { is_ecdsa = 1 } // ecdsa_secp521r1_sha512
                 if is_ecdsa == 1 {
                     if leaf_px == null {
                         err = "ECDSA CertificateVerify but leaf is not an EC cert"
