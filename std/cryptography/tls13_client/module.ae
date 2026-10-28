@@ -732,6 +732,36 @@ fn fresh_p256_priv() -> ptr {
     }
 }
 
+// Close the socket of a handshake that failed once what the server has
+// already sent is read and dropped (#3368). Closing a socket that holds
+// unread bytes sends a TCP reset, and a peer that gets one may discard the
+// alert just sent before reading it (Windows does). Bounded: at most
+// DRAIN_MAX_BYTES, and DRAIN_WAIT_MS for each more to arrive.
+const DRAIN_MAX_BYTES = 262144
+const DRAIN_WAIT_MS = 5
+
+fn close_drained(sock: ptr) {
+    buf = bytes.new(16384)
+    bytes.set(buf, 16383, 0)
+    total = 0
+    going = 1
+    while going == 1 && total < DRAIN_MAX_BYTES {
+        ready, perr = tcp.poll(sock, DRAIN_WAIT_MS)
+        if perr != "" || ready == false {
+            going = 0
+        } else {
+            got, rerr = tcp.read_into(sock, bytes.view(buf)[0..16384])
+            if rerr != "" || got <= 0 {
+                going = 0
+            } else {
+                total = total + got
+            }
+        }
+    }
+    bytes.free(buf)
+    tcp.close(sock)
+}
+
 fn cleanup_hello(pub: ptr, rnd: ptr, sid: ptr, ch: ptr) {
     bytes.free(pub); bytes.free(rnd); bytes.free(sid); bytes.free(ch)
 }
@@ -913,7 +943,7 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
         if string.equals(sherr, "") != 1 {
             if rio.alert != 0 { send_plain_alert(sock, rio.alert) }
             bytes.free(dk); bytes.free(p256_priv)
-            cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
+            cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); close_drained(sock)
             return null, sherr
         }
         shrec = shrec2
@@ -939,7 +969,7 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
             bytes.free(dk); bytes.free(p256_priv)
             if parsed.key_share != null { bytes.free(parsed.key_share) }
             bytes.free(sh); bytes.free(shrec)
-            cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
+            cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); close_drained(sock)
             return null, perr
         }
         if parsed.is_hello_retry == 1 {
@@ -964,7 +994,7 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
             shrec = null
             if string.equals(serr2, "") != 1 {
                 bytes.free(dk); bytes.free(p256_priv)
-                cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
+                cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); close_drained(sock)
                 return null, serr2
             }
             retried = 1
@@ -1004,7 +1034,7 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
         if shared != null { bytes.free(shared) }
         if parsed.key_share != null { bytes.free(parsed.key_share) }
         bytes.free(sh); bytes.free(shrec)
-        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
+        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); close_drained(sock)
         return null, agerr
     }
 
@@ -1020,7 +1050,7 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
     bytes.free(sh); bytes.free(shrec)
     cleanup_hello(pub, rnd, sid, ch); transcript_free(tr)
     if result == null {
-        recio_free(rio); tcp.close(sock)
+        recio_free(rio); close_drained(sock)
     } else {
         rc = result as *ClientConn
         rc.group = parsed.group
@@ -2494,7 +2524,7 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
         if sh != null { bytes.free(sh) }
         if shrec != null { bytes.free(shrec) }
         tls13_ks.free_secret(psk)
-        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
+        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); close_drained(sock)
         return null, err
     }
     transcript_add(tr, bytes.view(sh)[0..sh_msg_len])
@@ -2617,7 +2647,7 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
     bytes.free(sh); bytes.free(shrec)
     cleanup_hello(pub, rnd, sid, ch); transcript_free(tr)
     if result == null {
-        recio_free(rio); tcp.close(sock)
+        recio_free(rio); close_drained(sock)
     }
     return result, result_err
 }

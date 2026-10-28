@@ -28,6 +28,8 @@
 #   #3325  HelloRetryRequest, client and server.
 #   #3318  the ServerHello's legacy_version and session id echo.
 #   #3357  the pure server's ClientHello checks, secp256r1, skipped 0-RTT data.
+#   #3368  the client reads what the server sent before it closes a failed
+#          handshake, so a reset does not take its alert.
 #
 # No network beyond loopback, no openssl: the peer's certificate is built in.
 
@@ -108,6 +110,7 @@ run_case "SH: an unknown extension" "sh_ext=fafa0000" "ERR" "ALERT 110"
 run_case "SH: server_name, offered but out of place" "sh_ext=00000000" "ERR" "ALERT 47"
 run_case "SH: pre_shared_key in a full handshake" "sh_ext=002900020000" "ERR" "ALERT 110"
 run_case "SH: supported_versions twice" "sh_ext=002b00020304" "ERR" "ALERT 47"
+run_case "SH: an unknown extension, 32 KiB behind it (#3368)" "sh_ext=fafa0000;sh_tail=32768" "ERR" "ALERT 110"
 
 
 # #3316: CertificateEntry extensions (RFC 8446 4.4.2).

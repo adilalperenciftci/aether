@@ -21,8 +21,6 @@
     "UnofferedExtension-Client-TLS13": "by design: the client always offers ALPN http/1.1 (RFC 7301), so the server's ALPN answers it; a protocol it did not offer is illegal_parameter, as BoringSSL sends then",
     "UnsolicitedServerNameAck-TLS-TLS13": "by design: the client sends as server_name the name it verifies the certificate for (RFC 6066 3; the shim verifies test), so the server's acknowledgement answers it",
     "CheckECDSACurve-NotApplicable-TLS13": "by design: the server's key exchange groups are X25519MLKEM768, X25519 and secp256r1 (RFC 8446 9.1); a client offering only secp384r1 shares none with it",
-    "UnknownUnencryptedExtension-Client-TLS13": "open #3368: the client closes with unread bytes, and the reset loses its alert",
-    "HelloRetryRequest-DuplicateCookie-TLS13": "open #3368: the client closes with unread bytes, and the reset loses its alert",
     "DuplicateExtensionClient-TLS-TLS13": "open #3364: a repeated EncryptedExtensions extension is refused as unsolicited, not decode_error",
     "TLS13-HRR-InvalidCompressionMethod": "open #3364, #3369: a nonzero compression method is illegal_parameter, and no group is named without a share",
     "RejectEmptyCertificateAuthorities-Client-TLS-TLS13": "open #3365: a CertificateRequest's certificate_authorities is not checked",

@@ -21,6 +21,9 @@
 //   sh_version=HEX  the ServerHello's legacy_version
 //   sh_sid=bad      a ServerHello session id echo one bit off
 //   pack_sh=1       handshake bytes after the ServerHello in its record
+//   sh_tail=N       N bytes of application_data records behind the
+//                   ServerHello, in the same write, and the answer read
+//                   200 ms later
 //   extra=HEX       a raw handshake message right after EncryptedExtensions
 //   cr=HEX          a CertificateRequest with this body after it
 //   key=ed25519     an Ed25519 certificate and CertificateVerify (0x0807)
@@ -637,12 +640,40 @@ main() {
         packed = buf_take(w)
         send_plain(sock, 22, packed)
         bytes.free(packed)
+    } else if knob("sh_tail") != "" {
+        // The ServerHello and N bytes of application_data records behind
+        // it, in one write: more than the client reads at once, so they are
+        // still unread when it refuses the ServerHello (#3368).
+        tn, _te = string.to_int(knob("sh_tail"))
+        w = buf_new()
+        put8(w, 22)
+        put16(w, 0x0303)
+        put16(w, bytes.length(sh))
+        put_bytes(w, sh, 0, bytes.length(sh))
+        sent = 0
+        filler = bytes.new(4096)
+        bytes.set(filler, 4095, 0)
+        while sent < tn {
+            put8(w, 23)
+            put16(w, 0x0303)
+            put16(w, 4096)
+            put_bytes(w, filler, 0, 4096)
+            sent = sent + 4096
+        }
+        bytes.free(filler)
+        flight = buf_take(w)
+        send_raw(sock, flight)
+        bytes.free(flight)
     } else {
         send_plain(sock, 22, sh)
     }
     tls13_client.transcript_add(tr, bytes.view(sh)[0..bytes.length(sh)])
 
     // A client that refuses the ServerHello answers now, in the clear.
+    // With sh_tail, read it 200 ms on, as a server still busy would: a
+    // reset the client sent by then has dropped its alert unread, on
+    // Windows (#3368).
+    if knob("sh_tail") != "" { sleep(200) }
     ready, _perr = tcp.poll(sock, 300)
     if ready {
         println(client_answer(&r, null))
