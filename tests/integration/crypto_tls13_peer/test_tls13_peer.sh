@@ -8,6 +8,9 @@
 #          unsupported_extension (110) for what the client never offered,
 #          illegal_parameter (47) for an offered one out of place or twice,
 #          decode_error (50) for a block that does not parse.
+#   #3316  CertificateEntry extensions (RFC 8446 4.4.2): the same alerts,
+#          and decode_error for a status_request that is not one OCSP
+#          response.
 #
 # No network beyond loopback, no openssl: the peer's certificate is built in.
 
@@ -85,6 +88,15 @@ run_case "SH: an unknown extension" "sh_ext=fafa0000" "ERR" "ALERT 110"
 run_case "SH: server_name, offered but out of place" "sh_ext=00000000" "ERR" "ALERT 47"
 run_case "SH: pre_shared_key in a full handshake" "sh_ext=002900020000" "ERR" "ALERT 110"
 run_case "SH: supported_versions twice" "sh_ext=002b00020304" "ERR" "ALERT 47"
+
+
+# #3316: CertificateEntry extensions (RFC 8446 4.4.2).
+run_case "Certificate: an unknown entry extension" "cert_ext=fafa0000" "ERR" "ALERT 110"
+run_case "Certificate: an SCT, never offered" "cert_ext=00120000" "ERR" "ALERT 110"
+run_case "Certificate: server_name, offered but out of place" "cert_ext=00000000" "ERR" "ALERT 47"
+run_case "Certificate: status_request with no response" "cert_ext=00050000" "ERR" "ALERT 50"
+run_case "Certificate: status_request twice" "cert_ext=0005000501000001000005000501000001ff" "ERR" "ALERT 47"
+run_case "Certificate: one stapled response" "cert_ext=0005000501000001ff" "OK" "FINISHED"
 
 [ "$fails" = 0 ] || fail "$fails case(s)"
 echo "  [PASS] $NAME"

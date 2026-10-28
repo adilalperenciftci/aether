@@ -969,6 +969,10 @@ fn run_handshake_tail(sock: @keep ptr, rio: @keep ptr, tr: ptr, host: string, sh
     // each where it may appear (RFC 8446 4.2, #3315).
     if string.equals(ferr, "") == 1 {
         ee_alert, ee_err = check_flight_ee(fl, fllen, offered)
+        if ee_alert == 0 {
+            // Each CertificateEntry's extensions too (#3316).
+            ee_alert, ee_err = check_flight_certificate(fl, fllen, offered)
+        }
         if ee_alert != 0 {
             ferr = ee_err
             ee_ctx = tls13_record.new_aead(rec_aead, bytes.view(hs_client_key(keys))[0..rec_key_len], hs_client_iv(keys))
@@ -1449,6 +1453,22 @@ fn check_flight_ee(fl: ptr, flen: int, offered: int) -> (int, string) {
             return ALERT_ILLEGAL_PARAMETER, "encrypted extensions: ALPN names a protocol the client did not offer"
         }
         p = p + 4 + n
+    }
+    return 0, ""
+}
+
+// The server flight's Certificate message against what the ClientHello
+// offered (RFC 8446 4.4.2, #3316): (0, "") or the alert and why.
+fn check_flight_certificate(fl: ptr, flen: int, offered: int) -> (int, string) {
+    p = 0
+    while p + 4 <= flen {
+        mt = bytes.get(fl, p) & 0xFF
+        ml = ((bytes.get(fl, p + 1) & 0xFF) << 16) | ((bytes.get(fl, p + 2) & 0xFF) << 8) | (bytes.get(fl, p + 3) & 0xFF)
+        if p + 4 + ml > flen { return ALERT_DECODE_ERROR, "the server's flight is truncated" }
+        if mt == HS_CERTIFICATE {
+            return tls13_hs.check_certificate(bytes.view(fl)[p + 4..p + 4 + ml], offered)
+        }
+        p = p + 4 + ml
     }
     return 0, ""
 }

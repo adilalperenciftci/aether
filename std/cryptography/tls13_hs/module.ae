@@ -39,7 +39,7 @@ extern string_char_at_n(str: string, known_length: int, index: int) -> int
 exports(
     ChParsed, parse_client_hello, free_ch, server_hello,
     client_hello, client_hello_sni, client_hello_full, client_hello_pq, client_hello_psk, PskCh, parse_server_hello,
-    ShParsed, check_extensions,
+    ShParsed, check_extensions, check_certificate,
     MSG_SERVER_HELLO, MSG_HELLO_RETRY, MSG_ENCRYPTED_EXTENSIONS, MSG_CERTIFICATE_ENTRY,
     MSG_NEW_SESSION_TICKET, MSG_CERTIFICATE_REQUEST,
     OFFER_SNI, OFFER_ALPN, OFFER_STATUS, OFFER_PSK, OFFER_EARLY,
@@ -947,6 +947,49 @@ check_extensions(kind: int, exts: byte[], offered: int) -> (int, string) {
         p = p + 4 + el
     }
     bytes.free(seen)
+    return 0, ""
+}
+
+// check_certificate(body, offered) -> (alert, error) for the body of a
+// server's Certificate message (RFC 8446 4.4.2): an empty
+// certificate_request_context, a certificate_list of at least one entry
+// that fills the message exactly, each entry's cert_data non-empty and its
+// extensions what check_extensions allows in a CertificateEntry, a
+// status_request holding exactly one OCSP CertificateStatus. (0, "") when
+// it is well formed.
+check_certificate(body: byte[], offered: int) -> (int, string) {
+    if body.len < 0 { panic("tls13_hs.check_certificate: the `body` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int n = body.len
+    if n < 4 { return ALERT_DECODE_ERROR, "certificate: truncated" }
+    if get8(body, 0) != 0 { return ALERT_DECODE_ERROR, "certificate: a server's certificate_request_context must be empty" }
+    list_len = get24(body, 1)
+    if 4 + list_len != n { return ALERT_DECODE_ERROR, "certificate: the certificate list does not fill the message" }
+    if list_len == 0 { return ALERT_DECODE_ERROR, "certificate: no certificate" }
+    p = 4
+    while p < n {
+        if p + 3 > n { return ALERT_DECODE_ERROR, "certificate: truncated entry" }
+        cl = get24(body, p)
+        if cl == 0 || p + 3 + cl + 2 > n { return ALERT_DECODE_ERROR, "certificate: a cert_data overruns the list" }
+        q = p + 3 + cl
+        el = get16(body, q)
+        if q + 2 + el > n { return ALERT_DECODE_ERROR, "certificate: an entry's extensions overrun the list" }
+        a, err = check_extensions(MSG_CERTIFICATE_ENTRY, body[q + 2..q + 2 + el], offered)
+        if a != 0 { return a, "certificate: ${err}" }
+        // A status_request answer is one CertificateStatus { status_type
+        // ocsp(1), OCSPResponse<1..2^24-1> } (RFC 8446 4.4.2.1, RFC 6066 8).
+        r = q + 2
+        while r + 4 <= q + 2 + el {
+            t = get16(body, r)
+            tl = get16(body, r + 2)
+            if t == 5 {
+                if tl < 5 || get8(body, r + 4) != 1 || 4 + get24(body, r + 5) != tl || get24(body, r + 5) == 0 {
+                    return ALERT_DECODE_ERROR, "certificate: a status_request answer is not one OCSP response"
+                }
+            }
+            r = r + 4 + tl
+        }
+        p = q + 2 + el
+    }
     return 0, ""
 }
 
