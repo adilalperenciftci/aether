@@ -630,7 +630,7 @@ static void actor_finalize(ActorBase* actor) {
                                   memory_order_relaxed);
         scheduler_count_dead_sends(drained);
     }
-    const char* reason = atomic_load_explicit(&actor->death_reason, memory_order_acquire);
+    const char* reason = aether_actor_death_reason(actor);
     aether_watch_notify(actor, reason ? reason : "normal");
 }
 
@@ -2970,7 +2970,6 @@ int scheduler_register_actor(ActorBase* actor, int preferred_core) {
     atomic_init(&actor->inbox, NULL);
     atomic_init(&actor->thread_parked, 0);
     atomic_init(&actor->death_watch, NULL);         // #2974
-    atomic_init(&actor->death_reason, NULL);
     atomic_init(&actor->exit_flags, 0);
     atomic_init(&actor->incarnation, 0);
     atomic_init(&actor->mailbox_bound, 0);      // the generated spawn sets a bound (#2974)
@@ -3588,12 +3587,11 @@ void scheduler_send_batch_start(void) {
 }
 
 void scheduler_send_batch_add(ActorBase* actor, Message msg) {
-    // A bounded actor's message takes its place now, or is refused, so it
-    // is not batched (#2974); sent unbatched, it goes behind the batch.
-    if (unlikely(actor && atomic_load_explicit(&actor->mailbox_bound, memory_order_relaxed))) {
-        scheduler_send_remote(actor, msg, current_core_id);
+    // A bounded actor's message takes its place as it joins the batch, or
+    // is refused (#2974); every way on from here routes it as admitted.
+    if (unlikely(actor && atomic_load_explicit(&actor->mailbox_bound, memory_order_relaxed)) &&
+        !bound_admits(actor, &msg))
         return;
-    }
     // Drop messages to dead actors (see scheduler_send_local).
     if (unlikely(!actor || atomic_load_explicit(&actor->dead, memory_order_acquire))) {
         send_to_dead_actor(actor, &msg);
@@ -3604,7 +3602,7 @@ void scheduler_send_batch_add(ActorBase* actor, Message msg) {
     // batched on a scheduler thread (#3117): its sends keep its own core's
     // channel and overflow order.
     if (unlikely(actor->auto_process) || current_core_id >= 0) {
-        scheduler_send_remote(actor, msg, current_core_id);
+        send_remote_admitted(actor, msg, current_core_id);
         return;
     }
     // BATCH PATH: Multi-actor fan-out optimization
@@ -3612,7 +3610,7 @@ void scheduler_send_batch_add(ActorBase* actor, Message msg) {
         scheduler_send_batch_start();
         if (!g_batch_buffer) {
             // No buffer: the send goes out on its own, as an unbatched one.
-            scheduler_send_remote(actor, msg, current_core_id);
+            send_remote_admitted(actor, msg, current_core_id);
             return;
         }
     }
@@ -3744,7 +3742,7 @@ void scheduler_send_batch_flush(void) {
         // the message in flight included, so this batch's count is given back first.
         for (int j = enqueued; j < cnt; j++) {
             inflight_leave((ActorBase*)sorted_actors[start + j], 1);
-            scheduler_send_remote(sorted_actors[start + j], sorted_msgs[start + j], -1);
+            send_remote_admitted(sorted_actors[start + j], sorted_msgs[start + j], -1);
         }
 
         // Only count batch-enqueued messages here (fallback already counted by send_remote)
@@ -3813,7 +3811,6 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
     atomic_init(&actor->thread_parked, 0);
     atomic_init(&actor->inflight, 0);
     atomic_init(&actor->death_watch, NULL);         // #2974
-    atomic_init(&actor->death_reason, NULL);
     atomic_init(&actor->exit_flags, 0);
     atomic_init(&actor->incarnation, 0);
     atomic_init(&actor->mailbox_bound, 0);      // the generated spawn sets a bound (#2974)
@@ -3862,7 +3859,7 @@ void scheduler_release_actor(ActorBase* actor) {
     // (a death finalized) is told nothing more.
     if (!(atomic_load_explicit(&actor->dead, memory_order_acquire) & AETHER_ACTOR_RELEASED)) {
         aether_actor_claim_reason(actor, "normal");
-        aether_watch_notify(actor, atomic_load_explicit(&actor->death_reason, memory_order_acquire));
+        aether_watch_notify(actor, aether_actor_death_reason(actor));
     }
 
     // A message that still reaches the actor is dropped, not delivered.

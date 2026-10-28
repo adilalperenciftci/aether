@@ -278,7 +278,50 @@ static void test_rebirth_waits_for_in_flight(void) {
     ASSERT_EQ(1, inc);
 }
 
+/* The death notice list survives a restart. A monitor or a link of the dead
+ * child, from another actor's handler, takes the child's list and locks it
+ * to read the death it told; the restart runs on the supervisor's thread
+ * meanwhile. It freed the list, and such a caller locked freed memory and
+ * read a freed reason. Now the list stays, emptied under its lock, and
+ * tells the new incarnation's death in turn. */
+static void test_rebirth_keeps_watch_list(void) {
+    scheduler_init(2);
+    scheduler_start();
+    ActorBase* t = rb_spawn_target(0);
+    aether_actor_kill(t);
+    uint64_t until = aether_now_ns() + 3000ULL * 1000000ULL;
+    while (!(atomic_load(&t->exit_flags) & AETHER_EXIT_FINALIZED) && aether_now_ns() < until)
+        rb_sleep_ms(1);
+    struct AetherWatch* before = atomic_load(&t->death_watch);
+    const char* why = aether_actor_death_reason(t);
+    int killed = why && strcmp(why, "killed") == 0;
+    int claimed = aether_actor_rebirth_begin(t);
+    ActorBase* again = rb_spawn_target(0);
+    int ended = aether_actor_rebirth_end(t);
+    struct AetherWatch* after = atomic_load(&t->death_watch);
+    const char* why_after = aether_actor_death_reason(t);
+    aether_actor_kill(t);
+    until = aether_now_ns() + 3000ULL * 1000000ULL;
+    while (!(atomic_load(&t->exit_flags) & AETHER_EXIT_FINALIZED) && aether_now_ns() < until)
+        rb_sleep_ms(1);
+    const char* why_again = aether_actor_death_reason(t);
+    int killed_again = why_again && strcmp(why_again, "killed") == 0;
+    scheduler_shutdown();
+    scheduler_cleanup();
+
+    ASSERT_TRUE(before != NULL);
+    ASSERT_TRUE(killed);
+    ASSERT_EQ(1, claimed);
+    ASSERT_TRUE(again == t);
+    ASSERT_EQ(1, ended);
+    ASSERT_TRUE(after == before);        // the same list: a holder still holds it
+    ASSERT_TRUE(why_after == NULL);      // emptied for the new incarnation
+    ASSERT_TRUE(killed_again);           // which tells its own death through it
+}
+
 void register_actor_rebirth_tests(void) {
+    register_test_with_category("Rebirth: the death notice list survives a restart",
+        test_rebirth_keeps_watch_list, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Rebirth: the claim waits for messages in flight",
         test_rebirth_waits_for_in_flight, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Rebirth: a restart in place under concurrent senders",

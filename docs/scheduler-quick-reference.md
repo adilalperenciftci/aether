@@ -205,7 +205,7 @@ Both migration and work stealing use ascending core-id lock ordering to prevent 
 - Avoid blocking operations in actor step functions
 
 ### Crashes
-- Verify every actor struct starts with `ActorBase`'s fields: expand `AETHER_ACTOR_BASE_FIELDS` first (or put an `ActorBase` member first) rather than copying the list, which drifts as fields are added. In order, they are `active`, `id`, `mailbox`, `step`, `thread`, `auto_process`, `assigned_core`, `migrate_to`, `spsc_queue`, `reply_slot`, `step_lock`, `timeout_ns`, `last_activity_ns`, `step_payload`, `step_type`, `mailbox_bound`, `dead`, `alloc_size`, `destroy_state`, `release_message`, `scheduler_owned`, `inbox`, `thread_parked`, `inflight`, `death_watch`, `death_reason`, `exit_flags`, `incarnation`, `mailbox_pending`, `full_drops`.
+- Verify every actor struct starts with `ActorBase`'s fields: expand `AETHER_ACTOR_BASE_FIELDS` first (or put an `ActorBase` member first) rather than copying the list, which drifts as fields are added. In order, they are `active`, `id`, `mailbox`, `step`, `thread`, `auto_process`, `assigned_core`, `migrate_to`, `spsc_queue`, `reply_slot`, `step_lock`, `exit_flags`, `mailbox_bound`, `timeout_ns`, `last_activity_ns`, `step_payload`, `step_type`, `dead`, `alloc_size`, `destroy_state`, `release_message`, `scheduler_owned`, `incarnation`, `inbox`, `thread_parked`, `inflight`, `death_watch`, `mailbox_pending`, `full_drops`.
 - Initialize `migrate_to = -1` after actor creation
 - Use `scheduler_send_remote` instead of direct mailbox writes for cross-core messages
 - Call `scheduler_shutdown()` before process exit (waits for quiescence, stops and joins threads)

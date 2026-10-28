@@ -41,6 +41,7 @@ typedef struct AetherWatch {
     int count;
     int cap;
     AetherWatchEntry* e;
+    _Atomic(char*) reason;   // why the actor ended (aether_actor_death_reason)
 } AetherWatch;
 
 static atomic_int g_next_monitor_id = 1;
@@ -145,14 +146,24 @@ static void link_effect(ActorBase* to, ActorBase* dead, const char* reason) {
 }
 
 void aether_actor_claim_reason(ActorBase* a, const char* reason) {
-    if (atomic_load_explicit(&a->death_reason, memory_order_acquire)) return;
+    AetherWatch* w = watch_of(a);
+    if (!w) {
+        fprintf(stderr, "aether: out of memory keeping why actor %d ended\n", a->id);
+        return;
+    }
+    if (atomic_load_explicit(&w->reason, memory_order_acquire)) return;
     char* copy = strdup(reason ? reason : "normal");
     char* none = NULL;
-    if (copy && !atomic_compare_exchange_strong_explicit(&a->death_reason, &none, copy,
+    if (copy && !atomic_compare_exchange_strong_explicit(&w->reason, &none, copy,
                                                          memory_order_acq_rel,
                                                          memory_order_acquire)) {
         free(copy);
     }
+}
+
+const char* aether_actor_death_reason(ActorBase* a) {
+    AetherWatch* w = a ? atomic_load_explicit(&a->death_watch, memory_order_acquire) : NULL;
+    return w ? atomic_load_explicit(&w->reason, memory_order_acquire) : NULL;
 }
 
 int aether_actor_claim_end(ActorBase* a, const char* reason, int bit) {
@@ -206,9 +217,35 @@ void aether_watch_free(ActorBase* a) {
     AetherWatch* w = atomic_exchange_explicit(&a->death_watch, NULL, memory_order_acq_rel);
     if (w) {
         free(w->e);
+        free(atomic_load_explicit(&w->reason, memory_order_acquire));
         free(w);
     }
-    free(atomic_exchange_explicit(&a->death_reason, NULL, memory_order_acq_rel));
+}
+
+/* A restart in place (#2974): the old incarnation's entries and reason go, the
+ * list itself stays. Another actor's monitor or link of the dead child may
+ * hold it, to read the death it told under its lock, while the supervisor
+ * restarts the child; the new incarnation's death is told through it. */
+static void watch_reset(ActorBase* a) {
+    AetherWatch* w = atomic_load_explicit(&a->death_watch, memory_order_acquire);
+    if (!w) return;
+    watch_lock(w);
+    AetherWatchEntry* e = w->e;
+    char* reason = atomic_exchange_explicit(&w->reason, NULL, memory_order_acq_rel);
+    w->e = NULL;
+    w->count = 0;
+    w->cap = 0;
+    w->finished = 0;
+    watch_unlock(w);
+    free(e);
+    free(reason);
+}
+
+/* The reason a finished list keeps, copied: read under the list's lock, since
+ * a restart may empty it once the lock goes. NULL out of memory. */
+static char* watch_reason_copy(AetherWatch* w) {
+    const char* r = atomic_load_explicit(&w->reason, memory_order_acquire);
+    return strdup(r ? r : "normal");
 }
 
 int aether_down_accept(ActorBase* self, Message* msg) {
@@ -270,8 +307,10 @@ int aether_actor_monitor(void* ref) {
     watch_lock(theirs);
     if (theirs->finished) {
         // Ended already: told now, with the reason its death left.
+        char* why = watch_reason_copy(theirs);
         watch_unlock(theirs);
-        send_down(self, target, atomic_load_explicit(&target->death_reason, memory_order_acquire), id);
+        send_down(self, target, why ? why : "normal", id);
+        free(why);
         return id;
     }
     ok = watch_add(theirs, WATCH_WATCHER, id, self);
@@ -327,6 +366,7 @@ void aether_actor_link(void* ref) {
 
     // Ended already: the link takes the death now, as it would have then.
     const char* ended_with = NULL;
+    char* ended_copy = NULL;
     if (atomic_load_explicit(&other->dead, memory_order_acquire) & AETHER_ACTOR_RELEASED) {
         ended_with = "normal";
     } else {
@@ -337,8 +377,8 @@ void aether_actor_link(void* ref) {
         }
         watch_lock(theirs);
         if (theirs->finished) {
-            ended_with = atomic_load_explicit(&other->death_reason, memory_order_acquire);
-            if (!ended_with) ended_with = "normal";
+            ended_copy = watch_reason_copy(theirs);
+            ended_with = ended_copy ? ended_copy : "normal";
         } else {
             ok = watch_add(theirs, WATCH_LINK, 0, self);
         }
@@ -352,6 +392,7 @@ void aether_actor_link(void* ref) {
         watch_remove_from(self, WATCH_LINK, 0, other);
         link_effect(self, other, ended_with);
     }
+    free(ended_copy);
 }
 
 void aether_actor_unlink(void* ref) {
@@ -391,6 +432,11 @@ void aether_actor_trap_exits(int on) {
 // ---------------------------------------------------------------------------
 
 static AETHER_TLS int t_capture_depth = 0;   // the spawn capture, below
+/* Live rebirth claims and spawn captures, on any thread. Every spawn passes
+ * through aether_rebirth_take and scheduler_spawn_ready; while this is 0 they
+ * read no thread-local, which on some targets is a call (emutls). A thread
+ * with a claim or a capture of its own sees its own count. */
+static atomic_int g_spawn_watch = 0;
 static AETHER_TLS ActorBase* t_rebirth_target = NULL;
 static AETHER_TLS ActorBase* t_reborn = NULL;
 
@@ -410,6 +456,7 @@ int aether_actor_rebirth_begin(void* ref) {
         return 0;
     }
     t_rebirth_target = a;
+    atomic_fetch_add_explicit(&g_spawn_watch, 1, memory_order_relaxed);
     return 1;
 }
 
@@ -422,6 +469,7 @@ static void rebirth_clear_state(ActorBase* a) {
 }
 
 ActorBase* aether_rebirth_take(void (*step)(void*), size_t size) {
+    if (likely(atomic_load_explicit(&g_spawn_watch, memory_order_relaxed) == 0)) return NULL;
     ActorBase* a = t_rebirth_target;
     if (likely(a == NULL) || a->step != step || a->alloc_size != size) return NULL;
     t_rebirth_target = NULL;
@@ -440,16 +488,18 @@ ActorBase* aether_rebirth_take(void (*step)(void*), size_t size) {
     atomic_store_explicit(&a->active, 0, memory_order_relaxed);
     atomic_store_explicit(&a->migrate_to, -1, memory_order_relaxed);
     atomic_store_explicit(&a->reply_slot, NULL, memory_order_relaxed);
-    aether_watch_free(a);   // the old incarnation's lists and reason
+    watch_reset(a);   // the old incarnation's lists and reason
     atomic_store_explicit(&a->exit_flags, 0, memory_order_relaxed);
     atomic_fetch_add_explicit(&a->incarnation, 1, memory_order_relaxed);
     return a;
 }
 
 void scheduler_spawn_ready(ActorBase* a) {
+    if (likely(atomic_load_explicit(&g_spawn_watch, memory_order_relaxed) == 0)) return;
     if (unlikely(t_capture_depth > 0) && a) aether_actor_capture_note(a);
     if (likely(t_reborn != a) || !a) return;   // a fresh spawn: alive already
     t_reborn = NULL;
+    atomic_fetch_sub_explicit(&g_spawn_watch, 1, memory_order_relaxed);   // the claim is done
     // Its state is written: the release makes it visible to whoever reads
     // the cleared bits (a sender, the core that steps it).
     atomic_fetch_and_explicit(&a->dead,
@@ -466,7 +516,7 @@ static void rebirth_undo(ActorBase* a, int half_made) {
         rebirth_clear_state(a);
         aether_actor_claim_reason(a, "the restart failed");
         atomic_fetch_or_explicit(&a->exit_flags, AETHER_EXIT_FINALIZED, memory_order_acq_rel);
-        aether_watch_notify(a, atomic_load_explicit(&a->death_reason, memory_order_acquire));
+        aether_watch_notify(a, aether_actor_death_reason(a));
     }
     atomic_flag_clear_explicit(&a->step_lock, memory_order_release);
 }
@@ -477,22 +527,26 @@ int aether_actor_rebirth_end(void* ref) {
     if (t_rebirth_target == a) {   // the factory spawned no actor of its type
         t_rebirth_target = NULL;
         rebirth_undo(a, 0);
+        atomic_fetch_sub_explicit(&g_spawn_watch, 1, memory_order_relaxed);
         return 0;
     }
     if (t_reborn == a) {           // it panicked between the spawn and the ready
         t_reborn = NULL;
         rebirth_undo(a, 1);
+        atomic_fetch_sub_explicit(&g_spawn_watch, 1, memory_order_relaxed);
         return 0;
     }
     return !(atomic_load_explicit(&a->dead, memory_order_acquire) & AETHER_ACTOR_ENDED);
 }
 
 void aether_rebirth_abandon(void) {
+    if (likely(atomic_load_explicit(&g_spawn_watch, memory_order_relaxed) == 0)) return;
     if (likely(!t_rebirth_target && !t_reborn)) return;
     if (t_rebirth_target) rebirth_undo(t_rebirth_target, 0);
     if (t_reborn) rebirth_undo(t_reborn, 1);
     t_rebirth_target = NULL;
     t_reborn = NULL;
+    atomic_fetch_sub_explicit(&g_spawn_watch, 1, memory_order_relaxed);
 }
 
 int aether_actor_incarnation(void* ref) {
@@ -516,11 +570,13 @@ static AETHER_TLS ActorBase* t_captured[AETHER_CAPTURE_DEPTH];
 void aether_actor_capture_begin(void) {
     if (t_capture_depth < AETHER_CAPTURE_DEPTH) t_captured[t_capture_depth] = NULL;
     t_capture_depth++;
+    atomic_fetch_add_explicit(&g_spawn_watch, 1, memory_order_relaxed);
 }
 
 void* aether_actor_capture_end(void) {
     if (t_capture_depth <= 0) return NULL;
     t_capture_depth--;
+    atomic_fetch_sub_explicit(&g_spawn_watch, 1, memory_order_relaxed);
     return t_capture_depth < AETHER_CAPTURE_DEPTH ? t_captured[t_capture_depth] : NULL;
 }
 

@@ -417,7 +417,6 @@ int scheduler_register_actor(ActorBase* actor, int preferred_core) {
     actor->release_message = NULL;   // its messages are the caller's (#3142)
     actor->step_payload = NULL;
     atomic_store_explicit(&actor->death_watch, NULL, memory_order_relaxed);   // #2974
-    atomic_store_explicit(&actor->death_reason, NULL, memory_order_relaxed);
     atomic_store_explicit(&actor->exit_flags, 0, memory_order_relaxed);
     atomic_store_explicit(&actor->incarnation, 0, memory_order_relaxed);
     atomic_store_explicit(&actor->mailbox_bound, 0, memory_order_relaxed);   // #2974
@@ -490,7 +489,7 @@ void scheduler_release_actor(ActorBase* actor) {
     // something ended it first, and one told already is told nothing more.
     if (!(atomic_load_explicit(&actor->dead, memory_order_relaxed) & AETHER_ACTOR_RELEASED)) {
         aether_actor_claim_reason(actor, "normal");
-        aether_watch_notify(actor, atomic_load_explicit(&actor->death_reason, memory_order_relaxed));
+        aether_watch_notify(actor, aether_actor_death_reason(actor));
     }
     atomic_fetch_or_explicit(&actor->dead, AETHER_ACTOR_RELEASED, memory_order_relaxed);
 
@@ -644,7 +643,7 @@ static void coop_finalize(ActorBase* actor) {
         drained++;
     }
     scheduler_count_dead_sends(drained);
-    const char* reason = atomic_load_explicit(&actor->death_reason, memory_order_relaxed);
+    const char* reason = aether_actor_death_reason(actor);
     aether_watch_notify(actor, reason ? reason : "normal");
 }
 
