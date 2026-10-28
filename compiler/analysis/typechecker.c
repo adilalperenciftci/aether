@@ -7844,10 +7844,14 @@ int typecheck_program(ASTNode* program) {
      * Asked once the program type-checks: whether a `match` covers its type
      * depends on the type the checker gave the value it matches on. */
     if (error_count == 0) error_count += check_missing_returns(program);
-    /* A slice of a function's own storage must not outlive it (#2785): asked
-     * of the checked program, whose coercions into slices are explicit. */
+    /* #1300: a value used or freed after it was freed, a view after its
+     * storage went, and the `@frees` and `@moves` declarations. Asked of the
+     * program as written, before slice ownership adds its intrinsics. */
+    if (error_count == 0) error_count += check_frees(program);
     /* Slice ownership: owned buffers freed at scope exit, moves checked. */
     if (error_count == 0) error_count += check_slice_ownership(program);
+    /* A slice of a function's own storage must not outlive it (#2785): asked
+     * of the checked program, whose coercions into slices are explicit. */
     if (error_count == 0) error_count += check_slice_escapes(program);
     /* #385: sends through references that follow a protocol, in the order
      * it allows, asked of the checked program. */
@@ -7858,9 +7862,6 @@ int typecheck_program(ASTNode* program) {
         check_owned_types(program);
         check_owned_rules(program);
     }
-    /* #1300: a value used or freed after it was freed, a view after its
-     * storage went, and the `@frees` and `@moves` declarations. */
-    if (error_count == 0) error_count += check_frees(program);
 
     // #481: validate effect tags over the whole-program call graph.
     check_effect_tags(program);
