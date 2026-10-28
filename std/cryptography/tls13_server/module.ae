@@ -1277,8 +1277,7 @@ parse_cert_chain_pem_checked(pem_text: string) -> (ptr, ptr, string) {
                     block_end = e + string_length(end_line)
                     if string.equals(label, "CERTIFICATE") == 1 {
                         n = list_size(chain) + 1
-                        block = string.substring_n(pem_text, tlen, b, block_end)
-                        der, _label, perr = pem.parse(block)
+                        der, _label, perr = pem.parse_at(pem_text, b)
                         if string.equals(perr, "") != 1 || der == null {
                             err = "certificate ${n} of the chain does not decode: ${perr}"
                             going = 0
@@ -1311,10 +1310,11 @@ parse_cert_chain_pem_checked(pem_text: string) -> (ptr, ptr, string) {
     return chain, lens, ""
 }
 
+// The key's DER and its SEQUENCE copies are wiped as they are freed (#3382).
 parse_ec_private_key_pem(pem_text: string) -> ptr {
     der, label, err = pem.parse(pem_text)
     if string.equals(err, "") != 1 || der == null {
-        if der != null { bytes.free(der) }
+        if der != null { wipe_free(der) }
         return null
     }
     dlen = bytes.length(der)
@@ -1323,14 +1323,14 @@ parse_ec_private_key_pem(pem_text: string) -> ptr {
     r = asn1.reader_new(der)
     sub, body, serr = asn1.read_sequence(r)
     if string.equals(serr, "") != 1 {
-        asn1.reader_free(r); bytes.free(der)
+        asn1.reader_free(r); wipe_free(der)
         return null
     }
 
     // Check version
     ver_bn, verr = asn1.read_integer(sub)
     if string.equals(verr, "") != 1 {
-        asn1.reader_free(sub); asn1.reader_free(r); bytes.free(der); bytes.free(body)
+        asn1.reader_free(sub); asn1.reader_free(r); wipe_free(der); wipe_free(body)
         return null
     }
     bignum.free(ver_bn)
@@ -1355,14 +1355,14 @@ parse_ec_private_key_pem(pem_text: string) -> ptr {
                     if string.equals(iverr, "") == 1 { bignum.free(iver_bn) }
                     poct, poerr = asn1.read_octet_string(isub)
                     if string.equals(poerr, "") == 1 { priv = poct }
-                    asn1.reader_free(isub); bytes.free(ibody)
+                    asn1.reader_free(isub); wipe_free(ibody)
                 }
-                asn1.reader_free(ir); bytes.free(inner_oct)
+                asn1.reader_free(ir); wipe_free(inner_oct)
             }
         }
     }
 
-    asn1.reader_free(sub); asn1.reader_free(r); bytes.free(der); bytes.free(body)
+    asn1.reader_free(sub); asn1.reader_free(r); wipe_free(der); wipe_free(body)
     return priv
 }
 
@@ -1441,7 +1441,8 @@ fn parse_sec1(der: @keep ptr, want: int) -> (int, ptr) {
             bytes.free(params)
         }
     }
-    asn1.reader_free(sub); bytes.free(body); asn1.reader_free(r)
+    // body is the key's SEQUENCE: the scalar is in it (#3382).
+    asn1.reader_free(sub); wipe_free(body); asn1.reader_free(r)
     if string.equals(oerr, "") != 1 || oct == null { return tls13_cert.KEY_NONE, null }
     olen = bytes.length(oct)
     if kind == tls13_cert.KEY_NONE { kind = kind_of_size(olen) }
@@ -1509,10 +1510,11 @@ fn parse_pkcs8(der: @keep ptr) -> (ptr, string) {
                 }
             }
         }
-        asn1.reader_free(alg); bytes.free(abody)
+        asn1.reader_free(alg); wipe_free(abody)
     }
     inner, ierr = asn1.read_octet_string(sub)
-    asn1.reader_free(sub); bytes.free(body); asn1.reader_free(r)
+    // body is the PrivateKeyInfo's SEQUENCE, the key inside it (#3382).
+    asn1.reader_free(sub); wipe_free(body); asn1.reader_free(r)
     if string.equals(ierr, "") != 1 || inner == null { return null, "not a PKCS#8 private key" }
 
     if string.equals(oid, "1.2.840.10045.2.1") == 1 {
@@ -1581,8 +1583,9 @@ load_private_key(pem_text: string) -> (ptr, string) {
     if at < 0 { at = string.index_of(pem_text, KEY_LABEL_SEC1) }
     if at < 0 { at = string.index_of(pem_text, KEY_LABEL_PKCS1) }
     if at < 0 { return null, "no private key in the PEM text" }
-    block = string.substring(pem_text, at, string.length(pem_text))
-    der, label, err = pem.parse(block)
+    // Decoded where it lies in the text, never copied out as a string: a
+    // string cannot be wiped (#3382).
+    der, label, err = pem.parse_at(pem_text, at)
     if string.equals(err, "") != 1 || der == null {
         if der != null { wipe_free(der) }
         return null, "the private key's PEM does not decode: ${err}"

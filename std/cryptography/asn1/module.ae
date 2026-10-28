@@ -233,7 +233,8 @@ read_tlv(r: ptr) -> (ptr, string) {
     }
 
     if is_indefinite == 1 {
-        // Read TLVs recursively until we find EOC (00 00)
+        // Read TLVs recursively until we find EOC (00 00); each copy is
+        // wiped as it is replaced, the TLVs may hold a key (#3382).
         acc = bytes.new(0)
         acc_len = 0
         loop = 1
@@ -248,19 +249,19 @@ read_tlv(r: ptr) -> (ptr, string) {
             }
             if loop == 1 {
                 if rr.pos >= rr.len {
-                    bytes.free(acc)
+                    bytes.wipe_free(acc)
                     return null, "asn1: unexpected end of input in indefinite length"
                 }
                 start_pos = rr.pos
                 sub_content, suberr = read_tlv(r)
                 if string.equals(suberr, "") != 1 {
-                    bytes.free(acc)
+                    bytes.wipe_free(acc)
                     return null, suberr
                 }
                 // suberr is the sub-call's (empty) success string; release it
                 // so the recursive read_tlv's "" doesn't leak per sub-TLV.
                 string.release(suberr)
-                bytes.free(sub_content)
+                bytes.wipe_free(sub_content)
                 end_pos = rr.pos
                 sub_tlv_len = end_pos - start_pos
 
@@ -270,7 +271,7 @@ read_tlv(r: ptr) -> (ptr, string) {
                     bytes.copy_from_bytes(new_acc, 0, acc, 0, acc_len)
                 }
                 bytes.copy_from_bytes(new_acc, acc_len, rr.buf, start_pos, sub_tlv_len)
-                bytes.free(acc)
+                bytes.wipe_free(acc)
                 acc = new_acc
                 acc_len = acc_len + sub_tlv_len
             }
@@ -318,7 +319,7 @@ read_tagged(r: ptr, want_tag: int) -> (ptr, string) {
     }
     rr = r as *Asn1Reader
     if rr.last_tag != want_tag {
-        bytes.free(content)
+        bytes.wipe_free(content)
         return null, "asn1: unexpected tag"
     }
     return content, err
@@ -345,7 +346,8 @@ read_integer(r: ptr) -> (ptr, string) {
     }
     clen = bytes.length(content)
     n = bignum.from_bytes(content, clen)
-    bytes.free(content)
+    // The content may be a private key's number (an RSA d, #3382).
+    bytes.wipe_free(content)
     return n, err
 }
 

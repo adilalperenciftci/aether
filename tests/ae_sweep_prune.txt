@@ -322,3 +322,5 @@ tests/integration/https_tls_reload/
 tests/integration/crypto_random_failure/
 # #3376: mtls.ae takes its certificate, key and server port from its driver.
 tests/integration/crypto_tls13_mtls_signature/
+# #3382: probe.ae links probe_shim.c (aether.toml); test_key_wipe.sh builds and runs it.
+tests/integration/crypto_key_wipe/

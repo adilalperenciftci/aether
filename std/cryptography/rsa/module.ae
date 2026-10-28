@@ -29,9 +29,12 @@
 // result times r^-1). The two decryptions check their padding without an
 // early exit or a branch on the plaintext, and only the final verdict (and
 // the message length) is declassified. Loading a key is not constant time
-// (the DER reader and std.bignum branch on the encoding); key_from_bytes
-// copies d without std.bignum. tests/integration/crypto_ct_valgrind checks
-// the private-key operations under Valgrind.
+// (the DER reader and std.bignum branch on the encoding). key_from_bytes and
+// key_from_pkcs1_der copy d into the key byte by byte, without std.bignum,
+// so their keys have no d bignum (RsaKey.d is null), and the DER copies d
+// passes through are wiped as they are freed (#3382).
+// tests/integration/crypto_ct_valgrind checks the private-key operations
+// under Valgrind.
 //
 // A 2048-bit private-key operation takes about 11 ms with the default
 // `ae build` (27 ms on std.bignum's variable-time mod_pow before #2600).
@@ -57,8 +60,11 @@ exports(
 extern malloc(size: int) -> ptr
 @extern("free") libc_free(p: ptr)
 
-// An RSA key owns its component bignums (n, e, d). For a public-only key
-// `d` is null; raw_decrypt / sign require a private key.
+// An RSA key owns its component bignums (n, e, d). `d` is null for a
+// public-only key, and for the keys key_from_bytes and key_from_pkcs1_der
+// build: they copy the private exponent into `dbe` and never put it
+// through std.bignum, whose numbers are freed without a wipe (#3382).
+// raw_decrypt / sign require a private key, which `dbe` says.
 //
 // The private exponent is also held as `dbe`, exactly modulus_bytes(k)
 // big-endian bytes: the private-key operation reads its 4-bit windows from
@@ -151,8 +157,11 @@ fn wipe_free(b: @frees ptr) {
 }
 
 // Parse a PKCS#1 RSAPrivateKey DER (SEQUENCE { version, n, e, d, p, q,
-// dp, dq, qinv }). Returns (key, "") or (null, err). We keep n, e, d and
-// free the CRT params (this slice doesn't use CRT).
+// dp, dq, qinv }). Returns (key, "") or (null, err). The key is built as
+// key_from_bytes builds one: n and e as numbers, d copied byte by byte into
+// the key, never through std.bignum, whose numbers are freed as they are
+// (#3382); the CRT parameters are not read (this slice does not use CRT).
+// The SEQUENCE's copy and d's INTEGER content are wiped as they are freed.
 key_from_pkcs1_der(der: @keep ptr) -> (ptr, string) {
     r = asn1.reader_new(der)
     sub, body, serr = asn1.read_sequence(r)
@@ -162,18 +171,41 @@ key_from_pkcs1_der(der: @keep ptr) -> (ptr, string) {
     }
     ver, verr = asn1.read_integer(sub)
     if string.equals(verr, "") != 1 {
-        asn1.reader_free(sub); bytes.free(body); asn1.reader_free(r)
+        asn1.reader_free(sub); wipe_free(body); asn1.reader_free(r)
         return null, verr
     }
     bignum.free(ver)
-    n, nerr = asn1.read_integer(sub)
-    e, eerr = asn1.read_integer(sub)
-    d, derr = asn1.read_integer(sub)
-    asn1.reader_free(sub); bytes.free(body); asn1.reader_free(r)
-    if string.equals(nerr, "") != 1 { return null, nerr }
-    if string.equals(eerr, "") != 1 { return null, eerr }
-    if string.equals(derr, "") != 1 { return null, derr }
-    return key_from_components(n, e, d), derr
+    nb, nerr = read_int_content(sub)
+    eb, eerr = read_int_content(sub)
+    db, derr = read_int_content(sub)
+    asn1.reader_free(sub); wipe_free(body); asn1.reader_free(r)
+    err = ""
+    if string.equals(nerr, "") != 1 { err = nerr }
+    if string.equals(err, "") == 1 && string.equals(eerr, "") != 1 { err = eerr }
+    if string.equals(err, "") == 1 && string.equals(derr, "") != 1 { err = derr }
+    k = null
+    if string.equals(err, "") == 1 {
+        // An INTEGER's content is two's complement; n, e and d are
+        // positive, their leading zero byte only a sign.
+        k = key_from_bytes(bytes.view(nb)[0..bytes.length(nb)], bytes.view(eb)[0..bytes.length(eb)], bytes.view(db)[0..bytes.length(db)])
+        if k == null { err = "rsa: not an RSA private key (n, e or d)" }
+    }
+    if nb != null { bytes.free(nb) }
+    if eb != null { bytes.free(eb) }
+    if db != null { wipe_free(db) }
+    return k, err
+}
+
+// The content of the next INTEGER in `r`, as bytes (caller frees, wiping
+// a secret), or (null, why).
+fn read_int_content(r: ptr) -> (ptr, string) {
+    c, err = asn1.read_tlv(r)
+    if string.equals(err, "") != 1 { return null, err }
+    if asn1.last_tag(r) != 0x02 {
+        wipe_free(c)
+        return null, "rsa: an RSAPrivateKey field is not an INTEGER"
+    }
+    return c, ""
 }
 
 // Byte length of the modulus (the RSA block size k).
@@ -642,7 +674,8 @@ to_fixed(n: ptr, width: int) -> ptr {
         }
         i = i + 1
     }
-    bytes.free(mag)
+    // The magnitude of a private exponent too (key_from_components, #3382).
+    wipe_free(mag)
     return out
 }
 

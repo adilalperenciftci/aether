@@ -20,6 +20,7 @@
 //   import std.cryptography.pem
 //
 //   der, label, err = pem.parse(pem_text)   // first PEM block in the text
+//   der, label, err = pem.parse_at(pem_text, from) // the first at or after `from`
 //   text, err       = pem.encode(label, der_bytes)
 //
 //   `der` is a std.bytes (caller frees with bytes.free); `label` is the
@@ -31,7 +32,7 @@ import std.bytes
 import std.strbuilder
 
 exports(
-    parse, encode,
+    parse, parse_at, encode,
     base64_decode, base64_encode
 )
 
@@ -55,38 +56,53 @@ b64_val(c: int) -> int {
 // Returns (bytes, err). On malformed input returns (null, err).
 base64_decode(s: string) -> (ptr, string) {
     n = string.length(s)
-    out = bytes.new(0)
+    return decode_range(s, n, 0, n)
+}
+
+// The base64 in text[start, end) decoded, read in place, into a buffer of
+// exactly its final size (#3382): the text of a private key is decoded
+// here, and a buffer that grew would have left the key's bytes in the
+// blocks it moved out of. Whitespace is skipped; '=' ends a group's data
+// bits. (bytes, "") or (null, why).
+fn decode_range(text: string, tlen: int, start: int, end: int) -> (ptr, string) {
+    // First the length, and every character checked.
     outlen = 0
-    acc = 0 // accumulated bits
-    nbits = 0 // number of bits in acc
-    i = 0
-    while i < n {
-        c = string_char_at_n(s, n, i)
+    nbits = 0
+    i = start
+    while i < end {
+        c = string_char_at_n(text, tlen, i)
         i = i + 1
-        // skip whitespace
-        if c == 32 {} else {
-            if c == 9 {} else {
-                if c == 10 {} else {
-                    if c == 13 {} else {
-                        if c == 61 {
-                            // '=' padding — stop consuming data bits
-                            nbits = 0
-                        } else {
-                            v = b64_val(c)
-                            if v < 0 {
-                                bytes.free(out)
-                                return null, "pem: invalid base64 character"
-                            }
-                            acc = (acc << 6) | v
-                            nbits = nbits + 6
-                            if nbits >= 8 {
-                                nbits = nbits - 8
-                                byteval = (acc >> nbits) & 0xFF
-                                bytes.set(out, outlen, byteval)
-                                outlen = outlen + 1
-                            }
-                        }
-                    } } } }
+        if c == 61 {
+            nbits = 0
+        } else if c != 32 && c != 9 && c != 10 && c != 13 {
+            if b64_val(c) < 0 { return null, "pem: invalid base64 character" }
+            nbits = nbits + 6
+            if nbits >= 8 {
+                nbits = nbits - 8
+                outlen = outlen + 1
+            }
+        }
+    }
+    out = bytes.new(outlen)
+    if outlen > 0 { bytes.set(out, outlen - 1, 0) }
+    o = 0
+    acc = 0
+    nbits = 0
+    i = start
+    while i < end {
+        c = string_char_at_n(text, tlen, i)
+        i = i + 1
+        if c == 61 {
+            nbits = 0
+        } else if c != 32 && c != 9 && c != 10 && c != 13 {
+            acc = ((acc << 6) | b64_val(c)) & 0xFFFF
+            nbits = nbits + 6
+            if nbits >= 8 {
+                nbits = nbits - 8
+                bytes.set(out, o, (acc >> nbits) & 0xFF)
+                o = o + 1
+            }
+        }
     }
     return out, ""
 }
@@ -139,9 +155,17 @@ emit_b64_char(sb: ptr, alpha: string, v: int) {
 // Parse the first PEM block in `text`. Returns (der_bytes, label, "") on
 // success, (null, "", err) otherwise. Whitespace before/after is tolerated.
 parse(text: string) -> (ptr, string, string) {
-    _n = string.length(text)
+    return parse_at(text, 0)
+}
+
+// parse, for the first block that begins at or after offset `from`. The
+// base64 body is decoded where it lies in `text`, never copied out of it
+// as a string (#3382): a string cannot be wiped, and the body of a private
+// key's block is the key.
+parse_at(text: string, from: int) -> (ptr, string, string) {
+    tlen = string.length(text)
     begin = "-----BEGIN "
-    bidx = string.index_of(text, begin)
+    bidx = string.index_of_from(text, begin, from)
     if bidx < 0 {
         return null, "", "pem: no BEGIN marker"
     }
@@ -174,8 +198,7 @@ parse(text: string) -> (ptr, string, string) {
     if string.equals(begin_label, end_label) != 1 {
         return null, "", "pem: BEGIN/END label mismatch"
     }
-    body = string.substring(text, body_start, end_tok_idx)
-    der, derr = base64_decode(body)
+    der, derr = decode_range(text, tlen, body_start, end_tok_idx)
     if string.equals(derr, "") != 1 {
         return null, "", derr
     }
