@@ -3507,7 +3507,9 @@ w ! Close {}            // error: actor 'Writer' has no receive arm for 'Close'
 
 A function can take or return a typed reference, `close_it(w:
 actor_ref[Writer])` or `-> actor_ref[Writer]`, and a `spawn` result passes
-where one is wanted.
+where one is wanted. A typed reference also reaches the actor's state
+(`w.lines`); a bare `actor_ref` names no actor, so a field access through
+one is an error that says to type it (#3333).
 
 A send never blocks the sender. Two messages one sender sends one actor are
 handled in the order sent; a message is handled at most once, and one the

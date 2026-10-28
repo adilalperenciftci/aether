@@ -1,0 +1,64 @@
+// #3331: inside a builder's block, a setter whose `_ctx` is injected can
+// leave its defaulted parameters out. The arity check counted the hidden
+// `_ctx` among the arguments the call gives, so `item("a")` for
+// `item(_ctx, name, kind = "plain")` was refused (E0200, expects 2-3, got
+// 1), and `item("b", "fancy")` was read as `_ctx = "b"` with `kind`
+// defaulted, every argument one place off. Each item records its name and
+// kind, so a shifted argument shows; a call that passes the context itself
+// (`_ctx`, from a setter forwarding to another) and a call outside any
+// block keep their meaning.
+import std.string
+
+extern exit(code: int)
+
+struct Cfg {
+    names: string
+}
+
+cfg_new() -> *Cfg {
+    c = heap.new(Cfg)
+    c.names = ""
+    return c
+}
+
+builder collect(): string with cfg_new {
+    c = _builder as *Cfg
+    out = string.copy(c.names)
+    heap.free(c)
+    return out
+}
+
+item(_ctx: ptr, name: string, kind: string = "plain") {
+    c = _ctx as *Cfg
+    c.names = "${c.names}${name}:${kind} "
+}
+
+// A setter that forwards its own context to another.
+pair(_ctx: ptr, name: string) {
+    item(_ctx, name)
+    item(_ctx, name, "twin")
+}
+
+check(label: string, got: string, want: string) {
+    if got != want {
+        println("FAIL ${label}: got '${got}', want '${want}'")
+        exit(1)
+    }
+}
+
+main() {
+    r = collect() {
+        item("a")
+        item("b", "fancy")
+        pair("c")
+    }
+    check("block", r, "a:plain b:fancy c:plain c:twin ")
+
+    // Outside a block the context is passed, and a default still fills.
+    c = cfg_new()
+    item(c, "d")
+    item(c, "e", "bold")
+    check("explicit", c.names, "d:plain e:bold ")
+    heap.free(c)
+    println("ok")
+}

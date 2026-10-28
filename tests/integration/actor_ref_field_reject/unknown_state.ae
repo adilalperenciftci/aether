@@ -1,0 +1,18 @@
+// Part of: test_actor_ref_field_reject.sh. A typed reference naming a state
+// its actor does not have (#3333).
+
+message Bump {}
+
+actor Counter {
+    state n = 0
+    receive {
+        Bump() -> { n = n + 1 }
+    }
+}
+
+main() {
+    c = spawn(Counter())
+    c ! Bump {}
+    wait_for_idle()
+    println("${c.count}")
+}

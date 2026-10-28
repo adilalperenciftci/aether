@@ -1,0 +1,22 @@
+// Part of: test_actor_ref_field_reject.sh. The typed reference reaches the
+// state, through a parameter and a spawn result (#3333): accepted.
+
+message Bump {}
+
+actor Counter {
+    state n = 0
+    receive {
+        Bump() -> { n = n + 1 }
+    }
+}
+
+peek(w: actor_ref[Counter]) -> int {
+    return w.n
+}
+
+main() {
+    c = spawn(Counter())
+    c ! Bump {}
+    wait_for_idle()
+    println("${peek(c)} ${c.n}")
+}

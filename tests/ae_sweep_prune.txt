@@ -11,6 +11,7 @@
 /lib/
 tests/integration/actor_alignment/
 tests/integration/actor_ref_after_release/
+tests/integration/actor_ref_field_reject/
 tests/integration/actor_state_base_member_reject/
 tests/integration/ae_inspect/
 tests/integration/ae_add_hash_pin/
