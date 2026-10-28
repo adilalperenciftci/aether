@@ -1045,7 +1045,7 @@ fn is_session_post(what: string) -> int {
 
 // ---- HelloRetryRequest (hrr=MODE, #3325) ----
 
-const HRR_RANDOM = "cf21ad74e59a6111be1dfa3a06b44e8c845c7630048b15d5a00d203a15d5b26e"
+const HRR_RANDOM = "cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c"
 const HRR_COOKIE = "c00c1e0f"
 
 // A HelloRetryRequest for MODE: "cookie" (HRR_COOKIE), "group:HEX" (a

@@ -15,7 +15,8 @@
 #          of the ticket's hash (illegal_parameter).
 #   #3353  a ServerHello without key_share (missing_extension) or naming a
 #          group the ClientHello has no share for (illegal_parameter).
-#   #3325  a HelloRetryRequest asking for secp256r1: the second ClientHello
+#   #3325  a HelloRetryRequest asking for secp256r1 (also from s_server
+#          -groups P-256, and the pure server's to s_client): the second ClientHello
 #          carries its share, no early data, and a binder over the new
 #          transcript.
 #
@@ -47,6 +48,9 @@ for p in resumepeer resumeclient; do
     "$AE" build "$SCRIPT_DIR/$p.ae" -o "$TMP/$p" >"$TMP/b_$p.log" 2>&1 \
         || { sed -n '1,12p' "$TMP/b_$p.log"; fail "$p did not build"; }
 done
+# The pure server of crypto_tls13_peer, for the s_client case.
+"$AE" build "$ROOT/tests/integration/crypto_tls13_peer/server.ae" -o "$TMP/server" >"$TMP/b_server.log" 2>&1 \
+    || { sed -n '1,12p' "$TMP/b_server.log"; fail "server did not build"; }
 
 fails=0
 # run_case <name> <ticket suite> <PEER_CASE> <EARLY> <client expects> <peer expects>
@@ -136,6 +140,60 @@ if command -v openssl >/dev/null 2>&1 && openssl s_server -help 2>&1 | grep -q -
             *) echo "    FAIL: openssl s_server -early_data, $suite: client said [$got]; server [$(tr '\n' '|' <"$TMP/s.log")]"; fails=$((fails + 1)) ;;
         esac
     done
+    # A HelloRetryRequest from OpenSSL (#3325): s_server takes P-256 only,
+    # and a resuming ClientHello carries an x25519 share only, so the
+    # resumption needs a second ClientHello with a P-256 share and a binder
+    # over the new transcript. (No 0-RTT here: s_server's anti-replay spends
+    # a ticket offered with early data, so after the HelloRetryRequest it
+    # refuses the PSK, which it may.)
+    SP=""
+    for try in 1 2 3 4 5; do
+        P=$(( 20000 + ($$ * 7 + try * 1009 + 17) % 40000 ))
+        openssl s_server -4 -www -accept "$P" -tls1_3 -groups P-256 -num_tickets 1 -naccept 2 \
+            -cert "$TMP/c.pem" -key "$TMP/k.pem" >"$TMP/s.log" 2>&1 </dev/null &
+        spid=$!
+        PIDS="$PIDS $spid"
+        w=0
+        while [ "$w" -lt 100 ] && server_alive "$spid" && ! grep -q ACCEPT "$TMP/s.log" 2>/dev/null; do sleep 0.1; w=$((w + 1)); done
+        if server_alive "$spid" && grep -q ACCEPT "$TMP/s.log" 2>/dev/null; then
+            SP=$P
+            break
+        fi
+        kill_server "$spid"
+    done
+    [ -n "$SP" ] || fail "could not start openssl s_server -groups P-256"
+    got=$(RESUME_PORT="$SP" RESUME_HOST=localhost CAFILE="$TMP/c.pem" AFTER=GET RESUME_READ=1 \
+        "$TMP/resumeclient" 2>&1 | tr '\n' '|')
+    n=0
+    while server_alive "$spid" && [ "$n" -lt 100 ]; do sleep 0.1; n=$((n + 1)); done
+    stop_server "$spid"
+    case "$got" in
+        *"RESUMED early=0|SENT|RECV "*"HTTP/1.0 200"*) echo "    ok: openssl s_server -groups P-256: a HelloRetryRequest on the resumption" ;;
+        *) echo "    FAIL: openssl s_server -groups P-256: client said [$got]; server [$(tr '\n' '|' <"$TMP/s.log")]"; fails=$((fails + 1)) ;;
+    esac
+
+    # And to the pure server (#3325): s_client sends a P-384 share only, the
+    # server asks for X25519, and the handshake completes on the second
+    # ClientHello.
+    rm -f "$TMP/port" "$TMP/server.out"
+    PEER_PORT_OUT="$TMP/port" "$TMP/server" >"$TMP/server.out" 2>&1 &
+    spid=$!
+    PIDS="$PIDS $spid"
+    i=0
+    while [ "$i" -lt 100 ] && [ ! -s "$TMP/port" ]; do sleep 0.1; i=$((i + 1)); done
+    [ -s "$TMP/port" ] || fail "the pure server never listened"
+    openssl s_client -msg -connect "127.0.0.1:$(cat "$TMP/port")" -servername peer.example \
+        -groups P-384:X25519 </dev/null >"$TMP/c.log" 2>&1 || :
+    n=0
+    while server_alive "$spid" && [ "$n" -lt 100 ]; do sleep 0.1; n=$((n + 1)); done
+    stop_server "$spid"
+    hellos=$(grep -c '>>> TLS 1.3, Handshake .*ClientHello' "$TMP/c.log" || :)
+    if [ "$hellos" = 2 ] && grep -q 'Peer Temp Key: X25519' "$TMP/c.log" && grep -q ACCEPTED "$TMP/server.out"; then
+        echo "    ok: openssl s_client -groups P-384:X25519: the pure server's HelloRetryRequest"
+    else
+        echo "    FAIL: openssl s_client -groups P-384:X25519: $hellos ClientHellos, server said [$(tr '\n' '|' <"$TMP/server.out")]"
+        fails=$((fails + 1))
+    fi
 else
     echo "    skip: openssl s_server -early_data (no openssl, or no -early_data)"
 fi
