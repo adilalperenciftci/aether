@@ -613,6 +613,8 @@ void test_scheduler_actor_thread_holds_released_actor(void) {
     // the target, after the send: waited for, not read at once.
     for (int w = 0; w < 5000 && atomic_load(&g_churn_handled) < 1; w++) sleep_ms(1);
     ASSERT_EQ(1, atomic_load(&g_churn_handled));
+    // The target counts its message before it releases itself.
+    for (int w = 0; w < 5000 && scheduler_released_actors_pending() < 1; w++) sleep_ms(1);
     ASSERT_EQ(1, scheduler_released_actors_pending());
 
     // Further releases move the epoch on; the core publishes each move and
