@@ -1,0 +1,23 @@
+// #3341: the program's own actor handles a message an imported module
+// declares. The merge puts the module's message before main, after this
+// actor, and the actor was generated without it: the C did not compile
+// (`implicit declaration of function 'Counter_handle_Ping'`).
+import lib.pings
+
+message Total {}
+
+actor Counter {
+    state n = 0
+    receive {
+        Ping(n: k) -> { n = n + k }
+        Total() -> { reply n }
+    }
+}
+
+main() {
+    c = spawn(Counter())
+    pings.ping(c, 40)
+    c ! Ping { n: 2 }
+    int v = c ? Total {}
+    println("total ${v}")
+}

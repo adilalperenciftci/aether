@@ -8171,6 +8171,156 @@ static int program_uses_lanes(const ASTNode* n) {
     return 0;
 }
 
+/* One message's C: its struct, the release of the fields it owns, its
+ * registry entry (the id its sends and its receive arms use) and its
+ * --emit-header entry. generate_program emits every message this way
+ * ahead of the actors and functions, as it does the structs, so the order
+ * of the merged program does not matter: an actor generated before a
+ * message it handled had no id for it, so the arm was dropped, and an
+ * imported message, which the merge puts before main, could not be
+ * handled by the program's own actors at all (#3341). */
+static void emit_message_definition(CodeGenerator* gen, ASTNode* child) {
+    // Generate optimized message struct with field packing
+    if (child && child->value) {
+        int field_count = 0;
+        for (int i = 0; i < child->child_count; i++) {
+            if (child->children[i] && child->children[i]->type == AST_MESSAGE_FIELD) {
+                field_count++;
+            }
+        }
+        
+        print_line(gen, "// Message: %s (%d fields)", child->value, field_count);
+        
+        // Natural alignment only (#2509). Messages with more than
+        // four fields used to be declared aligned(64), but a
+        // payload lives in a malloc'd copy (aether_send_message),
+        // which promises 16 bytes, and the receiver reads it
+        // through a pointer of this type: undefined behaviour,
+        // and aligned vector moves the compiler may pick for it
+        // fault. One reader per copy, so the cache line bought
+        // nothing, and it padded every such message to 64 bytes.
+        print_line(gen, "typedef struct %s {", child->value);
+        indent(gen);
+        // The field order and types are the ones the embedding
+        // header gets (#2517).
+        emit_message_struct_body(child, gen->output, gen->indent_level);
+
+        MessageFieldDef* first_field = NULL;
+        MessageFieldDef* last_field = NULL;
+
+        // Build field list for registry. We store the resolved
+        // C type for each field so downstream codegen (receive
+        // destructuring, struct-literal send-side) can emit the
+        // correct type without re-deriving it from type_kind,
+        // which loses information for composite types like
+        // `string[]` (element type) and structs (struct name).
+        for (int i = 0; i < child->child_count; i++) {
+            ASTNode* field = child->children[i];
+            if (field && field->type == AST_MESSAGE_FIELD) {
+                MessageFieldDef* field_def = (MessageFieldDef*)malloc(sizeof(MessageFieldDef));
+                field_def->name = strdup(field->value);
+                field_def->type_kind = field->node_type ? field->node_type->kind : TYPE_UNKNOWN;
+                field_def->c_type = NULL;
+                field_def->element_c_type = NULL;
+                field_def->owned = tc_type_is_owned(field->node_type);   /* #3142 */
+                if (field->node_type) {
+                    const char* resolved = get_c_type(field->node_type);
+                    if (resolved) {
+                        field_def->c_type = strdup(resolved);
+                    }
+                    if (field->node_type->kind == TYPE_ARRAY &&
+                        field->node_type->element_type) {
+                        const char* elem = get_c_type(field->node_type->element_type);
+                        if (elem) {
+                            field_def->element_c_type = strdup(elem);
+                        }
+                    }
+                }
+                field_def->next = NULL;
+
+                if (!first_field) {
+                    first_field = field_def;
+                    last_field = field_def;
+                } else {
+                    last_field->next = field_def;
+                    last_field = field_def;
+                }
+            }
+        }
+        unindent(gen);
+        print_line(gen, "} %s;", child->value);
+        print_line(gen, "");
+        /* The death notice the runtime writes (#2974): this
+         * struct must be its AetherDownMsg. */
+        if (child->annotation && strcmp(child->annotation, "system") == 0 &&
+            strcmp(child->value, "Down") == 0) {
+            print_line(gen, "#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L");
+            print_line(gen, "_Static_assert(sizeof(Down) == sizeof(AetherDownMsg) &&");
+            print_line(gen, "               offsetof(Down, ref) == offsetof(AetherDownMsg, ref) &&");
+            print_line(gen, "               offsetof(Down, reason) == offsetof(AetherDownMsg, reason),");
+            print_line(gen, "               \"Down must be the runtime's AetherDownMsg\");");
+            print_line(gen, "#endif");
+            print_line(gen, "");
+        }
+
+        /* Per-message heap-string-field release function
+         * (#466). Walked by the receive-handler dispatch
+         * before `aether_free_message` so the deep-
+         * copied AetherString allocations the sender
+         * stamped in (codegen_expr.c send-side) are
+         * reclaimed when the recipient is done with the
+         * message. No-op for messages with no string
+         * fields; the codegen_actor.c dispatch skips
+         * the call in that case via
+         * `message_has_string_field`. */
+        if (message_owns_fields(gen, child->value)) {
+            /* Forward-declare `string_release` here so the
+             * generated release_fields function compiles
+             * even on tests that don't `import std.string`
+             * (and therefore don't get the extern
+             * registry's prototype). The duplicate-but-
+             * matching declaration is tolerated by C —
+             * matches the registry's
+             * `void string_release(const char*)` exactly
+             * when std.string IS imported. */
+            print_line(gen, "extern void string_release(const char*);");
+            print_line(gen, "static inline void _aether_msg_release_%s(%s* m) {",
+                       child->value, child->value);
+            indent(gen);
+            print_line(gen, "if (!m) return;");
+            /* Each field the message owns: a string the sender
+             * copied, a closure or struct it took (#2525, #2921). */
+            for (int fi = 0; fi < child->child_count; fi++) {
+                ASTNode* f = child->children[fi];
+                if (f && f->type == AST_MESSAGE_FIELD && own_type_owns(gen, f->node_type))
+                    own_emit_part(gen, f->node_type, cg_internf("m->%s", f->value), OWN_DROP);
+                /* #3142: an owned pointer the handler did not take
+                 * (its binding empties the field), or a message
+                 * that was never handled. */
+                else if (f && f->type == AST_MESSAGE_FIELD)
+                    emit_owned_ptr_drop(gen, f->node_type, cg_internf("m->%s", f->value));
+            }
+            unindent(gen);
+            print_line(gen, "}");
+            print_line(gen, "");
+        }
+
+        // Generate type-specific memory pool for this message type
+        print_line(gen, "// Type-specific memory pool for %s", child->value);
+        print_line(gen, "// DECLARE_TYPE_POOL(%s)", child->value);
+        print_line(gen, "// DECLARE_TLS_POOL(%s)", child->value);
+        print_line(gen, "");
+
+        register_message_type(gen->message_registry, child->value, first_field);
+
+        // The --emit-header file; #996 had gated this on the
+        // --emit=csrc catalog header, which left it empty (#2517).
+        if (gen->header_file) {
+            emit_message_to_header(gen, child);
+        }
+    }
+}
+
 void generate_program(CodeGenerator* gen, ASTNode* program) {
     if (!program || program->type != AST_PROGRAM) return;
     gen->program = program;
@@ -10380,6 +10530,14 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     if (program_releases_messages(gen))
         print_line(gen, "static void _aether_release_message(int type, void* payload);");
 
+    /* Every message before the actors and functions that send it or
+     * handle it (#3341). */
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* child = program->children[i];
+        if (child && child->type == AST_MESSAGE_DEFINITION)
+            emit_message_definition(gen, child);
+    }
+
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* child = program->children[i];
         if (!child) continue;
@@ -10450,145 +10608,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                 }
                 break;
             case AST_MESSAGE_DEFINITION:
-                // Generate optimized message struct with field packing
-                if (child && child->value) {
-                    int field_count = 0;
-                    for (int i = 0; i < child->child_count; i++) {
-                        if (child->children[i] && child->children[i]->type == AST_MESSAGE_FIELD) {
-                            field_count++;
-                        }
-                    }
-                    
-                    print_line(gen, "// Message: %s (%d fields)", child->value, field_count);
-                    
-                    // Natural alignment only (#2509). Messages with more than
-                    // four fields used to be declared aligned(64), but a
-                    // payload lives in a malloc'd copy (aether_send_message),
-                    // which promises 16 bytes, and the receiver reads it
-                    // through a pointer of this type: undefined behaviour,
-                    // and aligned vector moves the compiler may pick for it
-                    // fault. One reader per copy, so the cache line bought
-                    // nothing, and it padded every such message to 64 bytes.
-                    print_line(gen, "typedef struct %s {", child->value);
-                    indent(gen);
-                    // The field order and types are the ones the embedding
-                    // header gets (#2517).
-                    emit_message_struct_body(child, gen->output, gen->indent_level);
-
-                    MessageFieldDef* first_field = NULL;
-                    MessageFieldDef* last_field = NULL;
-
-                    // Build field list for registry. We store the resolved
-                    // C type for each field so downstream codegen (receive
-                    // destructuring, struct-literal send-side) can emit the
-                    // correct type without re-deriving it from type_kind,
-                    // which loses information for composite types like
-                    // `string[]` (element type) and structs (struct name).
-                    for (int i = 0; i < child->child_count; i++) {
-                        ASTNode* field = child->children[i];
-                        if (field && field->type == AST_MESSAGE_FIELD) {
-                            MessageFieldDef* field_def = (MessageFieldDef*)malloc(sizeof(MessageFieldDef));
-                            field_def->name = strdup(field->value);
-                            field_def->type_kind = field->node_type ? field->node_type->kind : TYPE_UNKNOWN;
-                            field_def->c_type = NULL;
-                            field_def->element_c_type = NULL;
-                            field_def->owned = tc_type_is_owned(field->node_type);   /* #3142 */
-                            if (field->node_type) {
-                                const char* resolved = get_c_type(field->node_type);
-                                if (resolved) {
-                                    field_def->c_type = strdup(resolved);
-                                }
-                                if (field->node_type->kind == TYPE_ARRAY &&
-                                    field->node_type->element_type) {
-                                    const char* elem = get_c_type(field->node_type->element_type);
-                                    if (elem) {
-                                        field_def->element_c_type = strdup(elem);
-                                    }
-                                }
-                            }
-                            field_def->next = NULL;
-
-                            if (!first_field) {
-                                first_field = field_def;
-                                last_field = field_def;
-                            } else {
-                                last_field->next = field_def;
-                                last_field = field_def;
-                            }
-                        }
-                    }
-                    unindent(gen);
-                    print_line(gen, "} %s;", child->value);
-                    print_line(gen, "");
-                    /* The death notice the runtime writes (#2974): this
-                     * struct must be its AetherDownMsg. */
-                    if (child->annotation && strcmp(child->annotation, "system") == 0 &&
-                        strcmp(child->value, "Down") == 0) {
-                        print_line(gen, "#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L");
-                        print_line(gen, "_Static_assert(sizeof(Down) == sizeof(AetherDownMsg) &&");
-                        print_line(gen, "               offsetof(Down, ref) == offsetof(AetherDownMsg, ref) &&");
-                        print_line(gen, "               offsetof(Down, reason) == offsetof(AetherDownMsg, reason),");
-                        print_line(gen, "               \"Down must be the runtime's AetherDownMsg\");");
-                        print_line(gen, "#endif");
-                        print_line(gen, "");
-                    }
-
-                    /* Per-message heap-string-field release function
-                     * (#466). Walked by the receive-handler dispatch
-                     * before `aether_free_message` so the deep-
-                     * copied AetherString allocations the sender
-                     * stamped in (codegen_expr.c send-side) are
-                     * reclaimed when the recipient is done with the
-                     * message. No-op for messages with no string
-                     * fields; the codegen_actor.c dispatch skips
-                     * the call in that case via
-                     * `message_has_string_field`. */
-                    if (message_owns_fields(gen, child->value)) {
-                        /* Forward-declare `string_release` here so the
-                         * generated release_fields function compiles
-                         * even on tests that don't `import std.string`
-                         * (and therefore don't get the extern
-                         * registry's prototype). The duplicate-but-
-                         * matching declaration is tolerated by C —
-                         * matches the registry's
-                         * `void string_release(const char*)` exactly
-                         * when std.string IS imported. */
-                        print_line(gen, "extern void string_release(const char*);");
-                        print_line(gen, "static inline void _aether_msg_release_%s(%s* m) {",
-                                   child->value, child->value);
-                        indent(gen);
-                        print_line(gen, "if (!m) return;");
-                        /* Each field the message owns: a string the sender
-                         * copied, a closure or struct it took (#2525, #2921). */
-                        for (int fi = 0; fi < child->child_count; fi++) {
-                            ASTNode* f = child->children[fi];
-                            if (f && f->type == AST_MESSAGE_FIELD && own_type_owns(gen, f->node_type))
-                                own_emit_part(gen, f->node_type, cg_internf("m->%s", f->value), OWN_DROP);
-                            /* #3142: an owned pointer the handler did not take
-                             * (its binding empties the field), or a message
-                             * that was never handled. */
-                            else if (f && f->type == AST_MESSAGE_FIELD)
-                                emit_owned_ptr_drop(gen, f->node_type, cg_internf("m->%s", f->value));
-                        }
-                        unindent(gen);
-                        print_line(gen, "}");
-                        print_line(gen, "");
-                    }
-
-                    // Generate type-specific memory pool for this message type
-                    print_line(gen, "// Type-specific memory pool for %s", child->value);
-                    print_line(gen, "// DECLARE_TYPE_POOL(%s)", child->value);
-                    print_line(gen, "// DECLARE_TLS_POOL(%s)", child->value);
-                    print_line(gen, "");
-
-                    register_message_type(gen->message_registry, child->value, first_field);
-
-                    // The --emit-header file; #996 had gated this on the
-                    // --emit=csrc catalog header, which left it empty (#2517).
-                    if (gen->header_file) {
-                        emit_message_to_header(gen, child);
-                    }
-                }
+                // Emitted ahead of this loop with every other message
+                // (emit_message_definition, #3341).
                 break;
             case AST_BUILDER_FUNCTION:
             case AST_FUNCTION_DEFINITION:

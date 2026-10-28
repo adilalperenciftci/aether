@@ -1,0 +1,35 @@
+// Regression (#3341): a message is known to every actor and function,
+// wherever it is declared. Codegen emitted a message's struct, and gave it
+// the id its sends and arms use, only when it reached the message, so an
+// actor generated before a message it handled dropped it (the arm never
+// ran: `after` stayed 0), and a function before it that sent it, with an
+// actor between them, did not compile.
+
+extern exit(code: int)
+
+fn tell(a: actor_ref, x: int) {
+    a ! Later { x: x }
+}
+
+actor Early {
+    state n = 0
+    receive {
+        Later(x) -> { n = n + x }
+        Total() -> { reply n }
+    }
+}
+
+message Later { x: int }
+message Total {}
+
+main() {
+    a = spawn(Early())
+    a ! Later { x: 5 }
+    tell(a, 3)
+    int v = a ? Total {}
+    if v != 8 {
+        println("FAIL: the actor declared before its messages got ${v}, want 8")
+        exit(1)
+    }
+    println("OK")
+}
