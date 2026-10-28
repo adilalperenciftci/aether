@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
+#include <stdatomic.h>
 
 // Stack-trace capture (issue #347). Three platform paths:
 //
@@ -91,6 +92,16 @@ static AetherDeathHook death_hook = NULL;
  * pointer so that a program that panics but never enforces links no
  * sandbox (aether_sandbox.o and the audit log it writes to). */
 void (*_Atomic aether_panic_sandbox_unwind)(int frames) = NULL;
+
+/* The sandbox's part of an actor step's context (#3393,
+ * aether_step_barrier.h): the threads with a sandbox level in force (the
+ * pointer aether_sandbox.h's check reads, set once the copies are found),
+ * and how a step puts this thread's levels aside and gives them back. Here,
+ * so that the scheduler, which every actor program links, reads them
+ * without linking the sandbox. */
+atomic_int* _Atomic aether_sandbox_in_force = NULL;
+int (*_Atomic aether_step_sandbox_hide)(int saved[2]) = NULL;
+void (*_Atomic aether_step_sandbox_show)(const int saved[2]) = NULL;
 
 static void unwind_sandbox_levels(void) {
     void (*u)(int) = atomic_load_explicit(&aether_panic_sandbox_unwind, memory_order_relaxed);

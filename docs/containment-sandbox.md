@@ -240,7 +240,7 @@ runtime (#2955):
 | Case | What holds |
 |---|---|
 | two threads, each in its own block | each is checked against its own levels only; one leaving its block changes nothing for the other |
-| a message sent from a block | handled on an actor's thread, with no grants: an actor is not the block |
+| a message sent from a block | handled with no grants: an actor is not the block. That holds when the send steps an idle receiver of the same core inline, on the block's own thread: the step puts the block's levels aside and the block has them again when the send returns (#3393) |
 | a library's export called from inside a block on the same thread (through a host service, say), one runtime | held to the block's grants; its own `enforce` only narrows them, and when it ends the block is checked as before |
 | the same, with libraries built without `--shared-runtime` on macOS or Windows | each library has a copy of the runtime of its own, which cannot read another copy's grants: the inner library's checked operations are refused, and the first refusal prints a message naming `--shared-runtime`. Detected where the copies can find each other by name: libraries a host loads (globally, on Linux and FreeBSD, where `RTLD_LOCAL` hides them), and a program with the libraries it loads; on Windows a program's own copy finds a library's only if the library was loaded before the program's first checked operation |
 | a contrib host bridge (`lua.run_sandboxed(perms, code)` and the others) | pushes `perms` as a level of the thread, so inside an `enforce` the guest gets the intersection |

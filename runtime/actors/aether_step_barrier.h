@@ -32,11 +32,17 @@
  *     the outer handler keeps its signal recovery after an inner step;
  *   - a supervisor's restart claim, the reborn block and the spawn brackets
  *     (aether_supervision.c): a nested step's spawn takes no claimed block
- *     and is no factory's child, and its panic undoes no enclosing claim.
+ *     and is no factory's child, and its panic undoes no enclosing claim;
+ *   - the sandbox levels in force on the thread, in this runtime copy and
+ *     every other it shares the count with (aether_sandbox.c, #3393): a
+ *     receiver stepped inside an enforce block is checked as it is on a
+ *     thread of its own, against the levels it pushes itself and no other,
+ *     and the block's levels are in force again when the send returns.
  *
  * Each part costs a step only when some thread holds that kind of context:
  * it is put aside behind a load of a global that says so
- * (g_aether_spawn_watch for the claim); the ask and the actor are two
+ * (g_aether_spawn_watch for the claim; for the levels, the count of threads
+ * with one, through aether_sandbox_in_force); the ask and the actor are two
  * thread-local words, and the in-step flags are restored from what the
  * step read when it set them. Neither the locals holding what was put aside
  * nor the variables change between the sigsetjmp and a longjmp back to it,
@@ -58,6 +64,13 @@
 extern AETHER_TLS void* g_current_reply_slot;
 extern AETHER_TLS void* g_current_step_actor;
 
+/* The sandbox's part (aether_panic.c's pointers, which aether_sandbox.c sets
+ * when it first looks for the runtime copies): the threads with a level in
+ * force, and how this thread's levels are put aside and given back. */
+extern atomic_int* _Atomic aether_sandbox_in_force;
+extern int (*_Atomic aether_step_sandbox_hide)(int saved[2]);
+extern void (*_Atomic aether_step_sandbox_show)(const int saved[2]);
+
 /* What a step put aside, to give back when it ends. */
 typedef struct {
     void* reply_slot;
@@ -65,7 +78,9 @@ typedef struct {
     int in_step;
     int actor_id;
     int spawn_hid;
+    int sandbox_hid;
     AetherSpawnAside spawn;
+    int sandbox[2];
 } AetherStepAside;
 
 static inline void aether_step_put_aside(AetherStepAside* s) {
@@ -76,9 +91,17 @@ static inline void aether_step_put_aside(AetherStepAside* s) {
     s->actor_id = s->in_step ? g_aether_current_actor_id : -1;
     s->spawn_hid = unlikely(atomic_load_explicit(&g_aether_spawn_watch, memory_order_relaxed) != 0) &&
                    aether_spawn_put_aside(&s->spawn);
+    s->sandbox_hid = 0;
+    atomic_int* in_force = atomic_load_explicit(&aether_sandbox_in_force, memory_order_acquire);
+    if (unlikely(in_force != NULL) && unlikely(atomic_load_explicit(in_force, memory_order_relaxed) != 0)) {
+        int (*hide)(int saved[2]) = atomic_load_explicit(&aether_step_sandbox_hide, memory_order_relaxed);
+        s->sandbox_hid = hide && hide(s->sandbox);
+    }
 }
 
 static inline void aether_step_give_back(const AetherStepAside* s) {
+    if (unlikely(s->sandbox_hid))
+        atomic_load_explicit(&aether_step_sandbox_show, memory_order_relaxed)(s->sandbox);
     if (unlikely(s->spawn_hid)) aether_spawn_give_back(&s->spawn);
     g_aether_in_actor_step = s->in_step;
     g_aether_current_actor_id = s->actor_id;

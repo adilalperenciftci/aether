@@ -97,7 +97,15 @@ const AetherSandboxRendezvous* aether_sandbox_rendezvous(void) {
 }
 
 static const AetherSandboxRendezvous* _Atomic g_rv = NULL;
-atomic_int* _Atomic aether_sandbox_in_force = NULL;
+/* aether_sandbox_in_force is aether_panic.c's, where the step barrier reads
+ * it without linking this file (#3393). */
+
+/* A step's part (aether_step_barrier.h, #3393), reached through
+ * aether_panic.c's pointers, set with the unwind's below. */
+static int sandbox_step_hide(int saved[2]);
+static void sandbox_step_show(const int saved[2]);
+extern int (*_Atomic aether_step_sandbox_hide)(int saved[2]);
+extern void (*_Atomic aether_step_sandbox_show)(const int saved[2]);
 
 typedef const AetherSandboxRendezvous* (*rendezvous_fn)(void);
 
@@ -185,6 +193,9 @@ static const AetherSandboxRendezvous* rv(void) {
     /* Before g_rv is published: a thread that sees g_rv set sees this. */
     atomic_store_explicit(&aether_panic_sandbox_unwind, aether_sandbox_unwind_to_frame,
                           memory_order_relaxed);
+    /* Before aether_sandbox_in_force, which the step barrier reads first. */
+    atomic_store_explicit(&aether_step_sandbox_hide, sandbox_step_hide, memory_order_relaxed);
+    atomic_store_explicit(&aether_step_sandbox_show, sandbox_step_show, memory_order_relaxed);
     const AetherSandboxRendezvous* found = find_rendezvous();
     if (!found || found->version != AETHER_SANDBOX_RV_VERSION) found = &g_own_rv;
     const AetherSandboxRendezvous* expected = NULL;
@@ -210,6 +221,9 @@ typedef struct {
 typedef struct {
     SandboxLevel level[AETHER_SANDBOX_MAX_LEVELS];
     int depth;
+    /* The levels below are the code's an actor step runs inside (#3393):
+     * put aside for the step, which is checked against its own alone. */
+    int floor;
     const void* pending_image;
     int pending_site;
 } SandboxThread;
@@ -245,7 +259,7 @@ void aether_sandbox_push(void* grants) {
 
 void aether_sandbox_pop(void) {
     SandboxThread* t = &t_sbx;
-    if (t->depth <= 0) return;
+    if (t->depth <= t->floor) return;   /* none of its own: an enclosing step's are not its to take */
     t->depth--;
     rv()->levels(-1);
 }
@@ -256,7 +270,7 @@ int aether_sandbox_depth(void) {
 
 void aether_sandbox_restore(int depth) {
     SandboxThread* t = &t_sbx;
-    if (depth < 0) depth = 0;
+    if (depth < t->floor) depth = t->floor;
     if (depth >= t->depth) return;
     int left = t->depth - depth;
     t->depth = depth;
@@ -282,7 +296,7 @@ int aether_sandbox_trust_enter(const void* image, int site) {
     SandboxThread* t = &t_sbx;
     int saved = t->depth;
     if (!image) return saved;
-    for (int l = t->depth - 1; l >= 0; l--) {
+    for (int l = t->depth - 1; l >= t->floor; l--) {
         if (t->level[l].skip_to >= 0) { l = t->level[l].skip_to; continue; }
         if (t->level[l].image == image && t->level[l].site == site) {
             push_level(t, NULL, NULL, 0, l);
@@ -297,8 +311,35 @@ void aether_sandbox_unwind_to_frame(int frames) {
     t->pending_image = NULL;
     t->pending_site = 0;
     int d = t->depth;
-    while (d > 0 && t->level[d - 1].frame >= frames) d--;
+    while (d > t->floor && t->level[d - 1].frame >= frames) d--;
     aether_sandbox_restore(d);
+}
+
+/* A step begins (aether_step_barrier.h, #3393): the levels of the code it
+ * runs inside, in this copy and in every other on this thread, are put
+ * aside, so the step is checked as its actor is on a thread of its own,
+ * against nothing but the levels it pushes itself. 0 when the thread had
+ * none. A step that ends gives them back, its own levels gone first (its
+ * pops, or its panic's unwind, took them; any left are taken here). */
+static int sandbox_step_hide(int saved[2]) {
+    SandboxThread* t = &t_sbx;
+    const AetherSandboxRendezvous* r = rv();
+    int total = r->levels(0);
+    if (total == 0 && t->depth == t->floor) return 0;
+    saved[0] = t->floor;
+    saved[1] = total;
+    t->floor = t->depth;
+    if (total) r->levels(-total);
+    return 1;
+}
+
+static void sandbox_step_show(const int saved[2]) {
+    SandboxThread* t = &t_sbx;
+    aether_sandbox_restore(t->floor);
+    t->floor = saved[0];
+    const AetherSandboxRendezvous* r = rv();
+    int now = r->levels(0);
+    if (saved[1] != now) r->levels(saved[1] - now);
 }
 
 // ---------------------------------------------------------------------------
@@ -328,8 +369,8 @@ static atomic_int g_foreign_reported;
 static int decide(const char* category, const char* resource) {
     SandboxThread* t = &t_sbx;
     int total = rv()->levels(0);
-    if (total == 0 && t->depth == 0) return -1;
-    if (total > t->depth) {
+    if (total == 0 && t->depth == t->floor) return -1;
+    if (total > t->depth - t->floor) {
         /* Levels of another copy of the runtime are in force on this
          * thread, and their grants cannot be read from here. */
         if (!atomic_exchange_explicit(&g_foreign_reported, 1, memory_order_relaxed))
@@ -347,7 +388,7 @@ static int decide(const char* category, const char* resource) {
      * program makes: allowed, and not audited. */
     int allowed = 1;
     int in_force = 0;
-    for (int l = t->depth - 1; l >= 0; l--) {
+    for (int l = t->depth - 1; l >= t->floor; l--) {
         if (t->level[l].skip_to >= 0) { l = t->level[l].skip_to; continue; }
         in_force = 1;
         if (!grants_allow(t->level[l].grants, category, resource)) { allowed = 0; break; }
@@ -365,7 +406,7 @@ int aether_sandbox_check_slow(const char* category, const char* resource) {
     if (!category) category = "";
     if (resource && category[0] == 'f' && category[1] == 's' &&
         (category[2] == '\0' || category[2] == '_')) {
-        if (r->levels(0) == 0 && t_sbx.depth == 0) return 1;
+        if (r->levels(0) == 0 && t_sbx.depth == t_sbx.floor) return 1;
         char resolved[PATH_MAX];
         if (!aether_sandbox_canon_path(resource, resolved, sizeof(resolved))) return 0;
         return decide(category, resolved) != 0;
@@ -375,7 +416,8 @@ int aether_sandbox_check_slow(const char* category, const char* resource) {
 
 int aether_sandbox_levels_here(void) {
     int total = rv()->levels(0);
-    return total > t_sbx.depth ? total : t_sbx.depth;
+    int own = t_sbx.depth - t_sbx.floor;
+    return total > own ? total : own;
 }
 
 int aether_sandbox_check_resolved(const char* category, const char* resource) {

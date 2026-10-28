@@ -131,9 +131,12 @@ new(name: string) -> Grants {
 // and library on the same runtime the block calls into on that thread: an
 // export of another library called from inside the block (through a host
 // service, say) is held to these grants too, and an enforce of its own can
-// only narrow them. A message the block sends is handled on an actor's
-// thread, with no grants. A library built without --shared-runtime on macOS
-// or Windows has a runtime of its own and cannot read these grants: called
+// only narrow them. A message the block sends is handled with no grants,
+// as an actor's thread handles it: also when the send steps an idle
+// receiver of the same core inline, on this thread, since a step puts the
+// thread's levels aside until it ends (#3393). A library built without
+// --shared-runtime on macOS or Windows has a runtime of its own and cannot
+// read these grants: called
 // from inside the block, its checked operations are refused, with a message
 // naming --shared-runtime (docs/containment-sandbox.md).
 enforce(perms: Grants, code: fn) {

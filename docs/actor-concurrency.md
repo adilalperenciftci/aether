@@ -238,7 +238,8 @@ What a send promises, on both schedulers (#2974):
 5. **A handler runs in its own context, whichever thread steps it.** A step can run inside another: a send steps an idle actor of the same core inline, inside the sender's handler, and a cooperative ask polls until its reply. So every step, at entry, puts aside the per-thread context of the code it runs inside and starts with none of it; at exit, normal or by panic, it gives that context back as it was; and its panic, or its end, undoes only what the step itself made (#3389; the rule is written once, in `runtime/actors/aether_step_barrier.h`). The context, part by part:
    - the ask in hand and the actor stepping: a handler that sends, or asks, before it replies still answers its own asker;
    - the in-step flags the signal handler reads: the outer handler keeps its signal recovery after an inner step;
-   - a supervisor's restart claim, the reborn block and the spawn brackets: a nested step's spawn takes no claimed block and is no factory's child, and its panic undoes no enclosing claim.
+   - a supervisor's restart claim, the reborn block and the spawn brackets: a nested step's spawn takes no claimed block and is no factory's child, and its panic undoes no enclosing claim;
+   - the sandbox levels in force on the thread, in every runtime copy that shares the count: a receiver stepped inside an enforce block is checked as on a thread of its own, against the levels it pushes itself, and the block's levels are in force again when the send returns (#3393).
 
    A part costs a step only when some thread holds that kind of context: it is put aside behind one load of a global that says so.
 
