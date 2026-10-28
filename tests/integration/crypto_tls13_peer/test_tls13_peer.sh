@@ -30,6 +30,7 @@
 #   #3357  the pure server's ClientHello checks, secp256r1, skipped 0-RTT data.
 #   #3364  decode_error for a repeated EncryptedExtensions extension (found
 #          before it is judged unsolicited) and a nonzero compression method.
+#   #3365  a CertificateRequest's certificate_authorities and signature list.
 #   #3368  the client reads what the server sent before it closes a failed
 #          handshake, so a reset does not take its alert.
 #
@@ -206,6 +207,11 @@ run_case "CertificateRequest: accepted, an empty Certificate answers" "cr=000008
 run_case "CertificateRequest: a byte after its extensions" "cr=000008000d00040002040300" "ERR" "ALERT 50"
 run_case "CertificateRequest: a certificate_request_context" "cr=01aa0008000d000400020403" "ERR" "ALERT 50"
 run_case "CertificateRequest: no signature_algorithms" "cr=000000" "ERR" "ALERT 109"
+run_case "CertificateRequest: an empty certificate_authorities (#3365)" "cr=00000e000d000400020403002f00020000" "ERR" "ALERT 50"
+run_case "CertificateRequest: a byte after certificate_authorities' names (#3365)" "cr=000012000d000400020403002f000600030001aa00" "ERR" "ALERT 50"
+run_case "CertificateRequest: certificate_authorities of one empty name (#3365)" "cr=000010000d000400020403002f000400020000" "ERR" "ALERT 50"
+run_case "CertificateRequest: one name in certificate_authorities (#3365)" "cr=000011000d000400020403002f000500030001aa" "OK" "HANDSHAKE"
+run_case "CertificateRequest: an odd signature_algorithms list (#3365)" "cr=000009000d00050003040300" "ERR" "ALERT 50"
 
 # run_cf_case <name> <PEER_CF> <answer expected> <server says>; SV names
 # another server program, SENV adds its environment, POST is PEER_POST,

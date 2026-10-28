@@ -1065,7 +1065,8 @@ fn ch_extension(msg: byte[], t: int, d: int, n: int, out: *ChParsed, share_group
 // which the message may not carry, with illegal_parameter. A block that
 // does not parse is decode_error, and a type that appears twice is refused
 // as extensions_framed says. Only a CertificateRequest's unknown extensions
-// are ignored (4.3.2).
+// are ignored (4.3.2); its certificate_authorities and signature lists must
+// parse (#3365).
 //
 // `offered` says what the ClientHello carried beyond the extensions every
 // ClientHello here has (supported_versions, supported_groups,
@@ -1140,8 +1141,30 @@ fn ext_recognized(t: int) -> int {
 // The body rules of the extensions a server may answer with: server_name
 // and early_data empty in EncryptedExtensions, ALPN naming exactly one
 // protocol, a status_request in a CertificateEntry holding an OCSP
-// response. (alert, error) as check_extensions.
+// response; a CertificateRequest's certificate_authorities and signature
+// lists well formed. (alert, error) as check_extensions.
 fn ext_body_check(kind: int, t: int, b: byte[], p: int, n: int) -> (int, string) {
+    if kind == MSG_CERTIFICATE_REQUEST && t == 47 {
+        // DistinguishedName authorities<3..2^16-1>, each
+        // DistinguishedName<1..2^16-1> (RFC 8446 4.2.4): a sender with no
+        // name to list omits the extension.
+        if n < 2 || get16(b, p) != n - 2 || n - 2 < 3 {
+            return ALERT_DECODE_ERROR, "extensions: certificate_authorities must list a name and fill its extension"
+        }
+        q = p + 2
+        while q < p + n {
+            if q + 2 > p + n { return ALERT_DECODE_ERROR, "extensions: a truncated name in certificate_authorities" }
+            dl = get16(b, q)
+            if dl == 0 || q + 2 + dl > p + n { return ALERT_DECODE_ERROR, "extensions: a name in certificate_authorities is empty or overruns it" }
+            q = q + 2 + dl
+        }
+    }
+    if kind == MSG_CERTIFICATE_REQUEST && (t == 13 || t == 50) {
+        // SignatureScheme supported_signature_algorithms<2..2^16-2> (4.2.3).
+        if n < 4 || get16(b, p) != n - 2 || (n - 2) % 2 != 0 {
+            return ALERT_DECODE_ERROR, "extensions: a signature algorithm list that is empty, odd or does not fill its extension"
+        }
+    }
     if kind == MSG_ENCRYPTED_EXTENSIONS && (t == 0 || t == 42) && n != 0 {
         return ALERT_DECODE_ERROR, "encrypted extensions: extension ${t} must be empty"
     }
@@ -1188,7 +1211,10 @@ check_extensions(kind: int, exts: byte[], offered: int) -> (int, string) {
             }
             na, nerr = ext_body_check(kind, t, exts, p + 4, el)
             if na != 0 { return na, nerr }
-        } else if kind != MSG_CERTIFICATE_REQUEST {
+        } else if kind == MSG_CERTIFICATE_REQUEST {
+            ra, rerr = ext_body_check(kind, t, exts, p + 4, el)
+            if ra != 0 { return ra, rerr }
+        } else {
             cookie = 0
             if kind == MSG_HELLO_RETRY && t == 44 { cookie = 1 }
             if ext_offered(t, offered) == 0 && cookie == 0 {
@@ -1292,7 +1318,9 @@ check_certificate(body: byte[], offered: int) -> (int, string) {
 // certificate_request_context (only post-handshake authentication, which
 // this client does not offer, fills it) and extensions that fill the rest,
 // each once, are decode_error and illegal_parameter otherwise; without
-// signature_algorithms, missing_extension (109) (#3324).
+// signature_algorithms, missing_extension (109) (#3324). An empty
+// certificate_authorities, one with bytes after its names, or a signature
+// list that is empty, odd or short is decode_error (4.2.4, 4.2.3, #3365).
 check_certificate_request(body: byte[]) -> (int, string) {
     if body.len < 0 { panic("tls13_hs.check_certificate_request: the `body` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     int n = body.len
