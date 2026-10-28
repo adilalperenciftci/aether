@@ -30,20 +30,20 @@ main() {
         exit(1)
     }
     cert = list.at(chain, 0) as ptr
-    key, lerr = tls13_server.load_private_key(key_pem)
-    if key == null {
-        println("FAIL: the client key: ${lerr}")
+    // The P-256 scalar connect_mtls signs with.
+    scalar = tls13_server.parse_ec_private_key_pem(key_pem)
+    if scalar == null || bytes.length(scalar) != 32 {
+        println("FAIL: the client key is not a P-256 key")
         exit(1)
     }
-    k = key as *tls13_server.ServerKey
     xpriv, rerr = cryptography.random_buffer(32)
     if rerr != "" {
         println("FAIL: ${rerr}")
         exit(1)
     }
-    conn, err = tls13_client.connect_mtls("localhost", atoi(os.getenv("PORT")), xpriv, cert, bytes.length(cert), k.secret)
+    conn, err = tls13_client.connect_mtls("localhost", atoi(os.getenv("PORT")), xpriv, cert, bytes.length(cert), scalar)
     bytes.free(xpriv)
-    tls13_server.free_private_key(key)
+    bytes.wipe_free(scalar)
     if err != "" {
         println("REFUSED: ${err}")
         exit(0)

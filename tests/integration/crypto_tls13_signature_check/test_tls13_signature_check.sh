@@ -20,6 +20,8 @@
 #      s_client gets internal_error (80), not a signature it rejects (a
 #      server that sent it made s_client fail with decrypt_error or a bad
 #      signature).
+#   3. The key with one bit of its shielded form flipped, for an EC, an
+#      Ed25519 and an RSA key: the server refuses to use it (#3376).
 #
 # Skipped without openssl.
 
@@ -110,6 +112,22 @@ check ed25519 ed25519 ed25519
 check rsa rsa_pss_rsae_sha256 rsa_pss_rsae_sha256
 check rsa rsa_pss_rsae_sha384 rsa_pss_rsae_sha384
 check rsa rsa_pss_rsae_sha512 rsa_pss_rsae_sha512
+
+# 3. The key is kept shielded (std.cryptography.shield): one bit flipped in
+# its shielded form, as a bit flipped in memory would, and the server
+# refuses to sign with it and ends the handshake with internal_error, for
+# each kind of key the shield holds (an EC scalar, an Ed25519 seed, an RSA
+# key's DER).
+for c in "p256 ecdsa_secp256r1_sha256" "ed25519 ed25519" "rsa rsa_pss_rsae_sha256"; do
+    set -- $c
+    SERVER_CORRUPT_KEY=1 serve "$TMP/$1.pem" "$TMP/$1.key" "$2"
+    if grep -q "REFUSED: .*changed in memory" "$TMP/server.out" && grep -qi "alert internal error\|alert number 80" "$TMP/c.log"; then
+        echo "    ok: $1: a shielded key with a bit changed is not used (internal_error)"
+    else
+        echo "    FAIL: $1, corrupted shield: server [$(tr '\n' '|' <"$TMP/server.out")], s_client [$(grep -i 'alert\|error' "$TMP/c.log" | tr '\n' '|')]"
+        fails=$((fails + 1))
+    fi
+done
 
 [ "$fails" = 0 ] || fail "$fails case(s)"
 echo "  [PASS] $NAME"

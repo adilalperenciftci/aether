@@ -15,7 +15,9 @@
 //     the key and the certificate are a pair when the server is set up
 //     (#3328). Every signature is checked against the leaf's key before it
 //     is sent; one that does not verify ends the handshake with
-//     internal_error instead (#3376).
+//     internal_error instead. The key is kept shielded
+//     (std.cryptography.shield), in the clear only for each signature, and
+//     a key whose shielded form changed in memory is not used (#3376).
 //   - Key exchange: X25519MLKEM768 (post-quantum hybrid) and X25519.
 //   - Buffer arguments are std.bytes HANDLES, never bytes.data(b) -- see the
 //     header of tls13_client for why that distinction bites.
@@ -34,6 +36,7 @@ import std.cryptography.p256
 import std.cryptography.p384
 import std.cryptography.p521
 import std.cryptography.rsa
+import std.cryptography.shield
 import std.cryptography.tls13_kdf
 import std.cryptography.tls13_client
 import std.cryptography.tls13_ks
@@ -1372,10 +1375,34 @@ parse_ec_private_key_pem(pem_text: string) -> ptr {
 // with: ECDSA P-256, P-384 or P-521 (0x0403, 0x0503, 0x0603), Ed25519
 // (0x0807) or RSA (rsa_pss_rsae_sha256, 0x0804). load_private_key makes
 // one, free_private_key frees it (wiping the secret).
+//
+// The secret is kept shielded (std.cryptography.shield, #3376): sealed
+// behind a 16 KiB random pre-key for as long as the server keeps the key,
+// in the clear only for each signature, and refused if a bit of it changed
+// in memory.
 struct ServerKey {
     kind: int // tls13_cert.KEY_P256, KEY_P384, KEY_P521, KEY_ED25519 or KEY_RSA
-    secret: ptr // the EC scalar (its curve's size) or the Ed25519 seed (32 bytes); null for RSA
-    rsa: ptr // the std.cryptography.rsa key for KEY_RSA, else null
+    shielded: ptr // the shield handle of the EC scalar (its curve's size), the Ed25519 seed (32 bytes) or the RSA key's PKCS#1 RSAPrivateKey DER
+}
+
+// A ServerKey of `kind` holding `secret` (consumed: shielded, and its
+// plaintext wiped), or (null, why).
+fn shielded_key(kind: int, secret: @frees ptr) -> (ptr, string) {
+    h, herr = shield.wrap(secret)
+    if h == null { return null, "the private key cannot be shielded: ${herr}" }
+    k = heap.new(ServerKey)
+    k.kind = kind
+    k.shielded = h
+    return k as ptr, ""
+}
+
+// A copy of a secret buffer in one of its exact size, so no growth leaves
+// a stray copy behind (#3382).
+fn secret_copy(b: @keep ptr) -> ptr {
+    n = bytes.length(b)
+    out = bytes.new(n)
+    bytes.copy_from_bytes(out, 0, b, 0, n)
+    return out
 }
 
 // The PEM labels a private key can have, in the order looked for.
@@ -1529,11 +1556,7 @@ fn parse_pkcs8(der: @keep ptr) -> (ptr, string) {
             if scalar != null { wipe_free(scalar) }
             return null, why
         }
-        ek = heap.new(ServerKey)
-        ek.kind = kind
-        ek.secret = scalar
-        ek.rsa = null
-        return ek as ptr, ""
+        return shielded_key(kind, scalar)
     }
     if string.equals(oid, "1.3.101.112") == 1 {
         // CurvePrivateKey ::= OCTET STRING, the 32-byte seed (RFC 8410).
@@ -1545,26 +1568,12 @@ fn parse_pkcs8(der: @keep ptr) -> (ptr, string) {
             if seed != null { wipe_free(seed) }
             return null, "not an Ed25519 private key"
         }
-        sk = heap.new(ServerKey)
-        sk.kind = tls13_cert.KEY_ED25519
-        sk.secret = seed
-        sk.rsa = null
-        return sk as ptr, ""
+        return shielded_key(tls13_cert.KEY_ED25519, seed)
     }
     if string.equals(oid, "1.2.840.113549.1.1.1") == 1 {
-        k, kerr = rsa.key_from_pkcs1_der(inner)
+        rk, rwhy = rsa_shielded_key(inner)
         wipe_free(inner)
-        if string.equals(kerr, "") != 1 || k == null { return null, "not an RSA private key" }
-        rwhy = rsa_key_problem(k)
-        if string.equals(rwhy, "") != 1 {
-            rsa.key_free(k)
-            return null, rwhy
-        }
-        rk = heap.new(ServerKey)
-        rk.kind = tls13_cert.KEY_RSA
-        rk.secret = null
-        rk.rsa = k
-        return rk as ptr, ""
+        return rk, rwhy
     }
     wipe_free(inner)
     return null, "a private key of an algorithm the server cannot sign with (${oid})"
@@ -1603,33 +1612,30 @@ load_private_key(pem_text: string) -> (ptr, string) {
             if scalar != null { wipe_free(scalar) }
             return null, why
         }
-        ek = heap.new(ServerKey)
-        ek.kind = kind
-        ek.secret = scalar
-        ek.rsa = null
-        return ek as ptr, ""
+        return shielded_key(kind, scalar)
     }
-    k, kerr = rsa.key_from_pkcs1_der(der)
+    rk, rwhy = rsa_shielded_key(der)
     wipe_free(der)
+    return rk, rwhy
+}
+
+// An RSA ServerKey from a PKCS#1 RSAPrivateKey DER (borrowed): the key is
+// built once to check it can sign, then freed, and its DER is what is
+// shielded; each signature builds the key from it again (#3376).
+fn rsa_shielded_key(der: @keep ptr) -> (ptr, string) {
+    k, kerr = rsa.key_from_pkcs1_der(der)
     if string.equals(kerr, "") != 1 || k == null { return null, "not an RSA private key" }
     rwhy = rsa_key_problem(k)
-    if string.equals(rwhy, "") != 1 {
-        rsa.key_free(k)
-        return null, rwhy
-    }
-    rk = heap.new(ServerKey)
-    rk.kind = tls13_cert.KEY_RSA
-    rk.secret = null
-    rk.rsa = k
-    return rk as ptr, ""
+    rsa.key_free(k)
+    if string.equals(rwhy, "") != 1 { return null, rwhy }
+    return shielded_key(tls13_cert.KEY_RSA, secret_copy(der))
 }
 
 // Free a key load_private_key made, its secret wiped first.
 free_private_key(key: @frees ptr) {
     if key == null { return }
     k = key as *ServerKey
-    if k.secret != null { wipe_free(k.secret) }
-    if k.rsa != null { rsa.key_free(k.rsa) }
+    shield.free(k.shielded)
     heap.free(k)
 }
 
@@ -1656,14 +1662,22 @@ fn key_scheme(k: *ServerKey, offered: int) -> int {
 // and never sent (#3376). OpenSSL checks its RSA-CRT signatures the same
 // way. The signature and "", or null and why.
 fn sign_cert_verify(k: *ServerKey, leaf: *tls13_cert.LeafCert, scheme: int, transcript_hash: byte[]) -> (ptr, string) {
+    // The secret in the clear for this one signature only (#3376).
+    secret, uerr = shield.unwrap(k.shielded)
+    if secret == null { return null, "the server's private key cannot be used: ${uerr}" }
     var sig: ptr = null
     if k.kind == tls13_cert.KEY_ED25519 {
-        sig = tls13_cert.sign_server_cert_verify_ed25519(k.secret, transcript_hash)
+        sig = tls13_cert.sign_server_cert_verify_ed25519(secret, transcript_hash)
     } else if k.kind == tls13_cert.KEY_RSA {
-        sig = tls13_cert.sign_server_cert_verify_rsa_pss_scheme(k.rsa, scheme, transcript_hash)
+        rk, _rerr = rsa.key_from_pkcs1_der(secret)
+        if rk != null {
+            sig = tls13_cert.sign_server_cert_verify_rsa_pss_scheme(rk, scheme, transcript_hash)
+            rsa.key_free(rk)
+        }
     } else {
-        sig = tls13_cert.sign_server_cert_verify_ecdsa(k.kind, k.secret, transcript_hash)
+        sig = tls13_cert.sign_server_cert_verify_ecdsa(k.kind, secret, transcript_hash)
     }
+    bytes.wipe_free(secret)
     if sig == null { return null, "the server's private key could not sign (a scalar out of range, or no randomness)" }
     if tls13_cert.leaf_signature_holds(leaf, scheme, transcript_hash, bytes.view(sig)) != 1 {
         bytes.wipe_free(sig)

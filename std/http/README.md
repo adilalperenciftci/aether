@@ -115,6 +115,11 @@ knowing before debugging a handshake:
   not verify is never sent, and the handshake ends with `internal_error`
   (#3376). The check is a verification per handshake, about as costly as
   the signature for ECDSA and Ed25519, about a tenth of it for RSA
+- the private key is kept encrypted in memory (`std.cryptography.shield`,
+  as OpenSSH keeps its keys), in the clear only for each signature, so a
+  memory-reading attack must read a 16 KiB random pre-key without an error
+  to get it; a key whose encrypted form changed in memory is not used
+  (#3376)
 - key exchange is **X25519MLKEM768** (the post-quantum hybrid, preferred
   when the client offers it), **X25519 or secp256r1** (P-256, which RFC 8446
   9.1 requires, #3357); a client that names one of them in supported_groups

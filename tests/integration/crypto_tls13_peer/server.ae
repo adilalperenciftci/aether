@@ -3,7 +3,8 @@
 // connection with peer.ae's certificate, and prints "ACCEPTED" or
 // "REFUSED: <why>". With SERVER_READ=1 it then echoes what it reads, printing
 // "RECV <n>" for each record, until "EOF" or "RECVERR: <why>". SERVER_CERT
-// and SERVER_KEY name PEM files to serve instead of the built-in pair.
+// and SERVER_KEY name PEM files to serve instead of the built-in pair;
+// SERVER_CORRUPT_KEY=1 flips a bit of the loaded key's shielded form.
 
 import std.os
 import std.fs
@@ -11,6 +12,7 @@ import std.tcp
 import std.bytes
 import std.cryptography
 import std.cryptography.tls13_server
+import std.cryptography.shield
 
 extern exit(code: int)
 
@@ -37,6 +39,12 @@ main() {
     }
     chain, lens = tls13_server.parse_cert_chain_pem(cert_pem)
     key, _kerr = tls13_server.load_private_key(key_pem)
+    // SERVER_CORRUPT_KEY=1 flips one bit of the shielded key, as a bit
+    // flipped in memory would (#3376): the server must refuse to use it.
+    if os.getenv("SERVER_CORRUPT_KEY") == "1" {
+        sh = (key as *tls13_server.ServerKey).shielded as *shield.Shielded
+        bytes.set(sh.sealed, 3, bytes.get(sh.sealed, 3) ^ 8)
+    }
     xpriv, _rerr = cryptography.random_buffer(32)
     conn, err = tls13_server.accept(sock, chain, lens, key, xpriv)
     bytes.free(xpriv)
