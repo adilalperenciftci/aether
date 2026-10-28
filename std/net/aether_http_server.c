@@ -1210,6 +1210,19 @@ static void server_openssl_init_once(void) {
     OpenSSL_add_all_algorithms();
     done = 1;
 }
+
+/* Security level 2 at least on the server context too (#3312), as
+ * std/net/aether_http.c does for the client: a certificate with an RSA key
+ * under 2048 bits (or an EC key under 224) is refused when it is loaded,
+ * on every distribution, as the pure-Aether backend refuses it. A system
+ * set higher stays higher. */
+static void server_tls_min_security_level(SSL_CTX* ctx) {
+#if !defined(LIBRESSL_VERSION_NUMBER) || LIBRESSL_VERSION_NUMBER >= 0x3060000fL
+    if (SSL_CTX_get_security_level(ctx) < 2) SSL_CTX_set_security_level(ctx, 2);
+#else
+    (void)ctx;
+#endif
+}
 #endif
 
 // Portable case-insensitive substring search (strcasestr is a GNU extension)
@@ -2037,6 +2050,7 @@ const char* http_server_set_tls_raw(HttpServer* server,
 
     SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
     if (!ctx) return "SSL_CTX_new failed";
+    server_tls_min_security_level(ctx);
     /* Match the client side: TLS 1.2+ only. Older versions are
      * known-broken (POODLE, etc.) and there's no compat reason to
      * keep them around for an in-process server. */
@@ -2048,7 +2062,7 @@ const char* http_server_set_tls_raw(HttpServer* server,
 
     if (SSL_CTX_use_certificate_file(ctx, cert_path, SSL_FILETYPE_PEM) != 1) {
         SSL_CTX_free(ctx);
-        return "failed to load TLS certificate (check cert_path and PEM format)";
+        return "failed to load TLS certificate (check cert_path and PEM format; an RSA key needs 2048 bits or more)";
     }
     if (SSL_CTX_use_PrivateKey_file(ctx, key_path, SSL_FILETYPE_PEM) != 1) {
         SSL_CTX_free(ctx);

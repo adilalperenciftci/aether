@@ -595,6 +595,21 @@ static int load_windows_trust(SSL_CTX* ctx) {
 }
 #endif  // _WIN32
 
+/* Security level 2 at least (#3312): RSA, DSA and DH keys of 2048 bits or
+ * more and elliptic curves of 224 bits or more, in the certificate chain and
+ * the handshake, whatever level the distribution configures (OpenSSL's own
+ * default, level 1, accepts RSA-1024; Debian and Ubuntu raise it to 2). A
+ * system set higher stays higher. The pure-Aether TLS backend refuses the
+ * same keys, so which backend a program runs on does not change which peers
+ * it accepts. */
+static void tls_min_security_level(SSL_CTX* ctx) {
+#if !defined(LIBRESSL_VERSION_NUMBER) || LIBRESSL_VERSION_NUMBER >= 0x3060000fL
+    if (SSL_CTX_get_security_level(ctx) < 2) SSL_CTX_set_security_level(ctx, 2);
+#else
+    (void)ctx;
+#endif
+}
+
 // Get (or lazily create) the shared SSL_CTX. Benign race on first call —
 // compare-exchange ensures at most one SSL_CTX is installed even if two
 // threads reach here simultaneously. Returns NULL on OpenSSL error.
@@ -614,6 +629,7 @@ static SSL_CTX* get_ssl_ctx(void) {
 
     ctx = SSL_CTX_new(TLS_client_method());
     if (!ctx) return NULL;
+    tls_min_security_level(ctx);
     SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
     SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
 
@@ -2566,6 +2582,7 @@ static int http_dial(HttpClientRequest* req, AetherAddrList* addrs,
         if (req->cafile) {
             ctx = SSL_CTX_new(TLS_client_method());
             if (ctx) {
+                tls_min_security_level(ctx);
                 SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
                 SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
                 if (SSL_CTX_load_verify_locations(ctx, req->cafile, NULL) != 1) {

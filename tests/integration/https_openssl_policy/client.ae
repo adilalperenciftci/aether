@@ -1,0 +1,34 @@
+// An https GET through std.http.client on the TLS backend BACKEND, for the
+// OpenSSL backend policy tests (#3312, #3313).
+//
+//   URL       the https URL to GET
+//   CAFILE    the CA to pin (set_cafile)
+//   BACKEND   "aether", "openssl", "" or anything else
+//
+// Prints "BACKEND-ERR: <error>" when set_tls_backend refuses, else
+// "STATUS <code> BODY <body>" or "ERR: <error>".
+
+import std.http.client
+import std.cryptography.tls13_client
+import std.os
+
+main() {
+    req = client.request("GET", os.getenv("URL"))
+    client.set_timeout(req, 10s)
+    ca = os.getenv("CAFILE")
+    if ca != "" { client.set_cafile(req, ca) }
+    berr = client.set_tls_backend(req, os.getenv("BACKEND"))
+    if berr != "" {
+        println("BACKEND-ERR: ${berr}")
+        client.request_free(req)
+        return
+    }
+    resp, err = client.send_request(req)
+    client.request_free(req)
+    if err != "" {
+        println("ERR: ${err}")
+        return
+    }
+    println("STATUS ${client.response_status(resp)} BODY ${client.response_body(resp)}")
+    client.response_free(resp)
+}

@@ -163,8 +163,9 @@ intermediate ends no path; pinning one is #3311)
 (`tls13_cert.validate_chain`, RFC 5280 section 6 as the Web PKI profiles it)
 on which every signature verifies (RSA PKCS#1 v1.5 with SHA-256, SHA-384 or
 SHA-512; ECDSA on P-256, P-384 or P-521; Ed25519), every key is one of those
-(RSA of at least 2048 bits, named curves only), every certificate is inside
-its validity period, every issuer below the anchor is a version 3 CA
+(RSA of at least 2048 bits, named curves only; the OpenSSL backend refuses
+the same RSA keys, at security level 2 or above, #3312), every certificate
+is inside its validity period, every issuer below the anchor is a version 3 CA
 (basicConstraints cA) allowed to sign certificates (keyUsage keyCertSign
 when keyUsage is present) within its pathLenConstraint, the leaf's keyUsage
 (when present) allows digitalSignature, which TLS 1.3 signs with, the leaf
