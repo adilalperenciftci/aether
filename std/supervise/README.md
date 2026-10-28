@@ -50,6 +50,10 @@ restarts 1, incarnation 1, done 1
 | `"one_for_all"` | every child: the others are killed, newest first, and all restart in start order once each one's `Down` has come |
 | `"rest_for_one"` | that child and every child started after it |
 
+A death while a restart is still waiting for a `Down` (a sibling killed for
+it has not ended yet) joins that restart: each child is restarted once, the
+children of both deaths together in start order.
+
 A child's restart kind is `"permanent"` (`supervise.child`, restarted after
 any end), `"transient"` (restarted unless it ended `"normal"`) or
 `"temporary"` (never), the last two through

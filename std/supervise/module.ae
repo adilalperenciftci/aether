@@ -17,6 +17,9 @@
 //                 restart in start order once each one's Down has come;
 //   rest_for_one  the dead child and every child started after it.
 //
+// A death while a restart still waits for a Down joins it: each child is
+// restarted once, the ones of both deaths together in start order.
+//
 // A child's restart kind says whether it is restarted: "permanent" (always,
 // the default), "transient" (unless it ended "normal") or "temporary"
 // (never). More than max_restarts restarts within within_secs, or a factory
@@ -63,9 +66,9 @@ actor Supervisor {
     state within_secs = 0
     state kids: SuperviseChild[32]
     state count = 0
-    state queue: int[32] // children to restart, in start order
-    state qhead = 0
-    state qlen = 0
+    // 1 for a child to restart: each one at most once, restarted in start
+    // order, whichever deaths asked for it (#3390).
+    state pending: int[32]
     state times: long[64] // the last restarts, a ring
     state tnext = 0
     state tcount = 0
@@ -142,14 +145,15 @@ actor Supervisor {
                                         j = j - 1
                                     }
                                 }
-                                // And restarted in start order.
+                                // And restarted in start order, together with
+                                // the children an earlier death left pending:
+                                // one already pending is not added again.
                                 j = first
                                 while j < count {
                                     // A temporary sibling is not restarted with it.
                                     if j == found || (strategy != 0 && kids[j].restart != 2) {
                                         if kids[j].phase == 2 || kids[j].phase == 3 {
-                                            queue[(qhead + qlen) % 32] = j
-                                            qlen = qlen + 1
+                                            pending[j] = 1
                                         }
                                     }
                                     j = j + 1
@@ -164,9 +168,15 @@ actor Supervisor {
 
         SuperviseRestart() -> {
             busy = 1
-            while busy == 1 && stopping == 0 && qlen > 0 {
-                i = queue[qhead]
-                if kids[i].phase == 3 {
+            while busy == 1 && stopping == 0 {
+                // The first pending child in start order.
+                i = 0
+                while i < count && pending[i] == 0 {
+                    i = i + 1
+                }
+                if i == count {
+                    busy = 0
+                } else if kids[i].phase == 3 {
                     // Its Down is still to come; the Down goes on from here.
                     busy = 0
                 } else {
@@ -198,8 +208,7 @@ actor Supervisor {
                             kids[i].phase = 1
                             actors.link(kids[i].ref)
                             total = total + 1
-                            qhead = (qhead + 1) % 32
-                            qlen = qlen - 1
+                            pending[i] = 0
                         }
                     }
                 }
