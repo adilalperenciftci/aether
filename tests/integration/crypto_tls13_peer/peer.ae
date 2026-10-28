@@ -17,6 +17,8 @@
 //                   EncryptedExtensions
 //   fin_trailing=1  bytes after the Finished, in its record
 //   split_sh=N      the ServerHello in records of at most N bytes
+//   split_flight=N  each protected handshake message in records of at
+//                   most N bytes
 //   hrr=MODE        a HelloRetryRequest first (see hrr_msg)
 //   sh_version=HEX  the ServerHello's legacy_version
 //   sh_sid=bad      a ServerHello session id echo one bit off
@@ -199,6 +201,23 @@ fn send_plain(sock: ptr, ct: int, msg: ptr) {
 }
 
 fn send_sealed(sock: ptr, ctx: ptr, ct: int, msg: ptr) {
+    sfk = knob("split_flight")
+    if ct == 22 && sfk != "" {
+        // Each handshake message in records of at most N bytes (RFC 8446
+        // 5.1, #3366).
+        step, _se = string.to_int(sfk)
+        mlen = bytes.length(msg)
+        off = 0
+        while off < mlen {
+            m = mlen - off
+            if m > step { m = step }
+            part = tls13_record.seal_record(ctx, ct, bytes.view(msg)[off..off + m])
+            send_raw(sock, part)
+            bytes.free(part)
+            off = off + m
+        }
+        return
+    }
     rec = tls13_record.seal_record(ctx, ct, bytes.view(msg)[0..bytes.length(msg)])
     send_raw(sock, rec)
     bytes.free(rec)

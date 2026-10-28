@@ -31,6 +31,7 @@
 #   #3364  decode_error for a repeated EncryptedExtensions extension (found
 #          before it is judged unsolicited) and a nonzero compression method.
 #   #3365  a CertificateRequest's certificate_authorities and signature list.
+#   #3366  a server flight in 1-byte records; the bound is on its bytes.
 #   #3368  the client reads what the server sent before it closes a failed
 #          handshake, so a reset does not take its alert.
 #
@@ -172,6 +173,8 @@ run_server_case "server: a change_cipher_spec before the ClientHello" "140303000
 # #3321: a handshake message split across records (RFC 8446 5.1).
 run_case "SH: split into 8-byte records" "split_sh=8" "OK" "FINISHED"
 run_case "SH: split into 1-byte records" "split_sh=1" "OK" "FINISHED"
+run_case "flight: every message in 1-byte records (#3366)" "split_flight=1" "OK" "FINISHED"
+run_case "flight: a Certificate header claiming 2^18 + 1 bytes (#3366)" "extra=0b040001" "ERR" "ALERT 10"
 run_case "SH: more handshake bytes after it in its record" "pack_sh=1" "ERR" "ALERT 10"
 run_server_case "server: a ClientHello split over two records" "split_ch" "SERVERHELLO"
 
