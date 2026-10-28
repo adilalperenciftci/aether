@@ -1,0 +1,250 @@
+// std.stream (#426): a credit-windowed stream between two actors.
+//
+// - Order and integrity: binary data (zero bytes included) cut into chunks
+//   arrives whole and in order, compared chunk by chunk.
+// - The window: a producer that has more to send than the window fills it
+//   and stops (stream.write returns short), resumes on each credit, and
+//   never has more than `window` chunks in flight (stream.peak); every
+//   credit is back before the consumer's end (in_flight 0 there).
+// - The end: an empty stream is only its last chunk; a window of 1 works.
+// - Misuse: no stream for a window under 1; nothing sent after finish.
+// - No leaks: where the heap count is exact (mem.heap_in_use_exact), whole
+//   streams, actors spawned and released each round, hold the heap steady
+//   (mem.steady_growth); elsewhere the leak gates cover this program.
+
+import std.bytes
+import std.mem
+import std.stream
+import std.string
+
+extern exit(code: int)
+extern scheduler_release_actor(a: ptr) @c_import
+extern scheduler_reclaim_released() -> int @c_import
+
+message Start { s: ptr, data: string, chunk: int }
+message Expect { data: string }
+message Fulls {}
+message Peak {}
+message Drained {}
+message Ended {}
+message Got {}
+message Bad {}
+message Chunks {}
+
+actor Producer {
+    state s: ptr = null
+    state data = ""
+    state at = 0
+    state chunk = 1
+    state fulls = 0
+    state peak = 0
+    state drained = -1
+    state ended = 0
+    receive {
+        Start(s: st, data: d, chunk: c) -> {
+            s = st
+            data = d
+            chunk = c
+            at = stream.write(s, data, 0, chunk)
+            peak = stream.peak(s)
+            if at < string.length(data) {
+                fulls = fulls + 1
+            } else {
+                stream.finish(s)
+            }
+        }
+        StreamCredit(s: st, n) -> {
+            if n == 0 {
+                drained = stream.in_flight(st)
+            }
+            if stream.credit(st, n) == 0 {
+                ended = ended + 1
+                s = null
+            } else if at < string.length(data) {
+                at = stream.write(s, data, at, chunk)
+                if stream.peak(s) > peak {
+                    peak = stream.peak(s)
+                }
+                if at < string.length(data) {
+                    fulls = fulls + 1
+                } else {
+                    stream.finish(s)
+                }
+            }
+        }
+        Fulls() -> { reply fulls }
+        Peak() -> { reply peak }
+        Drained() -> { reply drained }
+        Ended() -> { reply ended }
+    }
+}
+
+actor Consumer {
+    state expect = ""
+    state got = 0
+    state bad = 0
+    state chunks = 0
+    state ended = 0
+    receive {
+        Expect(data: d) -> { expect = d }
+        StreamChunk(s: st, data, last) -> {
+            if last == 0 {
+                n = string.length(data)
+                if string.equals(string.substring(expect, got, got + n), data) == 0 {
+                    bad = bad + 1
+                }
+                got = got + n
+                chunks = chunks + 1
+            } else {
+                ended = ended + 1
+            }
+            stream.consumed(st, last)
+        }
+        Got() -> { reply got }
+        Bad() -> { reply bad }
+        Chunks() -> { reply chunks }
+        Ended() -> { reply ended }
+    }
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// `n` bytes of every value, zero included.
+fn binary(n: int) -> string {
+    b = bytes.new(n)
+    i = 0
+    while i < n {
+        _set = bytes.set(b, i, (i * 7 + i / 256) % 256)
+        i = i + 1
+    }
+    out = bytes.to_string(b, n)
+    bytes.free(b)
+    return out
+}
+
+// One whole stream of `data` in chunks of `chunk` bytes through a window of
+// `window`; checks what both ends saw.
+fn run(data: string, chunk: int, window: int, quiet: bool) {
+    p = spawn(Producer())
+    c = spawn(Consumer())
+    s = stream.connect(p, c, window)
+    check(s != null, "connect gave no stream")
+    c ! Expect { data: data }
+    // Only one sender's messages keep their order: the producer's first
+    // chunks could reach the consumer before main's Expect. So the consumer
+    // has taken Expect before the producer starts.
+    wait_for_idle()
+    p ! Start { s: s, data: data, chunk: chunk }
+    wait_for_idle()
+
+    n = string.length(data)
+    want = (n + chunk - 1) / chunk
+    int got = c ? Got {}
+    int bad = c ? Bad {}
+    int chunks = c ? Chunks {}
+    int c_end = c ? Ended {}
+    int p_end = p ? Ended {}
+    int fulls = p ? Fulls {}
+    int peak = p ? Peak {}
+    int drained = p ? Drained {}
+    check(got == n, "the consumer got ${got} bytes of ${n}")
+    check(bad == 0, "${bad} chunks differ from what was sent")
+    check(chunks == want, "the consumer got ${chunks} chunks of ${want}")
+    check(c_end == 1, "the consumer saw ${c_end} ends")
+    check(p_end == 1, "the producer saw ${p_end} ends")
+    check(peak <= window, "${peak} chunks in flight through a window of ${window}")
+    if want > window {
+        check(peak == window, "a producer with more to send filled ${peak} of ${window}")
+        check(fulls >= 1, "the window never stopped a producer with more to send")
+    }
+    check(drained == 0, "${drained} credits still out at the consumer's end")
+    if !quiet {
+        println("  ${n} bytes, ${chunks} chunks, window ${window}: peak ${peak}, stopped ${fulls} times")
+    }
+    let pp: ptr = p
+    let cp: ptr = c
+    scheduler_release_actor(pp)
+    scheduler_release_actor(cp)
+    wait_for_idle()
+}
+
+fn round() {
+    data = binary(5000)
+    run(data, 64, 4, true)
+    run(data, 5000, 2, true)
+    run("", 16, 3, true)
+}
+
+// Takes no stream messages: what it is sent is dropped, so the calls below
+// are the only ones on the stream, made by main as its producer.
+actor Deaf {
+    state n = 0
+    receive {
+        Got() -> { reply n }
+    }
+}
+
+fn misuse() {
+    d = spawn(Deaf())
+    check(stream.connect(d, d, 0) == null, "a window of 0 gave a stream")
+    check(stream.connect(d, d, -1) == null, "a negative window gave a stream")
+    check(stream.offer(null, "x") == -1, "an offer on no stream did not say so")
+    check(stream.write(null, "x", 0, 1) == -1, "a write on no stream did not say so")
+    check(stream.credit(null, 1) == 0, "a credit on no stream did not say so")
+    check(stream.available(null) == 0, "no stream has credit")
+
+    s = stream.connect(d, d, 2)
+    check(stream.available(s) == 2, "a new stream does not hold its window")
+    check(stream.offer(s, "a") == 1, "the first offer was refused")
+    check(stream.in_flight(s) == 1, "one chunk sent is not one in flight")
+    check(stream.offer(s, "b") == 1, "the second offer was refused")
+    check(stream.offer(s, "c") == 0, "an offer through a full window was not refused")
+    check(stream.write(s, "cd", 0, 1) == 0, "a write through a full window moved")
+    check(stream.credit(s, 1) == 1, "a credit ended the stream")
+    check(stream.available(s) == 1, "a credit did not free one chunk")
+    check(stream.credit(s, 5) == 1, "a second credit ended the stream")
+    check(stream.available(s) == 2, "credits went past the window")
+    check(stream.peak(s) == 2, "the peak is not the window")
+    stream.finish(s)
+    check(stream.offer(s, "d") == -1, "an offer after finish was not refused")
+    check(stream.write(s, "d", 0, 1) == -1, "a write after finish was not refused")
+    check(stream.credit(s, 0) == 0, "the end did not end the stream")
+    let dp: ptr = d
+    scheduler_release_actor(dp)
+    wait_for_idle()
+}
+
+main() {
+    data = binary(70000)
+    run(data, 1000, 8, false)
+    run(data, 333, 1, false)
+    run(data, 100000, 4, false)
+    run("", 16, 3, false)
+    misuse()
+
+    i = 0
+    while i < 10 {
+        round()
+        i = i + 1
+    }
+    check(scheduler_reclaim_released() == 0, "released actors still retired after the warm-up")
+    if !mem.heap_in_use_exact() {
+        println("OK") // count not exact here: the leak gates check this program
+        return
+    }
+    grown = mem.steady_growth(|| {
+            j = 0
+            while j < 10 {
+                round()
+                j = j + 1
+            }
+            check(scheduler_reclaim_released() == 0, "released actors still retired after a window")
+        }, 5)
+    check(grown == 0, "streams grew the heap by ${grown} bytes in every run")
+    println("OK")
+}

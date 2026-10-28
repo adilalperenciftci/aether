@@ -7,7 +7,7 @@ cannot leave the index behind. The sections after it cover the most-used
 modules in depth; for the others the index links to the module source, whose
 header comment is the authoritative description.
 
-## Module index (89 modules)
+## Module index (90 modules)
 
 | Module | Purpose | Exports | Detail |
 |---|---|---:|---|
@@ -80,6 +80,7 @@ header comment is the authoritative description.
 | `std.spec` | BDD test framework: describe and it, hooks, assertions, structured reports. | 46 | [guide](../std/spec/README.md) · [source](../std/spec/module.ae) |
 | `std.strarr` | Growable string array whose backing is a `string[]`, for sorting runtime-built lists. | 15 | [guide](../std/strarr/README.md) · [source](../std/strarr/module.ae) |
 | `std.strbuilder` | Amortised-O(1) string building. | 18 | [guide](../std/strbuilder/README.md) · [source](../std/strbuilder/module.ae) |
+| `std.stream` | Credit-windowed streams between actors: memory stays bounded however fast the producer is. | 11 | [guide](../std/stream/README.md) · [source](../std/stream/module.ae) |
 | `std.string` | Managed strings: construction, search, slicing, case, split and join. | 100 | [full section](#strings-stdstring) |
 | `std.supervise` | Supervisors that restart dead actors in place, by strategy and within a restart budget. | 9 | [guide](../std/supervise/README.md) · [source](../std/supervise/module.ae) |
 | `std.sync` | Atomic 64-bit integer cell (load, store, add, sub, compare-and-swap) for refcounts and lock-free reclamation. | 7 | [guide](../std/sync/README.md) · [source](../std/sync/module.ae) |
@@ -3864,6 +3865,25 @@ lengths = worker.map(paths, | p: ptr | { return measure(p) })
   deliberately no automatic fallback: the threshold depends on the work per
   item, which the runtime cannot see. Numbers and method in
   [`docs/cross-references/bend.md`](cross-references/bend.md).
+
+### Streams between actors (`std.stream`)
+
+A send never blocks, so a producer that outruns its consumer grows memory
+without bound. A stream bounds it: the producer holds `window` credits, each
+chunk it sends costs one, and the consumer returns one per chunk handled, so
+at most `window` chunks are ever in flight. Running out of credit is a return
+value (`stream.offer` gives 0, `stream.write` returns short), never a block.
+
+- `stream.connect(producer, consumer, window)` - The stream, for both actors.
+- `stream.write(s, data, at, chunk)` / `stream.offer(s, data)` - The
+  producer's sends; `stream.finish(s)` ends the stream.
+- `stream.credit(s, n)` - The producer's, for each `StreamCredit`; 0 when the
+  consumer has ended the stream, which is freed then.
+- `stream.consumed(s, last)` - The consumer's, after each `StreamChunk`.
+
+The whole contract, a runnable producer and consumer, and the choices made
+(chunks as the unit of credit, the mailbox as the buffer, no reordering) are
+in [`std/stream/README.md`](../std/stream/README.md).
 
 ---
 

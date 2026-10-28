@@ -1,0 +1,212 @@
+// std.stream: credit-windowed streams between actors (#426).
+// Import with: import std.stream
+//
+// A send never blocks, so a producer that outruns its consumer grows the
+// consumer's mailbox, and then the scheduler's overflow, without bound. A
+// stream bounds it. The producer holds `window` credits; each chunk it sends
+// costs one, and the consumer returns one for each chunk it has handled. At
+// most `window` chunks of a stream are in flight, however fast the producer,
+// and the producer learns it may go on from a StreamCredit, never by waiting.
+//
+// Whoever wires the two actors connects them and gives both the stream:
+//
+//     s = stream.connect(producer, consumer, 8)
+//
+// The producer sends while it has credit (stream.write cuts a string into
+// chunks and sends as many as the window allows, returning where it got
+// to), finishes after the last chunk, and hands every StreamCredit to
+// stream.credit, which says when the stream has ended:
+//
+//     StreamCredit(s, n) -> {
+//         if stream.credit(s, n) == 0 { /* ended and freed: drop s */ }
+//         else { at = stream.write(s, data, at, 4096) ... }
+//     }
+//
+// The consumer handles each chunk, then says so:
+//
+//     StreamChunk(s, data, last) -> {
+//         if last == 0 { use(data) }
+//         stream.consumed(s, last)
+//     }
+//
+// The chunk with `last` 1 carries no data and ends the stream; once the
+// consumer has said it consumed it, it drops the stream. Chunks arrive in
+// the order sent, and the credits and the end come back in the order the
+// consumer sent them, so the end is the producer's last StreamCredit: the
+// stream is freed there, with nothing of it still in flight. The README
+// has a whole producer and consumer.
+//
+// `data` is a string, so it holds any bytes (std.bytes' string_from_slice
+// makes one from a byte[]); a send copies it, so the consumer owns what it
+// receives and the producer keeps what it sent.
+
+import std.string
+
+exports(
+    StreamChunk, StreamCredit,
+    connect, offer, write, finish, credit, consumed,
+    available, in_flight, peak
+)
+
+// One chunk of stream `s`; `last` 1 (and no data) ends it.
+message StreamChunk { s: ptr, data: string, last: int }
+// `n` more chunks of stream `s` may be sent; `n` 0 is the consumer's end of
+// it, after its last credit.
+message StreamCredit { s: ptr, n: int }
+
+struct Stream {
+    producer: actor_ref
+    consumer: actor_ref
+    window: int
+    // The rest is the producer's alone.
+    credits: int // chunks it may still send
+    peak: int // the most chunks in flight at once
+    finished: int // it sent the last chunk
+}
+
+// A stream from `producer` to `consumer` with at most `window` chunks in
+// flight, or null when `window` is less than 1. Give it to both actors; the
+// consumer's end frees it (see stream.credit).
+connect(producer: actor_ref, consumer: actor_ref, window: int) -> ptr {
+    if window < 1 {
+        return null
+    }
+    st = heap.new(Stream)
+    st.producer = producer
+    st.consumer = consumer
+    st.window = window
+    st.credits = window
+    st.peak = 0
+    st.finished = 0
+    return st as ptr
+}
+
+// The producer's: sends `data` as the next chunk. 1 when it was sent; 0 when
+// the window is full (send it again after the next StreamCredit); -1 after
+// finish.
+offer(s: @keep ptr, data: string) -> int {
+    if s == null {
+        return -1
+    }
+    st = s as *Stream
+    if st.finished == 1 {
+        return -1
+    }
+    if st.credits == 0 {
+        return 0
+    }
+    st.credits = st.credits - 1
+    if st.window - st.credits > st.peak {
+        st.peak = st.window - st.credits
+    }
+    st.consumer ! StreamChunk { s: s, data: data, last: 0 }
+    return 1
+}
+
+// The producer's: sends `data` from byte `at` on, in chunks of at most
+// `chunk` bytes, while the window allows. Returns the byte it got to: the
+// length of `data` when all of it went, less when the window filled (call
+// again from there after the next StreamCredit); -1 after finish, or when
+// `chunk` is less than 1.
+write(s: @keep ptr, data: string, at: int, chunk: int) -> int {
+    if s == null || chunk < 1 {
+        return -1
+    }
+    st = s as *Stream
+    if st.finished == 1 {
+        return -1
+    }
+    n = string.length(data)
+    pos = at
+    if pos < 0 {
+        pos = 0
+    }
+    while pos < n && st.credits > 0 {
+        end = pos + chunk
+        if end > n {
+            end = n
+        }
+        _sent = offer(s, string.substring(data, pos, end))
+        pos = end
+    }
+    return pos
+}
+
+// The producer's: the stream is done. The consumer gets the last chunk after
+// every chunk sent before it. It costs no credit; the producer still takes
+// StreamCredits until stream.credit says the stream has ended.
+finish(s: @keep ptr) {
+    if s == null {
+        return
+    }
+    st = s as *Stream
+    if st.finished == 1 {
+        return
+    }
+    st.finished = 1
+    st.consumer ! StreamChunk { s: s, data: "", last: 1 }
+}
+
+// The producer's, for each StreamCredit it receives: 1 when `n` chunks more
+// may be sent; 0 when this is the consumer's end of the stream, which is
+// freed now (the producer drops it).
+credit(s: ptr, n: int) -> int {
+    if s == null {
+        return 0
+    }
+    st = s as *Stream
+    if n == 0 {
+        heap.free(st)
+        return 0
+    }
+    if n > 0 {
+        st.credits = st.credits + n
+        if st.credits > st.window {
+            st.credits = st.window
+        }
+    }
+    return 1
+}
+
+// The consumer's, in its StreamChunk arm once it has handled the chunk:
+// returns its credit to the producer or, for the last chunk (`last` 1, the
+// chunk's own field), ends the stream for the consumer, which drops it.
+consumed(s: @keep ptr, last: int) {
+    if s == null {
+        return
+    }
+    st = s as *Stream
+    if last == 1 {
+        st.producer ! StreamCredit { s: s, n: 0 }
+    } else {
+        st.producer ! StreamCredit { s: s, n: 1 }
+    }
+}
+
+// The producer's: chunks it may send now.
+available(s: ptr) -> int {
+    if s == null {
+        return 0
+    }
+    st = s as *Stream
+    return st.credits
+}
+
+// The producer's: chunks sent whose credit has not come back yet.
+in_flight(s: ptr) -> int {
+    if s == null {
+        return 0
+    }
+    st = s as *Stream
+    return st.window - st.credits
+}
+
+// The producer's: the most chunks that were in flight at once (never more
+// than the window).
+peak(s: ptr) -> int {
+    if s == null {
+        return 0
+    }
+    st = s as *Stream
+    return st.peak
+}
