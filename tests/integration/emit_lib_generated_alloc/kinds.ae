@@ -70,7 +70,7 @@ k_heap(n: int) -> int {
 }
 
 // The program's own malloc: NULL, as C's is, and the call ends when it
-// returns.
+// returns, with its zero value: the -1 this returns is not a result (#3388).
 k_malloc(n: int) -> int {
     aether_test_fail_alloc_after(1)
     p = malloc(16)

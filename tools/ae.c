@@ -5486,9 +5486,14 @@ static void ae_emit_string_export(FILE* out, const char* kind, const char* csym,
                 params, kind[0] ? "" : " -> string", ext_name, call_args, check);
         return;
     }
+    /* #3388: a failed call's string goes back to the library before the
+     * failure is raised here, which skips the rest. A library built since
+     * returns none (NULL, which the release takes); one built before
+     * returned its result whatever the outcome. */
     fprintf(out, "@extern(\"%s\") __aes_%s(%s) -> ptr\n", csym, name, ext_params);
     fprintf(out, "%s%s(%s)%s {\n", kind, name, params, kind[0] ? "" : " -> string");
     fprintf(out, "    _aes_h = __aes_%s(%s)\n", name, call_args);
+    if (s_aeo_check) fprintf(out, "    if __aeo_code() != 0 {\n        __aes_release(_aes_h)\n    }\n");
     fprintf(out, "%s", check);
     fprintf(out, "    _aes_s = __aes_import(_aes_h)\n");
     fprintf(out, "    __aes_release(_aes_h)\n");

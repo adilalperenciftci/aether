@@ -157,7 +157,7 @@ static inline void exec_finish(AetherFrames* F, int outcome) {
     F->outcome = outcome;
 }
 
-void aether_exec_leave(void) {
+int aether_exec_leave_outcome(void) {
     AetherFrames* F = aether_frames_here();
     /* Read only once some deadline or cancel was ever armed: the trip
      * flag, and a C-backed std loop that stopped early (it returned an
@@ -167,10 +167,17 @@ void aether_exec_leave(void) {
         if (why) {
             set_text(F, aether_exec_reason(why));
             exec_finish(F, why);
-            return;
+            return why;
         }
     }
     exec_finish(F, AETHER_OK);
+    return AETHER_OK;
+}
+
+/* Kept for code generated before #3388, which returns its result whatever
+ * the outcome. */
+void aether_exec_leave(void) {
+    (void)aether_exec_leave_outcome();
 }
 
 void aether_exec_failed(void) {

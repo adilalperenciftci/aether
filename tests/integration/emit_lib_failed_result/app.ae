@@ -1,0 +1,18 @@
+// An Aether importer of words.ae in binary form, built with its own
+// runtime (#3388): a failed call is raised again as a panic here, and the
+// string the library would have returned is not kept by either runtime.
+import words
+
+main() {
+    base = words.used()
+    words.fail_next(1)
+    got = ""
+    try {
+        _s = words.greet(7)
+    } catch e {
+        got = e
+    }
+    println("raised: ${got}")
+    println("the library holds what it held before: ${words.used() == base}")
+    println("then: ${words.greet(7)}")
+}

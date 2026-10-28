@@ -33,7 +33,7 @@ lazy 0 $oom
 env 0 $oom
 box 0 $oom
 heap 0 $oom
-malloc -1 $oom
+malloc 0 $oom
 plain 6 outcome 0 \"\""
 
 if ! "$AETHERC" --emit=lib --with=extern "$SCRIPT_DIR/kinds.ae" "$TMP/kinds.c" > "$TMP/kinds.log" 2>&1; then

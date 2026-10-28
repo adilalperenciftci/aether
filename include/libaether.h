@@ -82,8 +82,14 @@ AETHER_API int aether_deadline_tripped(void);
  * does not catch ends the call, not the process, and the export returns
  * the zero value of its result (NULL for a string, which the release
  * accepts). A zero value with an outcome other than AETHER_OK is not a
- * result; release only what an AETHER_OK call returned. The library is
- * usable again at once; nothing done before the failure is rolled back.
+ * result; release only what an AETHER_OK call returned. That holds for a
+ * call that ran to its return with a stop noted after its last safe point
+ * (an allocation it survived, a JSON parse that stopped, the deadline's
+ * flag) too: it returns the zero value, and the library releases what it
+ * would have returned, a string or a struct's or closure's parts (#3388).
+ * A `ptr` result owns nothing, so what it pointed to is not released, as on
+ * a panic. The library is usable again at once; nothing done before the
+ * failure is rolled back.
  *
  * Nested calls (an export calls a host service, which calls an export)
  * each have their own outcome, and the outer call's caller info,

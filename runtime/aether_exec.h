@@ -7,7 +7,7 @@
  *     AetherJmpFrame* x = aether_exec_enter();
  *     if (AETHER_SIGSETJMP(x->buf, 1)) { aether_exec_failed(); return zero; }
  *     r = f(args);
- *     aether_exec_leave();
+ *     if (aether_exec_leave_outcome() != 0) { release r; return zero; }
  *     return r;
  *
  * The frame is a panic frame, so a panic the export does not catch ends
@@ -16,7 +16,9 @@
  * sets, the deadline, the sandbox levels), putting it back however the
  * execution ends. Each execution leaves an outcome the caller reads with
  * aether_last_outcome() (libaether.h): a zero value with an outcome other
- * than AETHER_OK is not a result. */
+ * than AETHER_OK is not a result. A call that returned but ended other than
+ * AETHER_OK (a stop noted after its last safe point) returns its zero value
+ * too: the stub releases what it would have returned (#3388). */
 
 #ifndef AETHER_EXEC_H
 #define AETHER_EXEC_H
@@ -41,6 +43,10 @@ extern "C" {
 #define AETHER_EXEC_MAX_DEPTH AETHER_PANIC_MAX_DEPTH
 
 AetherJmpFrame* aether_exec_enter(void);
+/* The execution ends: its outcome (AETHER_OK, or the stop noted for it),
+ * which aether_last_outcome() then reads. aether_exec_leave is the same
+ * without the result, for stubs generated before #3388. */
+int aether_exec_leave_outcome(void);
 void aether_exec_leave(void);
 void aether_exec_failed(void);
 

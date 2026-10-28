@@ -715,7 +715,15 @@ case AETHER_DEADLINE:  /* cut by its deadline: r is not a result */ break;
 - **A zero value with an outcome other than `AETHER_OK` is not a result.**
   Release only what an `AETHER_OK` call returned. `AETHER_DEADLINE` and
   `AETHER_CANCELLED` mean a safe point ended the call ("Per-call resource
-  caps" above): it returned its zero value, its defers run.
+  caps" above): it returned its zero value, its defers run. A call that ran
+  to its return with a stop noted after its last safe point (an allocation
+  it survived, a JSON parse that stopped, the deadline's flag) ends with
+  that outcome and returns its zero value as well (#3388): the stub
+  releases what the function returned, a string, or the strings and
+  closures of a struct or closure by value. A `ptr` or `*Struct` result
+  owns nothing (R4), so what it points to is not released, as on a panic.
+  An Aether importer gives such a string back to the library before it
+  raises the failure, whichever version built the library.
 - **Nested calls.** An export that calls a host service, which calls an
   export again on the same thread, runs two executions. The inner one sees
   what the service set for it (caller info, `aether_set_call_deadline`),

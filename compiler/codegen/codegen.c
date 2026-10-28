@@ -3330,6 +3330,30 @@ static int lib_export_frameless(CodeGenerator* gen, ASTNode* program, ASTNode* f
     return body && lib_node_cannot_fail(body);
 }
 
+/* #3388: the end of a stub whose function returned. A call can still have
+ * failed: a stop noted after its last safe point (an allocation that failed
+ * and that the code survived, the deadline's flag, a JSON parse that
+ * stopped) gives it an outcome other than AETHER_OK at the leave. Such a
+ * call returns its zero value, as every failed call does (libaether.h), so
+ * what it would have returned is released here: the string's reference the
+ * caller would have had, an owning struct's or closure's parts, a string
+ * sequence. A `ptr` or a `*Struct` owns nothing (R4): what it points to is
+ * not reached, as on a panic. `RET` is the stub's ABI spelling of `result`. */
+static void emit_lib_stub_return(CodeGenerator* gen, Type* result, const char* ret_abi) {
+    FILE* o = gen->output;
+    fprintf(o, "    if (aether_exec_leave_outcome() != 0) {\n");
+    if (result && !result->c_alias && result->kind == TYPE_STRING) {
+        fprintf(o, "        string_release((const char*)_aether_r);\n");
+    } else if (result && !result->c_alias && result->kind == TYPE_PTR) {
+        if (is_string_seq_ptr_type(result))
+            fprintf(o, "        string_seq_free((StringSeq*)(void*)_aether_r);\n");
+    } else if (result && !result->c_alias && own_type_owns(gen, result)) {
+        fprintf(o, "    ");
+        own_emit_part(gen, result, "_aether_r", OWN_DROP);
+    }
+    fprintf(o, "        return (%s){0};\n    }\n    return _aether_r;\n}\n", ret_abi);
+}
+
 static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
     if (!gen || !gen->emit_lib || !program) return;
 
@@ -3413,6 +3437,7 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
     fprintf(gen->output,
             "extern AetherJmpFrame* aether_exec_enter(void);\n"
             "extern void aether_exec_leave(void);\n"
+            "extern int aether_exec_leave_outcome(void);\n"
             "extern void aether_exec_failed(void);\n"
             "extern void aether_exec_ok(void);\n"
             "#ifndef AETHER_EXEC_STUB_ENTER\n"
@@ -3625,8 +3650,13 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
                 fprintf(gen->output, "%s", param_names[k]);
             }
         }
-        fprintf(gen->output, ");\n    %s;\n%s}\n", frameless ? "aether_exec_ok()" : "aether_exec_leave()",
-                stub_returns ? "    return _aether_r;\n" : "");
+        fprintf(gen->output, ");\n");
+        if (frameless)
+            fprintf(gen->output, "    aether_exec_ok();\n%s}\n", stub_returns ? "    return _aether_r;\n" : "");
+        else if (stub_returns)
+            emit_lib_stub_return(gen, result, ret_abi);
+        else
+            fprintf(gen->output, "    aether_exec_leave();\n}\n");
     }
 
     /* #2349: an exported builder of a package module. A builder's ABI is its
@@ -3698,8 +3728,13 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
             if (c->type == AST_BLOCK) break;
             fprintf(gen->output, "%s, ", c->value);
         }
-        fprintf(gen->output, "_builder);\n    aether_exec_leave();\n%s}\n",
-                returns ? "    return _aether_r;\n" : "");
+        fprintf(gen->output, "_builder);\n");
+        if (returns && unannotated)
+            emit_lib_stub_return(gen, NULL, bret);
+        else if (returns)
+            emit_lib_stub_return(gen, rt, bret);
+        else
+            fprintf(gen->output, "    aether_exec_leave();\n}\n");
     }
 
     /* #996 --emit=csrc: close the header guard. */
