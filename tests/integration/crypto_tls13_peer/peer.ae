@@ -1,0 +1,442 @@
+// A scripted TLS 1.3 server for the pure client's protocol checks: it runs
+// a real handshake (any suite and group the client offers, ECDSA P-256
+// certificate for peer.example) and changes exactly what PEER_CASE says, so
+// a test can send the client the bytes a broken or hostile server would.
+// test_tls13_peer.sh runs it against client.ae, case by case.
+//
+// PEER_CASE is a list of knob=value pairs separated by ";" (values in hex
+// where they are bytes):
+//   sh_ext=HEX      raw extensions appended to the ServerHello's
+//   ee_ext=HEX      raw extensions appended to EncryptedExtensions'
+//   ee_body=HEX     the whole EncryptedExtensions body instead ("-": empty)
+//   cert_ext=HEX    the leaf CertificateEntry's extensions
+// Writes its port to PEER_PORT_OUT and its certificate to PEER_CERT_OUT, serves one
+// connection, and prints what the client answered to its flight:
+// "ALERT <description>" (plaintext or under the client's handshake keys),
+// "FINISHED" (the client accepted it), or "CLOSED".
+
+import std.os
+import std.fs
+import std.tcp
+import std.bytes
+import std.string
+import std.list
+import std.cryptography
+import std.cryptography.x25519
+import std.cryptography.mlkem
+import std.cryptography.tls13_hs
+import std.cryptography.tls13_ks
+import std.cryptography.tls13_record
+import std.cryptography.tls13_client
+import std.cryptography.tls13_server
+import std.cryptography.tls13_cert
+
+extern exit(code: int)
+extern string_char_at(str: string, index: int) -> int
+
+// ---- knobs ----
+
+fn knob(name: string) -> string {
+    spec = os.getenv("PEER_CASE")
+    if spec == "" { return "" }
+    parts = string.split(spec, ";")
+    n = string.array_size(parts)
+    out = ""
+    i = 0
+    while i < n {
+        p = string.array_get(parts, i)
+        pre = "${name}="
+        if string.starts_with(p, pre) == 1 {
+            out = string.substring(p, string.length(pre), string.length(p))
+        }
+        i = i + 1
+    }
+    string.array_free(parts)
+    return out
+}
+
+fn hexval(h: int) -> int {
+    if h >= 48 && h <= 57 { return h - 48 }
+    if h >= 97 && h <= 102 { return h - 87 }
+    return h - 55
+}
+
+fn from_hex(s: string) -> ptr {
+    n = string.length(s) / 2
+    b = bytes.new(n)
+    i = 0
+    while i < n {
+        bytes.set(b, i, hexval(string_char_at(s, 2 * i)) * 16 + hexval(string_char_at(s, 2 * i + 1)))
+        i = i + 1
+    }
+    return b
+}
+
+// ---- bytes ----
+
+struct Buf {
+    b: ptr
+    n: int
+}
+
+fn buf_new() -> *Buf {
+    h = malloc(sizeof(Buf)) as *Buf
+    h.b = bytes.new(64)
+    h.n = 0
+    return h
+}
+
+fn put8(w: *Buf, v: int) {
+    bytes.set(w.b, w.n, v & 0xFF)
+    w.n = w.n + 1
+}
+
+fn put16(w: *Buf, v: int) {
+    put8(w, v >> 8)
+    put8(w, v)
+}
+
+fn put24(w: *Buf, v: int) {
+    put8(w, v >> 16)
+    put8(w, v >> 8)
+    put8(w, v)
+}
+
+fn put_bytes(w: *Buf, src: ptr, off: int, n: int) {
+    if n > 0 { bytes.copy_from_bytes(w.b, w.n, src, off, n) }
+    w.n = w.n + n
+}
+
+// The buffer as fresh bytes of exactly its length; frees the Buf.
+fn buf_take(w: *Buf) -> ptr {
+    out = bytes.new(w.n)
+    if w.n > 0 { bytes.copy_from_bytes(out, 0, w.b, 0, w.n) }
+    bytes.free(w.b)
+    free(w as ptr)
+    return out
+}
+
+extern malloc(size: int) -> ptr
+extern free(p: ptr)
+
+// ---- records ----
+
+struct Reader {
+    sock: ptr
+    buf: ptr
+    len: int
+    off: int
+}
+
+// The next record (header included) as fresh bytes, or null at EOF.
+fn next_record(r: *Reader) -> ptr {
+    while 1 == 1 {
+        avail = r.len - r.off
+        if avail >= 5 {
+            plen = ((bytes.get(r.buf, r.off + 3) & 0xFF) << 8) | (bytes.get(r.buf, r.off + 4) & 0xFF)
+            if avail >= 5 + plen {
+                rec = bytes.new(5 + plen)
+                bytes.copy_from_bytes(rec, 0, r.buf, r.off, 5 + plen)
+                r.off = r.off + 5 + plen
+                return rec
+            }
+        }
+        chunk = bytes.new(16384)
+        bytes.set(chunk, 16383, 0)
+        got, err = tcp.read_into(r.sock, bytes.view(chunk)[0..16384])
+        if err != "" || got <= 0 {
+            bytes.free(chunk)
+            return null
+        }
+        bytes.copy_from_bytes(r.buf, r.len, chunk, 0, got)
+        r.len = r.len + got
+        bytes.free(chunk)
+    }
+}
+
+fn send_raw(sock: ptr, rec: ptr) {
+    _n, _e = tcp.write_all(sock, bytes.view(rec)[0..bytes.length(rec)])
+}
+
+fn send_plain(sock: ptr, ct: int, msg: ptr) {
+    w = buf_new()
+    put8(w, ct)
+    put16(w, 0x0303)
+    put16(w, bytes.length(msg))
+    put_bytes(w, msg, 0, bytes.length(msg))
+    rec = buf_take(w)
+    send_raw(sock, rec)
+    bytes.free(rec)
+}
+
+fn send_sealed(sock: ptr, ctx: ptr, ct: int, msg: ptr) {
+    rec = tls13_record.seal_record(ctx, ct, bytes.view(msg)[0..bytes.length(msg)])
+    send_raw(sock, rec)
+    bytes.free(rec)
+}
+
+// ---- handshake messages ----
+
+fn hs_msg(typ: int, body: ptr) -> ptr {
+    w = buf_new()
+    put8(w, typ)
+    put24(w, bytes.length(body))
+    put_bytes(w, body, 0, bytes.length(body))
+    return buf_take(w)
+}
+
+fn server_hello(random: ptr, sid: ptr, sid_len: int, suite: int, group: int, ks: ptr, ks_len: int) -> ptr {
+    exts = buf_new()
+    put16(exts, 0x002b)
+    put16(exts, 2)
+    put16(exts, 0x0304)
+    put16(exts, 0x0033)
+    put16(exts, 4 + ks_len)
+    put16(exts, group)
+    put16(exts, ks_len)
+    put_bytes(exts, ks, 0, ks_len)
+    extra = knob("sh_ext")
+    if extra != "" {
+        x = from_hex(extra)
+        put_bytes(exts, x, 0, bytes.length(x))
+        bytes.free(x)
+    }
+    e = buf_take(exts)
+    w = buf_new()
+    put16(w, 0x0303)
+    put_bytes(w, random, 0, 32)
+    put8(w, sid_len)
+    put_bytes(w, sid, 0, sid_len)
+    put16(w, suite)
+    put8(w, 0)
+    put16(w, bytes.length(e))
+    put_bytes(w, e, 0, bytes.length(e))
+    bytes.free(e)
+    body = buf_take(w)
+    m = hs_msg(2, body)
+    bytes.free(body)
+    return m
+}
+
+fn encrypted_extensions() -> ptr {
+    raw = knob("ee_body")
+    if raw == "-" {
+        empty = bytes.new(0)
+        em = hs_msg(8, empty)
+        bytes.free(empty)
+        return em
+    }
+    if raw != "" {
+        b = from_hex(raw)
+        m = hs_msg(8, b)
+        bytes.free(b)
+        return m
+    }
+    exts = buf_new()
+    extra = knob("ee_ext")
+    if extra != "" {
+        x = from_hex(extra)
+        put_bytes(exts, x, 0, bytes.length(x))
+        bytes.free(x)
+    }
+    e = buf_take(exts)
+    w = buf_new()
+    put16(w, bytes.length(e))
+    put_bytes(w, e, 0, bytes.length(e))
+    bytes.free(e)
+    body = buf_take(w)
+    m = hs_msg(8, body)
+    bytes.free(body)
+    return m
+}
+
+// Certificate { context<1> = empty, certificate_list<3> = one entry }.
+fn certificate(der: ptr) -> ptr {
+    ext = bytes.new(0)
+    hexe = knob("cert_ext")
+    if hexe != "" {
+        bytes.free(ext)
+        ext = from_hex(hexe)
+    }
+    dl = bytes.length(der)
+    el = bytes.length(ext)
+    w = buf_new()
+    put8(w, 0)
+    put24(w, 3 + dl + 2 + el)
+    put24(w, dl)
+    put_bytes(w, der, 0, dl)
+    put16(w, el)
+    put_bytes(w, ext, 0, el)
+    bytes.free(ext)
+    body = buf_take(w)
+    m = hs_msg(11, body)
+    bytes.free(body)
+    return m
+}
+
+// (aead, key length, hash, hash length) of a TLS 1.3 suite.
+fn suite_params(cs: int) -> (int, int, string, int) {
+    if cs == tls13_hs.TLS_AES_256_GCM_SHA384 { return tls13_record.AEAD_AES_256_GCM, 32, "sha384", 48 }
+    if cs == tls13_hs.TLS_CHACHA20_POLY1305_SHA256 { return tls13_record.AEAD_CHACHA20_POLY1305, 32, "sha256", 32 }
+    return tls13_record.AEAD_AES_128_GCM, 16, "sha256", 32
+}
+
+// What the client sent back, read under `cli_ctx`: "ALERT n", "FINISHED",
+// "DATA" or "CLOSED".
+fn client_answer(r: *Reader, cli_ctx: ptr) -> string {
+    while 1 == 1 {
+        rec = next_record(r)
+        if rec == null { return "CLOSED" }
+        ct = bytes.get(rec, 0) & 0xFF
+        if ct == 0x14 {
+            bytes.free(rec)
+        } else if ct == 0x15 {
+            d = bytes.get(rec, 6) & 0xFF
+            bytes.free(rec)
+            return "ALERT ${d}"
+        } else {
+            if cli_ctx == null {
+                bytes.free(rec)
+                return "ENCRYPTED"
+            }
+            opened = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0 }
+            oerr = tls13_record.open_record(cli_ctx, bytes.view(rec)[0..bytes.length(rec)], &opened)
+            bytes.free(rec)
+            if oerr != "" { return "UNREADABLE" }
+            res = "DATA"
+            if opened.content_type == tls13_record.CONTENT_ALERT && opened.plaintext_len >= 2 {
+                res = "ALERT ${bytes.get(opened.plaintext, 1) & 0xFF}"
+            } else if opened.content_type == tls13_record.CONTENT_HANDSHAKE && opened.plaintext_len >= 1 {
+                if (bytes.get(opened.plaintext, 0) & 0xFF) == 20 { res = "FINISHED" } else { res = "HANDSHAKE" }
+            }
+            if opened.plaintext != null { bytes.free(opened.plaintext) }
+            return res
+        }
+    }
+}
+
+main() {
+    srv, lerr = tcp.listen_on("127.0.0.1", 0)
+    if lerr != "" {
+        println("FAIL: ${lerr}")
+        exit(1)
+    }
+    out = os.getenv("PEER_CERT_OUT")
+    if out != "" { _w = fs.write(out, peer_pem()) }
+    // The port goes to a file: a pipe would hold a printed line until exit.
+    _pw = fs.write(os.getenv("PEER_PORT_OUT"), "${tcp.server_port(srv)}")
+    sock, aerr = tcp.accept(srv)
+    if aerr != "" {
+        println("FAIL: ${aerr}")
+        exit(1)
+    }
+    r = Reader { sock: sock, buf: bytes.new(4096), len: 0, off: 0 }
+
+    chrec = next_record(&r)
+    if chrec == null {
+        println("FAIL: no ClientHello")
+        exit(1)
+    }
+    chlen = bytes.length(chrec) - 5
+    ch = bytes.new(chlen)
+    bytes.copy_from_bytes(ch, 0, chrec, 5, chlen)
+    bytes.free(chrec)
+    chp = tls13_hs.ChParsed { random: null, session_id: null, session_id_len: 0, cipher_suite: 0, group: 0, key_share: null, key_share_len: 0, has_sni: 0, saw_supported_versions: 0 }
+    perr = tls13_hs.parse_client_hello(bytes.view(ch)[0..chlen], &chp)
+    if perr != "" {
+        println("FAIL: ClientHello: ${perr}")
+        exit(1)
+    }
+    tr = tls13_client.transcript_new()
+    tls13_client.transcript_add(tr, bytes.view(ch)[0..chlen])
+
+    // The shared secret and our key share for the group the client chose.
+    xpriv, rerr = cryptography.random_buffer(32)
+    if rerr != "" {
+        println("FAIL: ${rerr}")
+        exit(1)
+    }
+    xpub = x25519.base_point(xpriv)
+    shared = null
+    ks = null
+    if chp.group == tls13_hs.GROUP_X25519MLKEM768 {
+        ek = bytes.new(1184)
+        bytes.copy_from_bytes(ek, 0, chp.key_share, 0, 1184)
+        cx = bytes.new(32)
+        bytes.copy_from_bytes(cx, 0, chp.key_share, 1184, 32)
+        ct, mss, _merr = mlkem.mlkem768_encaps(ek)
+        xss, _xerr = x25519.agree(xpriv, cx)
+        ks = bytes.new(1120)
+        bytes.copy_from_bytes(ks, 0, ct, 0, 1088)
+        bytes.copy_from_bytes(ks, 1088, xpub, 0, 32)
+        shared = bytes.new(64)
+        bytes.copy_from_bytes(shared, 0, mss, 0, 32)
+        bytes.copy_from_bytes(shared, 32, xss, 0, 32)
+        bytes.free(ek); bytes.free(cx); bytes.free(ct); bytes.free(mss); bytes.free(xss)
+    } else {
+        xss2, _xerr2 = x25519.agree(xpriv, chp.key_share)
+        shared = xss2
+        ks = bytes.new(32)
+        bytes.copy_from_bytes(ks, 0, xpub, 0, 32)
+    }
+    aead, klen, algo, hl = suite_params(chp.cipher_suite)
+
+    srnd, _sr = cryptography.random_buffer(32)
+    sh = server_hello(srnd, chp.session_id, chp.session_id_len, chp.cipher_suite, chp.group, ks, bytes.length(ks))
+    send_plain(sock, 22, sh)
+    tls13_client.transcript_add(tr, bytes.view(sh)[0..bytes.length(sh)])
+
+    // A client that refuses the ServerHello answers now, in the clear.
+    ready, _perr = tcp.poll(sock, 300)
+    if ready {
+        println(client_answer(&r, null))
+        tcp.close(sock)
+        exit(0)
+    }
+
+    th = tls13_client.transcript_hash_algo(tr, algo)
+    early = tls13_ks.early_secret(algo)
+    hsec = tls13_ks.handshake_secret(algo, early, bytes.view(shared)[0..bytes.length(shared)])
+    c_hs = tls13_ks.traffic_secret(algo, hsec, "c hs traffic", bytes.view(th)[0..hl])
+    s_hs = tls13_ks.traffic_secret(algo, hsec, "s hs traffic", bytes.view(th)[0..hl])
+    sk = tls13_ks.write_key(algo, bytes.view(s_hs)[0..hl], klen)
+    siv = tls13_ks.write_iv(algo, s_hs)
+    ck = tls13_ks.write_key(algo, bytes.view(c_hs)[0..hl], klen)
+    civ = tls13_ks.write_iv(algo, c_hs)
+    srv_ctx = tls13_record.new_aead(aead, bytes.view(sk)[0..klen], siv)
+    cli_ctx = tls13_record.new_aead(aead, bytes.view(ck)[0..klen], civ)
+
+    ee = encrypted_extensions()
+    send_sealed(sock, srv_ctx, 22, ee)
+    tls13_client.transcript_add(tr, bytes.view(ee)[0..bytes.length(ee)])
+
+    chain, _lens = tls13_server.parse_cert_chain_pem(peer_pem())
+    der = list.at(chain, 0) as ptr
+    cert = certificate(der)
+    send_sealed(sock, srv_ctx, 22, cert)
+    tls13_client.transcript_add(tr, bytes.view(cert)[0..bytes.length(cert)])
+
+    key = tls13_server.parse_ec_private_key_pem(peer_key())
+    th_c = tls13_client.transcript_hash_algo(tr, algo)
+    sig = tls13_cert.sign_server_cert_verify_ecdsa_p256(key, bytes.view(th_c)[0..hl])
+    cv = tls13_hs.certificate_verify_msg(0x0403, bytes.view(sig)[0..bytes.length(sig)])
+    send_sealed(sock, srv_ctx, 22, cv)
+    tls13_client.transcript_add(tr, bytes.view(cv)[0..bytes.length(cv)])
+
+    th_v = tls13_client.transcript_hash_algo(tr, algo)
+    svd = tls13_client.finished_verify_data_algo(s_hs, bytes.view(th_v)[0..hl], algo, hl)
+    fin = tls13_hs.finished_msg(svd, hl)
+    send_sealed(sock, srv_ctx, 22, fin)
+
+    println(client_answer(&r, cli_ctx))
+    tcp.close(sock)
+    exit(0)
+}
+
+fn peer_pem() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBezCCASGgAwIBAgIFUEVFUgEwCgYIKoZIzj0EAwIwFzEVMBMGA1UEAwwMcGVl\nci5leGFtcGxlMCAXDTI2MDEwMTAwMDAwMFoYDzIxMjYwMTAxMDAwMDAwWjAXMRUw\nEwYDVQQDDAxwZWVyLmV4YW1wbGUwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARv\n7S9eWT57ZTmAOztQD2+5EetBRQ+B+cOtLJCr7BVBQPQExOwo/jrT1ahb6i7ZxObZ\nFrq4KWW801ggO2EZ0SqXo1gwVjAMBgNVHRMBAf8EAjAAMA4GA1UdDwEB/wQEAwIH\ngDAXBgNVHREEEDAOggxwZWVyLmV4YW1wbGUwHQYDVR0OBBYEFH8HRengm5cRK0K4\na6DbxP8afdpfMAoGCCqGSM49BAMCA0gAMEUCIDCIjkFoXJK1RI1twupNRu+WcP5M\nrU1MCAQ84vwQWP4tAiEArDbfJRioR7QSSuE4iKxVCCFaHbJs/7eLq3CNJGUFXoM=\n-----END CERTIFICATE-----\n"
+}
+
+fn peer_key() -> string {
+    return "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgJkV1/PXrot1pb8nd\ndzrI+0SX8Cx63OCppeTS/FARImOhRANCAARv7S9eWT57ZTmAOztQD2+5EetBRQ+B\n+cOtLJCr7BVBQPQExOwo/jrT1ahb6i7ZxObZFrq4KWW801ggO2EZ0SqX\n-----END PRIVATE KEY-----\n"
+}

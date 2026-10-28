@@ -1,0 +1,24 @@
+// The pure TLS client against peer.ae: connect_socket to 127.0.0.1
+// PEER_PORT for "peer.example", trusting CAFILE. Prints "OK" after a
+// verified handshake, else "ERR: <why>".
+
+import std.os
+import std.tcp
+import std.string
+import std.cryptography.tls13_client
+
+main() {
+    port, _perr = string.to_int(os.getenv("PEER_PORT"))
+    sock, derr = tcp.connect("127.0.0.1", port)
+    if derr != "" {
+        println("ERR: connect: ${derr}")
+        return
+    }
+    conn, herr = tls13_client.connect_socket(sock, "peer.example", os.getenv("CAFILE"))
+    if herr != "" {
+        println("ERR: ${herr}")
+        return
+    }
+    println("OK")
+    tls13_client.close_conn(conn)
+}

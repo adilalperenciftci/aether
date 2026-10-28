@@ -789,6 +789,11 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
     bytes.copy_from_bytes(sh, 0, shrec, 5, sh_msg_len)
     parsed = tls13_hs.ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null, key_share_len: 0, is_hello_retry: 0, psk_accepted: 0 }
     perr = tls13_hs.parse_server_hello(bytes.view(sh)[0..sh_msg_len], &parsed)
+    if string.equals(perr, "") == 1 && parsed.psk_accepted == 1 {
+        // A full handshake offers no PSK (RFC 8446 4.2, #3315).
+        parsed.alert = ALERT_UNSUPPORTED_EXTENSION
+        perr = "server hello: pre_shared_key answers nothing the client sent"
+    }
     if string.equals(perr, "") == 1 && parsed.is_hello_retry == 1 {
         // Every group we implement already has a key share in this
         // ClientHello, so a HelloRetryRequest names either one of them, which
@@ -797,6 +802,8 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
         perr = "server sent a HelloRetryRequest, but every group we support was already offered"
     }
     if string.equals(perr, "") != 1 {
+        // The alert the ServerHello earned, in the clear (#3315).
+        if parsed.alert != 0 { send_plain_alert(sock, parsed.alert) }
         bytes.free(dk); bytes.free(p256_priv)
         if parsed.key_share != null { bytes.free(parsed.key_share) }
         bytes.free(sh); bytes.free(shrec)
@@ -840,7 +847,9 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
     // Derive keys from the shared secret (32 bytes classical, 64 hybrid) and
     // run the shared post-ServerHello handshake tail (flight read, auth,
     // Finished).
-    result, result_err = run_handshake_tail(sock, rio, tr, host, bytes.view(shared)[0..shared_len], parsed.cipher_suite, client_cert, client_cert_len, client_key, insecure, cafile)
+    offered = tls13_hs.OFFER_ALPN | tls13_hs.OFFER_STATUS
+    if string.length(host) > 0 { offered = offered | tls13_hs.OFFER_SNI }
+    result, result_err = run_handshake_tail(sock, rio, tr, host, bytes.view(shared)[0..shared_len], parsed.cipher_suite, client_cert, client_cert_len, client_key, insecure, cafile, offered)
 
     bytes.free(shared)
     if parsed.key_share != null { bytes.free(parsed.key_share) }
@@ -915,7 +924,7 @@ connect_pq(host: string, port: int) -> (ptr, string) {
 // or the ClientHello — the caller does.
 // insecure: 1 skips server authentication entirely (set_insecure parity).
 // cafile:   a PEM bundle to trust instead of the system store, or "".
-fn run_handshake_tail(sock: @keep ptr, rio: @keep ptr, tr: ptr, host: string, shared: byte[], cipher_suite: int, client_cert: ptr, client_cert_len: int, client_key: ptr, insecure: int, cafile: string) -> (ptr, string) {
+fn run_handshake_tail(sock: @keep ptr, rio: @keep ptr, tr: ptr, host: string, shared: byte[], cipher_suite: int, client_cert: ptr, client_cert_len: int, client_key: ptr, insecure: int, cafile: string, offered: int) -> (ptr, string) {
     rec_aead, rec_key_len, hash_algo, hash_len, suite_err = suite_params(cipher_suite)
     if string.equals(suite_err, "") != 1 { return null, suite_err }
 
@@ -953,6 +962,18 @@ fn run_handshake_tail(sock: @keep ptr, rio: @keep ptr, tr: ptr, host: string, sh
                 bytes.free(nrec)
                 if flight_complete(fl, fllen) == 1 { done = 1 }
             }
+        }
+    }
+
+    // The EncryptedExtensions answer only what the ClientHello offered,
+    // each where it may appear (RFC 8446 4.2, #3315).
+    if string.equals(ferr, "") == 1 {
+        ee_alert, ee_err = check_flight_ee(fl, fllen, offered)
+        if ee_alert != 0 {
+            ferr = ee_err
+            ee_ctx = tls13_record.new_aead(rec_aead, bytes.view(hs_client_key(keys))[0..rec_key_len], hs_client_iv(keys))
+            send_alert_hs(sock, ee_ctx, ALERT_LEVEL_FATAL, ee_alert)
+            tls13_record.free_ctx(ee_ctx)
         }
     }
 
@@ -1370,6 +1391,7 @@ const ALERT_DECODE_ERROR = 50
 const ALERT_DECRYPT_ERROR = 51
 const ALERT_PROTOCOL_VERSION = 70
 const ALERT_INTERNAL_ERROR = 80
+const ALERT_UNSUPPORTED_EXTENSION = 110
 const ALERT_NO_APPLICATION_PROTOCOL = 120
 
 // Seal + send an encrypted TLS alert on an established connection (uses the
@@ -1388,6 +1410,61 @@ fn send_alert_conn(c: *ClientConn, level: int, desc: int) -> string {
 
 // Send a fatal alert during the HANDSHAKE (before app keys exist), using the
 // given handshake write context. Same wire shape; best-effort.
+// A fatal alert in the clear, before any handshake key exists.
+fn send_plain_alert(sock: ptr, desc: int) {
+    b = bytes.new(7)
+    bytes.set(b, 0, 0x15)
+    bytes.set(b, 1, 0x03)
+    bytes.set(b, 2, 0x03)
+    bytes.set(b, 3, 0x00)
+    bytes.set(b, 4, 0x02)
+    bytes.set(b, 5, ALERT_LEVEL_FATAL)
+    bytes.set(b, 6, desc & 0xFF)
+    cli_send_view(sock, bytes.view(b)[0..7])
+    bytes.free(b)
+}
+
+// The server flight's EncryptedExtensions, which must come first, against
+// what the ClientHello offered (RFC 8446 4.2, #3315): (0, "") or the alert
+// and why. The one protocol ALPN may name is the one offered, http/1.1.
+fn check_flight_ee(fl: ptr, flen: int, offered: int) -> (int, string) {
+    if flen < 4 || (bytes.get(fl, 0) & 0xFF) != HS_ENCRYPTED_EXTENSIONS {
+        return ALERT_UNEXPECTED_MESSAGE, "the server's encrypted flight does not start with EncryptedExtensions"
+    }
+    ml = ((bytes.get(fl, 1) & 0xFF) << 16) | ((bytes.get(fl, 2) & 0xFF) << 8) | (bytes.get(fl, 3) & 0xFF)
+    if 4 + ml > flen || ml < 2 {
+        return ALERT_DECODE_ERROR, "encrypted extensions: truncated"
+    }
+    el = ((bytes.get(fl, 4) & 0xFF) << 8) | (bytes.get(fl, 5) & 0xFF)
+    if 2 + el != ml {
+        return ALERT_DECODE_ERROR, "encrypted extensions: the extensions do not fill the message"
+    }
+    a, err = tls13_hs.check_extensions(tls13_hs.MSG_ENCRYPTED_EXTENSIONS, bytes.view(fl)[6..6 + el], offered)
+    if a != 0 { return a, "encrypted extensions: ${err}" }
+    p = 6
+    while p + 4 <= 6 + el {
+        t = ((bytes.get(fl, p) & 0xFF) << 8) | (bytes.get(fl, p + 1) & 0xFF)
+        n = ((bytes.get(fl, p + 2) & 0xFF) << 8) | (bytes.get(fl, p + 3) & 0xFF)
+        if t == 16 && alpn_is_http11(fl, p + 7, n - 3) == 0 {
+            return ALERT_ILLEGAL_PARAMETER, "encrypted extensions: ALPN names a protocol the client did not offer"
+        }
+        p = p + 4 + n
+    }
+    return 0, ""
+}
+
+// 1 when fl[off, off + n) is "http/1.1".
+fn alpn_is_http11(fl: ptr, off: int, n: int) -> int {
+    want = "http/1.1"
+    if n != 8 { return 0 }
+    i = 0
+    while i < 8 {
+        if (bytes.get(fl, off + i) & 0xFF) != (string_char_at_n(want, 8, i) & 0xFF) { return 0 }
+        i = i + 1
+    }
+    return 1
+}
+
 fn send_alert_hs(sock: ptr, hs_ctx: ptr, level: int, desc: int) {
     body = bytes.new(2)
     bytes.set(body, 0, level & 0xFF)
@@ -1427,6 +1504,7 @@ fn alert_name(desc: int) -> string {
     if desc == ALERT_PROTOCOL_VERSION { return "protocol_version" }
     if desc == ALERT_INTERNAL_ERROR { return "internal_error" }
     if desc == ALERT_NO_APPLICATION_PROTOCOL { return "no_application_protocol" }
+    if desc == ALERT_UNSUPPORTED_EXTENSION { return "unsupported_extension" }
     return "unknown_alert"
 }
 
@@ -1751,6 +1829,8 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
     parsed = tls13_hs.ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null, key_share_len: 0, is_hello_retry: 0, psk_accepted: 0 }
     perr = tls13_hs.parse_server_hello(bytes.view(sh)[0..sh_msg_len], &parsed)
     if string.equals(perr, "") != 1 {
+        // The alert the ServerHello earned, in the clear (#3315).
+        if parsed.alert != 0 { send_plain_alert(sock, parsed.alert) }
         bytes.free(psk); bytes.free(sh); bytes.free(shrec)
         cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
         return null, perr
@@ -1810,6 +1890,21 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
                     }
                 }
             }
+        }
+    }
+
+    // The EncryptedExtensions answer only what the resuming ClientHello
+    // offered (RFC 8446 4.2, #3315).
+    if string.equals(ferr, "") == 1 {
+        r_offered = tls13_hs.OFFER_ALPN | tls13_hs.OFFER_PSK
+        if string.length(host) > 0 { r_offered = r_offered | tls13_hs.OFFER_SNI }
+        if want_0rtt == 1 { r_offered = r_offered | tls13_hs.OFFER_EARLY }
+        ree_alert, ree_err = check_flight_ee(fl, fllen, r_offered)
+        if ree_alert != 0 {
+            ferr = ree_err
+            ree_ctx = tls13_record.new_aead(rec_aead, bytes.view(hs_client_key(keys))[0..rec_key_len], hs_client_iv(keys))
+            send_alert_hs(sock, ree_ctx, ALERT_LEVEL_FATAL, ree_alert)
+            tls13_record.free_ctx(ree_ctx)
         }
     }
 
