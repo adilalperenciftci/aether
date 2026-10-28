@@ -35,6 +35,7 @@
 //   cv_trailing=1   one byte after the CertificateVerify's signature
 //   skip_cv=1       no CertificateVerify
 //   fin_long=1      a Finished one byte longer than the hash
+//   fin_type=HEX    the Finished sent as this message type
 //   post=WHAT       after the handshake, under the application keys:
 //                   oversize, padded, bigcipher, emptyN, ccs, badtype,
 //                   innertype, badmac, emptyhs; then prints "POST <answer>"
@@ -836,6 +837,13 @@ main() {
         bytes.free(fin)
         fin = hs_msg(20, lv)
         bytes.free(lv)
+    }
+    ftk = knob("fin_type")
+    if ftk != "" {
+        // The Finished sent as another message type (#3367).
+        fb = from_hex(ftk)
+        bytes.set(fin, 0, bytes.get(fb, 0))
+        bytes.free(fb)
     }
     if knob("fin_trailing") != "" {
         // Bytes after the Finished, in its record: a handshake message may

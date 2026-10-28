@@ -32,6 +32,7 @@
 #          before it is judged unsolicited) and a nonzero compression method.
 #   #3365  a CertificateRequest's certificate_authorities and signature list.
 #   #3366  a server flight in 1-byte records; the bound is on its bytes.
+#   #3367  a message the server's flight cannot hold ends it at once.
 #   #3368  the client reads what the server sent before it closes a failed
 #          handshake, so a reset does not take its alert.
 #
@@ -206,6 +207,8 @@ run_case "trailing: a byte after EncryptedExtensions' extensions" "ee_body=00000
 run_case "order: no CertificateVerify" "skip_cv=1" "ERR" "ALERT 10"
 run_case "order: a NewSessionTicket inside the flight" "extra=0400000d0000012c000000000000000000" "ERR" "ALERT 10"
 run_case "order: an unknown message inside the flight" "extra=fe000000" "ERR" "ALERT 10"
+run_case "order: the Finished sent as type 62 (#3367)" "fin_type=3e" "ERR" "ALERT 10"
+run_case "order: the Finished sent as a NewSessionTicket (#3367)" "fin_type=04" "ERR" "ALERT 10"
 run_case "CertificateRequest: accepted, an empty Certificate answers" "cr=000008000d000400020403" "OK" "HANDSHAKE"
 run_case "CertificateRequest: a byte after its extensions" "cr=000008000d00040002040300" "ERR" "ALERT 50"
 run_case "CertificateRequest: a certificate_request_context" "cr=01aa0008000d000400020403" "ERR" "ALERT 50"

@@ -1747,13 +1747,21 @@ const MAX_FLIGHT_CERTIFICATE = 262144
 
 // The messages of the server's flight so far, fl[0, flen): (the offset just
 // past the first complete Finished, or -1 when there is none yet, 0, "");
-// or (-1, the alert, why) for a message whose header says more bytes than
-// its kind may have (#3366), as soon as the header is in.
+// or (-1, the alert, why), as soon as a message's header is in, for a
+// message whose header says more bytes than its kind may have (#3366), or
+// of a type the flight cannot hold (unexpected_message, RFC 8446 6.2,
+// #3367): only EncryptedExtensions, CertificateRequest, Certificate,
+// CertificateVerify and Finished belong there, so waiting for a Finished
+// past any other would wait for a message that is not coming. Their order
+// is check_flight's.
 fn flight_scan(fl: ptr, flen: int) -> (int, int, string) {
     p = 0
     while p + 4 <= flen {
         mt = bytes.get(fl, p) & 0xFF
         ml = ((bytes.get(fl, p + 1) & 0xFF) << 16) | ((bytes.get(fl, p + 2) & 0xFF) << 8) | (bytes.get(fl, p + 3) & 0xFF)
+        if mt != HS_ENCRYPTED_EXTENSIONS && mt != HS_CERTIFICATE_REQUEST && mt != HS_CERTIFICATE && mt != HS_CERTIFICATE_VERIFY && mt != HS_FINISHED {
+            return -1, ALERT_UNEXPECTED_MESSAGE, "handshake: a message of type ${mt} in the server's flight"
+        }
         limit = MAX_FLIGHT_MESSAGE
         if mt == HS_CERTIFICATE { limit = MAX_FLIGHT_CERTIFICATE }
         if ml > limit { return -1, ALERT_UNEXPECTED_MESSAGE, "handshake: a message of type ${mt} and ${ml} bytes in the server's flight, over ${limit}" }
