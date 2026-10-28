@@ -221,7 +221,8 @@ client_hello_sni(random: ptr, session_id: byte[], x25519_pub: ptr, host: string)
 
 // Build a ClientHello offering up to three groups (e.g. X25519MLKEM768, x25519,
 // secp256r1) in supported_groups, carrying key_shares for each offered group.
-// Pass group2=0 or group3=0 to omit the respective entry.
+// Pass group2=0 or group3=0 to omit the respective entry. It offers
+// psk_key_exchange_modes { psk_dhe_ke }, so a server may send tickets (#3363).
 client_hello_full(random: ptr, session_id: byte[], group: int, pubkey: byte[], group2: int, pubkey2: byte[], group3: int, pubkey3: byte[], host: string) -> ptr {
     if session_id.len < 0 { panic("tls13_hs.client_hello_full: the `session_id` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     int sid_len = session_id.len
@@ -328,6 +329,15 @@ client_hello_full(random: ptr, session_id: byte[], group: int, pubkey: byte[], g
     off = put16(buf, off, 9) // ProtocolNameList length = 1 + 8
     off = put8(buf, off, 8) // ProtocolName length
     off = put_ascii(buf, off, "http/1.1")
+
+    // psk_key_exchange_modes (45): { psk_dhe_ke (1) }, the mode a ticket
+    // from this connection is resumed with. A server may use only a mode
+    // the client lists (RFC 8446 4.2.9), and Go and BoringSSL send no
+    // NewSessionTicket to a client that lists none (#3363).
+    off = put16(buf, off, 45)
+    off = put16(buf, off, 2) // ext body len
+    off = put8(buf, off, 1) // ke_modes length
+    off = put8(buf, off, 1) // psk_dhe_ke
 
     // key_share (51): a KeyShareEntry {group, key<len>} for each offered group.
     shares_len = 0

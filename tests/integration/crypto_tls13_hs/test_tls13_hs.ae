@@ -40,6 +40,22 @@ fn g24(b: ptr, off: int) -> int {
     return ((bytes.get(b, off) & 0xFF) << 16) | ((bytes.get(b, off + 1) & 0xFF) << 8) | (bytes.get(b, off + 2) & 0xFF)
 }
 
+// The offset and length of extension `t`'s body in the ClientHello message
+// `ch`, or (-1, 0) when it has none.
+fn ch_ext(ch: ptr, t: int) -> (int, int) {
+    p = 4 + 2 + 32
+    p = p + 1 + g8(ch, p)
+    p = p + 2 + g16(ch, p)
+    p = p + 1 + g8(ch, p)
+    end = p + 2 + g16(ch, p)
+    p = p + 2
+    while p + 4 <= end {
+        if g16(ch, p) == t { return p + 4, g16(ch, p + 2) }
+        p = p + 4 + g16(ch, p + 2)
+    }
+    return -1, 0
+}
+
 fn put16(b: ptr, off: int, v: int) -> int {
     bytes.set(b, off, (v >> 8) & 0xFF)
     bytes.set(b, off + 1, v & 0xFF)
@@ -229,6 +245,13 @@ main() {
     if g8(dual, 0) == 1 {
         println("ok   dual-keyshare CH builds (msg_type = client_hello, ${bytes.length(dual)} bytes)")
     } else { println("FAIL dual CH msg_type ${g8(dual, 0)}"); total_ok = 0 }
+    // A full ClientHello offers psk_key_exchange_modes { psk_dhe_ke }: Go
+    // and BoringSSL servers send no ticket to a client that offers no mode
+    // (RFC 8446 4.2.9, #3363).
+    mo, ml = ch_ext(dual, 45)
+    if mo >= 0 && ml == 2 && g8(dual, mo) == 1 && g8(dual, mo + 1) == 1 {
+        println("ok   a full ClientHello offers psk_key_exchange_modes { psk_dhe_ke }")
+    } else { println("FAIL a full ClientHello offers no psk_key_exchange_modes { psk_dhe_ke } (#3363)"); total_ok = 0 }
     bytes.free(p256pt)
     bytes.free(dual)
 
