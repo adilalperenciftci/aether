@@ -14,6 +14,41 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.859.0]
+
+### Fixed
+
+- **Concurrent sandboxed child launches no longer share one grant transport.**
+  The Linux and FreeBSD `spawn_sandboxed` backends now allocate each call an
+  exclusively created shared-memory name, so overlapping launches cannot
+  overwrite or unlink each other's serialized grants.
+
+- **Effect tags now cover every clause of a function.** `@pure`, `@no_fs`,
+  `@no_net`, and `@no_os` no longer accept a function when a later pattern
+  clause, or a later clause of a transitive callee, reaches a forbidden
+  capability.
+
+### Security
+
+- **`hide` and `seal except` now cover DSL receiver fallback.** A trailing
+  builder block could previously resolve a blocked bare name through its
+  receiver-prefixed method before lexical visibility was enforced.
+
+- **Shared-library capability checks now cover aliases and module families.**
+  `--emit=lib` now applies the filesystem gate to `std.file` and `std.dir`,
+  the network gate to `std.udp` and nested `std.http` modules, the OS gate to
+  `std.dl`, and the extern gate to `contrib.host.*`.
+
+- **Configured sandbox grant sources now fail closed when unreadable.** The
+  preload layer keeps interception active with zero grants when an explicit
+  shared-memory or file source is missing, unreadable, or oversized instead
+  of silently allowing every operation.
+
+- **Sandbox controls now survive `execve` with an explicit environment.** The
+  preload layer rebuilds child environments with its current `LD_PRELOAD` and
+  grant-source entries, preventing an explicit `envp` from dropping or
+  replacing cross-process containment.
+
 ## [0.858.0]
 
 ### Security
