@@ -8691,6 +8691,20 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * or cancel) re-raises it after its own cleanup. */
     print_line(gen, "extern int  aether_exec_interrupting(void);");
     print_line(gen, "extern void aether_exec_reraise(void);");
+    /* Imported wrappers and trailing-underscore privates are emitted with
+       internal linkage, so a translation unit that imports a module and calls
+       only part of it has unused statics left over. Downstream builds with
+       -Wall -Werror would fail on generated code they did not write, so the
+       storage class carries the attribute rather than the consumer carrying a
+       -Wno flag. The allocation helpers below carry it too (#3425): clang
+       warns of an unused static inline function in a .c file, gcc does not. */
+    print_line(gen, "#ifndef AETHER_MAYBE_UNUSED");
+    print_line(gen, "#  if defined(__GNUC__) || defined(__clang__)");
+    print_line(gen, "#    define AETHER_MAYBE_UNUSED __attribute__((unused))");
+    print_line(gen, "#  else");
+    print_line(gen, "#    define AETHER_MAYBE_UNUSED");
+    print_line(gen, "#  endif");
+    print_line(gen, "#endif");
     /* #3377: every allocation the generated code makes for itself (a
      * captured variable's cell, a ref, a closure's environment or box, a
      * thunk, heap.new) goes through _aether_alloc. Out of memory, it ends a
@@ -8706,13 +8720,13 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "extern _Atomic int aether_alloc_test_armed;");
     print_line(gen, "extern int  aether_alloc_test_refuses(void);");
     print_line(gen, "extern void aether_alloc_failed(int why);");
-    print_line(gen, "static inline void* (_aether_alloc)(size_t size, int zeroed, const char* what) {");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void* (_aether_alloc)(size_t size, int zeroed, const char* what) {");
     print_line(gen, "    void* p = (atomic_load_explicit(&aether_alloc_test_armed, memory_order_relaxed) &&");
     print_line(gen, "               aether_alloc_test_refuses()) ? (void*)0 : zeroed ? calloc(1, size) : malloc(size);");
     print_line(gen, "    if (!p) aether_out_of_memory(what);");
     print_line(gen, "    return p;");
     print_line(gen, "}");
-    print_line(gen, "static inline void* (_aether_alloc_or_null)(size_t size) {");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void* (_aether_alloc_or_null)(size_t size) {");
     print_line(gen, "    void* p = (atomic_load_explicit(&aether_alloc_test_armed, memory_order_relaxed) &&");
     print_line(gen, "               aether_alloc_test_refuses()) ? (void*)0 : calloc(1, size);");
     print_line(gen, "    if (!p) aether_alloc_failed(5);  /* AETHER_STOP_OUT_OF_MEMORY */");
@@ -8815,19 +8829,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         print_line(gen, "#endif");
     }
     /* GCC/Clang vs MSVC: guards for statement expressions ({...}) and computed goto */
-    /* Imported wrappers and trailing-underscore privates are emitted with
-       internal linkage, so a translation unit that imports a module and calls
-       only part of it has unused statics left over. Downstream builds with
-       -Wall -Werror would fail on generated code they did not write, so the
-       storage class carries the attribute rather than the consumer carrying a
-       -Wno flag. */
-    print_line(gen, "#ifndef AETHER_MAYBE_UNUSED");
-    print_line(gen, "#  if defined(__GNUC__) || defined(__clang__)");
-    print_line(gen, "#    define AETHER_MAYBE_UNUSED __attribute__((unused))");
-    print_line(gen, "#  else");
-    print_line(gen, "#    define AETHER_MAYBE_UNUSED");
-    print_line(gen, "#  endif");
-    print_line(gen, "#endif");
+    /* AETHER_MAYBE_UNUSED is defined above, before the first helper that
+     * carries it. */
     /* #3142: `move x` of an owned pointer: its value, and the place left
      * holding nothing, so the release at the place's exit skips it. */
     print_line(gen, "static inline AETHER_MAYBE_UNUSED void* aether_owned_take(void** p) "
