@@ -373,8 +373,60 @@ static int own_register(_Atomic unsigned* word) {
     return 0;
 }
 
+/* Under the lock: one thing less names `a`. 1 when it was the last, and the
+ * caller frees the block once it has let go of the lock. */
+static int acct_unref(AetherExecAccount* a) {
+    return --a->refs == 0;
+}
+
+/* Under the lock. The account in use on this thread becomes `a`: `a` taken
+ * for this thread, the one it replaces let go (and returned in `*gone` when
+ * nothing names it any more). 0, or -1 when `a` is in use on another
+ * thread (the account in use is then left as it was). */
+static int account_switch(AetherFrames* F, AetherExecAccount* a, AetherExecAccount** gone) {
+    AetherExecAccount* was = F->account;
+    if (a == was) return 0;
+    if (a) {
+        uintptr_t expected = 0;
+        if (!atomic_compare_exchange_strong_explicit(&a->thread, &expected, (uintptr_t)F,
+                                                     memory_order_acq_rel, memory_order_relaxed))
+            return -1;
+        a->refs++;
+    }
+    F->account = a;
+    if (was) {
+        atomic_store_explicit(&was->thread, 0, memory_order_release);
+        if (acct_unref(was)) *gone = was;
+    }
+    return 0;
+}
+
+/* The account in use on this thread. One the host freed meanwhile (on
+ * another thread, while it was in use here) is let go here, the thread
+ * whose it was: the next allocation, call or switch here finds it gone. */
 static AetherExecAccount* own_here(void) {
-    return aether_frames_here()->account;
+    AetherFrames* F = aether_frames_here();
+    AetherExecAccount* a = F->account;
+    if (!a || !atomic_load_explicit(&a->dead, memory_order_acquire)) return a;
+    AetherExecAccount* gone = NULL;
+    acct_lock();
+    if (F->account && atomic_load_explicit(&F->account->dead, memory_order_relaxed))
+        (void)account_switch(F, NULL, &gone);
+    a = F->account;
+    acct_unlock();
+    free(gone);
+    return a;
+}
+
+/* An execution begins: the account in use, held until it ends. */
+static AetherExecAccount* own_hold(void) {
+    AetherExecAccount* a = own_here();
+    if (!a) return NULL;
+    acct_lock();
+    if (atomic_load_explicit(&a->dead, memory_order_relaxed)) a = NULL;
+    else a->refs++;
+    acct_unlock();
+    return a;
 }
 
 int64_t aether_caps_now_ns(void) {
@@ -385,6 +437,8 @@ static int64_t own_deadline_ns(const AetherExecAccount* a, int* tripped) {
     int64_t at = 0, now = now_ns();
     int tr = 0;
     acct_lock();
+    /* A freed account sets no deadline: its chain is unlinked. */
+    if (a && atomic_load_explicit(&a->dead, memory_order_relaxed)) a = NULL;
     for (const AetherExecAccount* x = a; x; x = x->parent) {
         int64_t own = 0;
         if (x->deadline_counts == AETHER_DEADLINE_ACTIVE) {
@@ -405,6 +459,8 @@ static int64_t own_deadline_ns(const AetherExecAccount* a, int* tripped) {
 static void own_charge_time(AetherExecAccount* a, int64_t since_ns, int tripped) {
     int64_t now = now_ns();
     acct_lock();
+    /* Nothing is charged to an account the host freed meanwhile. */
+    if (a && atomic_load_explicit(&a->dead, memory_order_relaxed)) a = NULL;
     for (AetherExecAccount* x = a; x; x = x->parent) {
         int64_t own = 0;
         if (x->deadline_counts == AETHER_DEADLINE_ACTIVE) {
@@ -444,6 +500,7 @@ static AetherExecAccount* own_new(const AetherExecLimits* limits) {
         for (AetherExecAccount* x = g_live_accounts; x; x = x->next_live)
             if (x == limits->parent) { a->parent = x; break; }
     }
+    a->refs = 1;   /* the live list's */
     a->next_live = g_live_accounts;
     g_live_accounts = a;
     g_live_count++;
@@ -452,6 +509,11 @@ static AetherExecAccount* own_new(const AetherExecLimits* limits) {
     return a;
 }
 
+/* The host frees `a` (#3407): nothing in the runtime names it after this.
+ * In use on this thread, it is in use no more. In use on another thread,
+ * or named by an execution that began under it (here or there), it is
+ * dead: charged, put in use and linked no more, and the block goes when
+ * the last of them lets go of it. */
 static void own_free(AetherExecAccount* a) {
     if (!a) return;
     acct_lock();
@@ -460,10 +522,12 @@ static void own_free(AetherExecAccount* a) {
     if (!*link) { acct_unlock(); return; }   /* not a live account */
     *link = a->next_live;
     g_live_count--;
+    atomic_store_explicit(&a->dead, 1, memory_order_release);
     /* Its children charge it no more, and its blocks credit nobody: they
      * stay counted against the process cap until they are freed. */
     for (AetherExecAccount* x = g_live_accounts; x; x = x->next_live)
         if (x->parent == a) x->parent = NULL;
+    a->parent = NULL;
     for (size_t i = 0; i < g_slot_cap; i++) {
         if (g_slots[i].p && g_slots[i].a == a) {
             const void* p = g_slots[i].p;
@@ -478,46 +542,49 @@ static void own_free(AetherExecAccount* a) {
         g_slot_used = 0;
         copies_mark(0);
     }
+    AetherExecAccount* gone = NULL;
+    AetherFrames* F = aether_frames_here();
+    if (F->account == a) (void)account_switch(F, NULL, &gone);
+    if (acct_unref(a)) gone = a;   /* the live list's */
     acct_unlock();
-    free(a);
-}
-
-/* The account in use on this thread becomes `a`: `a` taken for this thread,
- * the one it replaces let go. 0, or -1 when `a` is in use on another
- * thread (the account in use is then left as it was). */
-static int account_switch(AetherFrames* F, AetherExecAccount* a) {
-    AetherExecAccount* was = F->account;
-    if (a == was) return 0;
-    if (a) {
-        uintptr_t expected = 0;
-        if (!atomic_compare_exchange_strong_explicit(&a->thread, &expected, (uintptr_t)F,
-                                                     memory_order_acq_rel, memory_order_relaxed))
-            return -1;
-    }
-    if (was) atomic_store_explicit(&was->thread, 0, memory_order_release);
-    F->account = a;
-    return 0;
+    free(gone);
 }
 
 /* aether_exec_use: an account these accounts did not make (one another copy
  * of the runtime made, where the copies did not find each other) is refused,
  * so a copy never charges, links or records a block for an account another
- * copy's lock guards and another copy may free. */
+ * copy's lock guards and another copy may free; so is one the host freed.
+ * The one it replaces is given back unless the host freed it. */
 static int own_use(AetherExecAccount* a, AetherExecAccount** previous) {
     if (a && a->owner != (const void*)&g_acct_lock) return -1;
     AetherFrames* F = aether_frames_here();
+    AetherExecAccount* gone = NULL;
+    acct_lock();
+    if (a && atomic_load_explicit(&a->dead, memory_order_relaxed)) { acct_unlock(); return -1; }
     AetherExecAccount* was = F->account;
-    if (account_switch(F, a) != 0) return -1;
+    if (was && atomic_load_explicit(&was->dead, memory_order_relaxed)) was = NULL;
+    int r = account_switch(F, a, &gone);
+    acct_unlock();
+    free(gone);
+    if (r != 0) return -1;
     if (previous) *previous = was;
     return 0;
 }
 
 /* An execution ends: the account in use when it began is in use again,
- * whatever the code it ran left (#2954). One another thread has taken
- * meanwhile is not taken from it: then no account is in use. */
+ * whatever the code it ran left (#2954), unless the host freed it, and the
+ * execution lets go of it. One another thread has taken meanwhile is not
+ * taken from it: then no account is in use. */
 static void own_restore(AetherExecAccount* a) {
     AetherFrames* F = aether_frames_here();
-    if (account_switch(F, a) != 0) (void)account_switch(F, NULL);
+    AetherExecAccount* gone[2] = { NULL, NULL };
+    acct_lock();
+    AetherExecAccount* back = a && !atomic_load_explicit(&a->dead, memory_order_relaxed) ? a : NULL;
+    if (account_switch(F, back, &gone[0]) != 0) (void)account_switch(F, NULL, &gone[0]);
+    if (a && acct_unref(a)) gone[1] = a;   /* the execution's */
+    acct_unlock();
+    free(gone[0]);
+    if (gone[1] != gone[0]) free(gone[1]);
 }
 
 /* An actor step begins (aether_step_barrier.h): the account in use is the
@@ -532,11 +599,19 @@ static AetherExecAccount* own_step_aside(void) {
 }
 
 /* The step ends: one it left in use is let go, and the one put aside is in
- * use again. */
+ * use again, or let go too when the host freed it meanwhile. */
 static void own_step_back(AetherExecAccount* was) {
     AetherFrames* F = aether_frames_here();
-    if (F->account && F->account != was) (void)account_switch(F, NULL);
+    if (!F->account && !was) return;
+    AetherExecAccount* gone[2] = { NULL, NULL };
+    acct_lock();
+    if (F->account && F->account != was) (void)account_switch(F, NULL, &gone[0]);
     F->account = was;
+    if (was && atomic_load_explicit(&was->dead, memory_order_relaxed))
+        (void)account_switch(F, NULL, &gone[1]);
+    acct_unlock();
+    free(gone[0]);
+    free(gone[1]);
 }
 
 static uint64_t own_used(const AetherExecAccount* a) {
@@ -554,6 +629,7 @@ static int own_tripped(const AetherExecAccount* a) {
 static int own_alloc(void* p, size_t bytes) {
     AetherExecAccount* a = own_here();
     acct_lock();
+    if (a && atomic_load_explicit(&a->dead, memory_order_relaxed)) a = NULL;   /* freed meanwhile */
     if (!a) {
         (void)slot_take(p);
         acct_unlock();
@@ -578,11 +654,13 @@ static void own_free_block(const void* p, size_t bytes) {
  * back to the account it was charged to, the new block's charged to the
  * account in use, before the realloc, so a refusal leaves it as it was. 0
  * refused. own_realloc_end records the new block, or undoes the charge
- * when the realloc itself failed (np NULL). */
+ * when the realloc itself failed (np NULL). Both accounts are held from one
+ * to the other, so a free meanwhile leaves neither naming a freed block. */
 static int own_realloc_begin(void* p, size_t old_bytes, size_t new_bytes,
                              AetherExecAccount** old_owner, AetherExecAccount** now) {
     *now = own_here();
     acct_lock();
+    if (*now && atomic_load_explicit(&(*now)->dead, memory_order_relaxed)) *now = NULL;
     *old_owner = p ? slot_take(p) : NULL;
     if (*old_owner) chain_credit(*old_owner, (uint64_t)old_bytes);
     if (*now && !chain_charge(*now, (uint64_t)new_bytes)) {
@@ -593,25 +671,35 @@ static int own_realloc_begin(void* p, size_t old_bytes, size_t new_bytes,
         acct_unlock();
         return 0;
     }
+    if (*old_owner) (*old_owner)->refs++;
+    if (*now) (*now)->refs++;
     acct_unlock();
     return 1;
 }
 
 static void own_realloc_end(void* p, void* np, size_t old_bytes, size_t new_bytes,
                             AetherExecAccount* old_owner, AetherExecAccount* now) {
+    AetherExecAccount* gone[2] = { NULL, NULL };
     acct_lock();
+    AetherExecAccount* was = old_owner && !atomic_load_explicit(&old_owner->dead, memory_order_relaxed)
+                                 ? old_owner : NULL;
+    AetherExecAccount* in_use = now && !atomic_load_explicit(&now->dead, memory_order_relaxed) ? now : NULL;
     if (!np) {
-        if (now) chain_credit(now, (uint64_t)new_bytes);
-        if (old_owner) {
-            (void)chain_charge(old_owner, (uint64_t)old_bytes);
-            (void)slot_put(p, old_owner);
+        if (in_use) chain_credit(in_use, (uint64_t)new_bytes);
+        if (was) {
+            (void)chain_charge(was, (uint64_t)old_bytes);
+            (void)slot_put(p, was);
         }
-    } else if (now) {
-        if (!slot_put(np, now)) chain_credit(now, (uint64_t)new_bytes);
+    } else if (in_use) {
+        if (!slot_put(np, in_use)) chain_credit(in_use, (uint64_t)new_bytes);
     } else {
         (void)slot_take(np);
     }
+    if (old_owner && acct_unref(old_owner)) gone[0] = old_owner;
+    if (now && acct_unref(now)) gone[1] = now;
     acct_unlock();
+    free(gone[0]);
+    if (gone[1] != gone[0]) free(gone[1]);
 }
 
 /* ------------------------------------------------------------------
@@ -648,6 +736,7 @@ typedef struct AetherAccountsRendezvous {
     int (*use)(AetherExecAccount* account, AetherExecAccount** previous);
     void (*restore)(AetherExecAccount* account);
     AetherExecAccount* (*here)(void);
+    AetherExecAccount* (*hold)(void);
     uint64_t (*used)(const AetherExecAccount* account);
     int (*tripped)(const AetherExecAccount* account);
     int64_t (*deadline_ns)(const AetherExecAccount* account, int* tripped);
@@ -665,7 +754,7 @@ typedef struct AetherAccountsRendezvous {
 static const AetherAccountsRendezvous g_own_accounts = {
     AETHER_ACCOUNTS_RV_VERSION, (uint32_t)sizeof(AetherAccountsRendezvous),
     (uint32_t)sizeof(struct AetherExecAccount), (uint32_t)sizeof(AetherExecLimits),
-    own_register, own_new, own_free, own_use, own_restore, own_here, own_used, own_tripped,
+    own_register, own_new, own_free, own_use, own_restore, own_here, own_hold, own_used, own_tripped,
     own_deadline_ns, own_charge_time, own_alloc, own_free_block, own_realloc_begin, own_realloc_end,
     own_step_aside, own_step_back,
 };
@@ -706,7 +795,7 @@ static void refused_step_back(AetherExecAccount* was) { (void)was; }
 static const AetherAccountsRendezvous g_refused_accounts = {
     AETHER_ACCOUNTS_RV_VERSION, (uint32_t)sizeof(AetherAccountsRendezvous),
     (uint32_t)sizeof(struct AetherExecAccount), (uint32_t)sizeof(AetherExecLimits),
-    refused_register, refused_new, refused_free, refused_use, refused_restore, refused_here,
+    refused_register, refused_new, refused_free, refused_use, refused_restore, refused_here, refused_here,
     refused_used, refused_tripped, refused_deadline, refused_time, refused_alloc, refused_free_block,
     refused_realloc_begin, refused_realloc_end, refused_step_aside, refused_step_back,
 };
@@ -763,6 +852,10 @@ void aether_accounts_register(void) {
 
 AetherExecAccount* aether_account_here(void) {
     return accounts()->here();
+}
+
+AetherExecAccount* aether_account_hold(void) {
+    return accounts()->hold();
 }
 
 int64_t aether_account_deadline_ns(const AetherExecAccount* a, int* tripped) {

@@ -755,7 +755,12 @@ aether_exec_account_free(script);
   to `aether_exec_account_free`; the runtime keeps nothing of `limits` past
   the call, writes `previous` and keeps nothing of it. Freeing an account
   detaches its children and its blocks, which then count only against the
-  process cap.
+  process cap. Nothing in the runtime names a freed account (#3407): in use
+  on the calling thread, it is in use no more; in use on another thread,
+  nothing more is charged to it there, and that thread lets go of it at its
+  next allocation, call or `aether_exec_use`; an execution that began under
+  it puts no account back when it returns. A freed account is the host's
+  no more: passing it again is not supported.
 - **An Aether host** has the same in std.host: `host.account_new(bytes, ms,
   host.DEADLINE_ELAPSED, parent)`, `host.account_use(a)`,
   `host.account_in_use()`, `host.account_used(a)`,

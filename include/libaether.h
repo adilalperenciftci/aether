@@ -166,8 +166,12 @@ AETHER_API int aether_exec_cancel(AetherExecToken token);
  * Nothing is charged and nothing more is paid while no account exists.
  *
  * Ownership: an account is the host's, from new to free; the runtime keeps
- * no reference to one after free, and none to `limits` after new.
- * `previous` is written (when not NULL) and not kept.
+ * no reference to one after free, and none to `limits` after new: freed
+ * while in use on the calling thread, it is in use no more; in use on
+ * another thread, nothing more is charged to it there, and that thread
+ * lets go of it at its next allocation, call or aether_exec_use; an
+ * execution that began under it puts no account back when it returns
+ * (#3407). `previous` is written (when not NULL) and not kept.
  *
  * Runtime copies: a library built without --shared-runtime has a runtime of
  * its own, and the accounts are still one per process. Every copy works

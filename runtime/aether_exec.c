@@ -148,14 +148,15 @@ static inline AetherJmpFrame* exec_push(AetherFrames* F, void** buf) {
     /* An account in use (#2954): its deadline, and its ancestors', is the
      * execution's too, the earlier of it and the one already in force; the
      * one in force is put back when the execution returns, as a nested
-     * execution's is. */
+     * execution's is. The execution holds the account until it returns, so
+     * one the host frees meanwhile is no freed block to it (#3407). */
     /* This copy finds the accounts it shares once (a library with a runtime
      * of its own works through the copy loaded first); then one load says
      * whether any account exists in the process. */
     if (__builtin_expect(!atomic_load_explicit(&aether_accounts_found, memory_order_relaxed), 0))
         aether_accounts_register();
     x->account = (atomic_load_explicit(&aether_caps_slow, memory_order_relaxed) & AETHER_CAPS_SLOW_ACCOUNTS)
-                     ? aether_account_here() : NULL;
+                     ? aether_account_hold() : NULL;
     x->account_deadline = 0;
     if (x->account) {
         x->account_since_ns = aether_caps_now_ns();
@@ -211,7 +212,8 @@ static inline void exec_finish(AetherFrames* F, int outcome) {
     AetherExecRecord* x = &F->exec[F->exec_depth];
     /* Under an account (#2954): the time it spent (an ACTIVE deadline) and a
      * trip of its deadline are the account's, and the account in use when it
-     * began is in use again, whatever the code it ran left. */
+     * began is in use again, whatever the code it ran left, unless the host
+     * freed it meanwhile; the execution lets go of it (#3407). */
     if (x->account) {
         aether_account_charge_time(x->account, x->account_since_ns, aether_caps_deadline_flag());
         aether_account_restore(x->account);

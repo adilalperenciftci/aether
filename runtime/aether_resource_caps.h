@@ -144,6 +144,11 @@ struct AetherExecAccount {
     _Atomic uintptr_t thread;         /* the thread it is in use on, 0 for none */
     const void* owner;                /* the accounts that made it: only they take it */
     AetherExecAccount* next_live;     /* every live account, for freeing one */
+    /* What still names it (#3407), under the accounts' lock: the live list
+     * until the host frees it, the thread it is in use on, and each
+     * execution that began under it. The block goes with the last. */
+    int      refs;
+    _Atomic int dead;                 /* the host freed it: charged, used and linked no more */
 };
 #ifndef AETHER_ACCOUNT_TRIPPED_DEADLINE
 #define AETHER_ACCOUNT_TRIPPED_DEADLINE 1
@@ -172,7 +177,11 @@ void aether_accounts_register(void);
 
 /* The account in use on this thread (aether_exec_use), NULL for none. */
 AetherExecAccount* aether_account_here(void);
-/* An execution ends: the account in use when it began is in use again. */
+/* An execution begins: the account in use, held for it until it ends, so a
+ * free meanwhile leaves the execution naming no freed block (#3407). */
+AetherExecAccount* aether_account_hold(void);
+/* An execution ends: the account in use when it began (the one held) is in
+ * use again, unless the host freed it meanwhile, and is let go. */
 void aether_account_restore(AetherExecAccount* account);
 /* An actor step begins and ends (aether_step_barrier.h): the account in use
  * is put aside for the step, still this thread's, and is in use again after
