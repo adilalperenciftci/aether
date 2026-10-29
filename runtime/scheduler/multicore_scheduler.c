@@ -2788,11 +2788,17 @@ static void scheduler_wait_quiet(int countdowns);
 /* wait_for_idle() waits for every actor, the calling one too, so inside an
  * actor's step (a handler, a receive timeout's arm) it waited for a step
  * that cannot end while it waits: forever in a handler, whose message stays
- * counted, and in an arm until the bound (#3463). There it panics, as the
- * actor's code: the step barrier ends the actor with the reason, and its
- * watchers are told. */
+ * counted, and in an arm until the bound (#3463). So it did on any thread
+ * that runs actors, after a step as much as in one: a core's, where a drop
+ * or a death hook runs once the in-step flag is off and the step's message
+ * not yet counted handled, and an actor's own. There it panics, as the
+ * actor's code: the step barrier, or the drop's or the hook's own frame,
+ * takes it, and the actor's watchers are told. */
+AETHER_TLS int aether_in_actor_thread = 0;   /* set by aether_actor_thread.c */
+
 void scheduler_wait(void) {
-    if (g_aether_in_actor_step) aether_panic(AETHER_WAIT_IN_STEP_REASON);
+    if (g_aether_in_actor_step || current_core_id >= 0 || aether_in_actor_thread)
+        aether_panic(AETHER_WAIT_IN_STEP_REASON);
     scheduler_wait_quiet(1);
 }
 

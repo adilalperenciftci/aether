@@ -34,6 +34,7 @@ atomic_int next_actor_id = 0;
 AETHER_TLS int current_core_id = 0;  // Always core 0
 AETHER_TLS void* g_current_reply_slot = NULL;
 AETHER_TLS void* g_current_step_actor = NULL;
+AETHER_TLS int aether_in_actor_thread = 0;   // set by aether_actor_thread.c (#3463)
 
 // ============================================================================
 // Released actors (#2509)
@@ -595,11 +596,13 @@ static int coop_timeout_armed(void) {
  * the CPU, the poll counting each check of the deadline as work. The end of
  * main does not wait for countdowns (scheduler_shutdown, #3219).
  *
- * Inside an actor's step it panics, as on the multicore scheduler (#3463):
- * it waits for every actor, the calling one too, whose step cannot end
- * while it waits. */
+ * Inside an actor's step, or on an actor's own thread, it panics, as on the
+ * multicore scheduler (#3463), so a program behaves the same on both. It
+ * waited for every actor there, the calling one too: on the multicore
+ * scheduler a step that cannot end while it waits; here the poll ran the
+ * other actors nested and returned. */
 void scheduler_wait(void) {
-    if (g_aether_in_actor_step) aether_panic(AETHER_WAIT_IN_STEP_REASON);
+    if (g_aether_in_actor_step || aether_in_actor_thread) aether_panic(AETHER_WAIT_IN_STEP_REASON);
     uint64_t give_up = aether_now_ns() + 100ULL * 1000000000ULL;
     for (;;) {
         if (aether_scheduler_poll(0) > 0) continue;

@@ -413,7 +413,7 @@ The multi-core scheduler uses core partitioning with locality-aware placement:
 
 ### Synchronization
 
-The `wait_for_idle()` function blocks until all actors have finished processing their messages (quiescence). It is **non-destructive**: it does not stop or join scheduler threads, so it can be called multiple times in a program. It is for code outside the actors (main, or a host's thread): it waits for every actor, so inside one, in a handler or a receive timeout's arm, it would wait for its own step, and it panics there instead, ending that actor with the reason (#3463). This is the recommended way to synchronize the main thread with actor completion:
+The `wait_for_idle()` function blocks until all actors have finished processing their messages (quiescence). It is **non-destructive**: it does not stop or join scheduler threads, so it can be called multiple times in a program. It is for code outside the actors (main, or a host's thread): it waits for every actor, so inside one (a handler, a receive timeout's arm) it would wait for its own step, and on the threaded scheduler a drop or a death hook a core runs would wait for that core; it panics there instead, on either scheduler (the cooperative one used to run the other actors nested and return), ending that actor with the reason (#3463). This is the recommended way to synchronize the main thread with actor completion:
 
 ```aether,fragment
 main() {

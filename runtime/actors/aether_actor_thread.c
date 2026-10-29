@@ -9,6 +9,7 @@
 #include <string.h>
 
 extern AETHER_TLS int current_core_id;
+extern AETHER_TLS int aether_in_actor_thread;   /* multicore_scheduler.c */
 
 // Idle iterations before the thread parks (#2592): as many as a core spins
 // before it parks (#1517), so a message that comes soon after the last one
@@ -41,6 +42,8 @@ void* aether_actor_thread(void* arg) {
     // whose single producer is the core's thread, and messages were lost or
     // delivered twice.
     current_core_id = -1;
+    /* A thread that runs an actor: scheduler_wait() refuses here (#3463). */
+    aether_in_actor_thread = 1;
 
     // The step reads actors from the tables (the ones its handler sends to),
     // so this thread publishes an epoch as a reader (#2517): from here until

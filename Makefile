@@ -973,6 +973,7 @@ TEST_SRC = tests/runtime/test_harness.c \
            tests/runtime/test_worksteal_race.c \
            tests/runtime/test_ask_relief.c \
            tests/runtime/test_ask_message.c \
+           tests/runtime/test_wait_inside_actor.c \
            tests/runtime/test_step_context.c \
            tests/runtime/test_exec_accounts.c \
            tests/runtime/test_abi_layout.c \

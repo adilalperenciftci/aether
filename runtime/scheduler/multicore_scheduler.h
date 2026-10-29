@@ -415,11 +415,13 @@ int scheduler_core_cpu(int core_id);
 void scheduler_stop(void);
 void scheduler_wait(void);      // Wait for quiescence (all pending messages processed). Non-destructive.
 /* The panic scheduler_wait() raises inside an actor's step, on either
- * scheduler (#3463): it waits for every actor, the calling one too. */
+ * scheduler, and on the threaded one on any thread that runs actors (a
+ * core's, an actor's own), where a drop or a death hook runs too (#3463): it
+ * waits for every actor, those this thread runs too. */
 #define AETHER_WAIT_IN_STEP_REASON                                                  \
-    "wait_for_idle() inside an actor: it waits for every actor, this one too, "     \
-    "whose step cannot end while it waits; call it outside the actors (main, a "    \
-    "host's thread)"
+    "wait_for_idle() inside an actor, or on a thread that runs actors: it waits "   \
+    "for every actor, those this thread runs too, which cannot step while it "      \
+    "waits; call it outside the actors (main, a host's thread)"
 void scheduler_shutdown(void);  // Wait + stop + join threads. Call once at program exit.
 void scheduler_cleanup(void);
 
