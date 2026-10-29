@@ -734,8 +734,11 @@ aether_exec_account_free(script);
   that is earlier. `AETHER_DEADLINE_ELAPSED` (the default) counts wall time
   from `aether_exec_account_new`, so the time a script spends suspended
   counts; `AETHER_DEADLINE_ACTIVE` counts only the time spent in calls
-  under the account. Past it the call ends with `AETHER_DEADLINE`, and the
-  account keeps `AETHER_ACCOUNT_TRIPPED_DEADLINE`.
+  under the account, once however calls nest: a call a host service makes
+  inside another, under the same account or a descendant of it, adds no
+  time of its own to it (#3409). Past it the call ends with
+  `AETHER_DEADLINE`, and the account keeps
+  `AETHER_ACCOUNT_TRIPPED_DEADLINE`.
 - **A parent only narrows.** An account made with a `parent` charges what
   it holds to the parent too, and its deadline is never later than the
   parent's: a host gives each plugin an account and each of the plugin's

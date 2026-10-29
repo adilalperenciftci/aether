@@ -433,17 +433,77 @@ int64_t aether_caps_now_ns(void) {
     return now_ns();
 }
 
-static int64_t own_deadline_ns(const AetherExecAccount* a, int* tripped) {
+/* The ACTIVE accounts this thread is timing (#3409), innermost last: each
+ * since the start of the outermost execution open here under it or under a
+ * descendant of it, and held until that execution ends. An execution nested
+ * inside one that already times an account adds no time of its own to it,
+ * so time spent in executions under an account is charged once, however
+ * they nest, across runtime copies too: they all time through the copy
+ * whose accounts they share. The first ACCT_TIMED_INLINE are kept here, the
+ * rest in a block that grows as needed (plain malloc, no account's), freed
+ * when this thread times none. Under the lock, this thread's only. */
+#define ACCT_TIMED_INLINE 8
+typedef struct { AetherExecAccount* a; int64_t since; } AcctTimed;
+static AETHER_TLS_SHARED AcctTimed t_timed_inline[ACCT_TIMED_INLINE];
+static AETHER_TLS_SHARED AcctTimed* t_timed_more;   /* entries past the inline ones */
+static AETHER_TLS_SHARED int t_timed_more_cap;
+static AETHER_TLS_SHARED int t_timed_n;
+
+static inline AcctTimed* timed_at(int i) {
+    return i < ACCT_TIMED_INLINE ? &t_timed_inline[i] : &t_timed_more[i - ACCT_TIMED_INLINE];
+}
+
+/* Under the lock: when this thread began timing `a`, or -1. */
+static int64_t timed_since(const AetherExecAccount* a) {
+    for (int i = t_timed_n - 1; i >= 0; i--)
+        if (timed_at(i)->a == a) return timed_at(i)->since;
+    return -1;
+}
+
+/* Under the lock: `a` timed from `now` (and held). 0 when there was no room
+ * and none could be had. */
+static int timed_push(AetherExecAccount* a, int64_t now) {
+    int i = t_timed_n;
+    if (i >= ACCT_TIMED_INLINE && i - ACCT_TIMED_INLINE >= t_timed_more_cap) {
+        int cap = t_timed_more_cap ? t_timed_more_cap * 2 : ACCT_TIMED_INLINE;
+        AcctTimed* more = (AcctTimed*)realloc(t_timed_more, sizeof(AcctTimed) * (size_t)cap);
+        if (!more) return 0;
+        t_timed_more = more;
+        t_timed_more_cap = cap;
+    }
+    timed_at(i)->a = a;
+    timed_at(i)->since = now;
+    t_timed_n = i + 1;
+    a->refs++;
+    return 1;
+}
+
+/* An execution begins under `a` (held for it): `*at` the deadline in force
+ * for it, the earliest of `a`'s and its ancestors' as absolute monotonic ns
+ * (0: none), `*tripped` set when one already passed. The ACTIVE accounts on
+ * the chain no execution open here times yet are timed from now, for this
+ * one: `*timed` says how many, for its end. -1 when one of them could not
+ * be timed (no memory for the thread's list): the execution must not run,
+ * or its account's budget would go unenforced. */
+static int own_exec_begin(AetherExecAccount* a, int64_t* at_out, int* tripped, int* timed) {
     int64_t at = 0, now = now_ns();
-    int tr = 0;
+    int tr = 0, n = 0, ok = 1;
     acct_lock();
     /* A freed account sets no deadline: its chain is unlinked. */
     if (a && atomic_load_explicit(&a->dead, memory_order_relaxed)) a = NULL;
-    for (const AetherExecAccount* x = a; x; x = x->parent) {
+    for (AetherExecAccount* x = a; x; x = x->parent) {
         int64_t own = 0;
         if (x->deadline_counts == AETHER_DEADLINE_ACTIVE) {
+            int64_t since = timed_since(x);
+            if (since < 0) {
+                if (!timed_push(x, now)) { ok = 0; break; }
+                n++;
+                since = now;
+            }
+            /* What is left of it: its budget, less what it spent before and
+             * since this thread began timing it. */
             if (x->active_budget_ns)
-                own = now + x->active_budget_ns - atomic_load_explicit(&x->active_spent_ns, memory_order_relaxed);
+                own = since + x->active_budget_ns - atomic_load_explicit(&x->active_spent_ns, memory_order_relaxed);
         } else {
             own = x->deadline_at_ns;
         }
@@ -452,30 +512,62 @@ static int64_t own_deadline_ns(const AetherExecAccount* a, int* tripped) {
     }
     acct_unlock();
     if (at && at <= now) tr = 1;
-    if (tripped) *tripped = tr;
-    return at;
+    *at_out = at;
+    *tripped = tr;
+    *timed = n;
+    return ok ? 0 : -1;
 }
 
-static void own_charge_time(AetherExecAccount* a, int64_t since_ns, int tripped) {
+/* The execution begun under `a` ends, its deadline tripped or not: the
+ * accounts it began timing are charged the time since, and let go; the
+ * trip, where a deadline on the chain passed, recorded. */
+static void own_exec_end(AetherExecAccount* a, int timed, int tripped) {
     int64_t now = now_ns();
+    AetherExecAccount* gone = NULL;   /* let go for the last time, freed after the lock */
     acct_lock();
-    /* Nothing is charged to an account the host freed meanwhile. */
-    if (a && atomic_load_explicit(&a->dead, memory_order_relaxed)) a = NULL;
-    for (AetherExecAccount* x = a; x; x = x->parent) {
-        int64_t own = 0;
-        if (x->deadline_counts == AETHER_DEADLINE_ACTIVE) {
-            int64_t spent = atomic_fetch_add_explicit(&x->active_spent_ns, now - since_ns,
-                                                      memory_order_relaxed) + (now - since_ns);
-            if (x->active_budget_ns && spent >= x->active_budget_ns) own = 1;
-        } else if (x->deadline_at_ns && now >= x->deadline_at_ns) {
-            own = 1;
+    for (int i = 0; i < timed && t_timed_n > 0; i++) {
+        AcctTimed e = *timed_at(--t_timed_n);
+        AetherExecAccount* x = e.a;
+        /* Nothing is charged to an account the host freed meanwhile. */
+        if (!atomic_load_explicit(&x->dead, memory_order_relaxed)) {
+            int64_t spent = atomic_fetch_add_explicit(&x->active_spent_ns, now - e.since,
+                                                      memory_order_relaxed) + (now - e.since);
+            if (tripped && x->active_budget_ns && spent >= x->active_budget_ns)
+                atomic_fetch_or_explicit(&x->tripped, AETHER_ACCOUNT_TRIPPED_DEADLINE, memory_order_relaxed);
         }
-        /* An account trips on its own deadline: the call's trip flag is only
-         * the sign that a safe point saw one pass. */
-        if (own && tripped)
-            atomic_fetch_or_explicit(&x->tripped, AETHER_ACCOUNT_TRIPPED_DEADLINE, memory_order_relaxed);
+        if (acct_unref(x)) {   /* dead and unlinked: its live-list link is free */
+            x->next_live = gone;
+            gone = x;
+        }
+    }
+    if (t_timed_n == 0 && t_timed_more) {
+        free(t_timed_more);
+        t_timed_more = NULL;
+        t_timed_more_cap = 0;
+    }
+    /* An account trips on its own deadline: the call's trip flag is only the
+     * sign that a safe point saw one pass. The ACTIVE ones an enclosing
+     * execution times count the time open so far. */
+    if (tripped && a && !atomic_load_explicit(&a->dead, memory_order_relaxed)) {
+        for (AetherExecAccount* x = a; x; x = x->parent) {
+            int own = 0;
+            if (x->deadline_counts == AETHER_DEADLINE_ACTIVE) {
+                int64_t since = timed_since(x);
+                own = since >= 0 && x->active_budget_ns &&
+                      atomic_load_explicit(&x->active_spent_ns, memory_order_relaxed) + (now - since) >=
+                          x->active_budget_ns;
+            } else {
+                own = x->deadline_at_ns && now >= x->deadline_at_ns;
+            }
+            if (own) atomic_fetch_or_explicit(&x->tripped, AETHER_ACCOUNT_TRIPPED_DEADLINE, memory_order_relaxed);
+        }
     }
     acct_unlock();
+    while (gone) {
+        AetherExecAccount* next = gone->next_live;
+        free(gone);
+        gone = next;
+    }
 }
 
 static AetherExecAccount* own_new(const AetherExecLimits* limits) {
@@ -749,8 +841,8 @@ typedef struct AetherAccountsRendezvous {
     AetherExecAccount* (*hold)(void);
     uint64_t (*used)(const AetherExecAccount* account);
     int (*tripped)(const AetherExecAccount* account);
-    int64_t (*deadline_ns)(const AetherExecAccount* account, int* tripped);
-    void (*charge_time)(AetherExecAccount* account, int64_t since_ns, int tripped);
+    int (*exec_begin)(AetherExecAccount* account, int64_t* at, int* tripped, int* timed);
+    void (*exec_end)(AetherExecAccount* account, int timed, int tripped);
     int (*alloc)(void* p, size_t bytes);
     void (*free_block)(const void* p, size_t bytes);
     int (*realloc_begin)(void* p, size_t old_bytes, size_t new_bytes,
@@ -765,7 +857,7 @@ static const AetherAccountsRendezvous g_own_accounts = {
     AETHER_ACCOUNTS_RV_VERSION, (uint32_t)sizeof(AetherAccountsRendezvous),
     (uint32_t)sizeof(struct AetherExecAccount), (uint32_t)sizeof(AetherExecLimits),
     own_register, own_new, own_free, own_use, own_restore, own_here, own_hold, own_used, own_tripped,
-    own_deadline_ns, own_charge_time, own_alloc, own_free_block, own_realloc_begin, own_realloc_end,
+    own_exec_begin, own_exec_end, own_alloc, own_free_block, own_realloc_begin, own_realloc_end,
     own_step_aside, own_step_back,
 };
 
@@ -789,8 +881,14 @@ static void refused_restore(AetherExecAccount* a) { (void)a; }
 static AetherExecAccount* refused_here(void) { return NULL; }
 static uint64_t refused_used(const AetherExecAccount* a) { (void)a; return 0; }
 static int refused_tripped(const AetherExecAccount* a) { (void)a; return 0; }
-static int64_t refused_deadline(const AetherExecAccount* a, int* tr) { (void)a; if (tr) *tr = 0; return 0; }
-static void refused_time(AetherExecAccount* a, int64_t s, int t) { (void)a; (void)s; (void)t; }
+static int refused_begin(AetherExecAccount* a, int64_t* at, int* tr, int* n) {
+    (void)a;
+    *at = 0;
+    *tr = 0;
+    *n = 0;
+    return 0;
+}
+static void refused_end(AetherExecAccount* a, int n, int t) { (void)a; (void)n; (void)t; }
 static int refused_alloc(void* p, size_t n) { (void)p; (void)n; return 1; }
 static void refused_free_block(const void* p, size_t n) { (void)p; (void)n; }
 static int refused_realloc_begin(void* p, size_t o, size_t n, AetherExecAccount** oo, AetherExecAccount** now) {
@@ -806,7 +904,7 @@ static const AetherAccountsRendezvous g_refused_accounts = {
     AETHER_ACCOUNTS_RV_VERSION, (uint32_t)sizeof(AetherAccountsRendezvous),
     (uint32_t)sizeof(struct AetherExecAccount), (uint32_t)sizeof(AetherExecLimits),
     refused_register, refused_new, refused_free, refused_use, refused_restore, refused_here, refused_here,
-    refused_used, refused_tripped, refused_deadline, refused_time, refused_alloc, refused_free_block,
+    refused_used, refused_tripped, refused_begin, refused_end, refused_alloc, refused_free_block,
     refused_realloc_begin, refused_realloc_end, refused_step_aside, refused_step_back,
 };
 
@@ -868,12 +966,12 @@ AetherExecAccount* aether_account_hold(void) {
     return accounts()->hold();
 }
 
-int64_t aether_account_deadline_ns(const AetherExecAccount* a, int* tripped) {
-    return accounts()->deadline_ns(a, tripped);
+int aether_account_exec_begin(AetherExecAccount* a, int64_t* at, int* tripped, int* timed) {
+    return accounts()->exec_begin(a, at, tripped, timed);
 }
 
-void aether_account_charge_time(AetherExecAccount* a, int64_t since_ns, int tripped) {
-    accounts()->charge_time(a, since_ns, tripped);
+void aether_account_exec_end(AetherExecAccount* a, int timed, int tripped) {
+    accounts()->exec_end(a, timed, tripped);
 }
 
 AetherExecAccount* aether_account_step_aside(void) {

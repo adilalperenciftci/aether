@@ -188,14 +188,18 @@ void aether_account_restore(AetherExecAccount* account);
  * it; one the step left in use is let go. */
 AetherExecAccount* aether_account_step_aside(void);
 void aether_account_step_back(AetherExecAccount* was);
-/* The deadline in force for an execution entered now under `a` and its
- * ancestors: the earliest of theirs, as absolute monotonic ns (0: none);
- * `tripped` is set when one already passed. */
-int64_t aether_account_deadline_ns(const AetherExecAccount* a, int* tripped);
-/* An execution under `a` ran from `since_ns` to now, and its deadline
- * tripped or not: the time spent (ACTIVE accounts) and the trip, recorded
- * on `a` and its ancestors. */
-void aether_account_charge_time(AetherExecAccount* a, int64_t since_ns, int tripped);
+/* An execution is entered now under `a` (held for it): `*at` the deadline
+ * in force for it, the earliest of `a`'s and its ancestors', as absolute
+ * monotonic ns (0: none); `*tripped` is set when one already passed. The
+ * ACTIVE accounts on the chain no execution open on this thread times yet
+ * are timed from now (#3409); `*timed` says how many, for its end. -1 when
+ * one could not be timed for want of memory: the execution must then end
+ * at once (AETHER_OUT_OF_MEMORY), never run with a budget unenforced. */
+int aether_account_exec_begin(AetherExecAccount* a, int64_t* at, int* tripped, int* timed);
+/* That execution ends, its deadline tripped or not: the accounts it began
+ * timing are charged the time spent since (once, however executions nest),
+ * and the trip is recorded on `a` and its ancestors. */
+void aether_account_exec_end(AetherExecAccount* a, int timed, int tripped);
 /* Monotonic ns, the clock the deadlines use. */
 int64_t aether_caps_now_ns(void);
 

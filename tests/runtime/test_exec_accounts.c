@@ -6,6 +6,8 @@
  *   account in use, not an execution that began under it.
  * - #3408: freeing an account credits its ancestors with what its live
  *   blocks were charged, and its children keep narrowing under its parent.
+ * - #3409: an ACTIVE account is charged once for time spent in executions
+ *   under it, however they nest, and however many are timed at once.
  */
 
 #include "test_harness.h"
@@ -14,6 +16,14 @@
 #include "../../runtime/actors/aether_panic.h"
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#define ea_sleep_ms(ms) Sleep(ms)
+#else
+#include <unistd.h>
+#define ea_sleep_ms(ms) usleep((ms) * 1000)
+#endif
 
 static AetherExecAccount* ea_new(uint64_t bytes, int64_t ms, int counts, AetherExecAccount* parent) {
     AetherExecLimits l = { bytes, ms, counts, parent };
@@ -106,3 +116,100 @@ TEST_CATEGORY(accounts_free_credits_the_ancestors, TEST_CATEGORY_RUNTIME) {
     ASSERT_EQ(0, child_after_block);
 }
 
+/* #3409: 200 ms spent in an execution nested inside another, both under one
+ * ACTIVE account of 300 ms (and under a child of it), is 200 ms of it: the
+ * next execution under it is not cut, and one of 150 ms more is. */
+static int ea_nested(AetherExecAccount* inner) {
+    AetherJmpFrame* x = aether_exec_enter();
+    if (AETHER_SIGSETJMP(x->buf, 1)) {
+        aether_exec_failed();
+        return aether_last_outcome();
+    }
+    AetherExecAccount* outer = NULL;
+    if (inner) aether_exec_use(inner, &outer);
+    AetherJmpFrame* y = aether_exec_enter();
+    if (AETHER_SIGSETJMP(y->buf, 1)) {
+        aether_exec_failed();
+    } else {
+        ea_sleep_ms(200);
+        aether_exec_leave();
+    }
+    if (inner) aether_exec_use(outer, NULL);
+    aether_exec_leave();
+    return aether_last_outcome();
+}
+
+static int ea_poll_under(int ms) {
+    AetherJmpFrame* x = aether_exec_enter();
+    if (AETHER_SIGSETJMP(x->buf, 1)) {
+        aether_exec_failed();
+        return aether_last_outcome();
+    }
+    ea_sleep_ms(ms);
+    (void)aether_exec_poll();
+    aether_exec_leave();
+    return aether_last_outcome();
+}
+
+TEST_CATEGORY(accounts_active_time_once_when_nested, TEST_CATEGORY_RUNTIME) {
+    int first[2], next[2], tripped[2], past[2];
+    for (int k = 0; k < 2; k++) {
+        AetherExecAccount* a = ea_new(0, 300, AETHER_DEADLINE_ACTIVE, NULL);
+        AetherExecAccount* child = k ? ea_new(0, 0, AETHER_DEADLINE_ELAPSED, a) : NULL;
+        aether_exec_use(a, NULL);
+        first[k] = ea_nested(child);
+        next[k] = ea_poll_under(10);
+        tripped[k] = aether_exec_account_tripped(a);
+        past[k] = ea_poll_under(150);   /* 200 + 10 + 150: past its 300 */
+        aether_exec_use(NULL, NULL);
+        if (child) aether_exec_account_free(child);
+        aether_exec_account_free(a);
+    }
+    ASSERT_EQ(AETHER_OK, first[0]);
+    ASSERT_EQ(AETHER_OK, next[0]);
+    ASSERT_EQ(0, tripped[0]);
+    ASSERT_EQ(AETHER_OK, first[1]);
+    ASSERT_EQ(AETHER_OK, next[1]);
+    ASSERT_EQ(0, tripped[1]);
+    ASSERT_EQ(AETHER_DEADLINE, past[0]);
+    ASSERT_EQ(AETHER_DEADLINE, past[1]);
+}
+
+
+/* #3409: more ACTIVE accounts timed at once on one thread than its list
+ * holds inline (and than the 16 it once held), each in use in an execution
+ * nested inside the one before: every one is charged its time. */
+#define EA_DEEP 20
+static AetherExecAccount* g_ea_deep[EA_DEEP];
+
+static void ea_deep(int i) {
+    AetherJmpFrame* x = aether_exec_enter();
+    if (AETHER_SIGSETJMP(x->buf, 1)) {
+        aether_exec_failed();
+        return;
+    }
+    if (i + 1 < EA_DEEP) {
+        AetherExecAccount* prev = NULL;
+        aether_exec_use(g_ea_deep[i + 1], &prev);
+        ea_deep(i + 1);
+        aether_exec_use(prev, NULL);
+    } else {
+        ea_sleep_ms(50);
+    }
+    aether_exec_leave();
+}
+
+TEST_CATEGORY(accounts_active_time_many_nested, TEST_CATEGORY_RUNTIME) {
+    for (int i = 0; i < EA_DEEP; i++) g_ea_deep[i] = ea_new(0, 10000, AETHER_DEADLINE_ACTIVE, NULL);
+    aether_exec_use(g_ea_deep[0], NULL);
+    ea_deep(0);
+    int outcome = aether_last_outcome();
+    aether_exec_use(NULL, NULL);
+    int charged = 0;
+    for (int i = 0; i < EA_DEEP; i++) {
+        if (atomic_load(&g_ea_deep[i]->active_spent_ns) >= 45 * 1000000LL) charged++;
+        aether_exec_account_free(g_ea_deep[i]);
+    }
+    ASSERT_EQ(AETHER_OK, outcome);
+    ASSERT_EQ(EA_DEEP, charged);
+}

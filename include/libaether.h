@@ -148,7 +148,8 @@ AETHER_API int aether_exec_cancel(AetherExecToken token);
  *   - an export's call has the account's deadline, the earliest on its
  *     chain and the call deadline's if that is earlier: ELAPSED counts wall
  *     time from aether_exec_account_new, so time suspended counts; ACTIVE
- *     counts only the time spent in calls under the account. Past it the
+ *     counts only the time spent in calls under the account, once however
+ *     calls nest (#3409). Past it the
  *     call ends with AETHER_DEADLINE, and the account has
  *     AETHER_ACCOUNT_TRIPPED_DEADLINE, which no later call clears.
  * A block's bytes stay charged to the account that allocated it until the

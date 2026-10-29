@@ -27,7 +27,7 @@ typedef struct {
     int     stop;              /* why a C-backed std loop stopped early */
     uint64_t serial;           /* this thread's count of executions, its token */
     struct AetherExecAccount* account;  /* the account in use when it began (#2954) */
-    int64_t account_since_ns;           /*   when it began, for an ACTIVE deadline */
+    int     account_timed;              /*   the ACTIVE accounts it began timing (#3409) */
     int     account_deadline;           /* it took its account's deadline */
 } AetherExecRecord;
 

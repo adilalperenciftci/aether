@@ -158,10 +158,17 @@ static inline AetherJmpFrame* exec_push(AetherFrames* F, void** buf) {
     x->account = (atomic_load_explicit(&aether_caps_slow, memory_order_relaxed) & AETHER_CAPS_SLOW_ACCOUNTS)
                      ? aether_account_hold() : NULL;
     x->account_deadline = 0;
+    x->account_timed = 0;
     if (x->account) {
-        x->account_since_ns = aether_caps_now_ns();
         int tripped = 0;
-        int64_t at = aether_account_deadline_ns(x->account, &tripped);
+        int64_t at = 0;
+        /* An account it could not time (no memory for the thread's list)
+         * ends it at once, as an allocation that fails does: its budget is
+         * never left unenforced. */
+        if (aether_account_exec_begin(x->account, &at, &tripped, &x->account_timed) != 0) {
+            x->stop = AETHER_STOP_OUT_OF_MEMORY;
+            atomic_store_explicit(&aether_caps_armed, 1, memory_order_relaxed);
+        }
         if (at || tripped) {
             AetherDeadlineState cur;
             aether_caps_deadline_save(&cur);
@@ -210,12 +217,13 @@ static inline void exec_finish(AetherFrames* F, int outcome) {
     int leaving = F->exec_depth;
     F->exec_depth--;
     AetherExecRecord* x = &F->exec[F->exec_depth];
-    /* Under an account (#2954): the time it spent (an ACTIVE deadline) and a
-     * trip of its deadline are the account's, and the account in use when it
+    /* Under an account (#2954): the time it spent (an ACTIVE deadline, once
+     * however executions nest, #3409) and a trip of its deadline are the
+     * account's, and the account in use when it
      * began is in use again, whatever the code it ran left, unless the host
      * freed it meanwhile; the execution lets go of it (#3407). */
     if (x->account) {
-        aether_account_charge_time(x->account, x->account_since_ns, aether_caps_deadline_flag());
+        aether_account_exec_end(x->account, x->account_timed, aether_caps_deadline_flag());
         aether_account_restore(x->account);
     } else if (atomic_load_explicit(&aether_caps_slow, memory_order_relaxed) & AETHER_CAPS_SLOW_ACCOUNTS) {
         aether_account_restore(NULL);
