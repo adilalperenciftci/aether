@@ -2347,7 +2347,7 @@ $(BUILD_DIR)/aetherc-release$(EXE_EXT): $(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS
 	@# regex.compile in the SHIPPED aetherc failed at runtime while the build
 	@# stayed clean. std.regex now refuses to compile stubs unless asked, which
 	@# is what surfaced this. The matching LDFLAGS are already in $(LDFLAGS).
-	@$(CC) -O3 -DNDEBUG $(LTO_FLAG) -Werror -Icompiler -Iruntime -Istd -Istd/collections \
+	@$(CC) -O3 -DNDEBUG $(LTO_FLAG) -Werror -Iinclude -Icompiler -Iruntime -Istd -Istd/collections \
 		-DAETHER_VERSION=\"$(VERSION)\" \
 		$(OPENSSL_CFLAGS) $(ZLIB_CFLAGS) $(NGHTTP2_CFLAGS) $(PCRE2_CFLAGS) $(YAML_CFLAGS) $(BROTLI_CFLAGS) $(ZSTD_CFLAGS) \
 		$(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) $(AETHERC_RUNTIME_SRC) $(MANIFEST_OBJ) \
