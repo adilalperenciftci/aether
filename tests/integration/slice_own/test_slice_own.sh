@@ -120,6 +120,21 @@ main() {
 }
 AE
 
+# The same under a program's own `extern free(p: ptr)`: free of a slice is the
+# builtin release there too (#3450), so the parameter is still borrowed.
+refused free_param_extern_free E0901 "cannot free 'xs': it is a parameter, which borrows the caller's slice" 4:10 <<'AE'
+extern free(p: ptr)
+
+drop_it(xs: int[]) {
+    free(xs)
+}
+
+main() {
+    a = make([]int, 2)
+    drop_it(a)
+}
+AE
+
 refused push_param E0901 "cannot push to 'xs': it is a parameter" 2:7 <<'AE'
 add_one(xs: int[]) {
     xs.push(1)
