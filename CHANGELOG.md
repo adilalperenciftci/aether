@@ -14,6 +14,1827 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.860.0]
+
+### Added
+
+- **An actor can be ended, and its death watched.** `import std.actors`:
+  `actors.kill(ref)` ends an actor from anywhere and `actors.stop()` ends the
+  one whose handler calls it, each once the running handler returns; a panic
+  ends it as before. `actors.monitor(ref)` asks for one `Down { ref, reason }`
+  when `ref` ends (`"normal"`, `"killed"`, or the panic's message), at once
+  for one that has ended already, and `actors.demonitor(id)` drops it, one
+  already on its way included. `Down` is declared by the compiler (a
+  program's own `message Down` is refused) and handled in a
+  `Down(ref, reason)` arm. A death is finalized on the thread that owns the
+  actor's mailbox while it steps nothing, so a `Down` never comes while its
+  handler still runs and comes after the last messages it sent; what was
+  queued for it, and every send to it after, is dropped and counted
+  (`actors.dead_sends()`, `scheduler_dead_sends()`); an ask its killed
+  handler waits in ends at once with "the asking actor was killed". On wasi,
+  where a panic ends the program, `actors.monitor` is refused at compile
+  time (#2974).
+
+- **Linked actors share their deaths.** `actors.link(ref)` ties two actors
+  both ways: when either ends, the other ends too with the same reason, unless
+  the reason is `"normal"`; one that called `actors.trap_exits(true)` gets a
+  `Down` instead and lives on. `actors.unlink(ref)` removes the tie, and a
+  link to an actor that has ended already takes its death at once. A failure
+  so climbs a tree of links up to the first actor that traps exits (#2974).
+
+- **An ended actor can be restarted in place, under the same ref.**
+  `actors.rebirth_begin(child)` claims an ended child once its death is
+  finalized and no message of it is in flight (0 means "not yet, try again";
+  -1 that it cannot be), the child's factory then runs, and its spawn of the
+  child's actor type takes the child's own block: the old state destroyed,
+  the fields zeroed, the state initializers run, `incarnation` one more, and
+  the child alive again when the generated spawn's new last line
+  (`scheduler_spawn_ready`) runs. `actors.rebirth_end(child)` says whether it
+  is, or undoes an unfinished restart. Messages queued at the death and sends
+  while the child is dead are dropped once and counted; sends after the
+  spawn reach the new incarnation, and a ref held by a client keeps working.
+  `actors.incarnation(ref)` counts the restarts. This is what `std.supervise`
+  restarts children with (#2974).
+- **A panic while an actor's full mailbox was being made room in no longer
+  strands messages.** The core went on putting the rest of a run of messages
+  into the dead actor's mailbox, where nothing handled or credited them; it
+  now drops them, counted with the death's (#2974).
+
+- **`std.supervise`: supervisors that restart actors.** `supervise.start`
+  takes a block of children (`supervise.child(name, || -> spawn(Worker()))`,
+  or `supervise.child_restart` with a restart kind: `"permanent"`,
+  `"transient"` or `"temporary"`), starts each from its factory before it
+  returns, and links them. A child that dies is restarted in place, under the
+  ref its siblings and clients already hold, by the strategy
+  (`"one_for_one"`, `"one_for_all"`, `"rest_for_one"`); past
+  `max_restarts` restarts within `within_secs` seconds the supervisor kills
+  its children and ends with a reason that says why, so its own watchers, or
+  a supervisor above it, take the failure. `supervise.which(sup, name)` gives
+  a child's ref and `supervise.restarts(sup)` the restarts made. The runtime's
+  spawn capture (`aether_actor_capture_begin` and `aether_actor_capture_end`)
+  tells which actor a factory started (#2974).
+- **A module's actor can handle `Down`.** The runtime's `Down` message was
+  taken for one of the program's own declarations, so a module's `Down(ref,
+  reason)` arm did not see its fields' types; it is now visible to modules as
+  any runtime declaration is (#2974).
+
+- **An actor's mailbox can be bounded: `@mailbox(bound: N)`.** Mailboxes stay
+  unbounded by default, so a send never blocks. With a bound the actor takes
+  at most N messages it has not handled yet, wherever they wait (a core's
+  queue, a sender's deferred sends, its overflow, its mailbox), counted
+  exactly. Past it a send is refused at once, never blocked on: the new
+  `try_send(ref, Msg { ... })` returns `"the mailbox is full"` (or `"the
+  actor is dead"`, and `""` when it sent), an ask fails with `"the mailbox
+  is full"`, and a plain `!` is dropped, counted by
+  `actors.full_drops(ref)` and reported once on stderr. A `Down` always gets
+  in. Both schedulers (#2974).
+
+- **`x448.agree(scalar, u) -> (shared, err)` refuses an all-zero shared
+  secret, as `x25519.agree` does (#1298).** X448 had only the raw RFC 7748
+  function, which returns the zeros a small-order peer point produces, so
+  the two key agreements answered that case differently. `agree` is the
+  key-agreement entry point for both curves now; `x448.x448` stays the raw
+  function. `x448` also returns null for a scalar or u that is not 56 bytes.
+
+- **Choose the TLS backend per HTTPS request and per server (#1298).**
+  `client.set_tls_backend(req, "aether" | "openssl" | "")` and
+  `http.server_set_tls_backend(server, ...)` pick the pure-Aether TLS 1.3
+  stack or OpenSSL explicitly; `""` keeps the default, which is unchanged:
+  OpenSSL where it is built in, the pure stack where it is not, and
+  `AETHER_PURE_TLS=1` to move a whole process. An explicit choice wins over
+  the variable, and pooled client connections are kept apart per backend.
+  Both return an error string, before any network is touched, when the
+  backend cannot be used: `"openssl"` in a build without OpenSSL, `"aether"`
+  in a program that does not import `std.cryptography.tls13_client` (or
+  `tls13_server`), or an unknown name. `server_set_tls_backend` may come
+  before or after `server_set_tls`. `tests/integration/https_tls_backend_select`
+  runs every client backend against every server backend and checks which
+  one ran from each side's TLS 1.2 peer.
+
+- **`client.set_partial_chain(req, 1)` trusts an intermediate CA on its
+  own.** Since #3310 a trust anchor must be a self-signed root on both TLS
+  backends, as on OpenSSL by default, so a CA file holding an intermediate
+  CA alone (a private PKI that hands out its issuing CA, or pinning one CA
+  below a public root) no longer anchors a path on the pure-Aether backend.
+  `set_partial_chain` is the explicit way to trust one, the same on both
+  backends (OpenSSL's `X509_V_FLAG_PARTIAL_CHAIN`, the pure client's
+  `tls13_cert.TRUST_PARTIAL_CHAIN`): any certificate in the trust store ends
+  a path, a trusted certificate that is not a root must still be a CA, and
+  peer and hostname verification stay on. Off by default; pooled connections
+  are kept apart by it (#3311).
+
+- **The pure-Aether TLS server signs with any key a certificate carries.**
+  It took ECDSA P-256 alone, so an RSA, P-384, P-521 or Ed25519
+  certificate made a server that dropped every connection at the signature
+  step. `tls13_server.load_private_key` reads PKCS#8, SEC1 (after an
+  `openssl ecparam` EC PARAMETERS block) and PKCS#1 PEM; CertificateVerify
+  is signed with the key's own scheme (0x0403, 0x0503, 0x0603, Ed25519, or
+  RSA as rsa_pss_rsae_sha256, constant time and blinded) when the client's
+  signature_algorithms offers it, and a client that offers none of them gets
+  `handshake_failure` (`missing_extension` when it sent none). RSA keys under
+  2048 bits are refused, as on the OpenSSL backend. The pure client offers
+  ecdsa_secp521r1_sha512 and verifies it. A signing failure now releases
+  the whole handshake state and sends `internal_error` (#3326).
+  Migration: `tls13_server.accept`'s private key is the handle
+  `load_private_key` returns (free it with `free_private_key`), not the raw
+  P-256 scalar; `parse_ec_private_key_pem` stays as the low-level P-256
+  reader.
+
+- **docs/aether-vs-hcl.md compares an Aether configuration with HCL.** What
+  HCL does well (repetition, typed and validated variables, plan before
+  apply, its providers), where it stops (no functions of your own, ternary
+  conditionals, templates as a second language, the provider split), the
+  same gateway configuration written both ways, `std.schema` beside HCL's
+  validated variables, what Aether offers for review before a configuration
+  runs, and when to pick which. config-is-code.md,
+  aether-embedded-in-host-applications.md and containment-sandbox.md link
+  to it (#476).
+
+- **std.stream: credit-windowed streams between actors.** A send never
+  blocks, so a producer that outran its consumer grew the consumer's mailbox,
+  and then the scheduler's overflow, without bound. `stream.connect(producer,
+  consumer, window)` gives the two actors a stream: each chunk the producer
+  sends (`stream.write` cuts a string into chunks, `stream.offer` sends one)
+  costs one of `window` credits, and the consumer returns one per chunk
+  handled (`stream.consumed`). At most `window` chunks are in flight, and
+  running out of credit is a return value, not a block. `stream.finish` ends
+  the stream; the consumer's end comes back to the producer behind its last
+  credit, and `stream.credit` frees the stream there. Chunks are strings, so
+  binary data streams too. Sequencing and reordering wait for a transport
+  that needs them (#426).
+
+- **BoGo, BoringSSL's TLS test suite, runs against the pure TLS stack
+  (#1298).** `make conformance-bogo` fetches BoringSSL at a pinned commit,
+  builds its `ssl/test/runner` (Go 1.27) and drives
+  `tests/conformance/bogo/shim.ae`, which runs `tls13_client` or
+  `tls13_server` for each test; `config.json` disables each failing test
+  with its reason. Not part of CI (it takes about five minutes).
+  `make conformance-x509` runs x509-limbo and bettertls locally, as CI does.
+- **Added:** `tls13_client.connect_socket(sock, host, cafile)` runs the
+  verified handshake over an already-connected std.tcp socket.
+
+- **`http.server_set_tls_pem(server, cert_pem, key_pem)`: a TLS server from
+  PEM text.** A program that held its certificate and key in memory had to
+  write the key to disk for `server_set_tls`. The new call takes the text,
+  with the same checks and results on both backends: OpenSSL loads it from
+  memory, and the pure server parses the chain and key once, when the server
+  is set up. The pure server used to read and parse both files on every
+  connection; with either call it now parses once, and every connection
+  shares the result. The server keeps its own copy of the text, for a later
+  `server_set_tls_backend`, and wipes it when it is replaced or the server is
+  freed. An encrypted key is refused at once: the OpenSSL backend used to ask
+  for its passphrase on the terminal (#3362).
+
+- **Execution accounts: a budget that belongs to a script, not to a call
+  or a thread.** A host that runs many scripts on one thread, each
+  yielding and resumed later, gives each an account
+  (`aether_exec_account_new`, `aether_exec_use`; `host.account_new` and
+  friends in std.host): every cap-aware allocation made while it is in use
+  is charged to it and its parent chain and refused past its allowance
+  (`AETHER_MEMORY_CAP`), a block credits the account that allocated it
+  wherever it is freed, and its deadline counts wall time from its making
+  (`AETHER_DEADLINE_ELAPSED`) or only the time spent in its calls
+  (`AETHER_DEADLINE_ACTIVE`). A parent only narrows; an account is in use
+  on one thread at a time (`aether_exec_use` returns -1 for one in use on
+  another); an execution puts back the account it began with; an actor
+  stepped inside code that has one in use is not charged to it. Libraries
+  with a runtime of their own share the accounts of the first loaded copy
+  (one lock, one table), and a copy of another layout refuses them, saying
+  so once. While no account exists an allocation still tests one word
+  (#2954).
+
+- **What a shipped library promises across Aether versions, and where an
+  unsupported pair is refused** (docs/abi-policy.md). The host ABI is
+  versioned (`AETHER_HOST_ABI`, level 1; a library with none recorded is
+  level 0) and only grows within a level. Catalogs are schema 1.11: they
+  record the library's `host_abi`, the runtime ABI it was compiled for
+  (`runtime_abi`, `AETHER_RUNTIME_ABI_ID`, which the shared runtime reports
+  through `aether_runtime_abi()`), and what its importer must do
+  (`requires`). The importer refuses a catalog of another major, one that
+  requires something it does not know (naming it, both versions and the
+  fix), and a shared-runtime library made for another runtime or recording
+  none; `ae lib-info` prints all of it. A library loaded against another
+  runtime than its own runs nothing: every export returns its zero value
+  with the new outcome `AETHER_INCOMPATIBLE` (6, `host.INCOMPATIBLE`) and
+  the reason, and `aether_<lib>_check(&why)` asks first; its generated C
+  compiled against another Aether's headers does not compile. The sandbox
+  levels' rendezvous carries its size (version 2), and a copy that finds
+  another layout says so once. `AETHER_FLAG_LOCKFREE_POOLS` and
+  `aether_message_pool_stats` are marked for removal at host ABI level 2
+  (#2957).
+
+- **A cross-version matrix runs this Aether's libraries and hosts against
+  the release before it.** `tests/integration/abi_matrix` builds a library
+  with both versions and runs C hosts of either header, two libraries of
+  different versions in one process (an execution account suspended and
+  resumed beside the old copy), Aether importers both ways, and the shared
+  runtime pairs, with the unsupported ones refused. CI runs it on Linux
+  and macOS against the latest published release on every pull request,
+  and the release workflow on every platform before it publishes;
+  `AETHER_ABI_OLD_HOME` names an extracted release to run it by hand
+  (#2957).
+
+### Changed
+
+- **Migrating: `p256.ecdsa_sign` takes no nonce (#2600).** The nonce is
+  derived by RFC 6979 from the key and the digest, so the parameter is
+  gone, and so is the `k` argument of `tls13_cert.sign_client_cert_verify_ecdsa_p256`
+  and `sign_server_cert_verify_ecdsa_p256`. Drop the argument and the code
+  that drew it:
+
+  ```aether
+  k = random_32_bytes()
+  r, s = p256.ecdsa_sign(priv, digest, k)     // before
+  r, s = p256.ecdsa_sign(priv, digest)        // now: the same digest gives the same signature
+  ```
+
+  `ecdsa_sign` returns `(null, null)` for a private key outside [1, n-1]
+  (check one with `p256.private_key_valid(priv)`), and `ecdh` and
+  `scalar_mult` return null for a public point that is not on the curve
+  (`p256.public_key_valid(x, y)`). The digest may be any length: its leftmost
+  256 bits are signed, as FIPS 186-5 says.
+
+- **A panic on the cooperative scheduler ends the actor, not the program.**
+  The cooperative scheduler (Emscripten, esp32, `-DAETHER_NO_THREADING`)
+  stepped actors with no panic barrier, so a handler's panic ended the
+  program. Both schedulers now step inside one barrier
+  (`runtime/actors/aether_step_barrier.h`): the actor ends, the message and
+  the ask it held are dropped and failed, its death is finalized and its
+  watchers get a `Down`. On wasi, which has no setjmp, a panic still ends
+  the program, and watching a death is refused at compile time (#2974).
+
+- **Migrating: `p384`, `p521` and `secp256k1`'s `ecdsa_sign` take no nonce
+  either (#2600).** As for `p256`: drop the third argument, and the
+  signature of a digest under a key is always the same one (RFC 6979).
+
+  ```aether
+  r, s = p384.ecdsa_sign(priv, digest, k)     // before
+  r, s = p384.ecdsa_sign(priv, digest)        // now
+  ```
+
+  P-521 also changes how the digest is read: the leftmost 521 bits of the
+  buffer, as FIPS 186-5 says, so a SHA-512 digest is passed as its 64
+  bytes. The old API took a 66-byte buffer as a number, and callers padded
+  the digest with two zero bytes; that buffer is now read as a 528-bit
+  digest and truncated, which signs a different number. `ecdsa_verify`
+  reads the digest the same way. secp256k1's `s` is as computed, not in
+  Bitcoin's low-S form.
+
+- **The actor delivery contract is written down.** docs/actor-concurrency.md
+  says what a send promises: each sender's messages in order, at most once
+  (every message not handled released and counted), unbounded by default
+  because a blocked sender can deadlock the scheduler, and a bound when the
+  actor asks for one. docs/structured-concurrency.md records Phase 1
+  (death notices, links, restart in place, std.supervise) as shipped and
+  where it differs from the proposal; Phase 2 stays a proposal. A new
+  example, examples/02-actors/12-supervisor.ae, restarts a crashed actor
+  under its ref and shows a supervisor giving up (#2974).
+
+- **The send buffer is no longer an extern thread-local.** `g_send_buffer`,
+  a thread-local of several fields declared in `aether_send_buffer.h` and
+  written field by field from every file that buffered a send, is now a
+  `static` thread-local of `aether_send_buffer.c`, reached through
+  `send_buffer_here()`. GCC 16.2 for x86_64-w64-mingw32 at -O2 merged two
+  adjacent stores into an extern thread-local aggregate into one store
+  addressed through the variable's non-thread address, so the calling
+  thread's copy kept its old value (the per-thread frames block was hit;
+  the send buffer's code was not, yet). The rule, written at
+  `aether_frames.h`: an extern thread-local is a scalar written whole; an
+  aggregate stays static to its file, reached by accessor. `send_buffered()`
+  stays inline, writing through the pointer: 1.57 ns a buffered send
+  against 1.55 ns before on Windows MinGW, loops aligned (5.7 ns as a call,
+  the message copied twice). Fixes #3372. `runtime/examples/buffered_send_bench.c` no longer hangs in its
+  second benchmark: it stopped the scheduler without a shutdown, and
+  `scheduler_init()` does nothing on a scheduler that is only stopped; and
+  its actor took up to 128 messages a step where the scheduler counts one,
+  so a shutdown waited for messages it would never see handled.
+
+- **A plain actor step reads one word to know it has nothing to put
+  aside.** The step barrier looked at each part of the context it puts
+  aside (spawn claims, execution accounts, sandbox levels) behind a load of
+  its own, at both ends of every step, which cost send-heavy actors about 3%
+  (ping_pong 11.96 against 11.65 M msg/s). The parts' globals are now bits
+  of one word, `aether_caps_slow`'s step bits (the restart claims and spawn
+  captures are counted there too), read once at each end with one predicted
+  branch, and the parts are looked at out of line only when it is set:
+  ping_pong is at 11.87, thread_ring, fork_join, counting and skynet are
+  where they were before the step-context rule.
+
+### Removed
+
+- **`AETHER_MSG_POOL_SIZE` and `AETHER_PROFILE` are gone; setting them
+  never had an effect.** The two environment variables were documented as
+  the message pool's size and a memory profile (`micro`, `small`, `medium`,
+  `large`), but the only code that read the size they set was
+  `runtime/actors/aether_message_pool.h`, a header nothing included, whose
+  pool variable was defined nowhere. They changed one line of the
+  `AETHER_VERBOSE` configuration print and nothing else, so a program that
+  sets them is unaffected. The header, its section in
+  `docs/runtime-config.md`, the two rows of the environment table, the
+  `msg_pool_size` and `profile` fields of the runtime configuration and the
+  profile helpers are removed (#3373). The compile-time `-DAETHER_PROFILE`
+  switch of the profiler is unrelated and unchanged.
+
+### Fixed
+
+- **An actor with a thread of its own that panics gives up its inbox.** Its
+  thread left at the death and the messages still waiting in its inbox were
+  never dropped or credited, so `scheduler_wait()`, and with it the
+  shutdown, waited for them forever. The death is now finalized on that
+  thread at the end of its loop, the inbox with the mailbox, and a sender
+  that pushes after that drain drops what it pushed (#3298).
+
+- **An ask on the cooperative runtime honours its timeout.** With no
+  threads (Emscripten, esp32, a `-DAETHER_NO_THREADING` build) an ask ignored
+  `timeout_ms`: a handler slower than the timeout still had its reply taken,
+  and an ask behind more than 100 000 queued messages ended "timed out" long
+  before its timeout, its polls counted instead of timed. The polls now stop
+  at the deadline and only there, and a reply that comes after it is
+  discarded as late, so the ask ends with "ask timed out after N ms", as it
+  does with threads. An ask that ended with its message still queued left
+  the message pointing at the asker's stack, and its handler later wrote its
+  reply there: the next ask from the same place received that reply (a
+  crash when the types differ). The message now forgets the asker when the
+  ask ends, and is handled as a plain send. The ask failure reasons test runs
+  on the cooperative runtime in CI (#3330).
+
+- **The pure TLS client verifies chains signed with SHA-384 and SHA-512
+  RSA, ECDSA on P-521 or with SHA-512, and Ed25519 (#3307).**
+  `std.cryptography.tls13_cert` checked certificate (and OCSP responder)
+  signatures only for sha256WithRSAEncryption, ecdsa-with-SHA256 on P-256
+  and ecdsa-with-SHA384 on P-384, so www.bing.com and www.microsoft.com
+  (sha384WithRSAEncryption, as many DigiCert chains) and any chain through a
+  P-521 or Ed25519 CA failed with "certificate does not chain to a trusted
+  anchor". RSA PKCS#1 v1.5 now takes SHA-256, SHA-384 or SHA-512; ECDSA
+  takes any of the three hashes on a P-256, P-384 or P-521 key; Ed25519
+  (id-Ed25519) is verified too.
+
+- **`server_set_tls` on the pure-Aether backend checks the certificate and
+  key.** It returned "" without reading either file, so a missing file, an
+  unusable or encrypted key, or a key belonging to another certificate made
+  a server that started and then dropped every connection, with nothing
+  logged. It now loads both, checks they are a pair (the key signs a test
+  CertificateVerify the certificate's key verifies) and returns why it
+  cannot serve them, as the OpenSSL backend does; a refused
+  `server_set_tls_backend` keeps the server's earlier backend (#3328).
+
+- **A builder setter's defaulted parameters can be left out in its block.**
+  Inside a builder's trailing block `_ctx` is injected and hidden from the
+  caller, but the arity check counted it among the arguments the call
+  gives: `item("a")` for `item(_ctx, name, kind = "plain")` was refused
+  (E0200), and `item("b", "fancy")` was read as `_ctx = "b"` with `kind`
+  defaulted, every argument one place off. In a block the call now gives
+  the parameters after `_ctx` and the defaults fill the rest; a call that
+  passes the context itself (`_ctx`, `builder_context()`) or every
+  parameter passes it explicitly, as outside a block (#3331).
+
+- **A reply of an actor reference keeps its type.** `reply w`, where `w` is
+  an `actor_ref`, was sent as an `int` (the pointer cut to its low half),
+  and the ask's result typed `int`, so a send through it did not compile.
+  Both sides now carry it as a pointer, bare or as a reply message's field
+  (#3332).
+
+- **A field access through a bare `actor_ref` is a type error.** It passed
+  the checker and failed in the C compiler (a bare reference is a `void*`
+  and names no actor). The checker refuses it with a hint to type the
+  reference (`actor_ref[Counter]`), and refuses a typed reference naming a
+  state its actor does not have, which reached C the same way (#3333).
+
+- **A message is known to every actor and function, wherever it is
+  declared.** Codegen emitted a message, and gave it the id its sends and
+  receive arms use, only when it reached it in the program. An actor declared
+  before a message it handled dropped that message without a word (the arm
+  never ran). A function that sent a message declared after it, with an
+  actor between them, did not compile. And a program's own actor could not
+  handle a message an imported module exports, because the merge puts the
+  module's declarations before `main`. Messages are now emitted ahead of the
+  actors and functions, as structs already were (#3341).
+
+- **`make test-ae` tests the tree, not an install.** With `AETHER_HOME` set
+  to an install, as `install.sh` sets it, a test that ran the tree's
+  `aetherc` without pinning the variable compiled against the installed std,
+  and failed where the two differed (c_callback_table,
+  heap_box_across_functions). The sweep's runners now drop an inherited
+  `AETHER_HOME`; a test that wants an install names one itself (#3342).
+
+- **On Windows a runtime lock allocates nothing once it is made.** A
+  critical section took a 48-byte debug record from the heap the first time
+  a thread waited on it, at an arbitrary later point. heap_in_use counts
+  every block on Windows, so an exact leak check (`std.mem.steady_growth`)
+  read it as growth, and a program that spawned and released actors failed
+  it now and then. The runtime's mutexes are made without the record, which
+  only served a debugger's lock listing. The Windows process table in
+  `std.os` is a statically initialized SRW lock now: it was made on first
+  use behind an unguarded flag, so two threads spawning at once could both
+  initialize it (#3346).
+
+- **`make compiler-fast` links.** Its monolithic build listed the runtime
+  pieces aetherc needs on its own and had lost `aether_spawn.c` and
+  `aether_sandbox.c`, so it failed at the link; it also did not wait for the
+  generated headers. It now uses the same source list and headers as the
+  regular aetherc rule (#3351).
+
+- **http_proxy_send_timeout tests the server, and std.tcp can size a
+  receive buffer before connecting.** The test's worker-path case received
+  every byte now and then, on two causes, both the test's:
+  - Its client set its receive buffer after connecting, so the window the
+    connection opened with still stood. On Linux it took that much through
+    the stall, then drained it for sixteen seconds after the cut.
+  - macOS's loopback, about two seconds into a client's stall, in some runs
+    has the sender's kernel report tens of megabytes sent and acknowledged,
+    while the client sends nothing and the bytes cross only once it reads
+    (measured with TCP_CONNECTION_INFO and a capture of lo0). No sender can
+    tell that from a client that reads, so the server rightly went on. The
+    worker path's cut, at its first full buffer plus the one second timeout,
+    met it at two seconds: 21 runs in 480.
+
+  New `tcp.connect_buffered(host, port, read_buffer)` sets the buffer before
+  the connection is made, and `tcp.available(sock)` says how many bytes wait
+  in the receive buffer. The test connects with the first and uses a 300 ms
+  idle timeout, so every cut comes before macOS's absorption: 80 runs of 80
+  on macOS, 40 of 40 on Linux (#3338).
+
+- **The pure TLS stack reassembles a handshake message split across
+  records (#3321).** RFC 8446 5.1 lets a peer split a handshake message over
+  several records. The client read the ServerHello, and the server the
+  ClientHello, from one record only, so a split one failed with "truncated
+  header" or "length overruns buffer". Both now gather the fragments, and
+  refuse with unexpected_message the bytes a peer puts after the message in
+  its last record.
+
+- **The pure TLS stack sends the dummy change_cipher_spec of middlebox
+  compatibility mode (#3322).** The client always sends a non-empty
+  legacy_session_id, which RFC 8446 4.1.2 ties to that mode, but never sent
+  the dummy change_cipher_spec D.4 asks for, so BoringSSL (and middleboxes
+  that expect TLS 1.2's shape) refused it. The client now sends it before
+  its second flight (an alert included), or right after the ClientHello
+  when it offers early data; the server sends one right after its
+  ServerHello when the client's legacy_session_id is not empty.
+
+- **The pure TLS client verifies an Ed25519 server (#3335).** It offered
+  ed25519 in signature_algorithms but had no Ed25519 branch where it checks
+  the CertificateVerify, so a server with an Ed25519 certificate was refused
+  with "unsupported CertificateVerify scheme". `tls13_cert.check_leaf_cert_verify`
+  now verifies every scheme the client offers (ECDSA P-256, P-384, P-521,
+  rsa_pss_rsae_sha256, Ed25519) with the certificate's own key.
+
+- **A panic in a library export ends the call, not the host, and nested
+  calls give the outer call its state back.** A panic an `--emit=lib`
+  export did not catch printed "panic outside any try/catch or actor" and
+  aborted the process that loaded the library. Every export now runs in an
+  execution frame: the panic ends the call with `AETHER_PANICKED`, the
+  export returns its zero value, `aether_last_outcome()` and
+  `aether_last_outcome_text()` (libaether.h) say how the call ended, and
+  the library takes the next call. An export that called a host service,
+  which set another caller and deadline and called an export again, saw the
+  inner call's caller and deadline from then on, and a sandbox level the
+  inner call left pushed stayed in force; each call now has its own, and
+  the outer one's are back when the inner one returns, however it ends. An
+  Aether program importing a library in binary form gets a failed call
+  raised again as a panic with the same reason, which a `try` catches, and
+  `host.last_outcome()` / `host.last_outcome_text()` read the outcome. A
+  library built with its own runtime now carries the host API
+  (`aether_set_call_deadline`, `aether_set_memory_cap`,
+  `aether_deadline_tripped`, `aether_set_caller`, ...) even when its code
+  calls none of it: a DLL had no `aether_set_call_deadline`, so a host could
+  not bound its calls. Every catalog is schema "1.10", with `outcome`
+  naming the library's outcome accessor; on Windows dbghelp is loaded when
+  a panic's stack trace is printed, so a C host needs no `-ldbghelp`. The
+  frame costs the context save a catchable panic needs: an export that
+  calls a function is 5.7 ns a call on Windows MinGW against 0.4 ns
+  before (the stub saves with `__builtin_setjmp` on x86, and Win64 makes it
+  keep its callee-saved registers), fib(30) through its stub is unchanged,
+  and an export that can neither panic, allocate, loop nor call anything
+  gets no frame (0.57 ns against 0.19 ns). A `try` frame no longer calls
+  into the allocation journal when it is pushed (#2955, #2956).
+
+- **The pure TLS client and server handle KeyUpdate (#3320).** After the
+  peer updated its keys, every following record failed to decrypt, so a
+  long-lived connection to a server that rotates keys died, and a KeyUpdate
+  asking for one in return was never answered. Both sides now move their
+  receiving keys on at each KeyUpdate (RFC 8446 4.6.3, 7.2), answer
+  update_requested with one KeyUpdate of their own before their next data
+  however many asked, and refuse a KeyUpdate that is not one byte of 0 or 1
+  (decode_error, illegal_parameter), one that shares its record with
+  another message, and more than 32 without data between them
+  (unexpected_message). New `tls13_client.conn_key_update(conn, request)`
+  and `tls13_server.conn_key_update(conn, request)` update a connection's
+  own keys, asking for the peer's with `tls13_hs.KEY_UPDATE_REQUESTED`. A
+  record key or traffic secret that a KeyUpdate replaces is zeroed before it
+  is freed.
+
+- **The pure TLS stack treats alerts as TLS 1.3 says (#3323).** It ended
+  the connection at a user_canceled alert, and took any alert at warning
+  level as one that ends it. A user_canceled is now read past (up to four in
+  a row, as BoringSSL bounds them) and the close_notify that follows it ends
+  the stream; TLS 1.3 has no other non-fatal alert, so one sent at warning
+  level is answered with decode_error, and an alert level other than 1 or 2
+  with illegal_parameter (RFC 8446 6). The client applies the same rules to
+  an alert in the server's flight, the server to the client's alerts.
+
+- **The pure TLS client and server do HelloRetryRequest (#3325).** The
+  client gave up at any HelloRetryRequest and the server refused a
+  ClientHello whose key shares held no group it takes. The client now
+  follows one that asks for a cookie or, on a resumption, for a secp256r1
+  share (its first ClientHello there carries x25519's only): the
+  change_cipher_spec, then the same ClientHello with the cookie and the
+  share, without early data and with its PSK binder computed again, in a
+  record of version 0x0303, under the message_hash transcript (RFC 8446
+  4.1.4, 4.4.1). It refuses one naming a group it already has a share for
+  or never offered, one asking for no change (illegal_parameter), an empty
+  cookie (decode_error), a second one (unexpected_message), and a
+  ServerHello after it with another cipher suite or group. The server asks
+  for X25519MLKEM768 or X25519 when `supported_groups` names it but no share
+  is for it (4.2.8), sends its compatibility change_cipher_spec after the
+  HelloRetryRequest, and refuses a second ClientHello without that share
+  or with another session id or suite (illegal_parameter).
+  New `tls13_hs.hello_retry_request(session_id, cipher_suite, group)` and
+  `tls13_hs.client_hello_retry(ch1, group, share, cookie, out)`.
+
+- **0-RTT resumption works on the pure TLS client (#3336, #3352, #3339,
+  #3355).** When the server took the early data, the client derived its
+  application traffic secrets over a transcript that included its
+  EndOfEarlyData (RFC 8446 7.1 derives them over ClientHello..server
+  Finished) and sealed the EndOfEarlyData under its handshake keys instead
+  of the early traffic keys (4.5), so the server could read neither, and it
+  protected the early data with a cipher chosen from the ticket's hash, so a
+  ChaCha20-Poly1305 ticket sent early data under AES-128-GCM (4.2.10). The
+  secrets now come from ClientHello..server Finished, the EndOfEarlyData
+  goes under the early traffic keys, a SessionTicket records the suite of
+  the connection that got it (`tls13_client.ticket_cipher_suite`), early
+  data goes under that suite, a ticket without one sends none, and a server
+  that takes the early data under another suite is refused
+  (illegal_parameter). New `tls13_client.conn_early_accepted(conn)` says
+  whether the early data was delivered. Tested against a scripted server
+  and against `openssl s_server -early_data` in all three suites.
+
+- **The pure TLS stack knows a HelloRetryRequest when it sees one (#3361).**
+  `std.cryptography.tls13_hs` compared a ServerHello's random against a
+  mistyped copy of RFC 8446's HelloRetryRequest value (the second half was
+  wrong), so the client read a real server's HelloRetryRequest as a broken
+  ServerHello ("bad key_share") and real clients refused the pure server's.
+  The value is now computed as the RFC defines it, SHA-256 of
+  "HelloRetryRequest", and checked against the RFC's bytes; the client
+  follows `openssl s_server -groups P-256`'s HelloRetryRequest on a
+  resumption, and `openssl s_client` completes the pure server's.
+
+- **A call's deadline ends the call, and another thread can cancel one.**
+  A deadline set with `aether_set_call_deadline` broke the loop it was
+  checked in, and the export returned whatever the loop had, an
+  ordinary-looking value only `aether_deadline_tripped()` said was partial;
+  a JSON parse had no check at all and ran to the end of a large document;
+  and
+  nothing could stop a call from another thread. Inside an export, the
+  first safe point past the deadline now ends the call: the interruption
+  unwinds like a panic, every frame on the way runs its defers and releases
+  its owned locals, a `try` passes it on after its own cleanup instead of
+  running its handler, and the export returns its zero value with the
+  outcome `AETHER_DEADLINE`. `aether_exec_token()` names the call running
+  on a thread (or its next one), and `aether_exec_cancel(token)` from any
+  thread ends that call the same way with `AETHER_CANCELLED`; a cancel of a
+  call that already ended does nothing. The safe points are loop heads and
+  `json.parse`, every 4096 values; straight-line code, recursion without a
+  loop (a safe point at every function entry made fib(30) 71% slower, so
+  there is none), other C-backed std operations and `extern` calls run to
+  their end (docs/emit-lib.md, "Per-call resource caps"). On Windows
+  MinGW, an execution's record was cleared by a store into the
+  thread-local's template instead of the calling thread's copy (GCC 16.2
+  at -O2 merges two adjacent stores into an extern thread-local aggregate
+  and addresses the merged one through the variable's non-thread
+  address), so a call could keep the next-deadline and caller-info flags
+  of an earlier call at the same depth: the per-thread frames block is now
+  a `static` thread-local of `aether_unwind.c`, reached from every other
+  file through `aether_frames_here()` (#2956).
+
+- **A program that panics links no sandbox.** Since a panic ends the
+  sandbox levels pushed inside the frame it leaves (#2955), it called into
+  `aether_sandbox.c` directly, and every program with a `panic` or a `try`
+  linked the sandbox and its audit log (17 KB more for a small program on
+  Windows MinGW). The sandbox now hands the panic its unwind through a
+  pointer, set before any level can exist, so such a program links what it
+  did before (`tests/integration/panic_link_surface` reads its symbol
+  table).
+
+- **The pure TLS client's alert reaches the server when a handshake fails
+  (#3368).** After refusing a server's message, `std.cryptography.tls13_client`
+  sent its alert and closed the socket with the rest of the server's flight
+  still unread. Closing a socket that holds unread bytes sends a TCP reset,
+  and a peer that gets one before reading (Windows does this) drops the
+  alert, so the server never learned why. The client now reads and drops
+  what has already arrived (at most 256 KiB, waiting at most 5 ms for each
+  more) before it closes.
+
+- **The OpenSSL server backend sends the certificate chain.** It loaded the
+  certificate file with `SSL_CTX_use_certificate_file`, which reads the first
+  certificate alone, so the intermediates in a CA's bundle never reached the
+  client, and a client that did not already hold them refused the server. The
+  pure backend sent the whole chain, so the two backends served different
+  chains from one file. Both now send the leaf and every certificate after it
+  (#3370).
+
+- **Re-loading a running server's TLS is safe.** `server_set_tls` on a
+  server that was already accepting freed the old OpenSSL context without a
+  lock, and both accept paths read the pointer and then called `SSL_new` on
+  it, so a connection accepted in between used freed memory. The TLS state is
+  swapped under a lock now, and each accept takes a reference to what it
+  uses (the `SSL_CTX`, or the pure server's credentials), so what a re-load
+  replaces is freed by its last user. Two re-loads at once, from two
+  threads, are safe too: the configuration calls take turns (#3371).
+
+- **The pure TLS client sends decode_error for a repeated EncryptedExtensions
+  extension and a nonzero compression method (#3364).**
+  `std.cryptography.tls13_hs.check_extensions` judged each extension as it
+  came, so an extension the server sent twice was refused as unsolicited
+  (unsupported_extension) before the repeat was seen. The block is now
+  checked whole first: a repeated type is decode_error in
+  EncryptedExtensions and illegal_parameter in the other messages, as
+  BoringSSL sends them. A ServerHello or HelloRetryRequest whose
+  legacy_compression_method is not 0 is decode_error instead of
+  illegal_parameter (RFC 8446 4.1.3).
+
+- **Nothing claims a message payload pool any more.** The pool's acquire
+  side was removed long ago (an actor can move to another core after a
+  message is sent, so a pooled payload would be released by a thread that
+  does not own the pool), and every typed payload is a heap copy. Yet
+  `AETHER_FLAG_LOCKFREE_POOLS` was documented as a working option and
+  reported enabled, the `AETHER_VERBOSE` print listed "[ON] TLS Message
+  Pools", five docs presented the pool as running, every actor program
+  asked `aether_message_pool_stats` for counters nothing incremented, and
+  every `aether_free_message` first asked the pool whether it owned the
+  payload, which it never did. The pool code is gone and
+  `aether_free_message` is a `free()` (8.20 ns against 8.27 ns a free on
+  Windows MinGW). `AETHER_FLAG_LOCKFREE_POOLS` stays
+  defined, accepted and ignored, and is deprecated:
+  `aether_runtime_has_feature()` reports it off and `use_lockfree_pools`
+  in the runtime configuration is always 0 (kept, so the fields after it
+  keep their offsets). `aether_message_pool_stats` stays, deprecated,
+  reporting zeros, and generated programs no longer call it (#3374).
+
+- **An allocation that fails inside a library call ends the call.** Past
+  `aether_set_memory_cap`, or with the allocator out of memory, a
+  cap-aware allocation returned NULL, the std operation returned its error
+  (a string operation, NULL), and the script went on with it: the export
+  returned whatever it reached with `AETHER_OK`. A send whose payload copy
+  failed, or a captured variable or `make([]T, n)` that could not be
+  allocated, stopped the process or panicked as an ordinary panic. Inside
+  an export the failure is now noted on the call, which ends at its next
+  safe point or its return with `AETHER_MEMORY_CAP` or
+  `AETHER_OUT_OF_MEMORY` and the zero value, its defers run and a `try`
+  in it not catching it; an allocation the code cannot go on without ends
+  the call at once with `AETHER_OUT_OF_MEMORY`, a send's message values
+  released. Outside an export nothing changes. Neither reporting nor
+  unwinding allocates any more: the allocation journal's drain, which took
+  a copy of the entries it released with `malloc` (and skipped them when
+  that failed), drains in place, and no longer releases a second time an
+  entry a release of the same frame forgot (#2956).
+
+- **The pure TLS client checks a CertificateRequest's certificate_authorities
+  (#3365).** `std.cryptography.tls13_hs.check_certificate_request` ignored
+  the extensions' bodies, so the client answered a CertificateRequest whose
+  certificate_authorities was an empty list or carried bytes after its
+  names. Such a list, an empty name in it, and a signature_algorithms or
+  signature_algorithms_cert list that is empty, odd or does not fill its
+  extension are now refused with decode_error (RFC 8446 4.2.4, 4.2.3).
+
+- **The pure TLS client reads a server flight split into small records
+  (#3366).** `std.cryptography.tls13_client` gave up on the server's
+  encrypted flight after 256 records ("flight too long"), so a valid flight
+  sent in one-byte records, which RFC 8446 5.1 allows, was refused. The
+  bound is now on the flight's bytes (512 KiB) and on each message's
+  length as soon as its header arrives (64 KiB, a Certificate 256 KiB),
+  with unexpected_message past either.
+
+- **`AETHER_VERBOSE=1` prints the runtime configuration.** The variable was
+  documented as printing the optimization configuration at startup, but it
+  only set a flag nothing read: only a program compiled with
+  `-DAETHER_VERBOSE` printed it. The runtime now prints it when the
+  scheduler starts and the variable is set, whatever the program was
+  compiled with; a program compiled with `-DAETHER_VERBOSE` (or a host
+  passing `AETHER_OPT_VERBOSE`) still prints it, and it is printed once
+  however many of them ask (#3375).
+
+- **The pure TLS client refuses a message its server's flight cannot hold
+  at once (#3367).** The client read the encrypted flight until a Finished
+  arrived and only then checked what came before it, so a server that sent
+  its Finished as another message type (or any message that does not belong
+  in the flight) left the client waiting until the connection closed or
+  timed out. Only EncryptedExtensions, CertificateRequest, Certificate,
+  CertificateVerify and Finished may come there; any other type is now
+  unexpected_message as soon as its header arrives.
+
+- **The pure TLS client gets session tickets from Go and BoringSSL servers
+  (#3363).** Its full-handshake ClientHello carried no
+  psk_key_exchange_modes, and a server may resume only with a mode the
+  client lists (RFC 8446 4.2.9), so Go's and BoringSSL's servers sent it no
+  NewSessionTicket and `conn_get_ticket` had nothing to return.
+  `tls13_hs.client_hello_full` now offers { psk_dhe_ke }.
+
+- **Every allocation the compiler makes for a program is checked.** The
+  helpers the generated C uses for a captured variable's cell, `ref`,
+  `lazy`, a closure's environment, a closure boxed into a `ptr` and
+  `heap.new` used `malloc`'s result unchecked (only the cell checked it):
+  out of memory, the program dereferenced NULL, a crash with no message,
+  inside a library call or not. They now go through one checked
+  allocation: inside a library call the call ends with
+  `AETHER_OUT_OF_MEMORY`, and elsewhere it is a panic naming what ran out
+  ("out of memory in heap.new"), which a `try` catches and which otherwise
+  stops the program with that message. A `malloc` the program declares
+  and calls itself still returns NULL, as C's does, and ends a library
+  call when it next reaches a safe point or returns. The runtime's
+  allocation test hook covers these allocations too. No measurable cost:
+  a closure made and called per step 577 against 551 ms, a `ref` and a
+  `heap.new` per step 880 against 873 ms, 20 million steps, Windows MinGW
+  (#3377).
+
+- **The pure TLS client follows a HelloRetryRequest for secp384r1 and checks
+  the ServerHello's group after one (#3369).** The client put a key share on
+  every group it offered, so no server ever had a group to ask for, and
+  after a HelloRetryRequest it did not check that the ServerHello used the
+  group it asked for (RFC 8446 4.2.8). It now names secp384r1 in
+  supported_groups without a share, as BoringSSL does, answers a
+  HelloRetryRequest for it with a P-384 share alone, and refuses with
+  illegal_parameter a ServerHello whose group has no share in the
+  ClientHello it answers. New `tls13_hs.client_hello_offer` (a ClientHello
+  naming one group without a share) and `tls13_hs.GROUP_SECP384R1`.
+
+- **`ae build --target=wasm` links the runtime again.** The Emscripten build
+  compiled a runtime list `ae` kept for itself, which had drifted from
+  `runtime/coop_runtime_sources.txt`, the list ci-wasm and the ESP32 build
+  read: it lacked `aether_resource_caps.c`, which every string release
+  calls, and `aether_exec.c`, `aether_host.c`, `aether_locale_num.c`,
+  `aether_supervision.c`, `capsicum_autosandbox.c` and the alloc,
+  http_park, quote and udp modules, so a program did not link. `ae` now
+  reads that file (installed with the runtime), so the lists cannot drift.
+  The file gains the C of `std.floatarr`, `std.strarr` and the StringList of
+  `std.collections`, which a program reaches from Aether as it reaches
+  `std.intarr` and `std.longarr`. ci-wasm builds a program with `ae build
+  --target=wasm` and runs it, and the release layout check asserts the
+  file ships (#3383).
+
+- **The undelivered-message leak test no longer fails now and then on
+  Windows.** `tests/regression/test_undelivered_message_releases_fields.ae`
+  failed now and then with "dropped messages grew the heap ... in every run"
+  (18 runs in 100 on main, before #3346; up to one in a hundred after). A
+  heap diff of a failing run showed what grew: one actor's block (1,799
+  bytes) per window, kept by the scheduler for the next spawn of its size
+  (#2517). A released actor's block is kept once it is reclaimed and no
+  message is on its way to it, and a spawn before that takes a fresh one,
+  so the number of blocks kept followed the cores' timing, not the program.
+  Each round of the test now ends settled (its released actors' messages
+  dropped, their blocks reclaimed), so the next round reuses the blocks the
+  first one made; its check is as exact as it was. The scheduler's comment,
+  which said the blocks kept never exceed what was once live at the same
+  time, now counts the released actors still being reclaimed or awaited by
+  a message too (#3385).
+
+- **The pure TLS server's reads no longer drop the end of a record
+  (#3381).** `std.cryptography.tls13_server`'s recv for `std.http` copied
+  as much of a decrypted record as the caller's buffer took and freed the
+  rest. The HTTP server reads with 16383 bytes of room, and its
+  Content-Length loop asks for just what a body still lacks, so a record of
+  16384 bytes lost a byte and a request body over 16 KiB never completed
+  (the request hung until its timeout). What does not fit is now kept for
+  the next read, as the pure client's bridge already did.
+
+- **A keep-alive connection on the pure TLS server no longer stalls on a
+  request it already holds, nor reads TLS records as HTTP (#3384).**
+  `std.http` decides whether the next request is there before it parks a
+  connection, and asks OpenSSL with `SSL_pending`; the pure server's
+  buffered plaintext (the kept tail of a record, #3381) and the whole
+  records it had already read were invisible, so a pipelined request in
+  the record that ended a body waited for the idle timeout. On Linux and
+  macOS the same check read the socket directly for any connection without
+  OpenSSL, the pure TLS ones included, taking the client's next TLS record
+  as plaintext. New `aether_pure_tls_server_pending` callback, checked
+  where `SSL_pending` is (also for WebSocket readiness), and the direct
+  read is for plain connections only.
+
+- **A store into another actor's state through its reference takes what it
+  stores and releases what it replaces (#3386).** `w.label = s`,
+  `w.kept = r`, `w.items[i] = r` and `w.names = arr`, with `w` an actor's
+  reference, were plain C assignments (the whole-array one did not compile):
+  the state shared what its source still owned, so once the source's owner
+  let go the actor held released strings and closures, and released them a
+  second time when it ended, and what a store replaced leaked. A part of
+  such a field (`w.kept.name = s`, `w.items[i].name = s`) took the new
+  value but leaked the old one. They are R3's stores now, as the actor's
+  own are, and what they take is published, since the actor reads it on
+  its own thread. `std.supervise.start` copied its spec's children into the
+  supervisor that way before freeing the spec: a factory that captured a
+  local crashed on its first call, and a child name built at run time
+  dangled in `supervise.which` and in the give-up reason.
+
+- **A supervisor restarts each child once per restart, in start order
+  (#3390).** Under `one_for_all` and `rest_for_one`, a death while a
+  restart still waited for a killed sibling's `Down` queued every child of
+  its restart again, the waiting ones included. The duplicate came round
+  after the child was already restarted and gave the supervisor up ("child
+  c cannot be restarted"), the children restarted out of start order (c
+  before a), and the 32-slot ring could overflow and overwrite entries. The
+  queue is now one pending mark per child: a child is marked at most once,
+  whichever deaths ask for it, the first marked in start order is restarted
+  next, and nothing can overflow.
+
+- **An ask's reply slot rides in its own message only.** The ask handed its
+  slot to the send through a thread-local. The send can step its target
+  inline, and every message with fields that handler sent read the slot
+  too: its receiver replied into it or failed it, the slot was let go
+  twice, and the asker read freed memory (a crash on every run of a handler
+  that asks an idle actor of its own core which sends before it replies,
+  #3395). Inside a library call, an ask whose message copy found no memory
+  unwound from inside the send and left the slot set for every later send
+  on the thread, and its core marked as asking, so no actor moved onto it
+  again (#3387). The ask now builds its own message; with no memory for it
+  the ask fails at once with "out of memory", nothing sent and nothing left
+  set, and the call ends with `AETHER_OUT_OF_MEMORY`.
+
+- **A failed call returns its zero value on every path.** A library call
+  that ran to its return with a stop noted after its last safe point (an
+  allocation it survived, a JSON parse that stopped, the deadline's flag)
+  ended with that outcome but returned its real result ("hello7" with
+  `AETHER_OUT_OF_MEMORY`), which a host following `libaether.h` (release
+  only what an `AETHER_OK` call returned) leaked. The stub now returns the
+  zero value and releases what the function returned: a string, or the
+  strings and closures of a struct or closure by value. An Aether importer
+  of a library with its own runtime gives such a string back to the
+  library before it raises the failure, also for a library built before
+  this change (#3388).
+
+- **A step nested in a supervisor's restart leaves the restart alone.** A
+  send from a child's factory to an idle actor of the same core steps that
+  actor inline, and the nested step took the supervisor's restart claim for
+  its own: its panic undid the claim, so the supervisor gave up ("the
+  restart of w failed") with an orphaned Worker made; its spawn of the
+  child's type took the child's block, so the child's ref reached a Worker
+  its factory never configured; and any spawn of it inside a factory
+  (supervise.start in a handler) was taken for the child. Every step now
+  puts the thread's claim, reborn block and spawn brackets aside at entry
+  and gives them back at exit, and its panic undoes only what it made; the
+  in-step flags the signal handler reads come back too, where an inner step
+  had left them cleared for the rest of the outer handler (#3389).
+
+- **A receiver stepped inside an enforce block runs without its grants.** A
+  message an enforce block sends is handled with no grants, as an actor's
+  thread handles it, but a send to an idle actor of the same core steps it
+  inline, on the block's thread, and it ran with the block's levels: a
+  deny-all block had the receiver's reads refused, or not, depending on
+  whether the step happened inline. A step now puts the thread's levels
+  aside (in every runtime copy that shares the count) and gives them back
+  when it ends, so the receiver is checked the same whichever thread steps
+  it, and the block's own code after the send is held to the block again
+  (#3393).
+
+- **An actor stepped inside a library call runs outside it.** On the
+  cooperative runtime (wasm, ESP32) an export's ask polls the actors, so the
+  asked actor runs on the call's thread, inside the call; on threads a
+  send's inline step can run one inside a call too. The call's deadline was
+  then raised in the actor's loop and caught by the actor's barrier: the
+  actor died ("the call's deadline passed") and the interruption stayed
+  marked, so the next call's `try` could not catch an ordinary panic and the
+  call ended with the stale outcome (#3392). The actor also read the caller
+  info the host had set for the call (#3396). A step now puts the thread's
+  calls aside, with their deadline, cancel, noted stop, interruption and
+  caller info, and gives them back when it ends: the actor runs as on a
+  core's thread, and the call is cut at its own next safe point after.
+
+- **The cooperative scheduler never steps an actor inside its own
+  handler.** An ask polls every actor until its reply, and the poll stepped
+  the asking actor too: its next message was handled inside the handler
+  that asked, its state changing under it, and a `stop()` or a panic there
+  finalized the actor (its Down sent, its queue dropped) while the first
+  handler still ran. An actor whose step is on the stack is now left alone,
+  as threads leave an actor stepping: its next message waits for the
+  handler to return (#3391).
+
+- **A chain of linked actors ends in the same stack depth however long it
+  is (#3394).** Where a death is finalized as soon as it is seen (the
+  cooperative scheduler, and the threaded one once it is stopped), the end
+  a link passed on ran inside the previous actor's finalize, so a chain of
+  linked actors ended one inside the other, a few frames per actor: killing
+  the head of 8000 linked actors overflowed a 256 KiB stack (wasm, an
+  ESP32 task or a host's thread have no more). An end a link passes on
+  while the thread is still making another now waits in the thread's queue
+  and is made after it; 100000 linked actors end on a 64 KiB stack.
+
+- **A drop that panics after a handler panicked stays in the step.** When a
+  handler panics, its step drops the message it ran on and fires the death
+  hook, both after the step's frame is gone. A field's drop function that
+  panicked there jumped past the rest of the step: on a core's own thread
+  the program ended; stepped inline inside another handler the panic
+  landed there, with the inner step's context still put aside, so the step
+  lock stayed held (the next ask hung) and an enforce block whose `try`
+  caught it ran on with its levels put aside, unenforced. The drop and the
+  hook now run in containment frames of their own (`aether_contain`): a
+  panic in one is reported through the death hook, and the step gives its
+  context back whatever happens (#3403).
+
+- **An interruption inside an actor's end goes on to its call.** The frame
+  that runs an ending actor's message drops (#3401) caught every panic,
+  the call's interruption included: when a call ended an actor there and
+  then (a kill on the cooperative runtime) and a drop ran a loop past the
+  call's deadline, the interruption was reported as the drop's panic and
+  left marked, so the call's next ordinary panic, in a later call's `try`,
+  was raised again as the interruption. A containment frame (`aether_contain`,
+  which the step barrier's drop uses too) now takes the interruption off
+  its way and notes it as the call's stop: the call ends with it at its
+  next safe point, or when it returns (#3404).
+
+- **A panic no longer leaks an owned pointer it skips the release of.** A
+  place of an owned pointer type (`type T = owned ptr drop f`), a function's
+  local or an arm's binding of an owned message field, was released at its
+  exits only: a panic skipped them, and the buffer leaked with its drop never
+  run (an arm that bound the field and panicked leaked it every time). Every
+  such place is now in the unwind journal while it lives, by one rule, and a
+  panic releases it as its exit would (#3406).
+
+- **Every store through a pointer, a slice or an actor's reference
+  publishes what it stores (#3398).** A string field reached through a
+  pointer was published (#2919), so two actors that reached it counted
+  its string atomically; a struct (`p.doc = d`), an element of an array
+  field (`p.docs[i] = d`, `p.names[i] = s`), a whole array field
+  (`p.names = arr`), an optional in a struct (`p.inner.tag = s`), a
+  slice's element (`xs[i] = d`) and the same parts of another actor's state
+  (`k.kept.doc = d`) took their strings with plain counts, which two
+  actors then raced on. One rule now decides it for every store emitter.
+  An element store also evaluates the element's place once: a string or
+  closure element's index used to be evaluated twice. The ownership grid
+  has a place for a field of a heap box reached through a pointer (P4H).
+
+- **An actor ended before `scheduler_start` is finalized at once
+  (#3399).** `scheduler_actor_end` took an initialized scheduler for a
+  running one and posted the finalize to the actor's core, but
+  `scheduler_init` marks the scheduler initialized before
+  `scheduler_start` makes the core threads. A C host that killed an actor
+  between the two waited for a start to finalize it, and one that never
+  started the cores never did: no `Down` went out, an actor linked to it
+  lived on, and `scheduler_wait` and `scheduler_shutdown` returned without
+  it. The request is posted only once the threads are started; before,
+  the death is finalized on the killing thread, as after a stop.
+
+- **A panic out of a link's end no longer stops the thread's later links
+  (#3400, a follow-up to #3394).** Ending an actor drops the messages
+  that wait for it, and a dropped message's release runs the drop
+  function of an owned field (#3142), which is the program's code and may
+  panic. Where a death is finalized as soon as it is seen (the cooperative
+  scheduler, the threaded one once stopped), such a panic jumped out of
+  the queue that makes the ends links pass on and left the thread marked
+  as making them: every later end a link passed on there was queued and
+  never made. The queue is journaled with the unwind journal now, so a
+  panic that leaves it puts it back empty; the ends it had not made yet
+  are given up, as an unwinding recursion gave them up.
+
+- **Freeing an execution account that is in use no longer leaves the
+  runtime writing into freed memory.** `aether_exec_account_free` (and
+  `host.account_free`) freed the account while the thread's account in use,
+  the account's own thread claim and every execution that began under it
+  still named it: `host.account_in_use()` went on returning it, the next
+  cap-aware allocation charged the freed block, and the execution's return
+  charged its time to it and put it back in use. Now freeing an account in
+  use on the calling thread ends its use; one in use on another thread is
+  charged nothing more there, and that thread lets go of it at its next
+  allocation, call or `aether_exec_use`; an execution that began under it
+  holds it until it returns and then puts no account back. The block goes
+  when the last of them lets go (#3407).
+
+- **Freeing an execution account with live blocks no longer leaves its
+  parent charged for them.** The freed account's blocks were detached but
+  its ancestors kept their charge for them, even after the blocks
+  themselves were freed, so a plugin account that freed its scripts'
+  accounts while the host still held their data lost allowance each time
+  and tripped `TRIPPED_MEMORY` in the end. Freeing a parent under live
+  children left the same charge behind on its own parent. Now freeing an
+  account credits its ancestors with what its own live blocks were
+  charged, and its children go under its parent, which their blocks were
+  charged to all along, and keep narrowing under it (#3408).
+
+- **An ACTIVE execution account is charged once for nested calls.** Every
+  call under an account charged its whole duration to the account and its
+  parents, so a call a host service made inside another call under the
+  same account (or under a child of it) was charged twice: an account with
+  a 300 ms ACTIVE budget tripped after 200 ms spent in such a nested call.
+  Now a thread times each ACTIVE account from the start of the outermost
+  call open under it to that call's end, and a call nested inside adds no
+  time of its own; the deadline a nested call gets counts the time open so
+  far. The thread's list of the accounts it times has no bound: a call
+  whose account cannot be timed for want of memory ends at once with
+  `AETHER_OUT_OF_MEMORY` (the allocation test hook covers that growth), so
+  a budget is never left unenforced (#3409).
+
+- **Execution accounts no longer cost threads that use none, and freeing
+  one is linear.** While any account existed, every cap-aware allocation
+  and free on every thread (actor cores, HTTP workers) took the accounts'
+  lock, a test-and-set loop with no pause, and probed their table; and
+  freeing an account rescanned the table from the start after each of its
+  blocks, under that lock (40,000 blocks took 1.1 s, with every allocation
+  in the process waiting). Now a thread with no account in use asks a
+  filter of the addresses the accounts recorded and takes no lock unless
+  its block may be one of them; freeing an account is one pass over the
+  table (40,000 blocks: 0.5 ms); and a waiter on the lock pauses, then
+  yields, instead of spinning hot. emit-lib.md gives the cost while an
+  account exists (#3410).
+
+- **A panic in a dropped message's release no longer stops an actor's end
+  (#3401).** An actor's end drops the messages that wait for it, and a
+  dropped message's release runs the drop function of an owned field
+  (#3142), which is the program's code. Where a death is finalized as soon
+  as it is seen (the cooperative scheduler, a stopped threaded one), a
+  panic in it jumped out of the finalize: the messages after it were not
+  released, and the actor's watchers and links were never told. Each such
+  release runs in a frame of its own now, on every path that finalizes a
+  death; a panic in it is reported through the death hook with the actor's
+  id and the panic's reason, as the step barrier reports a panic in the
+  release after a handler, and the drain and the notice go on.
+
+- **An unloaded library's runtime copy is no longer written into by the
+  execution accounts.** Every runtime copy registered its allocation
+  fast-path word with the accounts it shares at its first call and never
+  left: once a plugin library with a runtime of its own was unloaded,
+  making the first account (or freeing the last) wrote into its unmapped
+  image. A copy now leaves the accounts when it is unloaded. The list of
+  copies also grows as needed, where a 65th copy was refused and then
+  never told that an account was in use, so its allocations went
+  uncharged; a copy that cannot join the list asks the accounts on every
+  allocation instead (#3411).
+
+- **An execution account made under a parent that is not live is refused.**
+  `aether_exec_account_new` (and `host.account_new`) dropped a parent it
+  did not hold, one the host had freed or one another runtime copy made
+  without sharing the accounts, and made the account with no parent at
+  all: unbounded by the limits meant to narrow it. It now returns NULL
+  for such a parent, so a child is never wider than its parent (#3412).
+
+- **`make install` links again.** The release compiler it installs was
+  linked from a list of runtime files of its own, which lacked
+  `aether_unwind.c` (and four more the development compiler links) once the
+  cap-aware allocators began reading the execution frames, so its link
+  failed on `aether_frames_here`. It now links the same runtime pieces as
+  the development compiler, one list for both.
+
+- **A TLS keep-alive connection that sends a KeyUpdate no longer holds a
+  worker.** A KeyUpdate (or another record with no application data) on an
+  idle keep-alive connection was taken as the next request: the pure TLS
+  backend's pending check counted any whole buffered record, and on both
+  backends a socket that turned readable sent the worker into a read that
+  handled the record and then waited for the whole idle timeout (30 s by
+  default). With every worker so held, other clients waited that long. Now
+  a TLS connection whose socket turns readable is asked, without waiting,
+  whether a read would find data: the pure backend handles the whole
+  records the socket holds, and OpenSSL peeks with the socket non-blocking.
+  One with none is parked, or parked again when the lot woke it, for what is
+  left of its idle time. The pure server also reports its socket's receive
+  timeout after the handshake as a timeout, keeping the connection, instead
+  of retrying it for about 5 s and then failing the connection (#3405).
+
+- **A program that reads the environment or a file keeps its actor steps
+  plain.** The step barrier's sandbox bit was set by the first sandbox
+  check of any kind, a getenv or a file read with no enforce block
+  anywhere, so most programs paid the barrier's slow look at every step.
+  The bit is now set only when a sandbox level may be in force where the
+  copy's steps can see it: when the first thread enters a level counted by
+  this copy, or when the copy shares another copy's count. An actor of a
+  library with its own runtime, stepped inside an enforce block of another
+  copy, now runs without that block's levels even when the library had
+  made no sandbox check before (#3419).
+
+- **An owned type whose drop returns a value or has a typed C prototype
+  compiles again.** The checker takes any one-parameter `@frees ptr`
+  function as an owned type's drop, whatever it returns. The unwind journal
+  entry of an owned place (#3406) passed the drop itself where a `void`
+  function of a `void*` was expected, so a drop such as `rel(p: @frees ptr)
+  -> int`, or C's `fclose` (`int fclose(FILE*)`), failed to compile with
+  "incompatible pointer type", in a local and in an arm's binding alike. The
+  journal now holds a thunk per drop function, which calls the drop as the
+  scope's exit does (#3413).
+
+- **An ordinary panic during an interruption's unwind no longer ends the
+  interruption.** A containment frame (`aether_contain`, which runs an
+  ending actor's message drops) told the call's interruption from a panic by
+  whether an interruption was marked once it had caught one. When the drop
+  ran while the interruption was already unwinding the call (a `defer` the
+  unwind ran killed an actor, which the cooperative runtime finalizes there
+  and then) and panicked, the drop's panic was taken for the interruption,
+  which was taken off its way: a `try` the unwind reached ran its handler,
+  and a call with none ended `AETHER_PANICKED` instead of `AETHER_DEADLINE`.
+  The frame now puts an interruption on its way aside while its code runs,
+  and tells what it caught by what the code raised (#3415).
+
+- **A receiver stepped inline runs its drops in its own context again.**
+  Since #3403 the step gave the enclosing context back before it dropped
+  the message a panicking handler ran on, and before it finalized an actor
+  its step ended, whose queued messages' drops are the receiver's code. An
+  actor stepped inline (a send or an ask of an idle actor of the same core,
+  a cooperative ask's poll) then ran those drops in the sender's context: a
+  drop inside a deny-all enforce block read PATH as refused, where on the
+  actor's own thread it reads it, a drop inside a library call was cut by
+  the call's deadline, and its allocations were charged to the call's
+  account. The drops, the finalize and the death hook now run in the step's
+  context, each in a containment frame, and the context is given back
+  after them (#3416).
+
+- **An actor's end goes on past a death hook that panics.** The drop of a
+  message an ending actor leaves undelivered runs in a frame of its own
+  (#3401), and a panic in it is reported to the death hook, which ran bare
+  there. A hook that panicked then left the finalize halfway: the messages
+  it had drained were never counted, so `scheduler_shutdown` and
+  `wait_for_idle()` waited for them forever, its links and watchers were
+  never told, and the finalize, marked done, never ran again. The hook now
+  runs in a frame of its own, as the step barrier's does: its panic is
+  reported on stderr and the end goes on (#3417).
+
+- **`ae build --target=wasm` and `ae check` no longer need the native
+  runtime list.** `ae` read MANIFEST, the list of runtime sources a build
+  without libaether.a compiles, as soon as it found the toolchain, for every
+  command, and exited when it could not. Only a native link reads it: a wasm
+  build compiles `runtime/coop_runtime_sources.txt`, and a check compiles no
+  runtime. So in a tree `make compiler ae` built, or an install without
+  libaether.a and MANIFEST, a wasm build stopped before emcc. The list is now
+  read where a native link needs it, with the same message when it cannot
+  be (#3420).
+
+- **A death notice cut by a panic no longer leaks its entries.** The
+  notice of an actor's death takes its watch entries off the actor's list
+  and runs each one; a link's entry ends the linked actor, which can panic.
+  A panic that left the notice skipped the free of the entries it had taken.
+  They are now in the unwind journal from when the notice takes them until
+  it frees them, as the link drain's queue already was, so the unwind frees
+  them (#3421).
+
+- **The nested ACTIVE-time test no longer fails on a slow macOS runner.**
+  `accounts_active_time_once_when_nested` (#3409) gave two sleeps 90 ms of
+  room under the account's budget, and on macOS CI they overran by more.
+  It now checks the time charged against the wall time the nested call
+  took, on the clock the runtime charges by, so a double charge still fails
+  it on any host and a long sleep cannot; the cut past the budget is
+  asserted with a margin an overrun only widens (#3422).
+
+- **Generated C compiles with `clang -Wall -Werror` again when it allocates
+  nothing.** The two allocation helpers every program's C defines
+  (`_aether_alloc` and `_aether_alloc_or_null`, #3377) were plain
+  `static inline` functions, and clang warns of an unused one in a `.c` file
+  (gcc does not). They now carry `AETHER_MAYBE_UNUSED`, as the prologue's
+  other helpers do, defined before them (#3425).
+
+- **A program using the pure TLS stack without `std.http` links nothing of
+  the HTTP server or client.** `std.cryptography.tls13_server` and
+  `tls13_client` told `std.http` why a key or a handshake was refused
+  through functions of the HTTP server and client, and the client read the
+  Windows trust store through two more, so every such program pulled both
+  out of libaether.a, and with the server the HTTP/2 code: on macOS, where
+  Homebrew's nghttp2 makes that the real one, it did not link. The reason
+  now goes through the callback registry (`aether_callback_set_reason`,
+  `aether_callback_reason`, per thread), and the trust store has a file of
+  its own, `std/net/aether_tls_trust.c`, which both HTTPS clients read
+  (#3426).
+
+- **The embedded build compiles the HTTP server's stubs again.**
+  `std/net/aether_http_server.c` included `<sys/ioctl.h>`, for the FIONREAD
+  check of #3405, where every POSIX build reads it, and a bare-metal target
+  has none. It is now included with the file's other socket headers, in the
+  part a build with networking compiles (#3427).
+
+- **The TLS tests pass with every OpenSSL CI runs.** The signature check
+  read only the scheme names OpenSSL 3.2 and later print, and Ubuntu's 3.0
+  names a signature by its type and digest; the resumption test started
+  `s_server -www -early_data`, which 3.0 refuses; the key test made its
+  PKCS#1 fixture with `-traditional`, which macOS's LibreSSL does not know
+  and does not need. Each now reads what every one of them says, and a
+  3.0 host reports its 0-RTT-against-OpenSSL cases as skipped (#3429).
+
+- **Regression tests free what they allocate.** Three tests never gave their
+  `ref` cells to `ref_free`, one never released the closure boxes it stored
+  in raw `ptr` fields (`release_closure`), and one never freed the INTEGER
+  it read (`bignum.free`). The macOS leaks gate passed some of them only
+  while a stale pointer still reached the blocks (#3430).
+
+- **A fatal runtime error no longer loses what the program printed last.**
+  A panic outside any try, a failed runtime check, a fatal `std.log`
+  record, or an out-of-memory the runtime cannot report printed its message
+  and called `abort()`, and stdout, fully buffered when it is a file or a
+  pipe, was never flushed: glibc's `abort()` flushes no stdio stream, so the
+  program's last lines were lost on Linux. Each such path now flushes stdout
+  before its message. It waits for another thread that holds stdout a
+  little, as one in the middle of a println does, and gives up after a
+  quarter of a second, as one blocked writing to a pipe nobody reads would
+  hold it for ever (#3435).
+
+- **The runtime-copy tests check their claims on every platform.** Three
+  tests assumed, as Windows has it, that a loaded library has a runtime of
+  its own and that a program's copy is never found: on ELF a program
+  linked with `-rdynamic` lends its runtime to a library, and on macOS an
+  executable exports its globals. The failed-result importer now measures
+  without holding the raised reason, and the foreign-layout cases of the
+  accounts and the sandbox run their copies in libraries loaded after the
+  foreign rendezvous, from hosts with no runtime of their own (#3437).
+
+- **A runtime copy joins another copy's sandbox levels before its first
+  step.** A step reads only its own copy's word, and a copy that had looked
+  nothing up when another copy's count held levels stepped an actor plainly
+  inside them; the actor's first check then found levels it could not read
+  and was refused. `scheduler_init` now joins another copy's rendezvous of
+  this layout, through a pointer the sandbox installs, so the scheduler
+  still links nothing of it. A copy whose code runs another copy's panic (a
+  library's, under ELF interposition) has its sandbox served by that panic
+  and its steps: each copy adds its hooks to a list the panic and the step
+  barrier call, where one slot, set by the copy that looked last, served
+  only that one, and a panic caught inside another copy's block left its
+  level in force (#3438).
+
+- **Gateway script libraries load again on Linux and macOS.** Every
+  `--emit=lib` library's C carried a table of the host API (deadline, memory
+  cap, caller, accounts), which made a script built to bind to its host's
+  runtime reference objects the host never linked: "undefined symbol:
+  aether_set_memory_cap". The runtime keeps the table itself, in
+  `aether_exec.c`, which every library with a runtime of its own links; a
+  program that loads libraries (`std.dl`) keeps what every Aether library
+  binds to; and the cooperative runtime list has `libaether_caps.c`, which a
+  wasm library's host API needs (#3439).
+
+- **Runtime copies agree on which one owns the sandbox levels and the
+  accounts, whatever order they looked in.** The lookup of the first loaded
+  image that exports the rendezvous took a definition through the program's
+  handle, which searches every global library whenever it was loaded, or
+  through a library's handle, which searches its dependencies, so two
+  copies could pin different owners and not see each other's levels. A
+  definition now counts only inside the image being visited, and the list
+  of loaded objects grows past 512 (#3442).
+
+- **`wait_for_idle()` waits for a receive timeout's arm to end.** The step
+  that fires a countdown disarms it before the arm runs, and
+  `wait_for_idle()` saw a timeout only while it was armed, so it returned
+  while the arm still ran, and a program read the arm's state before the arm
+  wrote it. A step that fires a countdown is now counted until its arm
+  returns, and one that ends inside the wait's quiet window starts the window
+  again (#3443).
+
+- **`free(xs)` of a slice is the builtin release whatever extern `free` a
+  program declares.** A program with `extern free(p: ptr)` turned every
+  `free` of a slice, in its own code and in the modules it imports, into C's
+  free of the slice's pointer, while slice ownership still released the
+  buffer at scope exit: a double free (ML-KEM's matrix, in a TLS test that
+  declared it), and an element's references never given back. A slice
+  given to an extern `free` that takes a pointer is now released by the
+  builtin, as a module's own `free` already left it, so the same
+  ownership checks apply: freeing a slice parameter the function only
+  borrows, or a view of another slice, is a compile error there too (#3116,
+  #3450).
+
+- **A library whose runtime is left to its host loads where there is none
+  yet.** The allocation helpers of a `--emit=lib` library read the runtime's
+  test-hook flag, and its loop heads the safe point's, both data, which the
+  dynamic loader binds when the library is loaded: a library linked with a
+  raw `cc -shared` did not load at all without a runtime, so `ae lib-info`
+  could not read the catalog of one whose closures allocate. On ELF and
+  Mach-O those references are now weak, as the callback registry's was, and
+  an absent flag reads as unarmed (#3455).
+
+- **A `std.tcp` write to a connection the peer closed fails instead of
+  ending the process.** Its sends passed no flags, on sockets without
+  `SO_NOSIGPIPE`, so the write raised SIGPIPE and the program ended with no
+  output; on macOS the pure TLS client and server died that way when the
+  other side closed first. Sends now name `MSG_NOSIGNAL` where the platform
+  has it and sockets carry `SO_NOSIGPIPE` where it has that, as the HTTP
+  server's always did, and the write fails with EPIPE. `net.fd_write` on
+  a socket fails the same way (#3457).
+
+- **Two TLS tests no longer fail on Linux and macOS.** The pure server's
+  descriptor-ownership probe still used the accept that took a certificate
+  and key path, which #3362 replaced with creds loaded once; Windows skips
+  it, so it had not been built. The key test left every server it started
+  running, and the slowest to start missed its window on a two-core runner.
+  The probe uses the creds API, and the key test runs one server at a time
+  (#3459).
+
+- **`wait_for_idle()` inside an actor panics instead of never returning.**
+  It waits for every actor, the calling one too, whose step cannot end
+  while it waits: in a message handler it hung forever (the handler's own
+  message stays counted until the step returns), in a receive timeout's arm
+  it waited until its bound, and in a drop or a death hook a core ran after
+  the step, forever. Called inside an actor's step, on either scheduler,
+  or on the threaded scheduler on any thread that runs actors, it now
+  panics as the actor's code: the actor ends with a reason that says to
+  call it outside the actors (main, or a host's thread), its watchers are
+  told, and the program goes on (a drop run outside any frame, as for a
+  message to a dead actor, ends the process with the reason). On the
+  cooperative scheduler, where the wait ran the other actors nested and
+  returned, it panics in a step too, and a drop or a death hook after a
+  step still waits there (#3463).
+
+- **`wait_for_idle()` no longer returns with messages in flight.** Its count
+  of the messages still pending took sent less handled, and three things
+  broke it. Each core's two counts were read in turn, so a message sent on a
+  core already read and handled on one read after cancelled the reply it
+  sent. The handled count went up by one for each step a core made, so a
+  step that took no message (an actor killed mid-drain, or one another core
+  had just taken) counted a message never handled, and the handled count
+  passed the sent count for good, hiding as many pending messages from every
+  later wait. And two batch paths counted their sends after the receiver
+  could take them. Every core's handled count is now read before every sent
+  count, a step counts only a message it took, and every send counts before
+  its message can be taken: two actors trading messages on two cores (a
+  stream's chunks and credits) no longer see the wait return mid-exchange
+  (#3464).
+
+- **The pure TLS stack's fatal alert is no longer lost to a TCP reset when
+  a connection fails after the handshake.** The close after a failure
+  closed the socket with what the peer had sent after (the rest of a record
+  too long to read) still unread, which ends with a reset, and a peer that
+  got the reset before it read could discard the alert: it saw a bare
+  close. The client and the server now drain the socket before that close,
+  as a failed handshake's close on the client already did (#3368), with
+  `tcp.close_drained(sock)` in std.tcp; the server's library entry for a
+  failed handshake drains too (#3465).
+
+### Security
+
+- **P-256 signing and ECDH are constant time, with RFC 6979 nonces
+  (#2600, #1298, #3291).** `std.cryptography.p256` ran on the variable-time
+  `std.bignum`: every bit of the private key and of the nonce chose a branch,
+  and the pure TLS 1.3 server and the mTLS client signed with it. It now runs
+  on the new `std.cryptography.ecc`, fixed-width Montgomery field arithmetic
+  on 32-bit limbs with no allocation, the complete addition formulas of
+  Renes, Costello and Batina, and a fixed 4-bit window scalar multiplication
+  that reads every table entry. `ecdsa_sign` derives its nonce by RFC 6979
+  (HMAC-DRBG over SHA-2) and takes no nonce from its caller. A new CI job,
+  "Crypto constant-time (Valgrind)", runs `tests/integration/crypto_ct_valgrind`
+  with the secret inputs marked undefined for memcheck and fails on any
+  branch or memory index that depends on them; on the old code it reported
+  68. `ecdh`, `scalar_mult` and `ecdsa_verify` now refuse a public point off
+  the curve or with a coordinate of p or more: before, `ecdh` computed with
+  any point it was given, the invalid-curve attack (#3291; all 355
+  Wycheproof `ecdh_secp256r1_ecpoint` cases now run, 16 of them failed
+  before). Per operation, with the default `ae build`: sign 415 us (was
+  4050), verify 470 us (was 7850), ECDH 365 us (was 3900), so the
+  Wycheproof P-256 ECDSA drivers sweep all their vectors. The TLS client's
+  random-bytes helper also returned zeros when the CSPRNG failed, which would
+  have made its key shares predictable; it fails the handshake now.
+
+- **SHA-2 digests and fresh keys no longer pass through a string
+  (#2600, #3293).** `sha2.final_bytes` (and so every HMAC, HKDF and the
+  RFC 6979 nonce derivation) copied the digest into a string and back with
+  `bytes.copy_from_string`, whose C side asks whether its source is a
+  string by reading the source's first four bytes: a branch on HMAC's
+  secret state, which the constant-time test found in P-256 signing, and a
+  misread of any digest that happens to start like a string header. The
+  digest now stays in its byte buffer. The TLS client and server key shares
+  and randoms and the ML-KEM seeds went the same way through
+  `cryptography.random_bytes`; they use the new
+  `cryptography.random_buffer(n) -> (bytes, err)`, which fills a `std.bytes`
+  buffer straight from the OS CSPRNG.
+
+- **P-384, P-521 and secp256k1 are constant time too, with RFC 6979 nonces
+  (#2600, #3291).** `std.cryptography.p384`, `p521` and `secp256k1` run on
+  `std.cryptography.ecc` like P-256: signing, ECDH and the scalar
+  multiplications no longer branch on the key or the nonce, and the
+  constant-time test covers each curve's signing and ECDH. ECDH refuses a
+  point off the curve (#3291): every case of Wycheproof's
+  `ecdh_secp384r1_ecpoint`, `ecdh_secp521r1_ecpoint` and
+  `ecdh_secp256k1_webcrypto` runs. Per operation with the default
+  `ae build` (was, on `std.bignum`): P-384 sign 1230 us (7700), verify 1410
+  (15500), ECDH 1110 (7400); P-521 sign 3040 (15000), verify 3400 (28600),
+  ECDH 2920 (14800); secp256k1 sign 340 (3800), verify 370 (7850), ECDH 285
+  (3750). The Wycheproof ECDSA drivers for the three curves now sweep every
+  vector instead of every tenth (8 s, 18 s and 4 s at the -O0 of `ae run`).
+
+- **RSA private-key operations are constant time and blinded (#2600).**
+  `std.cryptography.rsa`'s `raw_decrypt`, and through it `decrypt_pkcs1`,
+  `decrypt_oaep`, `sign_pkcs1` and `sign_pss`, ran std.bignum's
+  variable-time `mod_pow` on the private exponent. They now use Montgomery
+  arithmetic on fixed-width limb vectors and a fixed 4-bit window
+  exponentiation that reads every table entry, with the base blinded by a
+  fresh random r. PKCS#1 v1.5 and OAEP decryption check the padding without
+  an early exit (the Bleichenbacher and Manger timing oracles). A 2048-bit
+  private-key operation takes about 11 ms with the default `ae build` (27 ms
+  before). New `rsa.key_from_bytes(n, e, d)` builds a key from big-endian
+  byte strings without putting d through std.bignum; `raw_decrypt` and the
+  signers return null (or an error) for a public-only key instead of
+  crashing. The constant-time test covers all four private-key paths.
+
+- **Ed25519, Ed448 and X448 are constant time (#2600, #1298).** Their
+  secret-key operations (EdDSA public-key derivation and signing, the X448
+  ladder) ran on the variable-time `std.bignum`. They now run on
+  `std.cryptography.ecc`'s fixed-width field: the complete Edwards formulas
+  of Bernstein, Birkner, Joye, Lange and Peters with the fixed-window
+  scalar multiplication that reads every table entry, S = r + k a mod L on
+  fixed-width limbs, and an X448 ladder of 448 masked swaps. Per operation
+  with the default `ae build` (was, on `std.bignum`): Ed25519 sign 665 us
+  (7850), verify 410 us (8350); Ed448 sign 2.3 ms (23.2), verify 1.6 ms
+  (25.5); X448 1.0 ms (6.6). The Wycheproof Ed25519 and X448 drivers sweep
+  every case (they sampled every 5th and 25th), and the constant-time test
+  covers EdDSA signing, X25519 and X448.
+
+- **SHA-3 and SHAKE output no longer passes through a string (#2600).**
+  `sha3.final_bytes` copied the digest into a string and back, as
+  `sha2.final_bytes` did; Ed448 signing runs its secret scalar and nonce
+  through SHAKE256, and the constant-time test reported the string's
+  header check reading them. The output now stays in its byte buffer.
+
+- **AES and GHASH are constant time, and AES-GCM is 15 times faster
+  (#2600, #1298).** The AES core indexed a 256-byte S-box with key- and
+  data-dependent bytes, which leaks the key through the cache; it is now
+  the 64-bit bitsliced AES of BearSSL's `aes_ct64` (the Boyar-Peralta S-box
+  circuit, four blocks per pass), about 185 MB/s in CTR mode. GHASH's
+  GF(2^128) multiply branched on the bits of the state and of H; it is a
+  masked shift-and-add on 64-bit halves now, which took AES-128-GCM from
+  1.5 MB/s to 23 MB/s. Every AEAD tag check (GCM, CCM, EAX, OCB,
+  ChaCha20-Poly1305) and the AES key-wrap integrity check compare all bytes
+  and declassify one verdict. The constant-time test covers AES-128/256,
+  AES-GCM seal and open, ChaCha20-Poly1305 seal and open, Poly1305,
+  HMAC-SHA-256, HKDF and SHA-256 with their keys secret, which is the
+  Poly1305 audit #1298 asked for.
+
+- **The pure TLS client validates the whole certificate path (#3303).**
+  This extends #3340 by Adil Alperen Çiftci, which made every issuing
+  certificate carry basicConstraints cA and, with a keyUsage, keyCertSign,
+  read into `LeafCert.is_ca`, `has_key_usage` and `key_cert_sign`. The rest
+  of RFC 5280 path validation that #3303 listed is here: pathLenConstraint,
+  extendedKeyUsage, name constraints, critical extensions the client does
+  not process, and the version and validity of everything above the leaf.
+  New
+  `tls13_cert.validate_chain(leaf, intermediates, anchors, at, purpose,
+  max_depth)` checks all of these (RFC 5280 section 6 as the Web PKI
+  profiles it), trying every candidate path with a bounded search, at `at`
+  ("YYYYMMDDHHMMSS", "" for now), for `PURPOSE_SERVER` or `PURPOSE_CLIENT`,
+  through at most `max_depth` intermediates that are not self-issued
+  (negative for the default, 8); the client uses it, and
+  `tls13_cert.chain_verify_path` now calls it for a server at the current
+  time. #3340's decoders also stop reading three malformed encodings
+  leniently: a keyUsage that is not a BIT STRING no longer counts as absent,
+  a repeated extension no longer lets the last copy win, and a BOOLEAN other
+  than 0x00 or 0xFF (a cA, or an extension's critical flag) is no longer
+  read as TRUE; each makes the certificate refused.
+  A basicConstraints field repeated or out of order (the last one won), or
+  a byte after the extension's SEQUENCE,
+  and a pathLenConstraint that is negative or carries a leading zero it does
+  not need is refused too; one of four bytes or more, too large to limit
+  any path, reads as unbounded, as OpenSSL reads it.
+  `tls13_cert.check_validity_at(c, at)` checks one certificate at a
+  given time. A self-signed certificate pinned as its own anchor is trusted
+  as it stands, whatever its basicConstraints say, as OpenSSL trusts it.
+  `std/http/README.md` lists what the pure client validates.
+
+- **A stapled OCSP response can no longer stop the pure TLS client
+  (#3308).** `std.cryptography.tls13_cert`'s DER reader, under
+  `parse_ocsp_status` and the OCSP signature check, read a length of four
+  bytes into a 32-bit int: from 0x80000000 up it overflowed into a negative
+  length that passed the bounds check, and the next read indexed before the
+  buffer, a panic in the client on a response the server controls. Lengths
+  of more than three bytes (16 MB) are refused now.
+
+- **Path validation measured against x509-limbo and bettertls, and against
+  OpenSSL; what they found is fixed (#1298).** `std.cryptography.tls13_cert`
+  runs both corpora in Linux CI (`tests/conformance/x509_limbo`, pinned to a
+  commit and a SHA-256, fetched into a cache): all 9572 bettertls cases
+  agree, and `expected.txt` gives, for each limbo case that is skipped (CRLs,
+  ML-DSA) or does not agree, the reason and OpenSSL's verdict. The two TLS
+  backends accept the same chains except where OpenSSL accepts something
+  unsafe, which the pure backend refuses. Fixed on the way: path validation
+  accepted RSA keys under 2048 bits, DSA and P-192 keys, and EC keys with
+  explicit curve parameters; a wildcard SAN such as `*.example.com` passed a
+  CA's excluded `bar.example.com` (CVE-2025-61727, which OpenSSL 3.6.4 still
+  accepts); mailbox, URI, directoryName and unrecognised name-constraint
+  forms were ignored rather than applied or refused; malformed names or
+  constraints, and an empty permittedSubtrees, were read as well formed;
+  name-constraint checks had no bound (2048 subtrees against 2048 names is
+  four million comparisons; now 250000, as Go and rustls-webpki); `*.com`
+  matched every .com host; and a critical key identifier or authority
+  information access, or a CA with an empty subject, was accepted.
+
+- **A certificate whose keyUsage does not allow signing is no longer
+  accepted as a TLS peer (#3309).** `tls13_cert.validate_chain`, and so the
+  pure TLS client, took any leaf for `PURPOSE_SERVER` or `PURPOSE_CLIENT`
+  whatever its keyUsage said, a CA certificate with keyCertSign and cRLSign
+  only among them. TLS 1.3 signs the CertificateVerify with the leaf's key,
+  and RFC 8446 4.4.2.2 requires digitalSignature when keyUsage is present;
+  OpenSSL refuses such a leaf as an unsuitable purpose, so the two backends
+  disagreed. The leaf's keyUsage, when present, must now allow
+  digitalSignature.
+
+- **On the pure TLS backend, as on OpenSSL's, only a self-signed root ends
+  a certificate path (#3310).** `tls13_cert.validate_chain` let any trusted
+  certificate end a path, an intermediate CA among them, and a self-issued
+  root whose authorityKeyIdentifier names another key, issuer or serial.
+  OpenSSL, without partial chains, ends a path only at a certificate that is
+  self-signed by X509_check_akid's rule (issuer equal to subject, and an AKI,
+  if any, naming the certificate itself), so the two backends accepted
+  different chains. The pure backend applies the same rule now.
+- **Migrating:** a CA file holding an intermediate rather than its root
+  (`client.set_cafile`, `SSL_CERT_FILE`) no longer anchors a path on the
+  pure backend, as it never did on OpenSSL; trust the root. Pinning an
+  intermediate on both backends is #3311.
+
+- **The OpenSSL TLS backend refuses RSA keys under 2048 bits everywhere
+  (#3312).** `std.http`'s client and server contexts ran at the security
+  level the system configured: OpenSSL's own default, level 1, accepts a
+  1024-bit RSA certificate, which the pure-Aether backend refuses, so the
+  same program accepted a different set of servers depending on the backend
+  and the distribution. Every OpenSSL client and server context now runs at
+  level 2 at least (RSA, DSA and DH of 2048 bits or more, elliptic curves of
+  224 bits or more); a system configured higher stays higher.
+- **Migrating:** a server certificate with an RSA key under 2048 bits, or a
+  chain with one, no longer verifies on the OpenSSL backend, and
+  `http.server_set_tls` refuses to load one; reissue it with a 2048-bit (or
+  larger) RSA key or an EC key.
+
+- **The OpenSSL TLS backend matches the host against subjectAltName only
+  (#3313).** `std.http`'s OpenSSL client (and the wss:// client) let
+  OpenSSL fall back to the subject common name when a certificate had no
+  DNS subjectAltName, which the pure-Aether backend never does (RFC 9525,
+  as browsers): a CN-only certificate was accepted on one backend and
+  refused on the other. Both clients now set
+  X509_CHECK_FLAG_NEVER_CHECK_SUBJECT.
+- **Migrating:** a server certificate that names its host only in the
+  subject CN no longer verifies on the OpenSSL backend; reissue it with the
+  name in subjectAltName.
+
+- **The pure TLS client refuses extensions it never asked for (#3315).**
+  `std.cryptography.tls13_client` accepted any extension in a ServerHello
+  or EncryptedExtensions: unknown types, TLS 1.2 ones
+  (extended_master_secret, renegotiation_info, ec_point_formats), a
+  key_share or supported_versions out of place, a pre_shared_key in a full
+  handshake, duplicates, an ALPN protocol it did not offer, and an
+  EncryptedExtensions with no extensions block at all. RFC 8446 4.2 requires
+  refusing them; now the client does, with unsupported_extension for what it
+  never offered, illegal_parameter for an offered extension out of place or
+  repeated, and decode_error for a block that does not parse, and it sends
+  that alert. New `tls13_hs.check_extensions(kind, exts, offered)` holds the
+  rules.
+
+- **The pure TLS client checks the server's Certificate message (#3316).**
+  It accepted any CertificateEntry extension (an unknown type, an SCT it
+  never asked for, a server_name out of place, a repeated or empty
+  status_request) and did not check that the message's lists fill it. RFC
+  8446 4.4.2 and 4.2 make these errors; the client now refuses them with
+  unsupported_extension, illegal_parameter or decode_error, and a
+  status_request must hold exactly one OCSP response. New
+  `tls13_hs.check_certificate(body, offered)` holds the rules.
+
+- **The pure TLS stack's record layer enforces RFC 8446 5 (#3317).** The
+  client and the server read records of any type and length: a plaintext
+  record over 2^14 bytes, a protected one over 2^14 + 256 or with an inner
+  plaintext over 2^14 + 1 (padding included), a content type TLS 1.3 does
+  not know, a change_cipher_spec after the handshake, more than one or of a
+  value other than 1, an empty handshake record, a plaintext record inside
+  the encrypted flight, and bytes after the server's Finished in its record
+  (which crashed the client). An unlimited run of empty records cost the
+  reader CPU without end; more than 32 in a row are now refused as a denial
+  of service, as BoringSSL bounds them. Each is refused with
+  record_overflow, unexpected_message or bad_record_mac, and the alert is
+  sent. New `tls13_record.check_header` checks a record's header before its
+  body is read; `OpenedRecord.alert` says what to send when a record does
+  not open.
+
+- **The pure TLS stack checks each handshake message to its last byte and
+  sends the alert RFC 8446 names (#3324).** The client took a server
+  flight with messages out of their place (a NewSessionTicket or an unknown
+  message among them, no CertificateVerify), bytes after a CertificateVerify's
+  signature, a Finished longer than the hash, and a CertificateRequest with a
+  request context or without signature_algorithms; it now refuses each with
+  unexpected_message, decode_error or missing_extension. A CertificateVerify
+  with a scheme the client did not offer, or one that does not fit the
+  certificate's key, is illegal_parameter, and a signature that does not
+  verify decrypt_error, also when a resumption's Finished does not match.
+  The server read the client Finished with no alert at all; it now answers,
+  under its application keys, bad_record_mac, unexpected_message,
+  decode_error or decrypt_error.
+
+- **A short client Finished no longer crashes the pure TLS server (#3337).**
+  The server compared the Finished's verify_data as the hash's length
+  without checking the message held that much, so a client that sent a
+  shorter one made the server process panic (a slice out of range), after
+  the server's first flight and before any authentication. A longer one was
+  taken (only the first bytes were compared) and one split over two records
+  refused. The server now reassembles the client Finished across records,
+  refuses verify_data of any other length with decode_error, and anything
+  after it in its record with unexpected_message.
+
+- **A sandbox's grants belong to the thread that entered them, in the
+  runtime.** Every `sandbox.enforce` installed one process-wide checker
+  pointer, and any thread leaving its block cleared it: a deny-all block on
+  one thread then ran unchecked while another thread entered and left an
+  allow-all block, or called the pointer just cleared and the process died
+  of an access violation. The grant levels lived in each program's or
+  library's generated code, so a library's export called from inside
+  another library's block checked against an empty stack of its own, or,
+  on one runtime, replaced the outer checker with its own (an inner
+  `grant_all` widened the block) and cleared it on the way out (the rest of
+  the block ran unchecked). A panic caught by an actor's barrier left the
+  block's level on the scheduler thread, so the next handler there was held
+  to grants already freed; and a 65th nested level was silently dropped,
+  its pop taking an outer level off. The levels are now each thread's,
+  kept by the runtime (`aether_sandbox_push` / `aether_sandbox_pop` for a C
+  host): nesting across libraries on one runtime narrows; libraries with
+  copies of the runtime of their own (macOS, Windows, built without
+  `--shared-runtime`) refuse what they cannot check, naming
+  `--shared-runtime`; a caught panic ends the levels pushed inside its
+  frame, whoever catches; a 65th level is refused with a panic. The contrib
+  host bridges push their grants as levels of the thread instead of
+  swapping the checker, so a bridge inside a block gets the intersection,
+  and the LD_PRELOAD library reads the calling thread's levels.
+  `sandbox_install()` and `sandbox_uninstall()` now do nothing (#2955).
+
+- **The pure TLS client checks the NewSessionTickets it reads (#3319,
+  #3354, #3356).** It took an empty ticket, a repeated early_data, an
+  early_data that is not four bytes, empty TLS flags or flags ending in a
+  zero byte, bytes after the extensions, and a ticket extension it knows
+  that a ticket may not carry; it now refuses each with decode_error or
+  illegal_parameter (RFC 8446 4.6.1, 4.2). It refused an extension it does
+  not know, which 4.6.1 says to ignore, and now ignores it. A ticket may
+  span records. `conn_get_ticket` dropped the application data that came
+  before the ticket; it now keeps it for the next `conn_recv`, up to 256 KiB
+  (past them it gives up, the connection still open), and a ticket
+  `conn_recv` reads is kept for `conn_get_ticket`. A CertificateRequest
+  after the handshake (no post-handshake authentication is offered) is
+  unexpected_message.
+
+- **The pure TLS client checks the ServerHello's fixed fields and its key
+  share (#3318, #3353).** It took a ServerHello whose legacy_version is not
+  0x0303, whose legacy_session_id_echo is not the session id it sent, whose
+  extensions do not fill the message or whose key_share has bytes after the
+  key, and on a resumption a selected_identity it never offered, a suite
+  whose hash is not the ticket's, a ServerHello without key_share (an
+  X25519 agreement over no share at all) and a key_share for a group it had
+  no share for. Each is now refused, with illegal_parameter, decode_error
+  or missing_extension (RFC 8446 4.1.3, 4.2.8, 4.2.11); an unoffered suite
+  or group and a key share that is not a valid point, which got no alert at
+  all, are illegal_parameter.
+
+- **The pure TLS server checks the ClientHello and speaks the rest of
+  TLS 1.3's baseline (#3357).** BoGo's server tests found it taking a
+  ClientHello with compression methods other than null alone, a repeated
+  extension, two key shares for one group, a server_name, key_share or
+  certificate_authorities that does not parse, bytes after the extensions,
+  and a pre_shared_key that is not the last extension; it now refuses each
+  with illegal_parameter or decode_error (RFC 8446 4.1.2, 4.2), a
+  ClientHello without supported_groups or key_share with missing_extension
+  (9.2), and another handshake type with unexpected_message. It takes a
+  secp256r1 key share, which 9.1 says a TLS 1.3 implementation MUST support,
+  signs with rsa_pss_rsae_sha384 and rsa_pss_rsae_sha512 when the client
+  offers only those (new `rsa.sign_pss_hash`, `rsa.verify_pss_hash` and
+  `tls13_cert.sign_server_cert_verify_rsa_pss_scheme`), reads past 0-RTT
+  data it does not take (4.2.10), and sends its compatibility
+  change_cipher_spec whatever the client's session id. On both sides a
+  Finished of the wrong length is now decrypt_error (4.4.4), and a
+  protected record shorter than its tag bad_record_mac (5.2).
+
+- **The pure TLS server never sends a non-certificate PEM block as part of
+  its chain (#3378).** `std.cryptography.tls13_server.parse_cert_chain_pem`
+  split the certificate text at each END CERTIFICATE line and decoded the
+  first PEM block of each piece, whatever its label. A private key between
+  two certificates (or a combined key-and-certificate file) went into the
+  chain, and the server sent the key's PKCS#8 DER to every client as a
+  CertificateEntry; `server_set_tls` checked only the leaf, so it accepted
+  the files. Only `BEGIN CERTIFICATE` blocks now form the chain, every other
+  block is skipped as OpenSSL skips it, and every entry is parsed as a
+  certificate when the chain is loaded: a certificate block that does not
+  decode or parse refuses the whole text, and `server_set_tls` says which.
+  New `tls13_server.parse_cert_chain_pem_checked`.
+
+- **The pure TLS server no longer dies on a certificate chain or a write
+  over 16 KiB (#3380).** `std.cryptography.tls13_server` put each handshake
+  message, and each `conn_send`, into one record. Over 2^14 bytes
+  `seal_record` refuses, and the null went on to a slice that panicked
+  outside any try, so a chain over 16 KiB killed an HTTP server on its first
+  connection, and so did a response written in one piece over 16 KiB; the
+  client's `conn_send` had the same fault. Handshake messages and data now
+  go in as many records as they take (new `tls13_record.seal_records`, RFC
+  8446 5.1), and every seal and send is checked on both sides: a record that
+  cannot be sealed or sent ends that connection with an error, never the
+  process.
+
+- **A pure TLS connection's memory no longer grows with what it receives
+  (#3379).** The record readers of `std.cryptography.tls13_server` and
+  `tls13_client` appended every byte read and only moved an offset past the
+  records they returned, so a connection kept everything it had ever
+  received: a pure server reading a 200 MiB stream grew by 240 MiB, one
+  long keep-alive connection could exhaust its memory, and the lengths would
+  overflow at 2^31. The readers now drop what they have consumed before
+  reading more, so a connection holds about one record and one read. Before
+  the handshake, the server no longer reads past application_data records
+  (empty ones cost nothing, so any number went by) except the refused 0-RTT
+  data after a HelloRetryRequest, and the client takes one
+  change_cipher_spec, of the byte 1, in its whole handshake (RFC 8446 5,
+  D.4) instead of dropping any number of any content before the
+  ServerHello; anything else is unexpected_message.
+
+- **Loading a server's private key leaves no copy of it in freed memory
+  (#3382).** The pure TLS server wiped the key it kept, but the copies the
+  loading made on the way were freed as they were: the base64 decoder grew
+  its output from nothing, so each smaller copy of the key's DER went back
+  to the allocator; `parse_sec1` and `parse_pkcs8` freed the key's SEQUENCE;
+  the RSA import freed its SEQUENCE, the private exponent's INTEGER content
+  and the exponent's magnitude; and the key text was copied into strings,
+  which cannot be wiped. `pem.parse` now decodes the base64 where it lies in
+  the text into a buffer of its final size (new `pem.parse_at`, which the
+  key loader uses at the key's label), every intermediate buffer holding key
+  material is wiped as it is freed, and `rsa.key_from_pkcs1_der` builds its
+  key as `key_from_bytes` does, the private exponent copied byte by byte and
+  never through `std.bignum`: the `d` bignum of such a key is null.
+
+- **`bytes.wipe` and `bytes.wipe_free`: zeroing a secret that the compiler
+  cannot drop.** A buffer that held key material, a nonce or the text of a
+  private key was zeroed with a loop of `bytes.set` calls before it was
+  freed, a dead store the C compiler may remove once it inlines the calls,
+  and only up to the buffer's length. `bytes.wipe(b)` zeroes the whole
+  capacity through a call the compiler cannot see through (OpenSSL's
+  `OPENSSL_cleanse` technique), and keeps the buffer; `bytes.wipe_free(b)`
+  wipes, then frees. The cryptography modules' private wipe helpers and the
+  HTTP server's copies of the TLS key text use it (#3376).
+
+- **The pure TLS server checks every signature before it sends it.** A
+  CertificateVerify signature computed wrongly, by a fault in the
+  arithmetic or a bit flipped in memory (a glitch, Rowhammer), can disclose
+  the private key: one faulty RSA-CRT signature factors the modulus, and
+  two signatures of one message under a deterministic nonce (RFC 6979
+  ECDSA, Ed25519) give the key. Each signature is now verified against the
+  certificate's key, the one the client checks, before it is sent; one
+  that does not verify is wiped and never sent, and the handshake ends with
+  `internal_error`. On by default, for every scheme the server signs
+  (ECDSA P-256, P-384, P-521, rsa_pss_rsae_sha256/384/512, Ed25519). The
+  cost is one verification per handshake: about as much as the signature
+  for ECDSA and Ed25519, about a tenth of it for RSA. New in
+  `std.cryptography.tls13_cert`: `leaf_signature_holds` and
+  `verify_cert_verify_rsa_pss_scheme` (#3376).
+
+- **Hedged signing nonces, and the mTLS client checks its signature too.**
+  The TLS CertificateVerify signatures used deterministic nonces (RFC 6979
+  for ECDSA, RFC 8032 for Ed25519), so two signatures of one message shared
+  one, and a fault in either gave the key away. Each signature now mixes 32
+  fresh random bytes into the nonce: `ecc.ecdsa_sign_hedged` and the
+  curves' `ecdsa_sign_hedged` (RFC 6979 section 3.6, the extra input k'),
+  and `ed25519.sign_hedged`. Whatever those bytes hold, the nonce is no
+  weaker than the deterministic one, and a verifier cannot tell the
+  difference. `ecdsa_sign` and `ed25519.sign` stay deterministic and keep
+  their RFC vectors. The mTLS client (`tls13_client.connect_mtls`) now
+  checks its CertificateVerify against its certificate's key before
+  sending it, as the server does: one that does not verify ends the
+  handshake with `internal_error`, and no Finished follows. Before, it sent
+  the signature, and learnt of the server's `decrypt_error` only on its
+  first read (#3376).
+
+- **`std.cryptography.shield`: a long-lived secret kept encrypted in
+  memory.** `shield.wrap(secret)` seals a private key with ChaCha20-Poly1305
+  under SHA-512 of a fresh 16 KiB random pre-key and wipes the plaintext;
+  `shield.unwrap(handle)` gives it back for one use, and refuses it when a
+  bit of the sealed key or the pre-key changed in memory (the tag); and
+  `shield.free` wipes both. A memory-reading attack (RAMBleed, a
+  Spectre-class read, a core dump) then needs the whole 16 KiB pre-key
+  without an error, as for OpenSSH's shielded keys since 8.2. An unwrap
+  costs about 0.1 ms. ChaCha20-Poly1305 now also wipes its keystream and
+  one-time Poly1305 key before freeing them (#3376).
+
+- **The pure TLS server keeps its private key shielded.** The key a server
+  loads once and keeps for its life (#3362) is now held by
+  `std.cryptography.shield`, sealed behind a 16 KiB random pre-key, and in
+  the clear only for each signature; a key whose sealed form changed in
+  memory is refused, and the handshake ends with `internal_error`. An RSA
+  key is shielded as its PKCS#1 DER and rebuilt for each signature. For
+  code that read `tls13_server.ServerKey`'s fields: `secret` and `rsa` are
+  gone, and `shielded` holds the shield handle; `load_private_key`,
+  `free_private_key` and `accept` are unchanged (#3376).
+
+- **Hashes, MACs and ciphers wipe their own state.** Wiping a key was not
+  enough while the primitives that used it freed their state as it was:
+  after one Ed25519 signature its seed was in SHA-512's freed block, an
+  HMAC's key was in its freed padded key, and a shield wrap left the AEAD
+  key (a SHA-512 digest) in a freed SHA-2 context. `sha2`, `sha3`, `hmac`,
+  `hkdf`, `aes` and `chacha20poly1305` now free every buffer with
+  `bytes.wipe_free`, wipe their context structs before freeing them, and
+  the C AES wipes its round keys and stack copies with `aether_wipe` (a
+  `memset` there was a dead store). New: `mem.wipe(dst, n)`, the
+  raw-memory form of `bytes.wipe`. No cost shows at the timer's
+  resolution: SHA-256 of 1 MiB 8 ms, of 64 bytes 1 us, HMAC-SHA-256 of 64
+  bytes 3 us, before and after (#3402).
+
+- **Every cryptography module wipes what it frees.** #3402 made the hash,
+  MAC and cipher modules wipe their state; the key exchange and the key
+  schedule still freed secrets as they were: X25519's ladder its clamped
+  copy of the private scalar on every exchange, the TLS key schedule its
+  "derived" salts (one of which gives the master secret, so every
+  application traffic key), and `tls13_ks.free_secret` zeroed with a loop
+  the compiler may drop. The rule is now the whole tree's: every module
+  under `std/cryptography` frees every `bytes` buffer with
+  `bytes.wipe_free`, and `make check-crypto-wipe` (run by `make ci`) fails
+  on a plain `bytes.free` there. Context structs, Argon2's working matrix,
+  ML-KEM's coefficient arrays, BLAKE3's buffers and RSA's limb scratch are
+  wiped with `mem.wipe` before they are freed (#3414).
+
+- **A library's code inside a program's deny-all block is held to it, however
+  the program was linked (#3445).** Runtime copies share the sandbox levels
+  and the execution accounts through the first loaded image that has them,
+  and an image said so only by its exports. A Windows executable exports
+  nothing, nor does one linked without `-rdynamic` on Linux (a C host linked
+  with `ae cflags --libs`), so a program whose copy looked first, before it
+  loaded a library with a runtime of its own, kept levels and accounts the
+  library's copy never found: the library's code that the program called
+  inside a deny-all block was allowed everything, and an account the
+  program had put in use was charged nothing the library allocated. Each
+  copy now carries a record in its image that every copy reads in load
+  order, the program first: on ELF a read-only note naming the copy's
+  rendezvous by an offset fixed at link time, on PE and Mach-O a section of
+  its own. An image is read while it is held loaded, and a record counts
+  only when what it names lies inside its image. The record never changes,
+  so copies of later releases read it too.
+
 ## [0.859.0]
 
 ### Fixed
