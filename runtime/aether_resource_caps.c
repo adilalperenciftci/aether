@@ -523,10 +523,20 @@ static void own_free(AetherExecAccount* a) {
     *link = a->next_live;
     g_live_count--;
     atomic_store_explicit(&a->dead, 1, memory_order_release);
-    /* Its children charge it no more, and its blocks credit nobody: they
-     * stay counted against the process cap until they are freed. */
-    for (AetherExecAccount* x = g_live_accounts; x; x = x->next_live)
-        if (x->parent == a) x->parent = NULL;
+    /* Its blocks credit nobody from now on: they count only against the
+     * process cap until they are freed. So its ancestors are credited now
+     * with what its own live blocks were charged (#3408): its count, less
+     * what its live children hold. Those stay charged where they are: a
+     * child goes under its parent's parent, which its blocks were charged
+     * to all along, and keeps narrowing under it. */
+    uint64_t own = atomic_load_explicit(&a->used, memory_order_relaxed);
+    for (AetherExecAccount* x = g_live_accounts; x; x = x->next_live) {
+        if (x->parent != a) continue;
+        uint64_t held = atomic_load_explicit(&x->used, memory_order_relaxed);
+        own = own >= held ? own - held : 0;
+        x->parent = a->parent;
+    }
+    if (a->parent && own) chain_credit(a->parent, own);
     a->parent = NULL;
     for (size_t i = 0; i < g_slot_cap; i++) {
         if (g_slots[i].p && g_slots[i].a == a) {

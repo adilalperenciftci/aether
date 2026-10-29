@@ -176,8 +176,9 @@ account_new(memory_bytes: long, deadline_ms: long, counts: int, parent: ptr) -> 
     return aether_exec_account_make(memory_bytes, deadline_ms, counts, parent)
 }
 
-// Frees an account; its children and the blocks charged to it are detached.
-// Freed while in use, it is in use no more: account_in_use() is null after,
+// Frees an account. The blocks charged to it are detached (its parent chain
+// credited for them), and its children go under its own parent. Freed while
+// in use, it is in use no more: account_in_use() is null after,
 // here and, from its next allocation or call, on any other thread.
 account_free(account: ptr) {
     aether_exec_account_free(account)

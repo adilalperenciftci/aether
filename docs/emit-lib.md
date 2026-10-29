@@ -754,8 +754,10 @@ aether_exec_account_free(script);
 - **Ownership.** The account is the host's from `aether_exec_account_new`
   to `aether_exec_account_free`; the runtime keeps nothing of `limits` past
   the call, writes `previous` and keeps nothing of it. Freeing an account
-  detaches its children and its blocks, which then count only against the
-  process cap. Nothing in the runtime names a freed account (#3407): in use
+  detaches its blocks, which then count only against the process cap: its
+  ancestors are credited with what they were charged for them (#3408). Its
+  children go under its own parent, which their blocks were charged to all
+  along, and keep narrowing under it. Nothing in the runtime names a freed account (#3407): in use
   on the calling thread, it is in use no more; in use on another thread,
   nothing more is charged to it there, and that thread lets go of it at its
   next allocation, call or `aether_exec_use`; an execution that began under

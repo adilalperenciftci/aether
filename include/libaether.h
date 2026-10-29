@@ -162,7 +162,9 @@ AETHER_API int aether_exec_cancel(AetherExecToken token);
  * thread later. Allocations made on other threads (an actor's handler) are
  * not charged to it, nor those of an actor stepped on this thread while it
  * is in use (a send's inline step). aether_exec_account_free detaches its
- * children and its blocks, which then count only against the process cap.
+ * blocks, which then count only against the process cap (its ancestors are
+ * credited with what they were charged for them), and puts its children
+ * under its own parent (#3408).
  * Nothing is charged and nothing more is paid while no account exists.
  *
  * Ownership: an account is the host's, from new to free; the runtime keeps
