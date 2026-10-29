@@ -446,6 +446,8 @@ struct LeafCert {
     is_ca: int
     has_key_usage: int
     key_cert_sign: int
+    has_path_len: int
+    path_len: int
 }
 
 // Parse a DER Certificate into `out`. Returns "" on success or an error.
@@ -477,6 +479,8 @@ parse_certificate(der: byte[], out: *LeafCert) -> string {
     out.is_ca = 0
     out.has_key_usage = 0
     out.key_cert_sign = 0
+    out.has_path_len = 0
+    out.path_len = 0
 
     view = bytes.new(len)
     if len > 0 { bytes.set(view, len - 1, 0) }
@@ -733,11 +737,50 @@ fn decode_basic_constraints(octet_content: @keep ptr, out: *LeafCert) {
                     }
                 }
             }
+            if tag == 0x02 {
+                decode_path_len(val, out)
+            }
             bytes.free(val)
+        }
+    }
+    if asn1.reader_eof(sr) != 1 {
+        val2, verr2 = asn1.read_tlv(sr)
+        tag2 = asn1.last_tag(sr)
+        if string.equals(verr2, "") == 1 {
+            if tag2 == 0x02 {
+                decode_path_len(val2, out)
+            }
+            bytes.free(val2)
         }
     }
     asn1.reader_free(sr)
     bytes.free(seq_content)
+}
+
+// Decode a non-negative pathLenConstraint. Malformed negative values become
+// a rejecting limit; positive values wider than int exceed the bounded path
+// depth and are therefore equivalent to INT_MAX here.
+fn decode_path_len(content: @keep ptr, out: *LeafCert) {
+    n = bytes.length(content)
+    out.has_path_len = 1
+    out.path_len = -1
+    if n < 1 { return }
+    start = 0
+    while start < n - 1 && bytes.get(content, start) == 0 {
+        start = start + 1
+    }
+    if (bytes.get(content, start) & 0x80) != 0 { return }
+    if n - start > 4 {
+        out.path_len = 2147483647
+        return
+    }
+    v = 0
+    i = start
+    while i < n {
+        v = (v << 8) | (bytes.get(content, i) & 0xFF)
+        i = i + 1
+    }
+    out.path_len = v
 }
 
 // keyUsage ::= BIT STRING. The first content byte counts the unused bits;
@@ -1859,78 +1902,98 @@ fn chains_to_anchor(cert: *LeafCert, anchors: ptr) -> int {
 
 // Verify a certificate PATH: `leaf` may chain through server-sent
 // `intermediates` (a std.list of *LeafCert, possibly empty/null) up to a
-// trusted anchor in `anchors`. At each hop the child's signature must verify
-// under the parent's key and the DNs must match; the path terminates when a
-// cert chains directly to a trusted anchor. A self-signed / untrusted leaf with
-// no such path is REJECTED. Bounded to MAX_CHAIN_DEPTH hops to stop cycles.
-// Returns "" on a valid path, else an error.
+// trusted anchor in `anchors`. Candidate issuers are explored with bounded
+// backtracking because two certificates can legitimately share a subject and
+// public key while only one has a path to a trusted anchor.
 chain_verify_path(leaf: *LeafCert, intermediates: ptr, anchors: ptr) -> string {
     if anchors == null { return "no trust anchors" }
     if list_size(anchors) == 0 { return "no trust anchors" }
 
-    current = leaf
-    // Track which intermediates we've consumed so a malicious server can't loop
-    // us with a cycle of mutually-signed intermediates.
     used = list_new()
-    depth = 0
-    result = "certificate does not chain to a trusted anchor"
-    walking = 1
-    while walking == 1 {
-        if chains_to_anchor(current, anchors) == 1 {
-            result = ""
-            walking = 0
-        } else {
-            if depth >= MAX_CHAIN_DEPTH {
-                result = "certificate chain too long"
-                walking = 0
-            } else {
-                if intermediates == null {
-                    walking = 0
-                } else {
-                    idx = find_issuer_unused(current, intermediates, used)
-                    if idx < 0 {
-                        walking = 0
-                    } else {
-                        list.add(used, list.at(intermediates, idx))
-                        current = list.at(intermediates, idx) as *LeafCert
-                        depth = depth + 1
-                    }
-                }
-            }
-        }
-    }
+    state = PathSearchState { attempts: 0, limit_hit: 0, depth_hit: 0 }
+    ok = path_search(leaf, intermediates, anchors, used, 0, 0, &state)
     list_free(used)
-    return result
+    if ok == 1 { return "" }
+    if state.limit_hit == 1 { return "certificate path search limit exceeded" }
+    if state.depth_hit == 1 { return "certificate chain too long" }
+    return "certificate does not chain to a trusted anchor"
 }
 
 const MAX_CHAIN_DEPTH = 8
+const MAX_PATH_ATTEMPTS = 64
 
-// Like find_issuer but skips any intermediate already in `used` (pointer
-// identity), preventing a signed-intermediate cycle from looping forever.
-// Only a CA can issue (RFC 5280 §4.2.1.9): basicConstraints cA must be TRUE,
-// and keyUsage, when present, must assert keyCertSign (§4.2.1.3). Without
-// this a leaf a trusted CA issued could sign a certificate for any host.
-fn find_issuer_unused(cert: *LeafCert, intermediates: ptr, used: ptr) -> int {
+struct PathSearchState {
+    attempts: int
+    limit_hit: int
+    depth_hit: int
+}
+
+fn path_search(current: *LeafCert, intermediates: ptr, anchors: ptr,
+    used: ptr, ca_below: int, depth: int,
+    state: *PathSearchState) -> int {
+    if chains_to_anchor(current, anchors) == 1 { return 1 }
+    if depth >= MAX_CHAIN_DEPTH {
+        state.depth_hit = 1
+        return 0
+    }
+    if intermediates == null { return 0 }
+
+    next_ca_below = ca_below
+    if depth > 0 && current.is_ca == 1 {
+        if self_issued(current) == 0 {
+            next_ca_below = next_ca_below + 1
+        }
+    }
+
     n = list_size(intermediates)
     i = 0
     while i < n {
-        m = list.at(intermediates, i) as *LeafCert
-        if m != null {
-            if is_in_list(intermediates, i, used) == 0 {
-                if m.is_ca == 1 {
-                    if m.has_key_usage == 0 || m.key_cert_sign == 1 {
-                        if dn_equal(bytes.view(cert.issuer)[0..cert.issuer_len], bytes.view(m.subject)[0..m.subject_len]) == 1 {
-                            if verify_cert_signature(cert, m) == 1 {
-                                return i
-                            }
-                        }
+        if is_in_list(intermediates, i, used) == 0 {
+            issuer = list.at(intermediates, i) as *LeafCert
+            if issuer_name_matches(current, issuer) == 1 {
+                if state.attempts >= MAX_PATH_ATTEMPTS {
+                    state.limit_hit = 1
+                    return 0
+                }
+                state.attempts = state.attempts + 1
+                if issuer_candidate_valid(current, issuer, next_ca_below) == 1 {
+                    _ = list.add(used, issuer)
+                    if path_search(issuer, intermediates, anchors, used,
+                        next_ca_below, depth + 1, state) == 1 {
+                        return 1
                     }
+                    list_remove(used, list_size(used) - 1)
                 }
             }
         }
         i = i + 1
     }
-    return -1
+    return 0
+}
+
+fn issuer_candidate_valid(cert: *LeafCert, issuer: *LeafCert,
+    ca_below: int) -> int {
+    if issuer == null { return 0 }
+    if issuer.is_ca != 1 { return 0 }
+    if issuer.has_key_usage == 1 && issuer.key_cert_sign != 1 { return 0 }
+    if issuer.has_path_len == 1 {
+        if ca_below > issuer.path_len { return 0 }
+    }
+    validity = check_validity(issuer)
+    if string.equals(validity, "") != 1 { return 0 }
+    return verify_cert_signature(cert, issuer)
+}
+
+fn issuer_name_matches(cert: *LeafCert, issuer: *LeafCert) -> int {
+    if issuer == null { return 0 }
+    return dn_equal(bytes.view(cert.issuer)[0..cert.issuer_len],
+        bytes.view(issuer.subject)[0..issuer.subject_len])
+}
+
+fn self_issued(cert: *LeafCert) -> int {
+    if cert.issuer == null || cert.subject == null { return 0 }
+    return dn_equal(bytes.view(cert.issuer)[0..cert.issuer_len],
+        bytes.view(cert.subject)[0..cert.subject_len])
 }
 
 // Find the certificate that issued `leaf` — search `intermediates` then
@@ -2122,6 +2185,8 @@ init_leaf(l: *LeafCert) {
     l.is_ca = 0
     l.has_key_usage = 0
     l.key_cert_sign = 0
+    l.has_path_len = 0
+    l.path_len = 0
 }
 
 // Free a trust-anchor list built by trust_store_load: each *LeafCert's buffers,
