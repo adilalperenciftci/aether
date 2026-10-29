@@ -1,4 +1,5 @@
 #include "aether_panic.h"
+#include "../utils/aether_fatal.h"   /* aether_fatal_flush (#3435) */
 /* Header-only use: is_aether_string and the AetherString layout. Nothing
  * from std/string is linked, so a runtime-only link (the WASI panic lib)
  * still resolves. */
@@ -544,7 +545,7 @@ void aether_panic_owned(const char* reason, void (*release)(const void*)) {
     // The program's own lines first (#3435): stdout is fully buffered when it
     // is a file or a pipe, and abort() flushes no stdio stream on glibc, so
     // what the program printed last was lost behind this message.
-    fflush(stdout);
+    aether_fatal_flush();
     fprintf(stderr, "aether: panic outside any try/catch or actor: %s\n",
             aether_panic_reason_text(reason));
     const char* trace_env = getenv("AETHER_STACK_TRACE");

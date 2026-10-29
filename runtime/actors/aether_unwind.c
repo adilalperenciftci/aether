@@ -3,6 +3,7 @@
 // that keeps this out of aether_panic.c.
 
 #include "aether_unwind.h"
+#include "../utils/aether_fatal.h"   /* aether_fatal_flush (#3435) */
 #include "../utils/aether_compiler.h"
 #include "aether_frames.h"
 #include <stdatomic.h>
@@ -48,7 +49,7 @@ AetherFrames* aether_frames_here(void) {
 AetherJmpFrame* aether_try_push(void) {
     AetherFrames* F = &t_frames;
     if (F->depth >= AETHER_PANIC_MAX_DEPTH) {
-        fflush(stdout);   /* the program's lines first: abort() flushes nothing on glibc (#3435) */
+        aether_fatal_flush();   /* the program's lines first (#3435, aether_fatal.h) */
         fprintf(stderr, "aether: try/catch nesting exceeded %d, aborting\n",
                 AETHER_PANIC_MAX_DEPTH);
         abort();
@@ -107,7 +108,7 @@ void aether_try_pop(void) {
     AetherFrames* F = &t_frames;
     if (F->depth <= 0) {
         // Defensive: popping an empty stack means codegen/runtime mismatch.
-        fflush(stdout);   /* the program's lines first (#3435) */
+        aether_fatal_flush();   /* the program's lines first (#3435, aether_fatal.h) */
         fprintf(stderr, "aether: aether_try_pop on empty stack\n");
         abort();
     }

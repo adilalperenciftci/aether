@@ -24,6 +24,7 @@
  * changed it during the call. */
 
 #include "libaether.h"
+#include "utils/aether_fatal.h"   /* aether_fatal_flush (#3435) */
 #include "aether_exec.h"
 #include "aether_abi.h"
 #include "aether_resource_caps.h"
@@ -141,7 +142,7 @@ void aether_exec_set_next_deadline(int64_t ms) {
 
 static inline AetherJmpFrame* exec_push(AetherFrames* F, void** buf) {
     if (F->depth >= AETHER_PANIC_MAX_DEPTH) {
-        fflush(stdout);   /* the program's lines first: abort() flushes nothing on glibc (#3435) */
+        aether_fatal_flush();   /* the program's lines first (#3435, aether_fatal.h) */
         fprintf(stderr, "aether: try/catch and executions nested deeper than %d on one thread, aborting\n",
                 AETHER_PANIC_MAX_DEPTH);
         abort();

@@ -1,4 +1,5 @@
 #include "aether_http_server.h"
+#include "../../runtime/utils/aether_fatal.h"   /* aether_fatal_flush (#3435) */
 #include "aether_http.h"
 #include "../http/proxy/aether_proxy.h"
 #include "aether_net.h"
@@ -7602,7 +7603,7 @@ static int http_server_serve(HttpServer* server) {
                 // The join loop below assumes exactly n_threads accept threads;
                 // continuing with a NULL ctx would write through NULL here and
                 // leave a never-created thread to join. Fail loudly instead.
-                fflush(stdout);   /* the program's lines first: abort() flushes nothing on glibc (#3435) */
+                aether_fatal_flush();   /* the program's lines first (#3435, aether_fatal.h) */
                 fprintf(stderr, "aether: failed to allocate accept-thread context\n");  /* silent-ok: last line before abort */
                 abort();
             }
