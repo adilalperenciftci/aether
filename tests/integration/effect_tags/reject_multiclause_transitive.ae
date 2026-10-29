@@ -1,0 +1,9 @@
+import std.os
+
+helper(0) -> 0
+helper(n: int) -> os.system("echo hi") + n
+
+@pure
+run() -> helper(1)
+
+main() { run() }

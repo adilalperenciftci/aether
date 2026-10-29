@@ -618,6 +618,8 @@ jobs:
           set -e
           gmake compiler ae stdlib
           gmake test
+          ./build/ae run std/capsicum/test_capsicum_portability.ae
+          sh tests/freebsd/run.sh
 
   # ============================================================
   # contrib/host bridge check — syntax check of every host bridge

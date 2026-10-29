@@ -270,6 +270,68 @@ main() {
 EOF
 run_accept "seal except lets a whitelisted prefix through nested blocks" $AE_TMP/ae_seal_qualified_whitelisted.ae
 
+# Cases 16-19: DSL receiver fallback is still an outward lookup. A hidden or
+# sealed-out bare name must not reach the receiver-prefixed function, while a
+# name admitted by the seal remains available through that fallback.
+mkdir -p $AE_TMP/dsl_helper
+cat > $AE_TMP/dsl_helper/module.ae << 'EOF'
+exports(run, script)
+
+builder run(label: string) {}
+
+script(_ctx: ptr, name: string) {}
+EOF
+
+cat > $AE_TMP/ae_hide_dsl_receiver.ae << 'EOF'
+import dsl_helper
+main() {
+    dsl_helper.run("direct") {
+        hide script
+        script("blocked")
+    }
+}
+EOF
+run_reject "hide blocks DSL receiver fallback" $AE_TMP/ae_hide_dsl_receiver.ae
+
+cat > $AE_TMP/ae_seal_dsl_receiver_nested.ae << 'EOF'
+import dsl_helper
+main() {
+    dsl_helper.run("nested") {
+        seal except println
+        {
+            script("blocked")
+        }
+    }
+}
+EOF
+run_reject "seal except blocks nested DSL receiver fallback" $AE_TMP/ae_seal_dsl_receiver_nested.ae
+
+cat > $AE_TMP/ae_seal_dsl_receiver_allowed.ae << 'EOF'
+import dsl_helper
+main() {
+    dsl_helper.run("allowed") {
+        seal except script
+        script("ok")
+    }
+}
+EOF
+run_accept "seal except admits whitelisted DSL receiver fallback" $AE_TMP/ae_seal_dsl_receiver_allowed.ae
+
+cat > $AE_TMP/ae_hide_dsl_receiver_outer.ae << 'EOF'
+import dsl_helper
+main() {
+    {
+        hide script
+        {
+            dsl_helper.run("outer") {
+                script("blocked")
+            }
+        }
+    }
+}
+EOF
+run_reject "hide blocks DSL receiver fallback across nested scopes" $AE_TMP/ae_hide_dsl_receiver_outer.ae
+
 # Cleanup
 rm -f $AE_TMP/ae_hide_*.ae $AE_TMP/ae_seal_*.ae $AE_TMP/ae_hide_out
 

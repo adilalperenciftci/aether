@@ -1,15 +1,14 @@
 #!/bin/sh
 # tests/freebsd/nightly.sh — self-run nightly FreeBSD sandbox validation.
 #
-# There is no FreeBSD runner in the GitHub CI matrix, so the Capsicum /
-# Casper / audit enforcement paths can't be gated automatically. This
-# script is the stand-in: run it on a cron on the GhostBSD build box
-# (paul@192.168.0.57), it builds the target branch from a clean tree and
-# runs the FreeBSD enforcement tests + the portable contract test. On
-# failure it opens (or updates) a GitHub issue so the result feeds back.
+# The native FreeBSD CI job gates the Capsicum / Casper enforcement paths.
+# This script provides an optional independent scheduled run on the GhostBSD
+# build box: it builds the target branch from a clean tree and runs the
+# FreeBSD enforcement tests plus the portable contract test. On failure it
+# opens (or updates) a GitHub issue so the result feeds back.
 #
 # Cron example (GhostBSD), 03:17 nightly:
-#   17 3 * * *  cd $HOME/aether && BRANCH=feat/freebsd-sandbox-parity-v2 \
+#   17 3 * * *  cd $HOME/aether && BRANCH=main \
 #               sh tests/freebsd/nightly.sh >> $HOME/aether-nightly.log 2>&1
 #
 # Requirements on the host: git, gmake, a C toolchain, and `gh` (GitHub
@@ -17,12 +16,12 @@
 # runs the tests and just prints the report (no issue filed).
 #
 # Env:
-#   BRANCH  branch to test          (default: feat/freebsd-sandbox-parity-v2)
+#   BRANCH  branch to test          (default: main)
 #   REPO    owner/name for issues   (default: aether-lang-dev/aether)
 #   NO_ISSUE=1  run tests, never file an issue (dry run)
 set -u
 
-BRANCH="${BRANCH:-feat/freebsd-sandbox-parity-v2}"
+BRANCH="${BRANCH:-main}"
 REPO="${REPO:-aether-lang-dev/aether}"
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$ROOT" || exit 3
@@ -47,7 +46,7 @@ fail_report() {
         return
     fi
     title="$MARKER $BRANCH failed: $stage"
-    body=$(printf 'Nightly FreeBSD sandbox validation failed.\n\n- host: %s\n- branch: `%s`\n- commit: `%s`\n- stage: **%s**\n- when: %s\n\n```\n%s\n```\n\n_Filed automatically by tests/freebsd/nightly.sh (no FreeBSD CI runner yet)._' \
+    body=$(printf 'Nightly FreeBSD sandbox validation failed.\n\n- host: %s\n- branch: `%s`\n- commit: `%s`\n- stage: **%s**\n- when: %s\n\n```\n%s\n```\n\n_Filed automatically by the optional tests/freebsd/nightly.sh run._' \
         "$(uname -srm)" "$BRANCH" "$(git rev-parse --short HEAD 2>/dev/null)" "$stage" "$TS" "$(tail -120 "$LOG")")
     # Dedup: if an open issue with the same title exists, comment instead.
     existing=$(gh issue list --repo "$REPO" --state open --search "$title in:title" --json number --jq '.[0].number' 2>/dev/null)

@@ -1,6 +1,6 @@
 // FreeBSD-only: capsicum.rights_limit() on a descriptor obtained from a
-// std.file handle via file.fd() (issue #1003). Run by tests/freebsd/run.sh;
-// NOT in the CI regression set (no FreeBSD runner).
+// std.file handle via file.fd() (issue #1003). Run by tests/freebsd/run.sh
+// in the native FreeBSD CI job.
 //
 // Proves the fd accessor returns the real kernel descriptor: narrowing it
 // succeeds; after capsicum.enter() the narrowed, already-open handle still
