@@ -6815,8 +6815,12 @@ static long conn_fd_unread(int fd) {
  * is the peer's end, which a read must see. */
 static int conn_readable_has_request(HttpConn* conn) {
     if (conn->pure_tls) {
+        /* Counted before the pending check, which takes what is there: bytes
+         * that held no data (a KeyUpdate) leave the socket empty after it,
+         * and only a socket empty before it is the peer's end. */
+        long before = conn_fd_unread(conn->fd);
         if (pt_server_pending(conn->pure_tls) != 0) return 1;
-        return conn_fd_unread(conn->fd) <= 0;
+        return before <= 0;
     }
 #ifdef AETHER_HAS_OPENSSL
     if (conn->ssl) {

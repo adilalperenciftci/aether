@@ -1,10 +1,12 @@
 // Keep-alive connections that send a KeyUpdate after their request, for
 // test_https_pure_server_keys.sh (#3405): to localhost PORT, trusting CAFILE,
 // HELD connections each send a GET of / and a KeyUpdate right behind it, read
-// the answer, and stay open. The KeyUpdate is not a request: the server must
-// park each connection, not hold a worker waiting on it. Then one more
-// connection's GET must be answered at once. Prints "HELD <n>" and
-// "NEXT <ms>" (the time to the last answer), or "ERR: <why>".
+// the answer, and stay open. With KU_AFTER_MS set, each sends its KeyUpdate
+// that many milliseconds after the answer instead, when the server has parked
+// the connection, so the KeyUpdate wakes it. The KeyUpdate is not a request:
+// the server must park each connection, not hold a worker waiting on it.
+// Then one more connection's GET must be answered at once. Prints "HELD <n>"
+// and "NEXT <ms>" (the time to the last answer), or "ERR: <why>".
 
 import std.os
 import std.tcp
@@ -52,6 +54,11 @@ fn answered(conn: ptr) -> int {
 main() {
     port, _pe = string.to_int(os.getenv("PORT"))
     held_n, _he = string.to_int(os.getenv("HELD"))
+    after_ms = 0
+    if os.getenv("KU_AFTER_MS") != "" {
+        a, _ae = string.to_int(os.getenv("KU_AFTER_MS"))
+        after_ms = a
+    }
     held = list.new()
     k = 0
     while k < held_n {
@@ -60,10 +67,11 @@ main() {
             println("ERR: held ${k}: ${err}")
             return
         }
-        // The request and the KeyUpdate go out back to back, so the server
-        // reads both at once and holds the KeyUpdate when it has answered.
         serr = send_text(conn, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        kerr = tls13_client.conn_key_update(conn, 0)
+        kerr = ""
+        // Back to back, the server reads both at once and holds the
+        // KeyUpdate when it has answered.
+        if after_ms == 0 { kerr = tls13_client.conn_key_update(conn, 0) }
         if serr != "" || kerr != "" {
             println("ERR: held ${k}: send: ${serr}${kerr}")
             return
@@ -72,9 +80,20 @@ main() {
             println("ERR: held ${k}: no answer")
             return
         }
+        // Later, the KeyUpdate wakes a parked connection.
+        if after_ms > 0 {
+            sleep(after_ms)
+            kerr = tls13_client.conn_key_update(conn, 0)
+            if kerr != "" {
+                println("ERR: held ${k}: key update: ${kerr}")
+                return
+            }
+        }
         list.add(held, conn)
         k = k + 1
     }
+    // Time for the server to take the last wake before the next request.
+    if after_ms > 0 { sleep(200) }
     println("HELD ${held_n}")
     t0 = time.now_ms()
     conn, err = dial(port)

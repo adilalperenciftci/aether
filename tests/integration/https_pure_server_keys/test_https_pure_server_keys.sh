@@ -251,24 +251,28 @@ case "$OUT" in
 esac
 
 
-# 8. A KeyUpdate behind a request (#3405), on each server backend. The
-#    server runs with 8 workers (the pool's floor, AETHER_HTTP_WORKERS); 8
-#    keep-alive connections each send a GET and a KeyUpdate back to back,
-#    read the answer and stay open. The KeyUpdate is not data, so each
-#    connection must be parked: a worker left reading it blocks until the
-#    30 s idle timeout, and with all 8 so held the next connection waits for
-#    that. Whether the KeyUpdate is already in the server's buffer when it
-#    answers, or still on its way, it must not count as a request.
+# 8. A KeyUpdate on a keep-alive connection (#3405), on each server backend.
+#    The server runs with 8 workers (the pool's floor, AETHER_HTTP_WORKERS);
+#    8 keep-alive connections each send a GET and a KeyUpdate and stay open,
+#    the KeyUpdate either right behind the GET (it reaches the server with
+#    the request) or 80 ms after the answer (it wakes the parked
+#    connection). The KeyUpdate is not data, so each connection must stay
+#    parked: a worker left reading it blocks until the 30 s idle timeout,
+#    and with all 8 so held the next connection waits for that.
 for sb in $BACKENDS; do
-    SERVER_BACKEND="$sb" AETHER_HTTP_WORKERS=8 start_server p256 p256
-    [ -n "$S_PORT" ] || { echo "    got: $OUT"; fail "the 8-worker P-256 server, backend \"$sb\", did not start"; }
-    run env PORT="$S_PORT" CAFILE="$TMP/p256.pem" HELD=8 "$TMP/keyupdate_park"
-    next_ms=$(printf '%s\n' "$OUT" | sed -n 's/^NEXT \([0-9]*\).*/\1/p' | head -1)
-    case "$OUT" in
-        *"HELD 8"*"NEXT "*) ;;
-        *) echo "    got: $OUT"; fail "server backend \"$sb\": keep-alive connections with a KeyUpdate: no result" ;;
-    esac
-    [ "${next_ms:-99999}" -lt 5000 ] || { echo "    got: $OUT"; fail "server backend \"$sb\": with 8 connections each holding a KeyUpdate, the next request waited ${next_ms} ms: their workers were not freed"; }
-    echo "    ok: server backend \"$sb\": 8 connections each holding a KeyUpdate were parked; the next request was answered in ${next_ms} ms"
+    for after in 0 80; do
+        SERVER_BACKEND="$sb" AETHER_HTTP_WORKERS=8 start_server p256 p256
+        [ -n "$S_PORT" ] || { echo "    got: $OUT"; fail "the 8-worker P-256 server, backend \"$sb\", did not start"; }
+        run env PORT="$S_PORT" CAFILE="$TMP/p256.pem" HELD=8 KU_AFTER_MS="$after" "$TMP/keyupdate_park"
+        next_ms=$(printf '%s\n' "$OUT" | sed -n 's/^NEXT \([0-9]*\).*/\1/p' | head -1)
+        how="right behind the request"
+        [ "$after" = 0 ] || how="${after} ms after the answer"
+        case "$OUT" in
+            *"HELD 8"*"NEXT "*) ;;
+            *) echo "    got: $OUT"; fail "server backend \"$sb\", a KeyUpdate $how: no result" ;;
+        esac
+        [ "${next_ms:-99999}" -lt 5000 ] || { echo "    got: $OUT"; fail "server backend \"$sb\", a KeyUpdate $how: the next request waited ${next_ms} ms: the workers were held"; }
+        echo "    ok: server backend \"$sb\", a KeyUpdate $how on 8 connections: the next request was answered in ${next_ms} ms"
+    done
 done
 echo "  [PASS] $NAME"
