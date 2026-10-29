@@ -96,6 +96,17 @@ if [ "$apart" = 1 ] && ! grep -q -- "--shared-runtime" "$TMP/apart.err"; then
     head -5 "$TMP/apart.err" | sed 's/^/        /'
     fail=1
 fi
+# 2b. the inner library loaded first and local, reading at once, the outer
+# one global after it (#3442): the outer copy's lookup from the program's
+# handle sees the global scope, where it is itself, and still agrees on the
+# inner copy, the first in load order. On Windows, where a module has no
+# global scope, this is case 2 again.
+got="$("$TMP/host_dyn" "$TMP/static/libouter.$ext" "$TMP/static/libinner.$ext" mixed 2>"$TMP/mixed.err" | tr -d '\r')"
+if [ "$got" != "$want" ]; then
+    echo "  [FAIL] sandbox_nested_libraries: the inner library local and first: got '$got', want '$want'"
+    head -5 "$TMP/mixed.err" | sed 's/^/        /'
+    fail=1
+fi
 
 # 3. one shared runtime
 if ls "$ROOT/build/shared/" 2>/dev/null | grep -q "aether"; then

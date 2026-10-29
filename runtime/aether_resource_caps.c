@@ -1202,12 +1202,36 @@ static void* rv_symbol_of(const char* name, const char* symbol) {
 #endif
 
 #ifdef AETHER_RV_PHDR
-typedef struct { const char* name[512]; int n; } RvObjects;
+/* A loaded object and the addresses its segments span. A symbol looked up
+ * in an object's handle may be found in its dependencies, and the program's
+ * handle searches the whole global scope (every RTLD_GLOBAL library,
+ * whenever it was loaded), so a definition counts for the object being
+ * visited only when it lies inside it (#3442): copies that looked at
+ * different times then still agree on the first object in load order. */
+typedef struct { const char* name; uintptr_t lo, hi; } RvObject;
+typedef struct { RvObject* o; int n, cap, oom; } RvObjects;
 
 static int rv_collect(struct dl_phdr_info* info, size_t size, void* data) {
     (void)size;
     RvObjects* objs = (RvObjects*)data;
-    if (objs->n < 512) objs->name[objs->n++] = info->dlpi_name;
+    if (objs->n == objs->cap) {
+        int cap = objs->cap ? objs->cap * 2 : 64;
+        RvObject* grown = (RvObject*)realloc(objs->o, (size_t)cap * sizeof(RvObject));
+        if (!grown) { objs->oom = 1; return 1; }   /* stops the walk */
+        objs->o = grown;
+        objs->cap = cap;
+    }
+    RvObject* o = &objs->o[objs->n++];
+    o->name = info->dlpi_name;
+    o->lo = UINTPTR_MAX;
+    o->hi = 0;
+    for (int k = 0; k < (int)info->dlpi_phnum; k++) {
+        if (info->dlpi_phdr[k].p_type != PT_LOAD) continue;
+        uintptr_t a = (uintptr_t)info->dlpi_addr + (uintptr_t)info->dlpi_phdr[k].p_vaddr;
+        uintptr_t b = a + (uintptr_t)info->dlpi_phdr[k].p_memsz;
+        if (a < o->lo) o->lo = a;
+        if (b > o->hi) o->hi = b;
+    }
     return 0;
 }
 #endif
@@ -1234,20 +1258,39 @@ void* aether_rendezvous_find(const char* symbol) {
     if (n > 512) n = 512;
     for (DWORD i = 0; i < n && !p; i++) {
         FARPROC fp = GetProcAddress(mods[i], symbol);
-        if (fp) memcpy(&p, &fp, sizeof(p));
+        if (!fp) continue;
+        /* A forwarded export resolves into another module: it is that
+         * module's, found when its turn comes (#3442). */
+        HMODULE owner = NULL;
+        if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                    GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                (LPCSTR)fp, &owner) || owner != mods[i])
+            continue;
+        memcpy(&p, &fp, sizeof(p));
     }
 #elif defined(__APPLE__) && defined(RTLD_NOLOAD)
-    /* The images in load order, the program first. */
+    /* The images in load order, the program first. A lookup in an image's
+     * handle may find the definition in another image (the program's handle
+     * searches every image not opened RTLD_LOCAL): it counts only inside
+     * the image being visited (#3442). */
     uint32_t n = _dyld_image_count();
-    for (uint32_t i = 0; i < n && !p; i++) p = rv_symbol_of(i == 0 ? NULL : _dyld_get_image_name(i), symbol);
+    for (uint32_t i = 0; i < n && !p; i++) {
+        void* q = rv_symbol_of(i == 0 ? NULL : _dyld_get_image_name(i), symbol);
+        Dl_info di;
+        if (q && dladdr(q, &di) && di.dli_fbase == (const void*)_dyld_get_image_header(i)) p = q;
+    }
 #elif defined(AETHER_RV_PHDR) && defined(RTLD_NOLOAD)
     /* The loaded objects in load order, the program first (its name is
-     * empty; opened as NULL it is the global scope). Their names are taken
-     * first and opened after: dl_iterate_phdr holds a loader lock. */
-    RvObjects objs;
-    objs.n = 0;
+     * empty; opened as NULL it is the global scope). Their names and spans
+     * are taken first and opened after: dl_iterate_phdr holds a loader
+     * lock. Out of memory partway, what was taken is searched. */
+    RvObjects objs = { NULL, 0, 0, 0 };
     dl_iterate_phdr(rv_collect, &objs);
-    for (int i = 0; i < objs.n && !p; i++) p = rv_symbol_of(objs.name[i], symbol);
+    for (int i = 0; i < objs.n && !p; i++) {
+        void* q = rv_symbol_of(objs.o[i].name, symbol);
+        if (q && (uintptr_t)q >= objs.o[i].lo && (uintptr_t)q < objs.o[i].hi) p = q;
+    }
+    free(objs.o);
 #elif (defined(__unix__) || defined(__APPLE__)) && defined(RTLD_DEFAULT)
     /* The global scope in load order. */
     p = dlsym(RTLD_DEFAULT, symbol);

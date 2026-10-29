@@ -12,7 +12,11 @@
  *
  * HOST_STATIC: both libraries' generated C linked into this program with one
  * runtime. Otherwise argv[1] and argv[2] are the outer and inner libraries,
- * loaded at run time. */
+ * loaded at run time. With argv[3] "mixed" (#3442) the inner one is loaded
+ * first and local (RTLD_LOCAL), and reads PATH at once, so its copy finds
+ * the copies first; the outer one is loaded after it, global: its lookup
+ * from the program's handle sees the global scope, where the outer library
+ * is, and must still agree on the inner one, the first in load order. */
 #include <stdio.h>
 
 typedef void (*note_fn)(int which, int got);
@@ -22,6 +26,7 @@ typedef int (*export_fn)(void);
 
 static export_fn outer_fn, inner_read_fn, inner_granted_fn;
 static int notes[3] = { -1, -1, -1 };
+static int g_mixed = 0, g_before = -1;   /* argv[3] "mixed" and its early read */
 
 static void note(int which, int got) {
     if (which >= 0 && which < 3) notes[which] = got;
@@ -58,18 +63,30 @@ static void* lib_sym(lib_t h, const char* name) {
     memcpy(&v, &p, sizeof(v));
     return v;
 }
+static lib_t lib_open_local(const char* path) { return LoadLibraryA(path); }
 #else
 #include <dlfcn.h>
 typedef void* lib_t;
 /* Global, as a host that links a library at build time has it. */
 static lib_t lib_open(const char* path) { return dlopen(path, RTLD_NOW | RTLD_GLOBAL); }
+static lib_t lib_open_local(const char* path) { return dlopen(path, RTLD_NOW | RTLD_LOCAL); }
 static void* lib_sym(lib_t h, const char* name) { return dlsym(h, name); }
 #endif
 
+
 static int load(int argc, char** argv) {
-    if (argc < 3) { printf("usage: host <outer> <inner>\n"); return 1; }
+    if (argc < 3) { printf("usage: host <outer> <inner> [mixed]\n"); return 1; }
+    g_mixed = argc > 3 && strcmp(argv[3], "mixed") == 0;
+    lib_t inner = NULL;
+    if (g_mixed) {
+        inner = lib_open_local(argv[2]);
+        void* r0 = inner ? lib_sym(inner, "aether_inner_read") : NULL;
+        if (!r0) { printf("cannot load the inner library\n"); return 1; }
+        memcpy(&inner_read_fn, &r0, sizeof(r0));
+        g_before = inner_read_fn();   /* this copy looks the copies up now */
+    }
     lib_t outer = lib_open(argv[1]);
-    lib_t inner = lib_open(argv[2]);
+    if (!g_mixed) inner = lib_open(argv[2]);
     if (!outer || !inner) { printf("cannot load the libraries\n"); return 1; }
     void* o = lib_sym(outer, "aether_outer");
     void* r = lib_sym(inner, "aether_inner_read");
@@ -91,7 +108,7 @@ static int load(int argc, char** argv) {
 
 int main(int argc, char** argv) {
     if (load(argc, argv) != 0) return 1;
-    int before = inner_read_fn();
+    int before = g_mixed ? g_before : inner_read_fn();
     outer_fn();
     int after = inner_read_fn();
     printf("before %d inner %d granted %d outer %d after %d\n",
