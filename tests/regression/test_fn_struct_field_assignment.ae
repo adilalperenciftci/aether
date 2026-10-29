@@ -90,6 +90,13 @@ main() {
     }
     print("  PASS: distinct allocations per assignment\n")
 
+    // A box in a raw `ptr` field holds a reference of its own, the
+    // program's to give back (docs/closures-and-lifetimes.md). h2.cb is a
+    // bare function's code pointer, not a box: nothing to give back. The
+    // macOS leaks gate runs this file.
+    release_closure(h.cb)
+    release_closure(h3a.cb)
+    release_closure(h3b.cb)
     free(h)
     free(h2)
     free(h3a)

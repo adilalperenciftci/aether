@@ -100,7 +100,9 @@ actor Asker {
                 ref_set(inside, readable("PATH"))
             }
             sandbox.free(nothing)
-            reply ref_get(inside)
+            int seen = ref_get(inside)
+            ref_free(inside)
+            reply seen
         }
     }
 }

@@ -89,7 +89,10 @@ actor Sender {
                 ref_set(inside, readable("PATH"))
             }
             sandbox.free(nothing)
-            reply ref_get(caught) * 10 + ref_get(inside)
+            int seen = ref_get(caught) * 10 + ref_get(inside)
+            ref_free(caught)
+            ref_free(inside)
+            reply seen
         }
     }
 }

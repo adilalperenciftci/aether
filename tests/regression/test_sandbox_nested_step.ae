@@ -61,7 +61,9 @@ actor Confined {
                 ref_set(inside, readable("PATH"))
             }
             sandbox.free(nothing)
-            reply ref_get(inside) * 10 + readable("PATH")
+            int got = ref_get(inside) * 10 + readable("PATH")
+            ref_free(inside)
+            reply got
         }
         Go() -> {
             nothing = sandbox.new("nothing") {
@@ -74,7 +76,9 @@ actor Confined {
             }
             sandbox.free(nothing)
             seen = looker ? Seen {}
-            reply ref_get(inside) * 10 + seen
+            int got = ref_get(inside) * 10 + seen
+            ref_free(inside)
+            reply got
         }
     }
 }
