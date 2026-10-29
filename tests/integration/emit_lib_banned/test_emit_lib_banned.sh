@@ -1,7 +1,7 @@
 #!/bin/sh
-# Verifies --emit=lib rejects every capability-heavy stdlib import.
-# All five should produce the capability-empty error and a non-zero
-# exit status.
+# Verifies --emit=lib rejects every capability-heavy module family.
+# Each case should produce the capability-empty error and a non-zero
+# exit status, including aliases and nested modules.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -25,7 +25,11 @@ check_banned() {
     fi
 }
 
-for mod in std.net std.http std.tcp std.fs std.os; do
+for mod in \
+    std.net std.http std.http.client std.tcp std.udp \
+    std.fs std.file std.dir \
+    std.os std.dl \
+    contrib.host.python; do
     check_banned "$mod"
 done
 

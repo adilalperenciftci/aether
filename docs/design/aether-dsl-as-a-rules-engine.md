@@ -384,8 +384,9 @@ A `rules` module providing:
 
 ### In the compiler
 
-- ✅ **Done**: shared library output (`aetherc --emit=lib`), with
-  capability-empty link profile rejecting `std.net|http|tcp|fs|os`.
+- ✅ **Done**: shared library output (`aetherc --emit=lib`), with a
+  capability-empty link profile covering network, filesystem, OS, and
+  foreign-runtime module families.
   Renamed from the original `--embed` proposal to fit alongside
   `--emit=exe` and `--emit=both`.
 - 📋 **Future**: `ae eval` subcommand for the subprocess model

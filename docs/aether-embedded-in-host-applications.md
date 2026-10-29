@@ -20,7 +20,8 @@ applications (Java, Go, etc.).
 >   for Python, Java (Panama, JDK 22+), Ruby (Fiddle). Java SWIG is no
 >   longer the recommended path, Panama is cleaner once you have a
 >   namespace manifest to template against
-> - Part 3, capability-empty default (rejects `std.net|http|tcp|fs|os`)
+> - Part 3, capability-empty default (rejects network, filesystem, OS, and
+>   foreign-runtime module families)
 > - Part 4, LD_PRELOAD containment composes naturally with `--emit=lib`
 >
 > What's still speculative (📋 Future):
@@ -479,18 +480,18 @@ Any config language that executes as real code introduces risks that
 static config (JSON, TOML) doesn't have:
 
 **1. Network access.**  If the embedded Aether runtime has access to
-socket APIs, a config file could open a listener, exfiltrate data, or
-act as a backdoor.  The embedding mode should **not link `std.tcp`,
-`std.http`, or `std.net`** by default.  The facade should be the *only*
+socket APIs, a config file could open a listener or send data outside the
+host. The embedding mode should **not link `std.tcp`, `std.udp`,
+`std.http` (including its children), or `std.net`** by default. The facade should be the *only*
 way the script talks to the outside world.
 
 **2. File system access.**  A config script that can read `/etc/passwd`
 or write to `/tmp` is a liability.  The embedding mode should **not link
-`std.fs` or `std.file`** unless the host explicitly opts in.
+`std.fs`, `std.file`, or `std.dir`** unless the host explicitly opts in.
 
-**3. Process spawning.**  `os_system()` and `os_run()` should be
-unavailable in embedded mode.  A config file that can `exec` arbitrary
-commands is not a config file, it's a remote code execution vector.
+**3. OS integration.** `os_system()`, `os_run()`, dynamic loading through
+`std.dl`, and foreign runtimes through `contrib.host.*` should be unavailable
+in embedded mode unless the host explicitly grants the corresponding category.
 
 **4. Unbounded computation.**  A config script with an infinite loop
 hangs the host.  The embedding runtime should support a **wall-clock

@@ -5,9 +5,9 @@
 # — that's pinned by the existing emit_lib_banned test. This test pins
 # the opt-in direction:
 #
-#   1. --with=fs unlocks std.fs but still rejects std.net / std.os.
-#   2. --with=net unlocks std.net / std.http / std.tcp but not std.fs.
-#   3. --with=os unlocks std.os.
+#   1. --with=fs unlocks the filesystem module family but still rejects net / os.
+#   2. --with=net unlocks the network module family but not fs.
+#   3. --with=os unlocks the operating-system module family.
 #   4. --with=fs,os unlocks both in one invocation.
 #   5. --with=<unknown> is a hard error, not a silent no-op.
 #   6. --with=fs WITHOUT --emit=lib is a no-op (no error, no effect).
@@ -53,6 +53,8 @@ run_case() {
 # ---- 1. --with=fs unlocks std.fs, still rejects std.net / std.os ----
 
 run_case "--with=fs accepts std.fs"       std.fs  "--emit=lib --with=fs"  accept
+run_case "--with=fs accepts std.file"     std.file "--emit=lib --with=fs" accept
+run_case "--with=fs accepts std.dir"      std.dir "--emit=lib --with=fs"  accept
 run_case "--with=fs still rejects std.net" std.net "--emit=lib --with=fs"  reject
 run_case "--with=fs still rejects std.os"  std.os  "--emit=lib --with=fs"  reject
 
@@ -60,12 +62,20 @@ run_case "--with=fs still rejects std.os"  std.os  "--emit=lib --with=fs"  rejec
 
 run_case "--with=net accepts std.net"  std.net  "--emit=lib --with=net" accept
 run_case "--with=net accepts std.http" std.http "--emit=lib --with=net" accept
+run_case "--with=net accepts std.http.client" std.http.client "--emit=lib --with=net" accept
 run_case "--with=net accepts std.tcp"  std.tcp  "--emit=lib --with=net" accept
+run_case "--with=net accepts std.udp"  std.udp  "--emit=lib --with=net" accept
 run_case "--with=net still rejects std.fs" std.fs "--emit=lib --with=net" reject
 
 # ---- 3. --with=os unlocks std.os ----
 
 run_case "--with=os accepts std.os"    std.os  "--emit=lib --with=os"  accept
+run_case "--with=os accepts std.dl"    std.dl  "--emit=lib --with=os"  accept
+
+# ---- 3b. contrib.host.* requires the explicit extern capability ----
+
+run_case "--with=extern accepts contrib.host.python" contrib.host.python "--emit=lib --with=extern" accept
+run_case "--with=os still rejects contrib.host.python" contrib.host.python "--emit=lib --with=os" reject
 
 # ---- 4. --with=fs,os unlocks both in one invocation ----
 
