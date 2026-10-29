@@ -118,6 +118,7 @@ int main(void) {
     clock_t end = clock();
     
     scheduler_stop();
+    current_core_id = -1;  // main is no core now: a core waits for no one (#3463)
     scheduler_wait();
     
     double elapsed = (double)(end - start) / CLOCKS_PER_SEC;

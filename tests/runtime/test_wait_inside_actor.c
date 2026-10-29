@@ -15,14 +15,6 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 
-#ifdef _WIN32
-#include <windows.h>
-#define wi_sleep_ms(ms) Sleep(ms)
-#else
-#include <unistd.h>
-#define wi_sleep_ms(ms) usleep((ms) * 1000)
-#endif
-
 typedef struct {
     int type;
     int value;
@@ -55,11 +47,6 @@ static void wi_hook(int actor_id, const char* reason) {
     atomic_fetch_add(&g_hook_waited, 1);
 }
 
-static int wi_wait(atomic_int* v, int want, int limit_ms) {
-    for (int w = 0; w < limit_ms && atomic_load(v) < want; w++) wi_sleep_ms(1);
-    return atomic_load(v) >= want;
-}
-
 TEST_CATEGORY(wait_in_a_death_hook_on_a_core_panics, TEST_CATEGORY_RUNTIME) {
     atomic_store(&g_hook_entered, 0);
     atomic_store(&g_hook_waited, 0);
@@ -78,8 +65,10 @@ TEST_CATEGORY(wait_in_a_death_hook_on_a_core_panics, TEST_CATEGORY_RUNTIME) {
 
     WiMsg m = { 1, 0 };
     aether_send_message(a, &m, sizeof m);
-    int entered = wi_wait(&g_hook_entered, 1, 6000);
-    scheduler_wait();   /* this thread runs no actor: it waits, and returns */
+    /* This thread runs no actor: it waits, and returns once the step's
+     * message is counted handled, which is after the hook ran. */
+    scheduler_wait();
+    int entered = atomic_load(&g_hook_entered) == 1;
     scheduler_shutdown();
     scheduler_cleanup();
     aether_set_on_actor_death(NULL);

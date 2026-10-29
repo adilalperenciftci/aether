@@ -2807,8 +2807,10 @@ static void scheduler_wait_quiet(int countdowns);
  * that runs actors, after a step as much as in one: a core's, where a drop
  * or a death hook runs once the in-step flag is off and the step's message
  * not yet counted handled, and an actor's own. There it panics, as the
- * actor's code: the step barrier, or the drop's or the hook's own frame,
- * takes it, and the actor's watchers are told. */
+ * actor's code: the step barrier, or the death hook's or a contained drop's
+ * own frame, takes it, and the actor's watchers are told; a drop run outside
+ * any frame (a message to a dead actor) ends the process with the reason,
+ * as any panic there does. */
 AETHER_TLS int aether_in_actor_thread = 0;   /* set by aether_actor_thread.c */
 
 void scheduler_wait(void) {

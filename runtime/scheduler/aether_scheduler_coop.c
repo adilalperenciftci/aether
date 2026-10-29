@@ -597,10 +597,11 @@ static int coop_timeout_armed(void) {
  * main does not wait for countdowns (scheduler_shutdown, #3219).
  *
  * Inside an actor's step, or on an actor's own thread, it panics, as on the
- * multicore scheduler (#3463), so a program behaves the same on both. It
- * waited for every actor there, the calling one too: on the multicore
- * scheduler a step that cannot end while it waits; here the poll ran the
- * other actors nested and returned. */
+ * multicore scheduler (#3463): there it waits for a step that cannot end
+ * while it waits; here the poll ran the other actors nested and returned,
+ * and a handler's wait now behaves alike on both. A drop or a death hook
+ * this scheduler runs after a step still polls nested and returns: the one
+ * thread here steps every actor, and is in no step then. */
 void scheduler_wait(void) {
     if (g_aether_in_actor_step || aether_in_actor_thread) aether_panic(AETHER_WAIT_IN_STEP_REASON);
     uint64_t give_up = aether_now_ns() + 100ULL * 1000000000ULL;

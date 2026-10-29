@@ -7,6 +7,8 @@
   or on the threaded scheduler on any thread that runs actors, it now
   panics as the actor's code: the actor ends with a reason that says to
   call it outside the actors (main, or a host's thread), its watchers are
-  told, and the program goes on. On the cooperative scheduler, where the
-  wait ran the other actors nested and returned, it panics too, so a
-  program behaves the same on both (#3463).
+  told, and the program goes on (a drop run outside any frame, as for a
+  message to a dead actor, ends the process with the reason). On the
+  cooperative scheduler, where the wait ran the other actors nested and
+  returned, it panics in a step too, and a drop or a death hook after a
+  step still waits there (#3463).
