@@ -29,6 +29,9 @@
 #ifdef _WIN32
 #  include <windows.h>
 #endif
+#if !defined(_WIN32) && !defined(AETHER_NO_THREADING)
+#  include <sched.h>
+#endif
 #if !defined(_WIN32) && (defined(__unix__) || defined(__APPLE__))
 #  include <dlfcn.h>
 #  if defined(__APPLE__)
@@ -257,8 +260,25 @@ static AcctSlot* g_slots = NULL;   /* open addressing, linear probes */
 static size_t g_slot_cap = 0;      /* a power of two, or 0 */
 static size_t g_slot_used = 0;
 
+/* Held for a table probe or a chain walk, and for a free's one pass over
+ * the table. A waiter spins a little, pausing, then gives up the processor
+ * rather than spin hot (#3410). */
+static inline void acct_yield(void) {
+#if defined(AETHER_NO_THREADING)
+    AETHER_CPU_PAUSE();
+#elif defined(_WIN32)
+    SwitchToThread();
+#else
+    sched_yield();
+#endif
+}
+
 static inline void acct_lock(void) {
-    while (atomic_flag_test_and_set_explicit(&g_acct_lock, memory_order_acquire)) { }
+    unsigned spins = 0;
+    while (atomic_flag_test_and_set_explicit(&g_acct_lock, memory_order_acquire)) {
+        if (++spins < 64) AETHER_CPU_PAUSE();
+        else acct_yield();
+    }
 }
 static inline void acct_unlock(void) {
     atomic_flag_clear_explicit(&g_acct_lock, memory_order_release);
@@ -289,12 +309,50 @@ static int slots_grow(void) {
     return 1;
 }
 
+/* Which addresses may have a block in the table (#3410): one bit per hash
+ * of an address, set before a block is recorded, under the lock. A thread
+ * with no account in use that frees or allocates a block whose bit is clear
+ * asks nothing more, and takes no lock: no account's block is there. A free
+ * of an account's block comes after its allocation (the program handed the
+ * pointer over), so it sees the bit. The bits are cleared, under the lock,
+ * when the table has no block left and enough of them are set to be worth
+ * it: no address can then be in it. 32 KiB, the owning copy's only. */
+#define ACCT_FILTER_BITS  (1u << 18)
+#define ACCT_FILTER_WORDS (ACCT_FILTER_BITS / 64)
+static _Atomic uint64_t g_filter[ACCT_FILTER_WORDS];
+static size_t g_filter_set = 0;   /* bits set, under the lock */
+
+static inline uint32_t filter_bit(const void* p) {
+    return (uint32_t)(((uint64_t)(uintptr_t)p * 0x9e3779b97f4a7c15ULL) >> (64 - 18));
+}
+
+static inline int filter_may_hold(const void* p) {
+    uint32_t b = filter_bit(p);
+    return (int)((atomic_load_explicit(&g_filter[b >> 6], memory_order_acquire) >> (b & 63)) & 1u);
+}
+
+/* Under the lock. */
+static inline void filter_note(const void* p) {
+    uint32_t b = filter_bit(p);
+    uint64_t bit = (uint64_t)1 << (b & 63);
+    if (!(atomic_fetch_or_explicit(&g_filter[b >> 6], bit, memory_order_release) & bit)) g_filter_set++;
+}
+
+/* Under the lock, with no block in the table. */
+static void filter_clear(void) {
+    for (size_t i = 0; i < ACCT_FILTER_WORDS; i++) atomic_store_explicit(&g_filter[i], 0, memory_order_relaxed);
+    g_filter_set = 0;
+}
+
 /* Under the lock. */
 static int slot_put(const void* p, AetherExecAccount* a) {
     if ((g_slot_used + 1) * 2 > g_slot_cap && !slots_grow()) return 0;
     size_t s = slot_of(p, g_slot_cap);
     while (g_slots[s].p && g_slots[s].p != p) s = (s + 1) & (g_slot_cap - 1);
-    if (!g_slots[s].p) g_slot_used++;
+    if (!g_slots[s].p) {
+        filter_note(p);
+        g_slot_used++;
+    }
     g_slots[s].p = p;
     g_slots[s].a = a;
     return 1;
@@ -309,7 +367,7 @@ static AetherExecAccount* slot_take(const void* p) {
     if (!g_slots[s].p) return NULL;
     AetherExecAccount* a = g_slots[s].a;
     g_slots[s].p = NULL;
-    g_slot_used--;
+    if (--g_slot_used == 0 && g_filter_set > ACCT_FILTER_BITS / 8) filter_clear();
     size_t hole = s;
     for (size_t j = (s + 1) & (g_slot_cap - 1); g_slots[j].p; j = (j + 1) & (g_slot_cap - 1)) {
         size_t home = slot_of(g_slots[j].p, g_slot_cap);
@@ -630,18 +688,18 @@ static void own_free(AetherExecAccount* a) {
     }
     if (a->parent && own) chain_credit(a->parent, own);
     a->parent = NULL;
-    for (size_t i = 0; i < g_slot_cap; i++) {
-        if (g_slots[i].p && g_slots[i].a == a) {
-            const void* p = g_slots[i].p;
-            (void)slot_take(p);
-            i = (size_t)-1;   /* the shift may have moved an entry behind i */
-        }
-    }
-    if (g_live_count == 0) {
+    /* One pass (#3410): a take shifts later entries of its probe chain back
+     * into the hole, so the slot is looked at again until it holds none of
+     * its blocks. An entry shifted to a slot already passed comes from the
+     * wrapped end of a chain, passed too, so it is none of them either. */
+    for (size_t i = 0; g_live_count > 0 && i < g_slot_cap; i++)
+        while (g_slots[i].p && g_slots[i].a == a) (void)slot_take(g_slots[i].p);
+    if (g_live_count == 0) {   /* every block left was its: the table goes */
         free(g_slots);
         g_slots = NULL;
         g_slot_cap = 0;
         g_slot_used = 0;
+        if (g_filter_set) filter_clear();
         copies_mark(0);
     }
     AetherExecAccount* gone = NULL;
@@ -730,6 +788,10 @@ static int own_tripped(const AetherExecAccount* a) {
  * (a block freed with plain free()) is dropped. */
 static int own_alloc(void* p, size_t bytes) {
     AetherExecAccount* a = own_here();
+    /* No account in use here: nothing to charge, and a stale entry at this
+     * address (a block an account was charged for, freed with plain free())
+     * only where its bit is set. No lock otherwise (#3410). */
+    if (!a && !filter_may_hold(p)) return 1;
     acct_lock();
     if (a && atomic_load_explicit(&a->dead, memory_order_relaxed)) a = NULL;   /* freed meanwhile */
     if (!a) {
@@ -746,6 +808,7 @@ static int own_alloc(void* p, size_t bytes) {
 }
 
 static void own_free_block(const void* p, size_t bytes) {
+    if (!filter_may_hold(p)) return;   /* no account was charged for it: no lock */
     acct_lock();
     AetherExecAccount* a = slot_take(p);
     if (a) chain_credit(a, (uint64_t)bytes);
@@ -761,6 +824,10 @@ static void own_free_block(const void* p, size_t bytes) {
 static int own_realloc_begin(void* p, size_t old_bytes, size_t new_bytes,
                              AetherExecAccount** old_owner, AetherExecAccount** now) {
     *now = own_here();
+    if (!*now && (!p || !filter_may_hold(p))) {   /* nothing to charge or credit: no lock */
+        *old_owner = NULL;
+        return 1;
+    }
     acct_lock();
     if (*now && atomic_load_explicit(&(*now)->dead, memory_order_relaxed)) *now = NULL;
     *old_owner = p ? slot_take(p) : NULL;
@@ -781,6 +848,7 @@ static int own_realloc_begin(void* p, size_t old_bytes, size_t new_bytes,
 
 static void own_realloc_end(void* p, void* np, size_t old_bytes, size_t new_bytes,
                             AetherExecAccount* old_owner, AetherExecAccount* now) {
+    if (!old_owner && !now && !(np && filter_may_hold(np))) return;   /* nothing held: no lock */
     AetherExecAccount* gone[2] = { NULL, NULL };
     acct_lock();
     AetherExecAccount* was = old_owner && !atomic_load_explicit(&old_owner->dead, memory_order_relaxed)

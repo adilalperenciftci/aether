@@ -799,6 +799,32 @@ word also holds the process cap and the test hook); an execution's entry
 adds one load, and an actor step one at each end (the delivery contract's
 item 5, in [actor-concurrency.md](actor-concurrency.md#the-delivery-contract)).
 
+While an account exists anywhere in the process (#3410):
+
+- A thread with no account in use takes no lock. Its cap-aware
+  allocation or free reads its account in use and one word of a filter
+  of the addresses the accounts recorded (32 KiB); only an address whose
+  bit is set (another account's block, or one sharing its bit) takes the
+  accounts' lock to look the table up. Actor cores and HTTP workers pay
+  nothing for a script's account.
+- A thread with an account in use takes the lock for each allocation and
+  free (a table probe and a walk of the account's chain), so threads that
+  each have one contend on it. A waiter pauses, then yields.
+- Freeing an account is one pass over the table, under the lock.
+
+Measured on Windows x86_64 (MinGW, the msvcrt heap), a 64-byte
+`aether_caps_malloc` and `aether_caps_free`, best of 5 passes of 2 million
+on each thread:
+
+| Setting | 1 thread | 3 threads |
+|---|---|---|
+| no account exists | 27 ns | 81-145 ns |
+| none exists, one more thread allocating (heap contention only) | 74-99 ns | 123-198 ns |
+| an account in use on that other thread, holding 20,000 blocks | 61-82 ns (199-252 before #3410) | 102-156 ns (697-716 before) |
+| each thread its own account | 46 ns (41 before) | 374-407 ns (532-570 before) |
+
+Freeing an account of 40,000 live blocks takes 0.5 ms (1.1 s before).
+
 ## Failures and nested calls at the boundary
 
 Every `aether_<name>` export (and every package builder export) runs inside

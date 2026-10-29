@@ -8,6 +8,7 @@
  *   blocks were charged, and its children keep narrowing under its parent.
  * - #3409: an ACTIVE account is charged once for time spent in executions
  *   under it, however they nest, and however many are timed at once.
+ * - #3410: freeing an account is linear in its blocks.
  */
 
 #include "test_harness.h"
@@ -20,9 +21,21 @@
 #ifdef _WIN32
 #include <windows.h>
 #define ea_sleep_ms(ms) Sleep(ms)
+static double ea_now_ms(void) {
+    LARGE_INTEGER f, c;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&c);
+    return (double)c.QuadPart * 1000.0 / (double)f.QuadPart;
+}
 #else
 #include <unistd.h>
+#include <time.h>
 #define ea_sleep_ms(ms) usleep((ms) * 1000)
+static double ea_now_ms(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (double)t.tv_sec * 1000.0 + (double)t.tv_nsec / 1e6;
+}
 #endif
 
 static AetherExecAccount* ea_new(uint64_t bytes, int64_t ms, int counts, AetherExecAccount* parent) {
@@ -213,3 +226,34 @@ TEST_CATEGORY(accounts_active_time_many_nested, TEST_CATEGORY_RUNTIME) {
     ASSERT_EQ(AETHER_OK, outcome);
     ASSERT_EQ(EA_DEEP, charged);
 }
+/* #3410: freeing an account of 4n blocks takes about four times as long as
+ * one of n, not sixteen. The best of three runs of each, with another
+ * account live, so the table outlives the free. */
+static double ea_free_ms(int n) {
+    double best = 1e18;
+    AetherExecAccount* keep = ea_new(0, 0, AETHER_DEADLINE_ELAPSED, NULL);
+    void** blocks = (void**)malloc(sizeof(void*) * (size_t)n);
+    for (int run = 0; run < 3; run++) {
+        AetherExecAccount* a = ea_new(0, 0, AETHER_DEADLINE_ELAPSED, NULL);
+        aether_exec_use(a, NULL);
+        for (int i = 0; i < n; i++) blocks[i] = aether_caps_malloc(32);
+        aether_exec_use(NULL, NULL);
+        double t0 = ea_now_ms();
+        aether_exec_account_free(a);
+        double t = ea_now_ms() - t0;
+        if (t < best) best = t;
+        for (int i = 0; i < n; i++) aether_caps_free(blocks[i], 32);
+    }
+    aether_exec_account_free(keep);
+    free(blocks);
+    return best;
+}
+
+TEST_CATEGORY(accounts_free_is_linear_in_its_blocks, TEST_CATEGORY_RUNTIME) {
+    double small = ea_free_ms(10000);
+    double large = ea_free_ms(40000);
+    if (small < 0.05) small = 0.05;   /* below the timer's grain both are fast */
+    fprintf(stderr, "    account_free: 10000 blocks %.2f ms, 40000 blocks %.2f ms\n", small, large);
+    ASSERT_TRUE(large < small * 8.0 || large < 2.0);
+}
+
