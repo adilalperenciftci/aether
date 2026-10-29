@@ -1566,9 +1566,10 @@ fn read_extn_value(xr: ptr) -> (ptr, int) {
 
 // basicConstraints ::= SEQUENCE { cA BOOLEAN DEFAULT FALSE,
 // pathLenConstraint INTEGER (0..MAX) OPTIONAL }. A cA of TRUE sets
-// out.is_ca; a pathLenConstraint goes to out.path_len (EXT_PATHLEN). A
+// out.is_ca; a pathLenConstraint goes to out.path_len (EXT_PATHLEN), and one
+// of four bytes or more, too large to limit any path, as 2147483647. A
 // BOOLEAN that is not one byte of 0x00 or 0xFF, a pathLenConstraint that is
-// negative or over three bytes, and anything else make the extension
+// negative or not minimal DER, and anything else make the extension
 // malformed (EXT_MALFORMED), so the certificate is refused rather than read
 // as not a CA.
 fn decode_basic_constraints(octet_content: @keep ptr, out: *LeafCert) {
@@ -1597,8 +1598,20 @@ fn decode_basic_constraints(octet_content: @keep ptr, out: *LeafCert) {
             }
         } else if ftag == 0x02 {
             fl = bytes.length(f)
-            if fl < 1 || fl > 3 || (bytes.get(f, 0) & 0x80) != 0 {
+            if fl < 1 || (bytes.get(f, 0) & 0x80) != 0 {
                 out.ext_bits = out.ext_bits | EXT_MALFORMED
+            } else if fl > 1 && (bytes.get(f, 0) & 0xFF) == 0 && (bytes.get(f, 1) & 0x80) == 0 {
+                // A leading zero the next byte does not need is not DER
+                // (X.690 8.3.2), and OpenSSL refuses it too: 00 00 00 05 must
+                // not read as a large constraint.
+                out.ext_bits = out.ext_bits | EXT_MALFORMED
+            } else if fl > 3 {
+                // RFC 5280 allows 0..MAX: a constraint of 2^23 or more limits
+                // no path this code builds (MAX_CHAIN_DEPTH), so it is read
+                // as unbounded, as OpenSSL reads a large one, not as a reason
+                // to refuse the CA (#3303).
+                out.path_len = 2147483647
+                out.ext_bits = out.ext_bits | EXT_PATHLEN
             } else {
                 v = 0
                 k = 0
