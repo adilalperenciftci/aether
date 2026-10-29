@@ -4,6 +4,7 @@
  * either) and reads everything by name, as a plugin host does. argv[2],
  * when given, is the shared runtime a --shared-runtime library runs on,
  * where the runtime's functions are; otherwise they are the library's own.
+ * argv[3] = --runtime-abi prints only the library's recorded runtime ABI ID.
  * It uses a level-1 function only when the header it was compiled against
  * has it and the library's catalog records level 1 or more. What it prints
  * depends on the levels alone, never on the versions:
@@ -102,6 +103,18 @@ int main(int argc, char** argv) {
 
     const AetherLibMeta* m = ((meta_fn)need(h, "aether_lib_meta"))();
     int level = recorded_level(m);
+    /* Query the actual library's ABI, including layout flags, rather than
+     * assuming a downloaded release differs from this tree. Only the new
+     * host uses this mode; level-0 catalogs have no runtime_abi field. */
+    if (argc > 3 && strcmp(argv[3], "--runtime-abi") == 0) {
+#if HEADER_LEVEL >= 1
+        if (level >= 1 && m->runtime_abi && *m->runtime_abi) {
+            puts(m->runtime_abi);
+            return lib_close(h) != 0;
+        }
+#endif
+        return 2;
+    }
     if (level >= 0) printf("catalog: schema %s, host ABI level %d\n", m->schema_version, level);
     else printf("catalog: schema %s, read by a level-0 host\n", m->schema_version);
 
