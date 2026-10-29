@@ -1,0 +1,7 @@
+import std.os
+
+@no_os
+status(0) -> 0
+status(n: int) -> os.system("echo hi") + n
+
+main() { status(1) }
