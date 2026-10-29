@@ -3468,6 +3468,8 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
         "aether_set_memory_cap", "aether_set_call_deadline", "aether_deadline_tripped",
         "aether_set_caller", "aether_clear_caller", "aether_last_outcome",
         "aether_last_outcome_text", "aether_exec_token", "aether_exec_cancel",
+        "aether_exec_account_new", "aether_exec_account_free", "aether_exec_use",
+        "aether_exec_account_used", "aether_exec_account_tripped",
     };
     int host_api_n = (int)(sizeof(host_api) / sizeof(host_api[0]));
     fprintf(gen->output,

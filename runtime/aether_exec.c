@@ -145,6 +145,36 @@ static inline AetherJmpFrame* exec_push(AetherFrames* F, void** buf) {
     x->has_view = 0;
     x->stop = 0;
     x->serial = ++F->serial;
+    /* An account in use (#2954): its deadline, and its ancestors', is the
+     * execution's too, the earlier of it and the one already in force; the
+     * one in force is put back when the execution returns, as a nested
+     * execution's is. */
+    /* This copy finds the accounts it shares once (a library with a runtime
+     * of its own works through the copy loaded first); then one load says
+     * whether any account exists in the process. */
+    if (__builtin_expect(!atomic_load_explicit(&aether_accounts_found, memory_order_relaxed), 0))
+        aether_accounts_register();
+    x->account = (atomic_load_explicit(&aether_caps_slow, memory_order_relaxed) & AETHER_CAPS_SLOW_ACCOUNTS)
+                     ? aether_account_here() : NULL;
+    x->account_deadline = 0;
+    if (x->account) {
+        x->account_since_ns = aether_caps_now_ns();
+        int tripped = 0;
+        int64_t at = aether_account_deadline_ns(x->account, &tripped);
+        if (at || tripped) {
+            AetherDeadlineState cur;
+            aether_caps_deadline_save(&cur);
+            if (d == F->exec_floor) {   /* the outermost here: not saved above */
+                x->deadline_at_ns = cur.at_ns;
+                x->deadline_tripped = cur.tripped;
+            }
+            AetherDeadlineState s = { cur.at_ns && cur.at_ns < at ? cur.at_ns : at,
+                                      cur.tripped || tripped };
+            if (!s.at_ns) s.at_ns = cur.at_ns;
+            aether_caps_deadline_restore(&s);
+            x->account_deadline = 1;
+        }
+    }
     F->exec_depth = d + 1;
     AetherJmpFrame* f = &F->frames[F->depth++];
     /* reason and reason_release are written by the panic that targets
@@ -179,8 +209,18 @@ static inline void exec_finish(AetherFrames* F, int outcome) {
     int leaving = F->exec_depth;
     F->exec_depth--;
     AetherExecRecord* x = &F->exec[F->exec_depth];
-    /* A nested execution: the outer one's deadline, trip flag and all. */
-    if (F->exec_depth > F->exec_floor) {
+    /* Under an account (#2954): the time it spent (an ACTIVE deadline) and a
+     * trip of its deadline are the account's, and the account in use when it
+     * began is in use again, whatever the code it ran left. */
+    if (x->account) {
+        aether_account_charge_time(x->account, x->account_since_ns, aether_caps_deadline_flag());
+        aether_account_restore(x->account);
+    } else if (atomic_load_explicit(&aether_caps_slow, memory_order_relaxed) & AETHER_CAPS_SLOW_ACCOUNTS) {
+        aether_account_restore(NULL);
+    }
+    /* A nested execution: the outer one's deadline, trip flag and all; and
+     * the host's at the outermost, when an account's deadline replaced it. */
+    if (F->exec_depth > F->exec_floor || x->account_deadline) {
         AetherDeadlineState s = { x->deadline_at_ns, x->deadline_tripped };
         aether_caps_deadline_restore(&s);
     }

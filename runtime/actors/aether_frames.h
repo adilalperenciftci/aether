@@ -26,6 +26,9 @@ typedef struct {
     int     has_view;          /* aether_host.c kept its caller info */
     int     stop;              /* why a C-backed std loop stopped early */
     uint64_t serial;           /* this thread's count of executions, its token */
+    struct AetherExecAccount* account;  /* the account in use when it began (#2954) */
+    int64_t account_since_ns;           /*   when it began, for an ACTIVE deadline */
+    int     account_deadline;           /* it took its account's deadline */
 } AetherExecRecord;
 
 /* Where another thread asks for an execution of this one to stop
@@ -55,6 +58,7 @@ typedef struct {
     int              interrupting; /* the outcome an interruption on its way carries */
     uint64_t         serial;   /* executions entered on this thread */
     AetherCancelCell* cell;
+    struct AetherExecAccount* account; /* in use on this thread (aether_exec_use, #2954) */
     /* The allocation journal (aether_unwind.c): its entries are tagged with
      * the frame depth they were made at. */
     struct AetherUnwindEntry* journal;

@@ -6,17 +6,37 @@
  * forwarders) calls in via the header.
  */
 
+#if !defined(_WIN32) && !defined(_GNU_SOURCE)
+#  define _GNU_SOURCE   /* RTLD_DEFAULT in glibc's <dlfcn.h> */
+#endif
 #include "aether_resource_caps.h"
 #include "utils/aether_thread.h"
 #include "utils/aether_compiler.h"
 #include "actors/aether_frames.h"
 
+/* The host API (libaether.h): exported however the runtime is built. */
+#if defined(__GNUC__) || defined(__clang__)
+#  define AETHER_CAPS_API __attribute__((visibility("default")))
+#else
+#  define AETHER_CAPS_API
+#endif
+
 #include <stdatomic.h>
+#include <stdio.h>
 #include <assert.h>
 #include <time.h>
 
 #ifdef _WIN32
 #  include <windows.h>
+#endif
+#if !defined(_WIN32) && (defined(__unix__) || defined(__APPLE__))
+#  include <dlfcn.h>
+#  if defined(__APPLE__)
+#    include <mach-o/dyld.h>
+#  elif defined(__linux__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
+#    include <link.h>
+#    define AETHER_RV_PHDR 1
+#  endif
 #endif
 
 /* Process-wide. _Atomic for the lock-free fast path — every alloc
@@ -24,6 +44,14 @@
  * compare-and-add pattern. */
 static _Atomic uint64_t g_mem_used = 0;
 static _Atomic uint64_t g_mem_cap  = 0;   /* 0 = unlimited */
+
+/* What the allocation fast path must ask about, in one word it reads once
+ * (#2954): a cap is set, an execution account exists, the test hook is
+ * armed. 0: none of them, and an allocation only counts its bytes. */
+#define CAPS_SLOW_CAP      1u
+#define CAPS_SLOW_ACCOUNTS 2u
+#define CAPS_SLOW_TEST     4u
+_Atomic unsigned aether_caps_slow = 0;
 
 /* Per-thread. The deadline is monotonic-clock nanoseconds; 0 means
  * "no deadline armed". The tripped flag is sticky once set, until
@@ -86,6 +114,8 @@ void aether_caps_account_free(size_t bytes) {
 
 void aether_caps_set_memory_cap(uint64_t bytes) {
     atomic_store_explicit(&g_mem_cap, bytes, memory_order_relaxed);
+    if (bytes) atomic_fetch_or_explicit(&aether_caps_slow, CAPS_SLOW_CAP, memory_order_relaxed);
+    else atomic_fetch_and_explicit(&aether_caps_slow, ~CAPS_SLOW_CAP, memory_order_relaxed);
 }
 
 /* Nonzero once any thread has armed or tripped a deadline, or cancelled a
@@ -180,7 +210,10 @@ static AETHER_TLS_SHARED int t_alloc_fail_after = 0;
 
 void aether_test_fail_alloc_after(int n) {
     t_alloc_fail_after = n > 0 ? n : 0;
-    if (n > 0) atomic_store_explicit(&aether_alloc_test_armed, 1, memory_order_relaxed);
+    if (n > 0) {
+        atomic_store_explicit(&aether_alloc_test_armed, 1, memory_order_relaxed);
+        atomic_fetch_or_explicit(&aether_caps_slow, CAPS_SLOW_TEST, memory_order_relaxed);
+    }
 }
 
 int aether_alloc_test_refuses(void) {
@@ -197,13 +230,682 @@ void aether_alloc_failed(int why) {
     caps_arm();
 }
 
+/* ------------------------------------------------------------------
+ * Execution accounts (#2954)
+ * ------------------------------------------------------------------
+ * A budget the host owns, for executions that outlive one call: a script
+ * that yields to its host and resumes later, while other scripts run on the
+ * same thread in between. The account in use on a thread (aether_exec_use)
+ * is charged every cap-aware allocation made there, and its parent chain
+ * with it; an allocation that would take any account on the chain past its
+ * allowance is refused, as the process cap refuses one, and inside an
+ * execution the call then ends with AETHER_MEMORY_CAP (aether_alloc_failed).
+ *
+ * A block remembers the account it was charged to, so a free credits that
+ * account wherever it happens: in another execution, under another account,
+ * or in the host outside any. The blocks of every account are in one table,
+ * kept only while some account exists (CAPS_SLOW_ACCOUNTS), behind one lock
+ * with the accounts' parent links and the list of live accounts. A block
+ * allocated under no account is in no table and credits nobody. */
+
+static atomic_flag g_acct_lock = ATOMIC_FLAG_INIT;
+static AetherExecAccount* g_live_accounts = NULL;
+static int g_live_count = 0;
+
+typedef struct { const void* p; AetherExecAccount* a; } AcctSlot;
+static AcctSlot* g_slots = NULL;   /* open addressing, linear probes */
+static size_t g_slot_cap = 0;      /* a power of two, or 0 */
+static size_t g_slot_used = 0;
+
+static inline void acct_lock(void) {
+    while (atomic_flag_test_and_set_explicit(&g_acct_lock, memory_order_acquire)) { }
+}
+static inline void acct_unlock(void) {
+    atomic_flag_clear_explicit(&g_acct_lock, memory_order_release);
+}
+
+static inline size_t slot_of(const void* p, size_t cap) {
+    uint64_t h = (uint64_t)(uintptr_t)p;
+    h ^= h >> 33;
+    h *= 0xff51afd7ed558ccdULL;
+    h ^= h >> 33;
+    return (size_t)h & (cap - 1);
+}
+
+/* The table's own memory is plain malloc: it is no account's and no cap's. */
+static int slots_grow(void) {
+    size_t cap = g_slot_cap ? g_slot_cap * 2 : 1024;
+    AcctSlot* fresh = (AcctSlot*)calloc(cap, sizeof(AcctSlot));
+    if (!fresh) return 0;
+    for (size_t i = 0; i < g_slot_cap; i++) {
+        if (!g_slots[i].p) continue;
+        size_t s = slot_of(g_slots[i].p, cap);
+        while (fresh[s].p) s = (s + 1) & (cap - 1);
+        fresh[s] = g_slots[i];
+    }
+    free(g_slots);
+    g_slots = fresh;
+    g_slot_cap = cap;
+    return 1;
+}
+
+/* Under the lock. */
+static int slot_put(const void* p, AetherExecAccount* a) {
+    if ((g_slot_used + 1) * 2 > g_slot_cap && !slots_grow()) return 0;
+    size_t s = slot_of(p, g_slot_cap);
+    while (g_slots[s].p && g_slots[s].p != p) s = (s + 1) & (g_slot_cap - 1);
+    if (!g_slots[s].p) g_slot_used++;
+    g_slots[s].p = p;
+    g_slots[s].a = a;
+    return 1;
+}
+
+/* Under the lock: the slot of `p` emptied (the probe chain after it shifted
+ * back), and the account it named returned. */
+static AetherExecAccount* slot_take(const void* p) {
+    if (!g_slot_cap) return NULL;
+    size_t s = slot_of(p, g_slot_cap);
+    while (g_slots[s].p && g_slots[s].p != p) s = (s + 1) & (g_slot_cap - 1);
+    if (!g_slots[s].p) return NULL;
+    AetherExecAccount* a = g_slots[s].a;
+    g_slots[s].p = NULL;
+    g_slot_used--;
+    size_t hole = s;
+    for (size_t j = (s + 1) & (g_slot_cap - 1); g_slots[j].p; j = (j + 1) & (g_slot_cap - 1)) {
+        size_t home = slot_of(g_slots[j].p, g_slot_cap);
+        /* Moves back when its home is not in (hole, j] cyclically. */
+        int stays = hole <= j ? (home > hole && home <= j) : (home > hole || home <= j);
+        if (!stays) {
+            g_slots[hole] = g_slots[j];
+            g_slots[j].p = NULL;
+            hole = j;
+        }
+    }
+    return a;
+}
+
+/* Under the lock: `bytes` charged to `a` and its ancestors, or to none of
+ * them when one would pass its allowance (which is then marked tripped). */
+static int chain_charge(AetherExecAccount* a, uint64_t bytes) {
+    for (AetherExecAccount* x = a; x; x = x->parent) {
+        uint64_t cur = atomic_load_explicit(&x->used, memory_order_relaxed);
+        if (x->memory_bytes && (cur + bytes > x->memory_bytes || cur + bytes < cur)) {
+            for (AetherExecAccount* y = a; y != x; y = y->parent)
+                atomic_fetch_sub_explicit(&y->used, bytes, memory_order_relaxed);
+            atomic_fetch_or_explicit(&x->tripped, AETHER_ACCOUNT_TRIPPED_MEMORY, memory_order_relaxed);
+            return 0;
+        }
+        atomic_store_explicit(&x->used, cur + bytes, memory_order_relaxed);
+    }
+    return 1;
+}
+
+static void chain_credit(AetherExecAccount* a, uint64_t bytes) {
+    for (AetherExecAccount* x = a; x; x = x->parent) {
+        uint64_t cur = atomic_load_explicit(&x->used, memory_order_relaxed);
+        atomic_store_explicit(&x->used, cur >= bytes ? cur - bytes : 0, memory_order_relaxed);
+    }
+}
+
+/* The allocation fast-path word (aether_caps_slow) of every copy that shares
+ * this copy's accounts, its own first: CAPS_SLOW_ACCOUNTS is set in each
+ * while an account exists, so a copy's fast path stays one load of its own
+ * word. Under the lock. */
+static _Atomic unsigned* g_copy_words[64] = { &aether_caps_slow };
+static int g_copy_count = 1;
+
+static void copies_mark(int on) {
+    for (int i = 0; i < g_copy_count; i++) {
+        if (on) atomic_fetch_or_explicit(g_copy_words[i], CAPS_SLOW_ACCOUNTS, memory_order_release);
+        else atomic_fetch_and_explicit(g_copy_words[i], ~CAPS_SLOW_ACCOUNTS, memory_order_release);
+    }
+}
+
+static int own_register(_Atomic unsigned* word) {
+    acct_lock();
+    for (int i = 0; i < g_copy_count; i++) {
+        if (g_copy_words[i] == word) { acct_unlock(); return 0; }
+    }
+    if (g_copy_count == 64) { acct_unlock(); return -1; }
+    g_copy_words[g_copy_count++] = word;
+    if (g_live_count > 0) atomic_fetch_or_explicit(word, CAPS_SLOW_ACCOUNTS, memory_order_release);
+    acct_unlock();
+    return 0;
+}
+
+static AetherExecAccount* own_here(void) {
+    return aether_frames_here()->account;
+}
+
+int64_t aether_caps_now_ns(void) {
+    return now_ns();
+}
+
+static int64_t own_deadline_ns(const AetherExecAccount* a, int* tripped) {
+    int64_t at = 0, now = now_ns();
+    int tr = 0;
+    acct_lock();
+    for (const AetherExecAccount* x = a; x; x = x->parent) {
+        int64_t own = 0;
+        if (x->deadline_counts == AETHER_DEADLINE_ACTIVE) {
+            if (x->active_budget_ns)
+                own = now + x->active_budget_ns - atomic_load_explicit(&x->active_spent_ns, memory_order_relaxed);
+        } else {
+            own = x->deadline_at_ns;
+        }
+        if (atomic_load_explicit(&x->tripped, memory_order_relaxed) & AETHER_ACCOUNT_TRIPPED_DEADLINE) tr = 1;
+        if (own && (!at || own < at)) at = own;
+    }
+    acct_unlock();
+    if (at && at <= now) tr = 1;
+    if (tripped) *tripped = tr;
+    return at;
+}
+
+static void own_charge_time(AetherExecAccount* a, int64_t since_ns, int tripped) {
+    int64_t now = now_ns();
+    acct_lock();
+    for (AetherExecAccount* x = a; x; x = x->parent) {
+        int64_t own = 0;
+        if (x->deadline_counts == AETHER_DEADLINE_ACTIVE) {
+            int64_t spent = atomic_fetch_add_explicit(&x->active_spent_ns, now - since_ns,
+                                                      memory_order_relaxed) + (now - since_ns);
+            if (x->active_budget_ns && spent >= x->active_budget_ns) own = 1;
+        } else if (x->deadline_at_ns && now >= x->deadline_at_ns) {
+            own = 1;
+        }
+        /* An account trips on its own deadline: the call's trip flag is only
+         * the sign that a safe point saw one pass. */
+        if (own && tripped)
+            atomic_fetch_or_explicit(&x->tripped, AETHER_ACCOUNT_TRIPPED_DEADLINE, memory_order_relaxed);
+    }
+    acct_unlock();
+}
+
+static AetherExecAccount* own_new(const AetherExecLimits* limits) {
+    AetherExecAccount* a = (AetherExecAccount*)calloc(1, sizeof(AetherExecAccount));
+    if (!a) return NULL;
+    a->owner = &g_acct_lock;
+    if (limits) {
+        a->memory_bytes = limits->memory_bytes;
+        a->deadline_counts = limits->deadline_counts == AETHER_DEADLINE_ACTIVE
+                                 ? AETHER_DEADLINE_ACTIVE : AETHER_DEADLINE_ELAPSED;
+        if (limits->deadline_ms > 0) {
+            if (a->deadline_counts == AETHER_DEADLINE_ACTIVE)
+                a->active_budget_ns = limits->deadline_ms * 1000000LL;
+            else
+                a->deadline_at_ns = now_ns() + limits->deadline_ms * 1000000LL;
+            caps_arm();
+        }
+    }
+    acct_lock();
+    /* A parent the host has freed is no parent: only a live one is linked. */
+    if (limits && limits->parent) {
+        for (AetherExecAccount* x = g_live_accounts; x; x = x->next_live)
+            if (x == limits->parent) { a->parent = x; break; }
+    }
+    a->next_live = g_live_accounts;
+    g_live_accounts = a;
+    g_live_count++;
+    if (g_live_count == 1) copies_mark(1);
+    acct_unlock();
+    return a;
+}
+
+static void own_free(AetherExecAccount* a) {
+    if (!a) return;
+    acct_lock();
+    AetherExecAccount** link = &g_live_accounts;
+    while (*link && *link != a) link = &(*link)->next_live;
+    if (!*link) { acct_unlock(); return; }   /* not a live account */
+    *link = a->next_live;
+    g_live_count--;
+    /* Its children charge it no more, and its blocks credit nobody: they
+     * stay counted against the process cap until they are freed. */
+    for (AetherExecAccount* x = g_live_accounts; x; x = x->next_live)
+        if (x->parent == a) x->parent = NULL;
+    for (size_t i = 0; i < g_slot_cap; i++) {
+        if (g_slots[i].p && g_slots[i].a == a) {
+            const void* p = g_slots[i].p;
+            (void)slot_take(p);
+            i = (size_t)-1;   /* the shift may have moved an entry behind i */
+        }
+    }
+    if (g_live_count == 0) {
+        free(g_slots);
+        g_slots = NULL;
+        g_slot_cap = 0;
+        g_slot_used = 0;
+        copies_mark(0);
+    }
+    acct_unlock();
+    free(a);
+}
+
+/* The account in use on this thread becomes `a`: `a` taken for this thread,
+ * the one it replaces let go. 0, or -1 when `a` is in use on another
+ * thread (the account in use is then left as it was). */
+static int account_switch(AetherFrames* F, AetherExecAccount* a) {
+    AetherExecAccount* was = F->account;
+    if (a == was) return 0;
+    if (a) {
+        uintptr_t expected = 0;
+        if (!atomic_compare_exchange_strong_explicit(&a->thread, &expected, (uintptr_t)F,
+                                                     memory_order_acq_rel, memory_order_relaxed))
+            return -1;
+    }
+    if (was) atomic_store_explicit(&was->thread, 0, memory_order_release);
+    F->account = a;
+    return 0;
+}
+
+/* aether_exec_use: an account these accounts did not make (one another copy
+ * of the runtime made, where the copies did not find each other) is refused,
+ * so a copy never charges, links or records a block for an account another
+ * copy's lock guards and another copy may free. */
+static int own_use(AetherExecAccount* a, AetherExecAccount** previous) {
+    if (a && a->owner != (const void*)&g_acct_lock) return -1;
+    AetherFrames* F = aether_frames_here();
+    AetherExecAccount* was = F->account;
+    if (account_switch(F, a) != 0) return -1;
+    if (previous) *previous = was;
+    return 0;
+}
+
+/* An execution ends: the account in use when it began is in use again,
+ * whatever the code it ran left (#2954). One another thread has taken
+ * meanwhile is not taken from it: then no account is in use. */
+static void own_restore(AetherExecAccount* a) {
+    AetherFrames* F = aether_frames_here();
+    if (account_switch(F, a) != 0) (void)account_switch(F, NULL);
+}
+
+/* An actor step begins (aether_step_barrier.h): the account in use is the
+ * code's the step runs inside, not the step's, whose allocations an actor's
+ * own thread would not charge to it. Put aside, still this thread's, so no
+ * other thread takes it meanwhile; NULL when none was in use. */
+static AetherExecAccount* own_step_aside(void) {
+    AetherFrames* F = aether_frames_here();
+    AetherExecAccount* was = F->account;
+    F->account = NULL;
+    return was;
+}
+
+/* The step ends: one it left in use is let go, and the one put aside is in
+ * use again. */
+static void own_step_back(AetherExecAccount* was) {
+    AetherFrames* F = aether_frames_here();
+    if (F->account && F->account != was) (void)account_switch(F, NULL);
+    F->account = was;
+}
+
+static uint64_t own_used(const AetherExecAccount* a) {
+    return a ? atomic_load_explicit(&a->used, memory_order_relaxed) : 0;
+}
+
+static int own_tripped(const AetherExecAccount* a) {
+    return a ? atomic_load_explicit(&a->tripped, memory_order_relaxed) : 0;
+}
+
+/* The account in use's charge for a block of `bytes`, under the lock: 1 and
+ * the block recorded (when an account is in use), or 0 refused. With no
+ * account in use the block is in no table: a stale entry at its address
+ * (a block freed with plain free()) is dropped. */
+static int own_alloc(void* p, size_t bytes) {
+    AetherExecAccount* a = own_here();
+    acct_lock();
+    if (!a) {
+        (void)slot_take(p);
+        acct_unlock();
+        return 1;
+    }
+    int ok = chain_charge(a, (uint64_t)bytes);
+    if (ok && !slot_put(p, a)) {
+        chain_credit(a, (uint64_t)bytes);   /* no room to remember it: charged to none */
+    }
+    acct_unlock();
+    return ok;
+}
+
+static void own_free_block(const void* p, size_t bytes) {
+    acct_lock();
+    AetherExecAccount* a = slot_take(p);
+    if (a) chain_credit(a, (uint64_t)bytes);
+    acct_unlock();
+}
+
+/* A realloc of a cap-aware block, for the accounts: the old block's bytes
+ * back to the account it was charged to, the new block's charged to the
+ * account in use, before the realloc, so a refusal leaves it as it was. 0
+ * refused. own_realloc_end records the new block, or undoes the charge
+ * when the realloc itself failed (np NULL). */
+static int own_realloc_begin(void* p, size_t old_bytes, size_t new_bytes,
+                             AetherExecAccount** old_owner, AetherExecAccount** now) {
+    *now = own_here();
+    acct_lock();
+    *old_owner = p ? slot_take(p) : NULL;
+    if (*old_owner) chain_credit(*old_owner, (uint64_t)old_bytes);
+    if (*now && !chain_charge(*now, (uint64_t)new_bytes)) {
+        if (*old_owner) {
+            (void)chain_charge(*old_owner, (uint64_t)old_bytes);   /* it was within it */
+            (void)slot_put(p, *old_owner);
+        }
+        acct_unlock();
+        return 0;
+    }
+    acct_unlock();
+    return 1;
+}
+
+static void own_realloc_end(void* p, void* np, size_t old_bytes, size_t new_bytes,
+                            AetherExecAccount* old_owner, AetherExecAccount* now) {
+    acct_lock();
+    if (!np) {
+        if (now) chain_credit(now, (uint64_t)new_bytes);
+        if (old_owner) {
+            (void)chain_charge(old_owner, (uint64_t)old_bytes);
+            (void)slot_put(p, old_owner);
+        }
+    } else if (now) {
+        if (!slot_put(np, now)) chain_credit(now, (uint64_t)new_bytes);
+    } else {
+        (void)slot_take(np);
+    }
+    acct_unlock();
+}
+
+/* ------------------------------------------------------------------
+ * The accounts are one per process (#2954)
+ * ------------------------------------------------------------------
+ * A library with a runtime of its own makes its allocations through its own
+ * copy of this file, while the account in use was set through another (an
+ * Aether host's std.host, or a C host's). So the accounts, the table of
+ * blocks, the lock and each thread's account in use live in one copy, the
+ * first loaded image that exports aether_accounts_rendezvous
+ * (aether_rendezvous_find, as the sandbox levels do), and every copy works
+ * through it: the lock is one per process, and an account in use on one
+ * thread is refused on another whichever copy asks. A copy finds it once,
+ * the first time it enters an execution or calls the account API, and is
+ * given the accounts' bit in its own fast-path word from then on.
+ *
+ * The rendezvous carries a version and the sizes of what the copies pass to
+ * each other. A copy whose layout differs refuses: it reports it once, its
+ * account calls fail (aether_exec_account_new returns NULL, aether_exec_use
+ * -1), its allocations are charged to no account, and it never reads or
+ * writes the other copy's state. The copy that owns the accounts must stay
+ * loaded while another uses them: unloading it first is not supported. */
+
+#define AETHER_ACCOUNTS_RV_VERSION 1
+
+typedef struct AetherAccountsRendezvous {
+    uint32_t version;
+    uint32_t size;            /* sizeof(AetherAccountsRendezvous) */
+    uint32_t account_size;    /* sizeof(struct AetherExecAccount) */
+    uint32_t limits_size;     /* sizeof(AetherExecLimits) */
+    int (*register_copy)(_Atomic unsigned* fast_path_word);
+    AetherExecAccount* (*account_new)(const AetherExecLimits* limits);
+    void (*account_free)(AetherExecAccount* account);
+    int (*use)(AetherExecAccount* account, AetherExecAccount** previous);
+    void (*restore)(AetherExecAccount* account);
+    AetherExecAccount* (*here)(void);
+    uint64_t (*used)(const AetherExecAccount* account);
+    int (*tripped)(const AetherExecAccount* account);
+    int64_t (*deadline_ns)(const AetherExecAccount* account, int* tripped);
+    void (*charge_time)(AetherExecAccount* account, int64_t since_ns, int tripped);
+    int (*alloc)(void* p, size_t bytes);
+    void (*free_block)(const void* p, size_t bytes);
+    int (*realloc_begin)(void* p, size_t old_bytes, size_t new_bytes,
+                         AetherExecAccount** old_owner, AetherExecAccount** now);
+    void (*realloc_end)(void* p, void* np, size_t old_bytes, size_t new_bytes,
+                        AetherExecAccount* old_owner, AetherExecAccount* now);
+    AetherExecAccount* (*step_aside)(void);
+    void (*step_back)(AetherExecAccount* was);
+} AetherAccountsRendezvous;
+
+static const AetherAccountsRendezvous g_own_accounts = {
+    AETHER_ACCOUNTS_RV_VERSION, (uint32_t)sizeof(AetherAccountsRendezvous),
+    (uint32_t)sizeof(struct AetherExecAccount), (uint32_t)sizeof(AetherExecLimits),
+    own_register, own_new, own_free, own_use, own_restore, own_here, own_used, own_tripped,
+    own_deadline_ns, own_charge_time, own_alloc, own_free_block, own_realloc_begin, own_realloc_end,
+    own_step_aside, own_step_back,
+};
+
+/* Looked up by name in the other copies, so exported from each. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("default"), used))
+#endif
+const AetherAccountsRendezvous* aether_accounts_rendezvous(void) {
+    return &g_own_accounts;
+}
+
+/* A copy whose layout differs from the owning copy's: no account, ever. */
+static int refused_register(_Atomic unsigned* w) { (void)w; return -1; }
+static AetherExecAccount* refused_new(const AetherExecLimits* l) { (void)l; return NULL; }
+static void refused_free(AetherExecAccount* a) { (void)a; }
+static int refused_use(AetherExecAccount* a, AetherExecAccount** prev) {
+    if (prev) *prev = NULL;
+    return a ? -1 : 0;
+}
+static void refused_restore(AetherExecAccount* a) { (void)a; }
+static AetherExecAccount* refused_here(void) { return NULL; }
+static uint64_t refused_used(const AetherExecAccount* a) { (void)a; return 0; }
+static int refused_tripped(const AetherExecAccount* a) { (void)a; return 0; }
+static int64_t refused_deadline(const AetherExecAccount* a, int* tr) { (void)a; if (tr) *tr = 0; return 0; }
+static void refused_time(AetherExecAccount* a, int64_t s, int t) { (void)a; (void)s; (void)t; }
+static int refused_alloc(void* p, size_t n) { (void)p; (void)n; return 1; }
+static void refused_free_block(const void* p, size_t n) { (void)p; (void)n; }
+static int refused_realloc_begin(void* p, size_t o, size_t n, AetherExecAccount** oo, AetherExecAccount** now) {
+    (void)p; (void)o; (void)n; *oo = NULL; *now = NULL;
+    return 1;
+}
+static void refused_realloc_end(void* p, void* np, size_t o, size_t n, AetherExecAccount* oo, AetherExecAccount* now) {
+    (void)p; (void)np; (void)o; (void)n; (void)oo; (void)now;
+}
+static AetherExecAccount* refused_step_aside(void) { return NULL; }
+static void refused_step_back(AetherExecAccount* was) { (void)was; }
+static const AetherAccountsRendezvous g_refused_accounts = {
+    AETHER_ACCOUNTS_RV_VERSION, (uint32_t)sizeof(AetherAccountsRendezvous),
+    (uint32_t)sizeof(struct AetherExecAccount), (uint32_t)sizeof(AetherExecLimits),
+    refused_register, refused_new, refused_free, refused_use, refused_restore, refused_here,
+    refused_used, refused_tripped, refused_deadline, refused_time, refused_alloc, refused_free_block,
+    refused_realloc_begin, refused_realloc_end, refused_step_aside, refused_step_back,
+};
+
+void* aether_rendezvous_find(const char* symbol);
+
+static const AetherAccountsRendezvous* _Atomic g_accounts = NULL;
+_Atomic int aether_accounts_found = 0;
+
+typedef const AetherAccountsRendezvous* (*accounts_rv_fn)(void);
+
+/* The accounts this copy works through, found the first time. */
+static const AetherAccountsRendezvous* accounts(void) {
+    const AetherAccountsRendezvous* r = atomic_load_explicit(&g_accounts, memory_order_acquire);
+    if (r) return r;
+    const AetherAccountsRendezvous* found = &g_own_accounts;
+    void* p = aether_rendezvous_find("aether_accounts_rendezvous");
+    if (p) {
+        accounts_rv_fn f;
+        memcpy(&f, &p, sizeof(f));
+        const AetherAccountsRendezvous* other = f();
+        if (other && other != &g_own_accounts) {
+            /* The version and size first: only those are read before it
+             * is known the rest is laid out as this copy lays it out. */
+            if (other->version == AETHER_ACCOUNTS_RV_VERSION &&
+                other->size == (uint32_t)sizeof(AetherAccountsRendezvous) &&
+                other->account_size == (uint32_t)sizeof(struct AetherExecAccount) &&
+                other->limits_size == (uint32_t)sizeof(AetherExecLimits)) {
+                found = other;
+            } else {
+                fprintf(stderr,
+                        "aether: this runtime copy cannot share execution accounts with the one "
+                        "loaded first (accounts version %u, %u-byte table, against %u, %u): its "
+                        "account calls fail and its allocations are charged to no account; build "
+                        "the libraries with one Aether version, or with --shared-runtime\n",
+                        (unsigned)AETHER_ACCOUNTS_RV_VERSION, (unsigned)sizeof(AetherAccountsRendezvous),
+                        (unsigned)other->version, (unsigned)other->size);
+                found = &g_refused_accounts;
+            }
+        }
+    }
+    const AetherAccountsRendezvous* expected = NULL;
+    if (atomic_compare_exchange_strong_explicit(&g_accounts, &expected, found,
+                                                memory_order_acq_rel, memory_order_acquire)) {
+        (void)found->register_copy(&aether_caps_slow);
+    }
+    atomic_store_explicit(&aether_accounts_found, 1, memory_order_release);
+    return atomic_load_explicit(&g_accounts, memory_order_acquire);
+}
+
+void aether_accounts_register(void) {
+    (void)accounts();
+}
+
+AetherExecAccount* aether_account_here(void) {
+    return accounts()->here();
+}
+
+int64_t aether_account_deadline_ns(const AetherExecAccount* a, int* tripped) {
+    return accounts()->deadline_ns(a, tripped);
+}
+
+void aether_account_charge_time(AetherExecAccount* a, int64_t since_ns, int tripped) {
+    accounts()->charge_time(a, since_ns, tripped);
+}
+
+AetherExecAccount* aether_account_step_aside(void) {
+    return accounts()->step_aside();
+}
+
+void aether_account_step_back(AetherExecAccount* was) {
+    accounts()->step_back(was);
+}
+
+void aether_account_restore(AetherExecAccount* a) {
+    accounts()->restore(a);
+}
+
+int aether_accounts_in_force(void) {
+    return (atomic_load_explicit(&aether_caps_slow, memory_order_relaxed) & CAPS_SLOW_ACCOUNTS) != 0;
+}
+
+AETHER_CAPS_API AetherExecAccount* aether_exec_account_new(const AetherExecLimits* limits) {
+    return accounts()->account_new(limits);
+}
+
+AETHER_CAPS_API void aether_exec_account_free(AetherExecAccount* account) {
+    accounts()->account_free(account);
+}
+
+AETHER_CAPS_API int aether_exec_use(AetherExecAccount* account, AetherExecAccount** previous) {
+    return accounts()->use(account, previous);
+}
+
+AETHER_CAPS_API uint64_t aether_exec_account_used(const AetherExecAccount* account) {
+    return accounts()->used(account);
+}
+
+AETHER_CAPS_API int aether_exec_account_tripped(const AetherExecAccount* account) {
+    return accounts()->tripped(account);
+}
+
+/* std.host's: an account from scalars, for a caller with no C struct. */
+AETHER_CAPS_API AetherExecAccount* aether_exec_account_make(uint64_t memory_bytes, int64_t deadline_ms,
+                                                            int counts, AetherExecAccount* parent) {
+    AetherExecLimits l = { memory_bytes, deadline_ms, counts, parent };
+    return aether_exec_account_new(&l);
+}
+
+/* ------------------------------------------------------------------
+ * Runtime copies that share state (#2955, #2954)
+ * ------------------------------------------------------------------
+ * A library built without --shared-runtime carries a copy of the runtime,
+ * and on Windows and macOS that copy stays apart from the program's. State
+ * that must be one per process (the sandbox levels a thread is inside, the
+ * execution accounts) lives in one copy, the first loaded image that
+ * exports the symbol naming it: every copy asks the same question, so they
+ * agree. That copy must stay loaded while another uses its state.
+ * ------------------------------------------------------------------ */
+
+#if !defined(_WIN32) && (defined(__APPLE__) || defined(AETHER_RV_PHDR)) && defined(RTLD_NOLOAD)
+/* `symbol` in the object `name` (a loaded object's path; NULL or "" the
+ * program), opened by name without loading, so an object a host loaded
+ * RTLD_LOCAL, which the global scope does not show, is found too. */
+static void* rv_symbol_of(const char* name, const char* symbol) {
+    void* h = (name && name[0]) ? dlopen(name, RTLD_LAZY | RTLD_NOLOAD) : dlopen(NULL, RTLD_LAZY);
+    if (!h) return NULL;
+    void* p = dlsym(h, symbol);
+    dlclose(h);
+    return p;
+}
+#endif
+
+#ifdef AETHER_RV_PHDR
+typedef struct { const char* name[512]; int n; } RvObjects;
+
+static int rv_collect(struct dl_phdr_info* info, size_t size, void* data) {
+    (void)size;
+    RvObjects* objs = (RvObjects*)data;
+    if (objs->n < 512) objs->name[objs->n++] = info->dlpi_name;
+    return 0;
+}
+#endif
+
+void* aether_rendezvous_find(const char* symbol) {
+    void* p = NULL;
+#if defined(_WIN32)
+    /* The modules in load order; the first that exports one. A DLL that
+     * `ae build --emit=lib` links exports every symbol, the shared runtime
+     * too; an executable exports none, so a program's own copy finds a
+     * library's when one is loaded. */
+    typedef BOOL (WINAPI *enum_modules_fn)(HANDLE, HMODULE*, DWORD, LPDWORD);
+    HMODULE k32 = GetModuleHandleA("kernel32.dll");
+    enum_modules_fn enum_modules = NULL;
+    if (k32) {
+        FARPROC fp = GetProcAddress(k32, "K32EnumProcessModules");
+        if (fp) memcpy(&enum_modules, &fp, sizeof(enum_modules));
+    }
+    if (!enum_modules) return NULL;
+    HMODULE mods[512];
+    DWORD need = 0;
+    if (!enum_modules(GetCurrentProcess(), mods, (DWORD)sizeof(mods), &need)) return NULL;
+    DWORD n = need / (DWORD)sizeof(HMODULE);
+    if (n > 512) n = 512;
+    for (DWORD i = 0; i < n && !p; i++) {
+        FARPROC fp = GetProcAddress(mods[i], symbol);
+        if (fp) memcpy(&p, &fp, sizeof(p));
+    }
+#elif defined(__APPLE__) && defined(RTLD_NOLOAD)
+    /* The images in load order, the program first. */
+    uint32_t n = _dyld_image_count();
+    for (uint32_t i = 0; i < n && !p; i++) p = rv_symbol_of(i == 0 ? NULL : _dyld_get_image_name(i), symbol);
+#elif defined(AETHER_RV_PHDR) && defined(RTLD_NOLOAD)
+    /* The loaded objects in load order, the program first (its name is
+     * empty; opened as NULL it is the global scope). Their names are taken
+     * first and opened after: dl_iterate_phdr holds a loader lock. */
+    RvObjects objs;
+    objs.n = 0;
+    dl_iterate_phdr(rv_collect, &objs);
+    for (int i = 0; i < objs.n && !p; i++) p = rv_symbol_of(objs.name[i], symbol);
+#elif (defined(__unix__) || defined(__APPLE__)) && defined(RTLD_DEFAULT)
+    /* The global scope in load order. */
+    p = dlsym(RTLD_DEFAULT, symbol);
+#else
+    (void)symbol;
+#endif
+    return p;
+}
+
 /* Libc-compatible wrappers: the returned pointer has no hidden
  * header, so libc free() is safe (loses cap accounting but no
  * heap corruption). For full cap accounting, callers free with
  * aether_caps_free(p, bytes) passing the original size. */
 
-void* aether_caps_malloc(size_t bytes) {
-    if (aether_alloc_test_refuses()) {
+/* What every allocation goes through when something is to be asked: the
+ * test hook, the process cap, the account in use. */
+static void* caps_alloc_slow(size_t bytes, int zeroed, size_t n, size_t size) {
+    unsigned slow = atomic_load_explicit(&aether_caps_slow, memory_order_acquire);
+    if ((slow & CAPS_SLOW_TEST) && aether_alloc_test_refuses()) {
         aether_alloc_failed(AETHER_STOP_OUT_OF_MEMORY);
         return NULL;
     }
@@ -211,13 +913,32 @@ void* aether_caps_malloc(size_t bytes) {
         aether_alloc_failed(AETHER_STOP_MEMORY_CAP);
         return NULL;
     }
-    void* p = malloc(bytes);
+    void* p = zeroed ? calloc(n, size) : malloc(bytes);
     if (!p) {
         aether_caps_account_free(bytes);
         aether_alloc_failed(AETHER_STOP_OUT_OF_MEMORY);
         return NULL;
     }
+    if ((slow & CAPS_SLOW_ACCOUNTS) && !accounts()->alloc(p, bytes)) {
+        free(p);
+        aether_caps_account_free(bytes);
+        aether_alloc_failed(AETHER_STOP_MEMORY_CAP);
+        return NULL;
+    }
     return p;
+}
+
+void* aether_caps_malloc(size_t bytes) {
+    if (__builtin_expect(atomic_load_explicit(&aether_caps_slow, memory_order_relaxed) == 0, 1)) {
+        void* p = malloc(bytes);
+        if (!p) {
+            aether_alloc_failed(AETHER_STOP_OUT_OF_MEMORY);
+            return NULL;
+        }
+        atomic_fetch_add_explicit(&g_mem_used, (uint64_t)bytes, memory_order_relaxed);
+        return p;
+    }
+    return caps_alloc_slow(bytes, 0, 0, 0);
 }
 
 void* aether_caps_calloc(size_t n, size_t size) {
@@ -226,25 +947,21 @@ void* aether_caps_calloc(size_t n, size_t size) {
         return NULL;
     }
     size_t bytes = n * size;
-    if (aether_alloc_test_refuses()) {
-        aether_alloc_failed(AETHER_STOP_OUT_OF_MEMORY);
-        return NULL;
+    if (__builtin_expect(atomic_load_explicit(&aether_caps_slow, memory_order_relaxed) == 0, 1)) {
+        void* p = calloc(n, size);
+        if (!p) {
+            aether_alloc_failed(AETHER_STOP_OUT_OF_MEMORY);
+            return NULL;
+        }
+        atomic_fetch_add_explicit(&g_mem_used, (uint64_t)bytes, memory_order_relaxed);
+        return p;
     }
-    if (!aether_caps_check_alloc(bytes)) {
-        aether_alloc_failed(AETHER_STOP_MEMORY_CAP);
-        return NULL;
-    }
-    void* p = calloc(n, size);
-    if (!p) {
-        aether_caps_account_free(bytes);
-        aether_alloc_failed(AETHER_STOP_OUT_OF_MEMORY);
-        return NULL;
-    }
-    return p;
+    return caps_alloc_slow(bytes, 1, n, size);
 }
 
 void* aether_caps_realloc(void* p, size_t old_bytes, size_t new_bytes) {
-    if (new_bytes > old_bytes && aether_alloc_test_refuses()) {
+    unsigned slow = atomic_load_explicit(&aether_caps_slow, memory_order_acquire);
+    if ((slow & CAPS_SLOW_TEST) && new_bytes > old_bytes && aether_alloc_test_refuses()) {
         aether_alloc_failed(AETHER_STOP_OUT_OF_MEMORY);
         return NULL;
     }
@@ -255,7 +972,24 @@ void* aether_caps_realloc(void* p, size_t old_bytes, size_t new_bytes) {
             return NULL;
         }
     }
+    /* The accounts' view: the old block's bytes back to the account charged
+     * for them, the new block's charged to the account in use, before the
+     * realloc, so a refusal leaves the block as it was. */
+    AetherExecAccount* old_owner = NULL;
+    AetherExecAccount* now_in_use = NULL;
+    int accounted = (slow & CAPS_SLOW_ACCOUNTS) != 0;
+    if (accounted && !accounts()->realloc_begin(p, old_bytes, new_bytes, &old_owner, &now_in_use)) {
+        if (new_bytes > old_bytes) aether_caps_account_free(new_bytes - old_bytes);
+        aether_alloc_failed(AETHER_STOP_MEMORY_CAP);
+        return NULL;
+    }
+    /* The old address, as a key only: the accounts read it again when the
+     * realloc failed and the old block is still the one they charged. */
+    uintptr_t old_key = (uintptr_t)p;
     void* np = realloc(p, new_bytes);
+    if (accounted)
+        accounts()->realloc_end((void*)old_key, new_bytes ? np : NULL, old_bytes, new_bytes, old_owner,
+                                now_in_use);
     if (!np) {
         if (new_bytes > old_bytes) {
             aether_caps_account_free(new_bytes - old_bytes);
@@ -271,6 +1005,8 @@ void* aether_caps_realloc(void* p, size_t old_bytes, size_t new_bytes) {
 
 void aether_caps_free(void* p, size_t bytes) {
     if (!p) return;
+    if (atomic_load_explicit(&aether_caps_slow, memory_order_relaxed) & CAPS_SLOW_ACCOUNTS)
+        accounts()->free_block(p, bytes);
     free(p);
     aether_caps_account_free(bytes);
 }

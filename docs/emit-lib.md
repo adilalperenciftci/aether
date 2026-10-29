@@ -692,6 +692,99 @@ The trip is also observable via `aether_deadline_tripped()`. Retrying a
 tripped deadline is the host's policy: re-arm + call again with a more
 generous budget, or surface `Deadline` to the user.
 
+### Execution accounts (#2954)
+
+The cap and the deadline above belong to the process and to one call. A
+host that runs many scripts on one thread, each yielding to it and resumed
+later (a game's scripts, an editor's plugins), needs a budget that belongs
+to the script: an execution account.
+
+```c
+AetherExecLimits lim = { 256 * 1024, 5000, AETHER_DEADLINE_ACTIVE, NULL };
+AetherExecAccount* script = aether_exec_account_new(&lim);
+
+AetherExecAccount* was;
+aether_exec_use(script, &was);     // this thread's calls charge `script`
+int r = aether_on_frame(dt);
+if (aether_last_outcome() == AETHER_MEMORY_CAP) { /* past its 256 KiB */ }
+aether_exec_use(was, NULL);        // back to the host's own
+
+if (aether_exec_account_tripped(script)) drop(script);
+aether_exec_account_free(script);
+```
+
+- **Memory.** While an account is in use on a thread, every cap-aware
+  allocation made there (strings, collections, JSON, the std buffers) is
+  charged to it and to its parent chain. One that would take any of them
+  past its `memory_bytes` is refused as the process cap refuses one: the
+  call ends at its next safe point with `AETHER_MEMORY_CAP`, and the
+  account's `aether_exec_account_tripped` has
+  `AETHER_ACCOUNT_TRIPPED_MEMORY`. The process cap stays the outer ceiling.
+- **A block stays the account's that allocated it** until it is freed,
+  wherever that happens: in a call under another account, or in the host
+  outside any call. So a string a script hands its host keeps counting
+  against the script until the host releases it, and two scripts on one
+  thread never charge each other.
+- **Deadlines.** A call under an account has the earliest deadline on the
+  account's chain, or the call deadline (`aether_set_call_deadline`) if
+  that is earlier. `AETHER_DEADLINE_ELAPSED` (the default) counts wall time
+  from `aether_exec_account_new`, so the time a script spends suspended
+  counts; `AETHER_DEADLINE_ACTIVE` counts only the time spent in calls
+  under the account. Past it the call ends with `AETHER_DEADLINE`, and the
+  account keeps `AETHER_ACCOUNT_TRIPPED_DEADLINE`.
+- **A parent only narrows.** An account made with a `parent` charges what
+  it holds to the parent too, and its deadline is never later than the
+  parent's: a host gives each plugin an account and each of the plugin's
+  scripts a child of it.
+- **Nesting.** An execution puts back the account that was in use when it
+  began, whatever the code it ran set: a host service that runs another
+  script under its own account, inside a call, leaves the outer call's
+  account as it was.
+- **Threads.** An account is in use on one thread at a time:
+  `aether_exec_use` returns -1 for one in use on another thread, and it may
+  move to another thread once let go there. Allocations on other threads (an
+  actor's handler) are not charged to it, nor those of an actor stepped on
+  this thread while it is in use (a send's inline step, a cooperative ask's
+  poll): a step runs in its own context (actor-concurrency.md, "The
+  delivery contract").
+- **Ownership.** The account is the host's from `aether_exec_account_new`
+  to `aether_exec_account_free`; the runtime keeps nothing of `limits` past
+  the call, writes `previous` and keeps nothing of it. Freeing an account
+  detaches its children and its blocks, which then count only against the
+  process cap.
+- **An Aether host** has the same in std.host: `host.account_new(bytes, ms,
+  host.DEADLINE_ELAPSED, parent)`, `host.account_use(a)`,
+  `host.account_in_use()`, `host.account_used(a)`,
+  `host.account_tripped(a)` and `host.account_free(a)`.
+
+**Runtime copies.** A library built without `--shared-runtime` has a
+runtime of its own, and the accounts are still one per process: every copy
+works through the accounts of the first loaded image that exports them,
+found once, at its first account call or execution (the rule the sandbox's
+levels follow). There is one lock, one table of blocks and one account in
+use per thread, so an account is charged whichever copy allocates, and is
+refused on another thread whichever copy is asked.
+
+- The copy that owns the accounts must stay loaded while another runs:
+  unloading it first is not supported.
+- On Windows an executable exports nothing, so a program's own copy finds a
+  library's only if the library was loaded before the program's first
+  account call. Where two copies did not find each other, a copy refuses
+  (-1) to put in use an account the other made, rather than charge one it
+  does not guard.
+- The accounts carry a version and the sizes of what the copies pass each
+  other. A copy that finds accounts of another layout (another Aether
+  version) does not share them: it says so once on stderr, naming
+  `--shared-runtime`; its `aether_exec_account_new` returns NULL and its
+  `aether_exec_use` -1 for an account; its allocations are charged to
+  none; and it reads nothing of the other's but the version and sizes.
+
+**What it costs.** While no account exists nothing is charged, and a
+cap-aware allocation still tests one word before it calls `malloc` (the
+word also holds the process cap and the test hook); an execution's entry
+adds one load, and an actor step one at each end (the delivery contract's
+item 5, in [actor-concurrency.md](actor-concurrency.md#the-delivery-contract)).
+
 ## Failures and nested calls at the boundary
 
 Every `aether_<name>` export (and every package builder export) runs inside
@@ -762,8 +855,10 @@ case AETHER_DEADLINE:  /* cut by its deadline: r is not a result */ break;
 - **The host API is in every library.** A library built with its own
   runtime carries `aether_set_call_deadline`, `aether_deadline_tripped`,
   `aether_set_memory_cap`, `aether_set_caller`, `aether_clear_caller`,
-  `aether_last_outcome`, `aether_last_outcome_text`, `aether_exec_token`
-  and `aether_exec_cancel` even when its code calls none of them, so a host
+  `aether_last_outcome`, `aether_last_outcome_text`, `aether_exec_token`,
+  `aether_exec_cancel` and the execution accounts' `aether_exec_account_new`,
+  `aether_exec_account_free`, `aether_exec_use`, `aether_exec_account_used`
+  and `aether_exec_account_tripped` even when its code calls none of them, so a host
   that loads it can call them in its runtime (a library DLL had no
   `aether_set_call_deadline` before). On the shared runtime they are the
   shared runtime's.

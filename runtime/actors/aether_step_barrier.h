@@ -51,11 +51,17 @@
  *     call: its loop heads are not cut by the call's deadline, a try in it
  *     catches its own panics, its failed allocations are its own, and it
  *     reads no caller info, as on a core's thread. The call is cut at its
- *     own next safe point once the step returns.
+ *     own next safe point once the step returns;
+ *   - the execution account in use (aether_resource_caps.c, #2954): an
+ *     actor stepped inside code that has one in use is charged nothing to
+ *     it, as on a thread of its own; the account stays the thread's
+ *     meanwhile, so no other thread takes it, and one the step left in use
+ *     is let go.
  *
  * Each part costs a step only when some thread holds that kind of context:
  * it is put aside behind a load of a global that says so
- * (g_aether_spawn_watch for the claim; for the levels, the count of threads
+ * (g_aether_spawn_watch for the claim; aether_caps_slow's accounts bit for
+ * the account; for the levels, the count of threads
  * with one, through aether_sandbox_in_force), or behind two fields of the
  * thread's frames block, which the step's try frame is pushed on anyway
  * (the executions: their depth against the floor, and an interruption on
@@ -78,6 +84,7 @@
 #include "aether_frames.h"
 #include "../scheduler/multicore_scheduler.h"
 #include "../utils/aether_trace.h"
+#include "../aether_resource_caps.h"
 
 extern AETHER_TLS void* g_current_reply_slot;
 extern AETHER_TLS void* g_current_step_actor;
@@ -101,6 +108,8 @@ typedef struct {
     int sandbox[2];
     int execs_hid;
     AetherExecAside execs;
+    int account_hid;
+    struct AetherExecAccount* account;
 } AetherStepAside;
 
 static inline void aether_step_put_aside(AetherStepAside* s) {
@@ -111,6 +120,12 @@ static inline void aether_step_put_aside(AetherStepAside* s) {
     s->actor_id = s->in_step ? g_aether_current_actor_id : -1;
     s->spawn_hid = unlikely(atomic_load_explicit(&g_aether_spawn_watch, memory_order_relaxed) != 0) &&
                    aether_spawn_put_aside(&s->spawn);
+    s->account_hid = 0;
+    s->account = NULL;
+    if (unlikely(atomic_load_explicit(&aether_caps_slow, memory_order_relaxed) & AETHER_CAPS_SLOW_ACCOUNTS)) {
+        s->account = aether_account_step_aside();
+        s->account_hid = 1;
+    }
     s->sandbox_hid = 0;
     atomic_int* in_force = atomic_load_explicit(&aether_sandbox_in_force, memory_order_acquire);
     if (unlikely(in_force != NULL) && unlikely(atomic_load_explicit(in_force, memory_order_relaxed) != 0)) {
@@ -123,6 +138,10 @@ static inline void aether_step_give_back(const AetherStepAside* s) {
     if (unlikely(s->execs_hid)) aether_step_give_back_execs(&s->execs);
     if (unlikely(s->sandbox_hid))
         atomic_load_explicit(&aether_step_sandbox_show, memory_order_relaxed)(s->sandbox);
+    /* Accounts made while the step ran, and one it left in use, count too. */
+    if (unlikely(s->account_hid) ||
+        unlikely(atomic_load_explicit(&aether_caps_slow, memory_order_relaxed) & AETHER_CAPS_SLOW_ACCOUNTS))
+        aether_account_step_back(s->account);
     if (unlikely(s->spawn_hid)) aether_spawn_give_back(&s->spawn);
     g_aether_in_actor_step = s->in_step;
     g_aether_current_actor_id = s->actor_id;

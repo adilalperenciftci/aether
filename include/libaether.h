@@ -132,6 +132,81 @@ typedef struct AetherExecToken { void* cell; uint64_t serial; } AetherExecToken;
 AETHER_API AetherExecToken aether_exec_token(void);
 AETHER_API int aether_exec_cancel(AetherExecToken token);
 
+/* Execution accounts (#2954): a memory allowance and a deadline that belong
+ * to one logical execution, a script that yields to its host and resumes
+ * later while others run on the same thread in between, not to the thread
+ * or the call.
+ *
+ * aether_exec_account_new makes one; aether_exec_use puts it in use on the
+ * calling thread (NULL: none) and gives back the one it replaces, which the
+ * host puts back when it switches scripts. While an account is in use:
+ *   - every cap-aware allocation (strings, collections, JSON, the std
+ *     buffers) is charged to it and to its parent chain; one that would take
+ *     any of them past its memory_bytes is refused, the call ends at its next
+ *     safe point with AETHER_MEMORY_CAP, and aether_exec_account_tripped has
+ *     AETHER_ACCOUNT_TRIPPED_MEMORY;
+ *   - an export's call has the account's deadline, the earliest on its
+ *     chain and the call deadline's if that is earlier: ELAPSED counts wall
+ *     time from aether_exec_account_new, so time suspended counts; ACTIVE
+ *     counts only the time spent in calls under the account. Past it the
+ *     call ends with AETHER_DEADLINE, and the account has
+ *     AETHER_ACCOUNT_TRIPPED_DEADLINE, which no later call clears.
+ * A block's bytes stay charged to the account that allocated it until the
+ * block is freed, wherever that happens: in a call under another account, or
+ * in the host outside any call. A parent can only narrow: what a child
+ * holds counts against its parent too. The process cap
+ * (aether_set_memory_cap) stays the outer ceiling.
+ *
+ * Threads: an account is in use on one thread at a time; aether_exec_use
+ * returns -1 for one in use on another thread. It may be used on another
+ * thread later. Allocations made on other threads (an actor's handler) are
+ * not charged to it, nor those of an actor stepped on this thread while it
+ * is in use (a send's inline step). aether_exec_account_free detaches its
+ * children and its blocks, which then count only against the process cap.
+ * Nothing is charged and nothing more is paid while no account exists.
+ *
+ * Ownership: an account is the host's, from new to free; the runtime keeps
+ * no reference to one after free, and none to `limits` after new.
+ * `previous` is written (when not NULL) and not kept.
+ *
+ * Runtime copies: a library built without --shared-runtime has a runtime of
+ * its own, and the accounts are still one per process. Every copy works
+ * through the accounts of the first loaded image that exports them (the
+ * same rule as the sandbox's levels), found once, at its first account call
+ * or execution: one lock, one table, each thread's account in use in one
+ * place, so an account is charged whichever copy allocates and is refused
+ * on another thread whichever copy asks. The copy that owns them must stay
+ * loaded while any other runs: unloading it first is not supported. On
+ * Windows a program's own copy is found by nobody (an executable exports
+ * nothing), so it finds a library's only if the library was loaded before
+ * that first call; where two copies did not find each other, a copy refuses
+ * (-1) to put in use an account the other made. Copies of different
+ * layouts (another accounts version) never share: a copy that finds the
+ * other's says so once on stderr, its aether_exec_account_new returns NULL
+ * and its aether_exec_use -1 for an account, its allocations are charged to
+ * none, and it reads nothing of the other's but the version and sizes. */
+#ifndef AETHER_EXEC_ACCOUNT_DEFINED
+#define AETHER_EXEC_ACCOUNT_DEFINED
+typedef struct AetherExecAccount AetherExecAccount;
+typedef struct {
+    uint64_t memory_bytes;       /* the live bytes it may hold; 0: no limit of its own */
+    int64_t  deadline_ms;        /* 0: no deadline of its own */
+    int      deadline_counts;    /* AETHER_DEADLINE_ELAPSED or AETHER_DEADLINE_ACTIVE */
+    AetherExecAccount* parent;   /* NULL, or the account its charges also go to */
+} AetherExecLimits;
+#define AETHER_DEADLINE_ELAPSED 0   /* wall time since the account was made */
+#define AETHER_DEADLINE_ACTIVE  1   /* time spent in executions under it */
+#endif
+#ifndef AETHER_ACCOUNT_TRIPPED_DEADLINE
+#define AETHER_ACCOUNT_TRIPPED_DEADLINE 1
+#define AETHER_ACCOUNT_TRIPPED_MEMORY   2
+#endif
+AETHER_API AetherExecAccount* aether_exec_account_new(const AetherExecLimits* limits);
+AETHER_API void     aether_exec_account_free(AetherExecAccount* account);
+AETHER_API int      aether_exec_use(AetherExecAccount* account, AetherExecAccount** previous);
+AETHER_API uint64_t aether_exec_account_used(const AetherExecAccount* account);
+AETHER_API int      aether_exec_account_tripped(const AetherExecAccount* account);
+
 #ifdef __cplusplus
 }
 #endif

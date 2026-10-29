@@ -115,6 +115,81 @@ int aether_exec_stop_reason(void);
  * its failure instead of stopping the process. Allocates nothing. */
 void aether_alloc_failed(int why);
 
+/* ------------------------------------------------------------------
+ * Execution accounts (#2954): budgets a host owns, for executions that
+ * outlive one call. libaether.h has the public half; this is the runtime's.
+ * ------------------------------------------------------------------ */
+#ifndef AETHER_EXEC_ACCOUNT_DEFINED
+#define AETHER_EXEC_ACCOUNT_DEFINED
+typedef struct AetherExecAccount AetherExecAccount;
+typedef struct {
+    uint64_t memory_bytes;       /* the live bytes it may hold; 0: no limit of its own */
+    int64_t  deadline_ms;        /* 0: no deadline of its own */
+    int      deadline_counts;    /* AETHER_DEADLINE_ELAPSED or AETHER_DEADLINE_ACTIVE */
+    AetherExecAccount* parent;   /* NULL, or the account its charges also go to */
+} AetherExecLimits;
+#define AETHER_DEADLINE_ELAPSED 0   /* wall time since the account was made */
+#define AETHER_DEADLINE_ACTIVE  1   /* time spent in executions under it */
+#endif
+
+struct AetherExecAccount {
+    _Atomic uint64_t used;            /* live bytes charged to it (its children's too) */
+    uint64_t memory_bytes;
+    int64_t  deadline_at_ns;          /* ELAPSED: when it passes; 0: none */
+    int64_t  active_budget_ns;        /* ACTIVE: what it may spend; 0: none */
+    _Atomic int64_t active_spent_ns;
+    int      deadline_counts;
+    _Atomic int tripped;              /* AETHER_ACCOUNT_TRIPPED_* bits */
+    AetherExecAccount* parent;
+    _Atomic uintptr_t thread;         /* the thread it is in use on, 0 for none */
+    const void* owner;                /* the accounts that made it: only they take it */
+    AetherExecAccount* next_live;     /* every live account, for freeing one */
+};
+#ifndef AETHER_ACCOUNT_TRIPPED_DEADLINE
+#define AETHER_ACCOUNT_TRIPPED_DEADLINE 1
+#define AETHER_ACCOUNT_TRIPPED_MEMORY   2
+#endif
+
+/* The public half (libaether.h). */
+AetherExecAccount* aether_exec_account_new(const AetherExecLimits* limits);
+void     aether_exec_account_free(AetherExecAccount* account);
+int      aether_exec_use(AetherExecAccount* account, AetherExecAccount** previous);
+uint64_t aether_exec_account_used(const AetherExecAccount* account);
+int      aether_exec_account_tripped(const AetherExecAccount* account);
+
+/* std.host's: an account from scalars. */
+AetherExecAccount* aether_exec_account_make(uint64_t memory_bytes, int64_t deadline_ms, int counts,
+                                            AetherExecAccount* parent);
+
+/* The allocation fast path's word (aether_resource_caps.c): 0 when nothing
+ * is to be asked; AETHER_CAPS_SLOW_ACCOUNTS while an account exists in the
+ * process. Scalars, read with relaxed loads by the execution frames. */
+extern _Atomic unsigned aether_caps_slow;
+#define AETHER_CAPS_SLOW_ACCOUNTS 2u
+/* Set once this copy has found the accounts it shares (the rendezvous). */
+extern _Atomic int aether_accounts_found;
+void aether_accounts_register(void);
+
+/* The account in use on this thread (aether_exec_use), NULL for none. */
+AetherExecAccount* aether_account_here(void);
+/* An execution ends: the account in use when it began is in use again. */
+void aether_account_restore(AetherExecAccount* account);
+/* An actor step begins and ends (aether_step_barrier.h): the account in use
+ * is put aside for the step, still this thread's, and is in use again after
+ * it; one the step left in use is let go. */
+AetherExecAccount* aether_account_step_aside(void);
+void aether_account_step_back(AetherExecAccount* was);
+/* The deadline in force for an execution entered now under `a` and its
+ * ancestors: the earliest of theirs, as absolute monotonic ns (0: none);
+ * `tripped` is set when one already passed. */
+int64_t aether_account_deadline_ns(const AetherExecAccount* a, int* tripped);
+/* An execution under `a` ran from `since_ns` to now, and its deadline
+ * tripped or not: the time spent (ACTIVE accounts) and the trip, recorded
+ * on `a` and its ancestors. */
+void aether_account_charge_time(AetherExecAccount* a, int64_t since_ns, int tripped);
+/* Monotonic ns, the clock the deadlines use. */
+int64_t aether_caps_now_ns(void);
+
 /* Test hook (runtime C tests and C hosts of tests only; generated code never
  * arms it): the n-th checked allocation from now on this thread fails as if
  * the allocator were out of memory, once; 0 turns it off. The checked ones

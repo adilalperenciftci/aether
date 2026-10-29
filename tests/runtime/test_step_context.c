@@ -9,7 +9,8 @@
  * fault in the rest of the outer handler was not recovered as a panic.
  *
  * A step inside a library call is not the call either (#3392, #3396):
- * the last test steps an actor inside an execution, on a core's thread.
+ * the third test steps an actor inside an execution, on a core's thread.
+ * Nor is it charged to the execution account in use (#2954): the last.
  */
 
 #include "test_harness.h"
@@ -214,4 +215,87 @@ TEST_CATEGORY(step_context_runs_outside_the_call, TEST_CATEGORY_RUNTIME) {
     ASSERT_EQ(AETHER_DEADLINE, atomic_load(&x->outcome));
     free(x);
     free(y);
+}
+
+/* #2954: an actor stepped while an execution account is in use is charged
+ * nothing to it. On core 0's thread, P's handler puts an account in use
+ * and sends to Q, idle on core 0, so Q is stepped inline; Q keeps a
+ * 4000-byte cap-aware block. After the send P allocates 100 bytes of its
+ * own, still under the account. The account holds P's 100, not Q's 4000,
+ * and is in use again after Q's step. */
+#include "../../runtime/aether_resource_caps.h"
+
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    ActorBase* tell;
+    void* kept;                  // Q: its block
+    atomic_long held;            // P: what the account holds at the end
+    atomic_int in_use_after;     // P: the account was in use after the send
+    atomic_int done;
+} AcActor;
+
+static void ac_step(AcActor* self) {
+    Message msg;
+    if (!mailbox_receive(&self->mailbox, &msg)) {
+        atomic_store_explicit(&self->active, 0, memory_order_relaxed);
+        return;
+    }
+    aether_reply_slot_set(msg._reply_slot);
+    if (msg.payload_ptr) aether_free_message(msg.payload_ptr);
+    if (self->tell) {
+        AetherExecLimits lim = { 0, 0, AETHER_DEADLINE_ELAPSED, NULL };
+        AetherExecAccount* a = aether_exec_account_new(&lim);
+        aether_exec_use(a, NULL);
+        ScMsg m = { 1, 0 };
+        aether_send_message(self->tell, &m, sizeof m);
+        AetherExecAccount* now = NULL;
+        void* mine = aether_caps_malloc(100);
+        aether_exec_use(NULL, &now);
+        atomic_store(&self->in_use_after, now == a);
+        atomic_store(&self->held, (long)aether_exec_account_used(a));
+        aether_caps_free(mine, 100);
+        aether_exec_account_free(a);
+        atomic_store(&self->done, 1);
+    } else {
+        self->kept = aether_caps_malloc(4000);
+        atomic_store(&self->done, 1);
+    }
+    atomic_store_explicit(&self->active, self->mailbox.count > 0, memory_order_relaxed);
+}
+
+static AcActor* ac_actor(int core) {
+    AcActor* a = calloc(1, sizeof(AcActor));
+    static int next_id = 9900;
+    a->id = next_id++;
+    a->step = (void (*)(void*))ac_step;
+    atomic_init(&a->assigned_core, -1);
+    atomic_init(&a->migrate_to, -1);
+    atomic_init(&a->reply_slot, NULL);
+    atomic_flag_clear_explicit(&a->step_lock, memory_order_relaxed);
+    mailbox_init(&a->mailbox);
+    scheduler_register_actor((ActorBase*)a, core);
+    return a;
+}
+
+TEST_CATEGORY(step_context_account_put_aside, TEST_CATEGORY_RUNTIME) {
+    scheduler_init(1);
+    AcActor* q = ac_actor(0);
+    AcActor* p = ac_actor(0);
+    p->tell = (ActorBase*)q;
+    scheduler_start();
+
+    ScMsg m = { 1, 0 };
+    aether_send_message(p, &m, sizeof m);
+    int done = sc_wait(&p->done, 1, 6000);
+    int stepped = sc_wait(&q->done, 1, 2000);
+    scheduler_shutdown();
+    scheduler_cleanup();
+
+    ASSERT_TRUE(done);
+    ASSERT_TRUE(stepped);
+    ASSERT_EQ(100, (int)atomic_load(&p->held));    // P's own, not Q's 4000
+    ASSERT_EQ(1, atomic_load(&p->in_use_after));
+    aether_caps_free(q->kept, 4000);
+    free(p);
+    free(q);
 }

@@ -16,6 +16,8 @@ exports(
     manifest_get, manifest_clear,
     caller_identity, caller_attribute, caller_deadline_ms,
     last_outcome, last_outcome_text,
+    account_new, account_free, account_use, account_in_use, account_used, account_tripped,
+    DEADLINE_ELAPSED, DEADLINE_ACTIVE, TRIPPED_DEADLINE, TRIPPED_MEMORY,
     OK, PANICKED, DEADLINE, CANCELLED, MEMORY_CAP, OUT_OF_MEMORY
 )
 
@@ -140,4 +142,63 @@ last_outcome() -> int {
 // "" for host.OK, else the reason (a panic's message, cut at 1023 bytes).
 last_outcome_text() -> string {
     return "${aether_last_outcome_text()}"
+}
+
+// ---------------------------------------------------------------------------
+// Execution accounts (#2954): a memory allowance and a deadline that belong
+// to one logical execution, a script that yields to its host and resumes
+// later while others run on the same thread, as libaether.h describes them
+// for a C host. The account in use on this thread is charged every
+// cap-aware allocation (strings, collections, JSON) and gives every library
+// call its deadline; a free credits the account that was charged, wherever
+// it happens. An account is a raw `ptr` the program owns from account_new to
+// account_free (nothing frees it for you, and the runtime keeps no reference
+// to it after account_free); the calls below only borrow it.
+// ---------------------------------------------------------------------------
+
+const DEADLINE_ELAPSED = 0 // wall time since the account was made
+const DEADLINE_ACTIVE = 1 // time spent in calls under it
+const TRIPPED_DEADLINE = 1 // account_tripped bits
+const TRIPPED_MEMORY = 2
+
+extern aether_exec_account_make(memory_bytes: long, deadline_ms: long, counts: int, parent: ptr) -> ptr
+extern aether_exec_account_free(account: ptr)
+extern aether_exec_use(account: ptr, previous: ptr) -> int
+extern aether_account_here() -> ptr
+extern aether_exec_account_used(account: ptr) -> long
+extern aether_exec_account_tripped(account: ptr) -> int
+
+// A new account: at most `memory_bytes` live (0: no limit of its own), a
+// deadline of `deadline_ms` (0: none) counted as host.DEADLINE_ELAPSED or
+// host.DEADLINE_ACTIVE, and `parent` (null, or an account it narrows: what
+// it holds counts against the parent too). null when out of memory.
+account_new(memory_bytes: long, deadline_ms: long, counts: int, parent: ptr) -> ptr {
+    return aether_exec_account_make(memory_bytes, deadline_ms, counts, parent)
+}
+
+// Frees an account; its children and the blocks charged to it are detached.
+account_free(account: ptr) {
+    aether_exec_account_free(account)
+}
+
+// Puts `account` (null: none) in use on this thread: 0, or -1 when it is in
+// use on another thread.
+account_use(account: ptr) -> int {
+    return aether_exec_use(account, null)
+}
+
+// The account in use on this thread, or null.
+account_in_use() -> ptr {
+    return aether_account_here()
+}
+
+// The live bytes charged to `account` (and its children).
+account_used(account: ptr) -> long {
+    return aether_exec_account_used(account)
+}
+
+// host.TRIPPED_DEADLINE and host.TRIPPED_MEMORY bits: what the account ran
+// out of. 0 when neither.
+account_tripped(account: ptr) -> int {
+    return aether_exec_account_tripped(account)
 }

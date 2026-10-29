@@ -111,70 +111,12 @@ typedef const AetherSandboxRendezvous* (*rendezvous_fn)(void);
 
 #define RV_SYMBOL "aether_sandbox_rendezvous"
 
-#if !defined(_WIN32) && (defined(__APPLE__) || defined(AETHER_SANDBOX_PHDR)) && defined(RTLD_NOLOAD)
-/* The rendezvous `name` (a loaded object's path; NULL or "" the program)
- * exports. Opened by name without loading, so an object a host loaded
- * RTLD_LOCAL, which the global scope does not show, is found too. */
-static void* rv_symbol_of(const char* name) {
-    void* h = (name && name[0]) ? dlopen(name, RTLD_LAZY | RTLD_NOLOAD) : dlopen(NULL, RTLD_LAZY);
-    if (!h) return NULL;
-    void* p = dlsym(h, RV_SYMBOL);
-    dlclose(h);
-    return p;
-}
-#endif
-
-#ifdef AETHER_SANDBOX_PHDR
-typedef struct { const char* name[512]; int n; } RvObjects;
-
-static int rv_collect(struct dl_phdr_info* info, size_t size, void* data) {
-    (void)size;
-    RvObjects* objs = (RvObjects*)data;
-    if (objs->n < 512) objs->name[objs->n++] = info->dlpi_name;
-    return 0;
-}
-#endif
+/* The first loaded image that exports one (aether_rendezvous_find, in
+ * aether_resource_caps.c, which the execution accounts share). */
+void* aether_rendezvous_find(const char* symbol);
 
 static const AetherSandboxRendezvous* find_rendezvous(void) {
-    void* p = NULL;
-#if defined(_WIN32)
-    /* The modules in load order; the first that exports one. A DLL that
-     * `ae build --emit=lib` links exports every symbol, the shared runtime
-     * too; an executable exports none, so a program's own copy finds a
-     * library's when one is loaded. */
-    typedef BOOL (WINAPI *enum_modules_fn)(HANDLE, HMODULE*, DWORD, LPDWORD);
-    HMODULE k32 = GetModuleHandleA("kernel32.dll");
-    enum_modules_fn enum_modules = NULL;
-    if (k32) {
-        FARPROC p = GetProcAddress(k32, "K32EnumProcessModules");
-        if (p) memcpy(&enum_modules, &p, sizeof(enum_modules));
-    }
-    if (!enum_modules) return NULL;
-    HMODULE mods[512];
-    DWORD need = 0;
-    if (!enum_modules(GetCurrentProcess(), mods, (DWORD)sizeof(mods), &need)) return NULL;
-    DWORD n = need / (DWORD)sizeof(HMODULE);
-    if (n > 512) n = 512;
-    for (DWORD i = 0; i < n && !p; i++) {
-        FARPROC fp = GetProcAddress(mods[i], RV_SYMBOL);
-        if (fp) memcpy(&p, &fp, sizeof(p));
-    }
-#elif defined(__APPLE__) && defined(RTLD_NOLOAD)
-    /* The images in load order, the program first. */
-    uint32_t n = _dyld_image_count();
-    for (uint32_t i = 0; i < n && !p; i++) p = rv_symbol_of(i == 0 ? NULL : _dyld_get_image_name(i));
-#elif defined(AETHER_SANDBOX_PHDR) && defined(RTLD_NOLOAD)
-    /* The loaded objects in load order, the program first (its name is
-     * empty; opened as NULL it is the global scope). Their names are taken
-     * first and opened after: dl_iterate_phdr holds a loader lock. */
-    RvObjects objs;
-    objs.n = 0;
-    dl_iterate_phdr(rv_collect, &objs);
-    for (int i = 0; i < objs.n && !p; i++) p = rv_symbol_of(objs.name[i]);
-#elif (defined(__unix__) || defined(__APPLE__)) && defined(RTLD_DEFAULT)
-    /* The global scope in load order. */
-    p = dlsym(RTLD_DEFAULT, RV_SYMBOL);
-#endif
+    void* p = aether_rendezvous_find(RV_SYMBOL);
     if (!p) return NULL;
     rendezvous_fn f;
     memcpy(&f, &p, sizeof(f));
