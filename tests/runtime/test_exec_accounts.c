@@ -10,6 +10,7 @@
  *   under it, however they nest, and however many are timed at once;
  *   an account that cannot be timed for want of memory ends its call.
  * - #3410: freeing an account is linear in its blocks.
+ * - #3412: an account made under a parent that is not live is refused.
  */
 
 #include "test_harness.h"
@@ -311,4 +312,18 @@ TEST_CATEGORY(accounts_active_timing_growth_refused, TEST_CATEGORY_RUNTIME) {
     ASSERT_EQ(AETHER_OK, second);
     ASSERT_TRUE(spent_after >= 45 * 1000000LL);
     ASSERT_TRUE(deepest_after >= 45 * 1000000LL);
+}
+
+/* #3412: a parent that is not live (freed, or never made by these
+ * accounts) is refused, not dropped: the child would be wider than it. */
+TEST_CATEGORY(accounts_unknown_parent_refused, TEST_CATEGORY_RUNTIME) {
+    AetherExecAccount* p = ea_new(100, 0, AETHER_DEADLINE_ELAPSED, NULL);
+    aether_exec_account_free(p);
+    AetherExecAccount* under_freed = ea_new(0, 0, AETHER_DEADLINE_ELAPSED, p);
+    static char not_an_account[256];
+    AetherExecAccount* under_foreign = ea_new(0, 0, AETHER_DEADLINE_ELAPSED, (AetherExecAccount*)not_an_account);
+    if (under_freed) aether_exec_account_free(under_freed);
+    if (under_foreign) aether_exec_account_free(under_foreign);
+    ASSERT_NULL(under_freed);
+    ASSERT_NULL(under_foreign);
 }

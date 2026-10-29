@@ -694,10 +694,18 @@ static AetherExecAccount* own_new(const AetherExecLimits* limits) {
         }
     }
     acct_lock();
-    /* A parent the host has freed is no parent: only a live one is linked. */
+    /* Only a live parent of these accounts is linked. One they do not hold
+     * (the host freed it, or a copy that does not share them made it) is
+     * refused, not dropped (#3412): the account would be wider than the
+     * parent meant to narrow it. Found by its address alone, never read. */
     if (limits && limits->parent) {
         for (AetherExecAccount* x = g_live_accounts; x; x = x->next_live)
             if (x == limits->parent) { a->parent = x; break; }
+        if (!a->parent) {
+            acct_unlock();
+            free(a);
+            return NULL;
+        }
     }
     a->refs = 1;   /* the live list's */
     a->next_live = g_live_accounts;

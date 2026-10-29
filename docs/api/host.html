@@ -236,7 +236,7 @@
       <h3 class="function-name">account_new <span class="kind">fn</span></h3>
       <pre class="usage"><code>account_new(memory_bytes, deadline_ms, counts, parent) <span class="arrow">-&gt;</span> ptr</code></pre>
       <p class="signature"><span class="sig-params">memory_bytes: long, deadline_ms: long, counts: int, parent: ptr</span></p>
-      <p class="doc">A new account: at most `memory_bytes` live (0: no limit of its own), a deadline of `deadline_ms` (0: none) counted as host.DEADLINE_ELAPSED or host.DEADLINE_ACTIVE, and `parent` (null, or an account it narrows: what it holds counts against the parent too). null when out of memory.</p>
+      <p class="doc">A new account: at most `memory_bytes` live (0: no limit of its own), a deadline of `deadline_ms` (0: none) counted as host.DEADLINE_ELAPSED or host.DEADLINE_ACTIVE, and `parent` (null, or an account it narrows: what it holds counts against the parent too). null when out of memory, or when `parent` is no live account (freed, or another runtime copy's).</p>
     </div>
     <div class="function" id="account_free" data-name="account_free">
       <h3 class="function-name">account_free <span class="kind">fn</span></h3>

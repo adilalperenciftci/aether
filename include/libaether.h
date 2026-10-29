@@ -137,7 +137,11 @@ AETHER_API int aether_exec_cancel(AetherExecToken token);
  * later while others run on the same thread in between, not to the thread
  * or the call.
  *
- * aether_exec_account_new makes one; aether_exec_use puts it in use on the
+ * aether_exec_account_new makes one: NULL when out of memory, or when
+ * limits->parent is no live account of these accounts (one the host freed,
+ * or one a copy that does not share them made: refused rather than
+ * dropped, #3412, so a child is never wider than its parent);
+ * aether_exec_use puts it in use on the
  * calling thread (NULL: none) and gives back the one it replaces, which the
  * host puts back when it switches scripts. While an account is in use:
  *   - every cap-aware allocation (strings, collections, JSON, the std

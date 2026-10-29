@@ -742,7 +742,10 @@ aether_exec_account_free(script);
 - **A parent only narrows.** An account made with a `parent` charges what
   it holds to the parent too, and its deadline is never later than the
   parent's: a host gives each plugin an account and each of the plugin's
-  scripts a child of it.
+  scripts a child of it. A `parent` that is no live account of these
+  accounts (one the host freed, or one another runtime copy made without
+  sharing them) makes `aether_exec_account_new` return NULL (#3412): the
+  child is refused, never made wider than the parent meant.
 - **Nesting.** An execution puts back the account that was in use when it
   began, whatever the code it ran set: a host service that runs another
   script under its own account, inside a call, leaves the outer call's

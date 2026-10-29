@@ -171,7 +171,8 @@ extern aether_exec_account_tripped(account: ptr) -> int
 // A new account: at most `memory_bytes` live (0: no limit of its own), a
 // deadline of `deadline_ms` (0: none) counted as host.DEADLINE_ELAPSED or
 // host.DEADLINE_ACTIVE, and `parent` (null, or an account it narrows: what
-// it holds counts against the parent too). null when out of memory.
+// it holds counts against the parent too). null when out of memory, or when
+// `parent` is no live account (freed, or another runtime copy's).
 account_new(memory_bytes: long, deadline_ms: long, counts: int, parent: ptr) -> ptr {
     return aether_exec_account_make(memory_bytes, deadline_ms, counts, parent)
 }
