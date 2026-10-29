@@ -67,7 +67,7 @@ exports(
     leaf_not_before, leaf_not_before_len, leaf_not_after, leaf_not_after_len,
     leaf_dns_count, leaf_dns_name,
     leaf_tbs_len, leaf_subject_len, leaf_issuer_len,
-    leaf_is_ca, leaf_key_cert_sign,
+    leaf_is_ca, leaf_key_cert_sign, EXT_PATHLEN, EXT_MALFORMED,
     SCHEME_ECDSA_P256_SHA256, SCHEME_ECDSA_P384_SHA384, SCHEME_ECDSA_P521_SHA512, SCHEME_ED25519, SCHEME_RSA_PSS_RSAE_SHA256,
     check_validity, time_to_key, check_hostname,
     chain_verify, chain_verify_path, verify_cert_signature, find_issuer_cert,
