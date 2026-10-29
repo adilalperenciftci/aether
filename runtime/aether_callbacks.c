@@ -20,6 +20,7 @@
  * use) rather than allocate in a constructor. */
 
 #include "aether_callbacks.h"
+#include "utils/aether_compiler.h"
 
 #include <stdatomic.h>
 #include <stddef.h>
@@ -58,4 +59,19 @@ void* aether_callback_lookup(const char* name) {
             return atomic_load_explicit(&g_callbacks[i].fn, memory_order_acquire);
     }
     return NULL;
+}
+
+/* Why the thread's last refusing callback refused (#3426): see the header. */
+static AETHER_TLS_SHARED char t_callback_reason[512];
+
+void aether_callback_set_reason(const char* reason) {
+    if (!reason) { t_callback_reason[0] = '\0'; return; }
+    size_t n = strlen(reason);
+    if (n >= sizeof(t_callback_reason)) n = sizeof(t_callback_reason) - 1;
+    memcpy(t_callback_reason, reason, n);
+    t_callback_reason[n] = '\0';
+}
+
+const char* aether_callback_reason(void) {
+    return t_callback_reason;
 }

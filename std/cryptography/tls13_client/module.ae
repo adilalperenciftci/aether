@@ -3040,7 +3040,7 @@ fn parse_cert_verify(body: byte[]) -> (int, ptr, int, string) {
 //      reads it.
 //   3. On Windows, every certificate of the ROOT system store together with
 //      the first bundle file of the list std.http.client's OpenSSL path looks
-//      for too. std/net/aether_http.c owns both, for both stacks, so the two
+//      for too. std/net/aether_tls_trust.c owns both, for both stacks, so the two
 //      cannot look in different places again (#2675). Elsewhere these come
 //      back empty and the next step decides.
 //   4. The OS defaults: the first bundle file that exists, else the first
@@ -3112,7 +3112,7 @@ fn first_existing_file3(p1: string, p2: string, p3: string) -> string {
     return ""
 }
 
-// The Windows trust anchors (#2675), from std/net/aether_http.c, which
+// The Windows trust anchors (#2675), from std/net/aether_tls_trust.c, which
 // std.http.client's OpenSSL path reads too: the ROOT system store as PEM text,
 // and the first bundle file of the shared list (the bundle beside the
 // program, MSYS2's, Git for Windows'). Both, rather than the store alone,
@@ -3445,22 +3445,24 @@ pure_tls_client_available() -> int {
 // Why a handshake failed goes back to std/net/aether_http.c through this, so
 // the https request's error names the cause (untrusted chain, wrong host, a
 // server that does not speak TLS 1.3, no trust store) instead of a guess. The
-// callback ABI returns only a pointer; this is the side channel (thread-local
-// on the C side, and the handshake runs on the dialling thread).
-extern aether_pure_tls_client_set_error(msg: string)
+// callback ABI returns only a pointer; this is the side channel: the callback
+// registry's reason, thread-local, and the handshake runs on the dialling
+// thread. It is the registry's (#3426) so that this module links nothing of
+// the HTTP client.
+extern aether_callback_set_reason(reason: string)
 
 @c_callback("aether_pure_tls_client_connect")
 pure_tls_client_connect(fd: int, host: string, verify_mode: int, cafile: string) -> ptr {
     sock = tcp_socket_from_fd_owned(fd)
     if sock == null {
-        aether_pure_tls_client_set_error("could not adopt the connected socket")
+        aether_callback_set_reason("could not adopt the connected socket")
         return null
     }
 
     priv = rand_into(32)
     if priv == null {
         tcp.close(sock)
-        aether_pure_tls_client_set_error("no randomness for the key share")
+        aether_callback_set_reason("no randomness for the key share")
         return null
     }
 
@@ -3469,18 +3471,18 @@ pure_tls_client_connect(fd: int, host: string, verify_mode: int, cafile: string)
     conn, err = connect_full(host, 443, priv, null, 0, null, sock, verify_mode, ca)
     bytes.wipe_free(priv)
     if string.equals(err, "") != 1 {
-        aether_pure_tls_client_set_error(err)
+        aether_callback_set_reason(err)
         return null
     }
     if conn == null {
-        aether_pure_tls_client_set_error("handshake returned no connection")
+        aether_callback_set_reason("handshake returned no connection")
         return null
     }
 
     pc = malloc(sizeof(PureClientConn)) as *PureClientConn
     if pc == null {
         close_conn(conn)
-        aether_pure_tls_client_set_error("out of memory")
+        aether_callback_set_reason("out of memory")
         return null
     }
     pc.conn = conn

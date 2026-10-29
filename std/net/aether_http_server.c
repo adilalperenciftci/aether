@@ -407,20 +407,11 @@ AETHER_WEAK void aether_pure_tls_server_close(void* pure_conn) {
     (void)pure_conn;
 }
 
-/* Why the pure server's check refused a certificate and key (#3328), on the
- * thread that asked. Set through aether_pure_tls_server_set_error, which
- * std.cryptography.tls13_server calls. */
-static _Thread_local char pt_server_check_err[512];
-void aether_pure_tls_server_set_error(const char* msg) {
-    if (!msg) { pt_server_check_err[0] = '\0'; return; }
-    size_t n = strlen(msg);
-    if (n >= sizeof(pt_server_check_err)) n = sizeof(pt_server_check_err) - 1;
-    memcpy(pt_server_check_err, msg, n);
-    pt_server_check_err[n] = '\0';
-}
 /* The pure server's parsed chain and key for this PEM text (#3362), or NULL
- * with the reason set when they do not load or are not a pair (#3328).
- * std.cryptography.tls13_server overrides both. */
+ * with the reason set when they do not load or are not a pair (#3328): the
+ * callback's reason (aether_callback_set_reason, #3426), so the module
+ * calls nothing of this file. std.cryptography.tls13_server overrides
+ * both. */
 AETHER_WEAK void* aether_pure_tls_server_load(const char* cert_pem, const char* key_pem) {
     (void)cert_pem; (void)key_pem;
     return NULL;
@@ -488,11 +479,11 @@ static void* pt_server_load(const char* cert_pem, const char* key_pem, const cha
         return NULL;
     }
     pt_server_load_fn f = (pt_server_load_fn)aether_callback_lookup("aether_pure_tls_server_load");
-    pt_server_check_err[0] = '\0';
+    aether_callback_set_reason(NULL);
     void* creds = f ? f(cert_pem, key_pem) : aether_pure_tls_server_load(cert_pem, key_pem);
     if (!creds) {
-        *why = pt_server_check_err[0] ? pt_server_check_err
-                                      : "the pure-Aether TLS server cannot use this certificate and key";
+        const char* reason = aether_callback_reason();
+        *why = reason[0] ? reason : "the pure-Aether TLS server cannot use this certificate and key";
     }
     return creds;
 }

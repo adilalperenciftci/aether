@@ -153,10 +153,6 @@ void http_client_pool_size_for_proxy(void) {}
 #ifdef _WIN32
     #include <winsock2.h>
     #include <ws2tcpip.h>
-    /* The ROOT certificate store (#2675). Before the OpenSSL headers, which
-     * undefine the names wincrypt.h shares with them (X509_NAME and others);
-     * aether_thread.h's WIN32_LEAN_AND_MEAN keeps windows.h from bringing it. */
-    #include <wincrypt.h>
     #ifdef _MSC_VER
         #pragma comment(lib, "ws2_32.lib")
     #endif
@@ -272,21 +268,15 @@ static int pt_client_available(void) {
  * The connect callback hands back only a pointer, so before this every pure
  * failure -- an untrusted chain, a wrong hostname, a TLS 1.2-only server, no
  * trust store at all -- reached the caller as one generic sentence that
- * guessed at the cause. tls13_client knows the real reason; it stores it here
+ * guessed at the cause. tls13_client knows the real reason; it gives it as
+ * the callback's reason (aether_callback_set_reason, thread-local, #3426)
  * just before returning NULL, and http_dial copies it into the request's
- * error. Thread-local because the handshake runs synchronously on the
- * dialling thread, so two requests on two threads cannot see each other's
- * reason, and no lock is needed. Cleared before each connect so a stale
- * reason is never reported for a later failure that did not set one. */
-static _Thread_local char pt_client_last_err[512];
-
-void aether_pure_tls_client_set_error(const char* msg) {
-    if (!msg) { pt_client_last_err[0] = '\0'; return; }
-    size_t n = strlen(msg);
-    if (n >= sizeof(pt_client_last_err)) n = sizeof(pt_client_last_err) - 1;
-    memcpy(pt_client_last_err, msg, n);
-    pt_client_last_err[n] = '\0';
-}
+ * error. The handshake runs synchronously on the dialling thread, so two
+ * requests on two threads cannot see each other's reason, and no lock is
+ * needed. Cleared before each connect so a stale reason is never reported
+ * for a later failure that did not set one. It went through a function of
+ * this file, which linked the whole HTTP client into every program that
+ * imported the pure client. */
 
 /* Which TLS client backend an https request uses (#1298).
  *
@@ -407,156 +397,9 @@ int parse_url_alloc(const char* url, char* host, size_t host_size,
 // Windows trust anchors, the same for both HTTPS clients (#2675)
 // -----------------------------------------------------------------
 //
-// Neither client read the Windows certificate store, so a program copied to a
-// machine without MSYS2 or Git for Windows could make no HTTPS request at all,
-// and the two looked for different bundle files (OpenSSL's list here, the
-// pure-Aether client's in std.cryptography.tls13_client), so one could work on
-// a machine where the other failed. Both now trust, unless SSL_CERT_FILE or
-// SSL_CERT_DIR names the store, every certificate in the system ROOT store
-// (what Python's ssl module loads on Windows) together with the first bundle
-// file of the one list below. The bundle joins the store rather than standing
-// in for it: Windows adds a root to the store on demand, the first time
-// CryptoAPI needs it, so a root a server chains to can be missing from the
-// store of a machine that has never met that server.
-//
-// The tls13_client module reaches these through extern declarations, which is
-// why they live here, beside the OpenSSL code that uses them too, and why
-// they exist (returning nothing) on every platform.
-
-#ifdef _WIN32
-/* wincrypt.h is included with winsock2.h at the top, before the OpenSSL
- * headers, which undefine the names it shares with them (X509_NAME...). */
-
-/* The first file of the bundle list that exists, in `out`; "" when none
- * does. In order: the bundle the release archive ships beside the program
- * (<root>\bin\prog.exe -> <root>\share\ssl\ca-bundle.crt, or the program's own
- * directory when it is not in a bin\), MSYS2's ca-certificates for MINGW64
- * and UCRT64 under both names it has used, and Git for Windows'. */
-static const char* windows_ca_bundle(char* out, size_t cap) {
-    static const char* fixed[] = {
-        "C:\\msys64\\mingw64\\etc\\ssl\\certs\\ca-bundle.crt",
-        "C:\\msys64\\ucrt64\\etc\\ssl\\certs\\ca-bundle.crt",
-        "C:\\msys64\\mingw64\\etc\\ssl\\cert.pem",
-        "C:\\msys64\\ucrt64\\etc\\ssl\\cert.pem",
-        "C:\\Program Files\\Git\\mingw64\\etc\\ssl\\certs\\ca-bundle.crt",
-        NULL
-    };
-    char exe_path[MAX_PATH];
-    DWORD n = GetModuleFileNameA(NULL, exe_path, sizeof(exe_path));
-    if (n > 0 && n < sizeof(exe_path)) {
-        char* p = strrchr(exe_path, '\\');           // ...\bin\prog.exe -> ...\bin
-        if (p) {
-            *p = '\0';
-            char* q = strrchr(exe_path, '\\');        // ...\bin -> ...
-            if (q && _stricmp(q, "\\bin") == 0) *q = '\0';
-        }
-        snprintf(out, cap, "%s\\share\\ssl\\ca-bundle.crt", exe_path);
-        DWORD a = GetFileAttributesA(out);
-        if (a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY)) return out;
-    }
-    for (int i = 0; fixed[i]; i++) {
-        DWORD a = GetFileAttributesA(fixed[i]);
-        if (a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY)) {
-            snprintf(out, cap, "%s", fixed[i]);
-            return out;
-        }
-    }
-    if (cap) out[0] = '\0';
-    return out;
-}
-
-/* Calls `each` with the DER of every certificate in the ROOT system store of
- * the current user, which includes the machine's. Returns how many. */
-static int windows_root_store_each(void (*each)(const unsigned char* der, size_t len, void* arg),
-                                   void* arg) {
-    HCERTSTORE store = CertOpenSystemStoreW(0, L"ROOT");
-    if (!store) return 0;
-    int n = 0;
-    PCCERT_CONTEXT c = NULL;
-    while ((c = CertEnumCertificatesInStore(store, c)) != NULL) {
-        if ((c->dwCertEncodingType & X509_ASN_ENCODING) && c->cbCertEncoded > 0) {
-            each(c->pbCertEncoded, (size_t)c->cbCertEncoded, arg);
-            n++;
-        }
-    }
-    CertCloseStore(store, 0);
-    return n;
-}
-
-typedef struct { char* buf; size_t len, cap; int oom; } PemOut;
-
-static void pem_out_append(PemOut* o, const char* s, size_t n) {
-    if (o->oom) return;
-    if (o->len + n + 1 > o->cap) {
-        size_t want = o->cap ? o->cap * 2 : 65536;
-        while (want < o->len + n + 1) want *= 2;
-        char* grown = (char*)aether_caps_realloc(o->buf, o->cap, want);
-        if (!grown) { o->oom = 1; return; }
-        o->buf = grown;
-        o->cap = want;
-    }
-    memcpy(o->buf + o->len, s, n);
-    o->len += n;
-    o->buf[o->len] = '\0';
-}
-
-/* One certificate as a PEM block, base64 in lines of 64. */
-static void pem_out_cert(const unsigned char* der, size_t len, void* arg) {
-    static const char b64[] =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    PemOut* o = (PemOut*)arg;
-    pem_out_append(o, "-----BEGIN CERTIFICATE-----\n", 28);
-    char line[65];
-    size_t col = 0;
-    for (size_t i = 0; i < len; i += 3) {
-        unsigned v = (unsigned)der[i] << 16;
-        if (i + 1 < len) v |= (unsigned)der[i + 1] << 8;
-        if (i + 2 < len) v |= der[i + 2];
-        line[col++] = b64[(v >> 18) & 63];
-        line[col++] = b64[(v >> 12) & 63];
-        line[col++] = i + 1 < len ? b64[(v >> 6) & 63] : '=';
-        line[col++] = i + 2 < len ? b64[v & 63] : '=';
-        if (col == 64) {
-            line[col++] = '\n';
-            pem_out_append(o, line, col);
-            col = 0;
-        }
-    }
-    if (col) {
-        line[col++] = '\n';
-        pem_out_append(o, line, col);
-    }
-    pem_out_append(o, "-----END CERTIFICATE-----\n", 26);
-}
-#endif  // _WIN32
-
-/* Every certificate of the Windows ROOT system store as PEM text, a fresh
- * counted string the caller releases; "" when there is none, and on any other
- * platform. NULL only when out of memory. */
-char* aether_tls_windows_store_pem(void) {
-#ifdef _WIN32
-    PemOut o = { NULL, 0, 0, 0 };
-    windows_root_store_each(pem_out_cert, &o);
-    if (o.oom) { aether_caps_free(o.buf, o.cap); return NULL; }
-    if (o.buf) return (char*)string_adopt_caps_buffer(o.buf, o.len, o.cap);
-#endif
-    return (char*)string_empty();
-}
-
-/* The first bundle file of the list above that exists, a fresh counted string
- * the caller releases; "" when none does, and on any other platform. NULL only
- * when out of memory. */
-char* aether_tls_windows_bundle(void) {
-#ifdef _WIN32
-    char path[MAX_PATH + 64];
-    windows_ca_bundle(path, sizeof(path));
-    size_t n = strlen(path);
-#else
-    const char* path = "";
-    size_t n = 0;
-#endif
-    return (char*)string_new_with_length(path, n);
-}
+// In aether_tls_trust.c (#3426), which the pure-Aether client reads too,
+// without linking this file.
+#include "aether_tls_trust.h"
 
 // -----------------------------------------------------------------
 // OpenSSL context: lazy init, shared across all HTTPS calls
@@ -595,9 +438,9 @@ static int load_windows_trust(SSL_CTX* ctx) {
         if (file && SSL_CTX_load_verify_locations(ctx, file, NULL) == 1) loaded = 1;
         if (dir && SSL_CTX_load_verify_locations(ctx, NULL, dir) == 1) loaded = 1;
     } else {
-        loaded = windows_root_store_each(x509_store_add_der, SSL_CTX_get_cert_store(ctx)) > 0;
+        loaded = aether_tls_windows_root_store_each(x509_store_add_der, SSL_CTX_get_cert_store(ctx)) > 0;
         char bundle[MAX_PATH + 64];
-        if (windows_ca_bundle(bundle, sizeof(bundle))[0] &&
+        if (aether_tls_windows_ca_bundle(bundle, sizeof(bundle))[0] &&
             SSL_CTX_load_verify_locations(ctx, bundle, NULL) == 1) loaded = 1;
     }
     /* What failed to load (a duplicate, a missing file) is no error of any
@@ -2566,7 +2409,7 @@ static int http_dial(HttpClientRequest* req, AetherAddrList* addrs,
             ae_set_err(out_err, missing);
             return -1;
         }
-        aether_pure_tls_client_set_error(NULL);
+        aether_callback_set_reason(NULL);
         void* pc = pt_client_connect(sockfd, host,
                                      http_req_verify_mode(req),
                                      req ? req->cafile : NULL);
@@ -2577,13 +2420,14 @@ static int http_dial(HttpClientRequest* req, AetherAddrList* addrs,
              * NUMBER, which another thread may already have been given for a
              * fresh socket of its own.
              *
-             * tls13_client leaves the reason in pt_client_last_err. Only a
+             * tls13_client leaves the reason as the callback's. Only a
              * failure before it got that far (out of memory, an unusable
              * socket) arrives without one. */
             char emsg[640];
-            if (pt_client_last_err[0]) {
+            const char* reason = aether_callback_reason();
+            if (reason[0]) {
                 snprintf(emsg, sizeof(emsg), "TLS handshake failed (pure-Aether TLS 1.3): %s",
-                         pt_client_last_err);
+                         reason);
             } else {
                 snprintf(emsg, sizeof(emsg),
                          "TLS handshake failed (pure-Aether TLS 1.3): the connection "

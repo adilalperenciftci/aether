@@ -1766,7 +1766,9 @@ pure_tls_server_available() -> int {
     return 1
 }
 
-extern aether_pure_tls_server_set_error(msg: string)
+// Why a load is refused, for the C that asked (std.http): the callback
+// registry's reason (#3426), so this module links nothing of the HTTP server.
+extern aether_callback_set_reason(reason: string)
 
 // A server's certificate chain and private key, parsed and checked once when
 // the server is configured (#3362) and shared by every connection after:
@@ -1782,20 +1784,20 @@ struct ServerCreds {
 // (#3328, #3362): the chain and the key as PEM text. They must load and be a
 // pair, so a server that cannot complete a handshake is refused when it is
 // configured, as the OpenSSL backend refuses it, instead of dropping every
-// connection. The creds, or null with why in aether_pure_tls_server_set_error.
+// connection. The creds, or null with why given to aether_callback_set_reason.
 // The text is the caller's; nothing here keeps it.
 @c_callback("aether_pure_tls_server_load")
 pure_tls_server_load(cert_pem: string, key_pem: string) -> ptr {
     chain_list, lens_list, cerr = parse_cert_chain_pem_checked(cert_pem)
     if chain_list == null {
-        aether_pure_tls_server_set_error("the TLS certificate (PEM): ${cerr}")
+        aether_callback_set_reason("the TLS certificate (PEM): ${cerr}")
         return null
     }
     key, perr = load_private_key(key_pem)
     if key == null {
         free_cert_chain(chain_list)
         list_free(lens_list)
-        aether_pure_tls_server_set_error("the TLS private key cannot be used: ${perr}")
+        aether_callback_set_reason("the TLS private key cannot be used: ${perr}")
         return null
     }
     merr = key_matches_cert(key as *ServerKey, list.at(chain_list, 0) as ptr)
@@ -1803,7 +1805,7 @@ pure_tls_server_load(cert_pem: string, key_pem: string) -> ptr {
         free_private_key(key)
         free_cert_chain(chain_list)
         list_free(lens_list)
-        aether_pure_tls_server_set_error(merr)
+        aether_callback_set_reason(merr)
         return null
     }
     c = heap.new(ServerCreds)

@@ -44,6 +44,7 @@ runtime/sandbox/capsicum_autosandbox.c
 std/string/aether_string.c
 std/math/aether_math.c
 std/net/aether_http.c
+std/net/aether_tls_trust.c
 std/net/aether_http_server.c
 std/net/aether_http_pool.c
 std/net/aether_http_park.c
