@@ -10,7 +10,7 @@ import std.strbuilder
 import std.bytes
 import std.mem
 import std.encoding
-import std.map(map_new, map_put_raw, map_has, map_free)
+import std.map(map_new, map_put, map_has, map_free)
 
 exports(
     CBOR_INT, CBOR_BYTES, CBOR_TEXT, CBOR_ARRAY, CBOR_MAP, CBOR_TAG, CBOR_SIMPLE, CBOR_FLOAT,
@@ -422,7 +422,7 @@ fn seen_key_check(seen: ptr, key_cv: ptr) -> string {
         string.release(hx)
         return duplicate_key_error(key_cv)
     }
-    _ = map_put_raw(seen, hx, hx)
+    _ = map_put(seen, hx, hx)
     string.release(hx)
     return ""
 }
