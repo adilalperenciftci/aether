@@ -5565,6 +5565,24 @@ static void collect_owned_locals(ASTNode* n, const char** names, Type** types, i
     for (int i = 0; i < n->child_count; i++) collect_owned_locals(n->children[i], names, types, count, cap);
 }
 
+/* #3406: the one rule for every place of an owned pointer type, a local
+ * (hoist_owned_locals) or an arm's binding of a message field (the
+ * handler's prologue): released at each exit of its scope, and journaled
+ * while it lives, so a panic that skips the exit releases it as the exit
+ * would. The journal writes nothing outside every frame (no panic can be
+ * caught there, so nothing can skip the exit and go on); the exit's release
+ * forgets the place first. */
+void push_owned_place_drop(CodeGenerator* gen, const char* name, const char* drop_c,
+                           int line, int column) {
+    print_line(gen, "int _aeo_%s = aether_unwind_track_owned_place((const void*)&%s, %s);", name, name, drop_c);
+    ASTNode* carrier = create_ast_node(AST_EXPRESSION_STATEMENT, NULL, line, column);
+    if (!carrier) return;
+    if (carrier->annotation) free(carrier->annotation);
+    carrier->annotation = heap_strf("owned_exit_drop:%s:%s", name, drop_c);
+    codegen_own_node(gen, carrier);
+    push_defer(gen, carrier);
+}
+
 /* #3142: an owned-pointer local is one variable for the whole function, as a
  * string local is: declared at its top holding nothing, and released at
  * every exit. A `move` of it (a `return` of it is one) leaves it holding
@@ -5584,11 +5602,7 @@ void hoist_owned_locals(CodeGenerator* gen, ASTNode* body) {
             print_line(gen, "void* %s = NULL;", name);
             mark_var_declared(gen, name);
         }
-        ASTNode* carrier = create_ast_node(AST_EXPRESSION_STATEMENT, NULL, body->line, body->column);
-        if (!carrier) continue;
-        carrier->annotation = heap_strf("owned_exit_drop:%s:%s", name, drop);
-        codegen_own_node(gen, carrier);
-        push_defer(gen, carrier);
+        push_owned_place_drop(gen, name, drop, body->line, body->column);
     }
 }
 

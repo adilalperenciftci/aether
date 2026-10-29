@@ -639,6 +639,10 @@ int tc_type_is_owned(const Type* t);
 const char* tc_owned_drop_c(const Type* t);
 int emit_owned_ptr_drop(CodeGenerator* gen, Type* t, const char* lv);
 void hoist_owned_locals(CodeGenerator* gen, ASTNode* body);
+/* #3406: the release and the unwind journal entry of a place of an owned
+ * pointer type, for every such place (codegen_stmt.c). */
+void push_owned_place_drop(CodeGenerator* gen, const char* name, const char* drop_c,
+                           int line, int column);
 int program_releases_messages(CodeGenerator* gen);
 int expr_is_c_view_of_slice(CodeGenerator* gen, const ASTNode* expr);
 void emit_array_fill(CodeGenerator* gen, const char* dst, ASTNode* e, Type* at);

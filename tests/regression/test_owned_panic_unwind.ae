@@ -1,0 +1,121 @@
+// An owned pointer a panic skips the release of is released by the unwind
+// (#3406).
+//
+// A place of an owned pointer type (`type Buf = owned ptr drop f`) is
+// released at its scope's exits: a local at its function's, an arm's binding
+// of a message field at the handler's. A panic skips those exits, and
+// neither place was in the unwind journal, which releases what a panic
+// skips: the buffer leaked, and its drop never ran. Both are journaled now,
+// by one rule. Measured exactly, as the heap a round leaves behind once the
+// work is steady (mem.steady_growth):
+// - a function whose owned local is live when it panics, the panic caught
+//   by its caller: 0 bytes a round (it was the buffer's size and more);
+// - an actor whose handler binds the field and panics, against the same
+//   round with the field not bound (which the step's drop of the message
+//   releases): the same growth (it was the buffer's size more), what a dead
+//   actor keeps (its block, its reason) being the same in both.
+
+import std.bytes
+import std.mem
+import std.sync
+
+extern exit(code: int)
+
+var drops: ptr = null
+
+release_counted(p: @frees ptr) {
+    sync.atomic_add(drops, 1)
+    bytes.free(p)
+}
+
+type Buf = owned ptr drop release_counted
+
+message Hit { a: int, b: Buf }
+
+fn filled(n: int) -> Buf {
+    return bytes.new(n) as Buf
+}
+
+// Its local holds a Buf when it panics.
+fn holds_then_panics(n: int) -> int {
+    b = filled(n)
+    if n > 0 {
+        panic("panicked holding ${n} bytes")
+    }
+    return 0
+}
+
+fn caught(n: int) -> int {
+    got = 0
+    try {
+        got = holds_then_panics(n)
+    } catch e {
+        got = -1
+    }
+    return got
+}
+
+actor Binds {
+    receive {
+        Hit(b) -> { panic("hit") }
+    }
+}
+
+actor Unbound {
+    receive {
+        Hit(a) -> { panic("hit") }
+    }
+}
+
+check(label: string, ok: bool) -> int {
+    if !ok {
+        println("  FAIL ${label}")
+        return 1
+    }
+    println("  PASS ${label}")
+    return 0
+}
+
+main() {
+    println("=== an owned pointer a panic skips the release of is released by the unwind (#3406) ===")
+    drops = sync.atomic_new(0)
+    fails = 0
+    if !mem.heap_in_use_exact() {
+        println("  (the heap count is not exact here: the growth checks are skipped)")
+    }
+
+    d0 = sync.atomic_load(drops)
+    grown = mem.steady_growth(|| {
+        _r = caught(4096)
+    }, 20)
+    ran = sync.atomic_load(drops) - d0
+    if mem.heap_in_use_exact() {
+        fails = fails + check("a function's local unwound by a panic: 0 bytes a round, got ${grown}", grown == 0)
+    }
+    fails = fails + check("and its drop ran each time, ${ran} drops", ran > 0)
+
+    g_unbound = mem.steady_growth(|| {
+        x = spawn(Unbound())
+        x ! Hit { a: 1, b: filled(4096) }
+        wait_for_idle()
+    }, 30)
+    d1 = sync.atomic_load(drops)
+    g_bound = mem.steady_growth(|| {
+        x = spawn(Binds())
+        x ! Hit { a: 1, b: filled(4096) }
+        wait_for_idle()
+    }, 30)
+    bound_drops = sync.atomic_load(drops) - d1
+    if mem.heap_in_use_exact() {
+        fails = fails + check("an arm's binding unwound by a panic: ${g_bound} bytes a round, as with the field not bound: ${g_unbound}",
+            g_bound == g_unbound)
+    }
+    fails = fails + check("and its drop ran each time, ${bound_drops} drops", bound_drops > 0)
+
+    sync.atomic_free(drops)
+    if fails > 0 {
+        println("FAIL: ${fails} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

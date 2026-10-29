@@ -770,14 +770,11 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                                  * releases nothing of it after the arm. */
                                 if (tc_type_is_owned(fsig)) {
                                     print_line(gen, "_pattern->%s = NULL;", field->value);
-                                    ASTNode* carrier = create_ast_node(AST_EXPRESSION_STATEMENT, NULL,
-                                                                       field->line, field->column);
-                                    if (carrier) {
-                                        carrier->annotation = strdup(cg_internf("owned_exit_drop:%s:%s", var_name,
-                                                                        tc_owned_drop_c(fsig)));
-                                        codegen_own_node(gen, carrier);
-                                        push_defer(gen, carrier);
-                                    }
+                                    /* Journaled too (#3406): a panic in the
+                                     * arm skips its exits, and the message,
+                                     * emptied, no longer holds it. */
+                                    push_owned_place_drop(gen, var_name, tc_owned_drop_c(fsig),
+                                                          field->line, field->column);
                                     continue;
                                 }
                                 /* The binding is a view of the message's

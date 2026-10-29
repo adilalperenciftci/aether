@@ -237,6 +237,10 @@ A panic caught by a `try` releases what the scopes it leaves hold, as their
 exits would have: every owning local, temporary and argument is recorded in
 an unwind journal while it is live, and every plain `defer` of those scopes
 runs, newest first. `defer try` and `defer catch` do not run on a panic.
+That includes an owned pointer (`type T = owned ptr drop f`) in a local or
+bound from a message field by a handler (#3406): while a frame that can
+unwind is live (a `try`, an actor step) it costs one journal entry, about
+3 ns at most, and outside one a single depth check.
 
 ### Cycles
 

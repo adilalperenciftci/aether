@@ -618,6 +618,24 @@ a drain releases what the place holds then and empties it. Stores, moves and
 releases never touch the journal; a scope exit forgets the place. The drain
 takes its entries off the journal before it runs any release.
 
+**Every owned place a panic can skip is journaled (#3406).** R2 says a place
+holds one reference and its exit gives it back; a panic skips the exit, so the
+journal must stand for it at every place that owns. Owned pointers (#3142,
+`type T = owned ptr drop f`) were the exception: an owned local and an arm's
+binding of an owned message field (the arm takes the field out of the message,
+so the barrier's drop of the message no longer holds it) were released at
+their exits only, and a panic leaked them, their drop never run. One codegen
+rule now covers every such place (`push_owned_place_drop`): its exit release,
+and a journal entry written where it begins, typed so the drop keeps its
+`void*` signature (`aether_unwind_track_owned_place`). The entry is written
+only while a frame that can unwind is live, and its token tells the exit
+whether there is one to forget; outside every frame the place costs one call
+that returns at the depth check. Measured on a function whose only work is one
+owned buffer (5,000,000 calls, medians of 11 interleaved runs): 289 against
+295 ms outside any frame, 288 against 302 ms inside a `try`: an owned local or
+binding costs one journal entry while a frame is live (a `try` or an actor
+step), about 3 ns at most, and one depth check outside one.
+
 **Temporaries live to the end of their statement when a view may point into
 them.** `string.bytes(s)` returns a view of `s`; given a temporary
 (`string.bytes(make())`), freeing the temporary as soon as the call returned

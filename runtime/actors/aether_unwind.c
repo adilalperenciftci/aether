@@ -13,11 +13,14 @@
 /* An entry is a value (`free_fn(ptr)` on a drain) or a place (#2923): `ptr`
  * is the address of a slot holding a value, `owned` the address of the flag
  * that says the slot owns it (NULL: it owns whatever it holds), and a drain
- * releases what the slot holds then, leaving it empty. */
+ * releases what the slot holds then, leaving it empty. A place of an owned
+ * pointer type (#3406) has `drop_ptr`, the type's drop function, which takes
+ * the pointer as `void*`, in place of `free_fn`. */
 typedef struct AetherUnwindEntry {
     const void* ptr;
     const void* owned;
     AetherUnwindFree free_fn;
+    AetherUnwindDropPtr drop_ptr;
     int depth;
     unsigned char place;     /* a place, not a value */
     unsigned char draining;  /* to be released by the drain running now */
@@ -161,6 +164,33 @@ void aether_unwind_track_place(const void* place, const void* owned, AetherUnwin
     }
 }
 
+/* An owned place is journaled once, where its function or arm begins, at
+ * a slot of the stack no live entry can name (every exit forgets its
+ * place, and a drain takes what it runs), so it is appended without the
+ * search a value's re-tracking needs: this runs on every call of a
+ * function with an owned local inside a frame (#3406). */
+int aether_unwind_track_owned_place(const void* place, AetherUnwindDropPtr drop) {
+    AetherFrames* F = &t_frames;
+    if (F->depth == 0 || !place || !drop) return 0;
+    if (F->journal_count == F->journal_capacity) {
+        int cap = F->journal_capacity ? F->journal_capacity * 2 : 32;
+        AetherUnwindEntry* grown =
+            (AetherUnwindEntry*)realloc(F->journal, (size_t)cap * sizeof(AetherUnwindEntry));
+        if (!grown) return 0;   /* no room to journal it: the old leak at worst */
+        F->journal = grown;
+        F->journal_capacity = cap;
+    }
+    AetherUnwindEntry* e = &F->journal[F->journal_count++];
+    e->ptr = place;
+    e->owned = NULL;
+    e->free_fn = NULL;
+    e->drop_ptr = drop;
+    e->depth = F->depth;
+    e->place = 1;
+    e->draining = 0;
+    return 1;
+}
+
 static void journal_at(const void* p, AetherUnwindFree free_fn, int depth) {
     // Re-tracking an already-journaled pointer updates in place: the
     // ownership handoff shapes (callee returns, caller re-arms its own
@@ -184,6 +214,7 @@ static void journal_at(const void* p, AetherUnwindFree free_fn, int depth) {
     t_frames.journal[t_frames.journal_count].ptr = p;
     t_frames.journal[t_frames.journal_count].owned = NULL;
     t_frames.journal[t_frames.journal_count].free_fn = free_fn;
+    t_frames.journal[t_frames.journal_count].drop_ptr = NULL;
     t_frames.journal[t_frames.journal_count].depth = depth;
     t_frames.journal[t_frames.journal_count].place = 0;
     t_frames.journal[t_frames.journal_count].draining = 0;
@@ -248,7 +279,8 @@ void aether_unwind_drain_current(void) {
         if (!v || (owned && !*owned)) continue;
         if (owned) *owned = 0;
         *slot = NULL;
-        e.free_fn(v);
+        if (e.drop_ptr) e.drop_ptr((void*)v);
+        else e.free_fn(v);
     }
 }
 

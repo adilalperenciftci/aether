@@ -1570,9 +1570,14 @@ static int try_emit_owned_exit_drop(CodeGenerator* gen, ASTNode* deferred) {
     const char* rest = deferred->annotation + plen;
     const char* sep = strchr(rest, ':');
     if (!sep || sep == rest || !sep[1]) return 0;
+    /* The place's journal entry goes first, when it has one (#3406,
+     * push_owned_place_drop: _aeo_<name> says so). */
+    int nl = (int)(sep - rest);
     print_indent(gen);
-    fprintf(gen->output, "/* deferred */ if (%.*s) { %s((void*)%.*s); %.*s = NULL; }\n",
-            (int)(sep - rest), rest, sep + 1, (int)(sep - rest), rest, (int)(sep - rest), rest);
+    fprintf(gen->output,
+            "/* deferred */ if (_aeo_%.*s) aether_unwind_forget((const void*)&%.*s); "
+            "if (%.*s) { %s((void*)%.*s); %.*s = NULL; }\n",
+            nl, rest, nl, rest, nl, rest, sep + 1, nl, rest, nl, rest);
     return 1;
 }
 
@@ -9244,6 +9249,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "typedef void (*AetherUnwindFree)(const void*);");
     print_line(gen, "extern void aether_unwind_track(const void*, AetherUnwindFree);");
     print_line(gen, "extern void aether_unwind_track_place(const void*, const void*, AetherUnwindFree);");
+    print_line(gen, "extern int aether_unwind_track_owned_place(const void*, void (*)(void*));");
     print_line(gen, "extern void aether_unwind_forget(const void*);");
     print_line(gen, "extern void aether_teardown(void*);");
     /* Is `s` a counted AetherString, the one shape string_release frees?
