@@ -440,9 +440,10 @@ way you would treat any other cross-language value exchange.
 
 `--emit=lib` rejects `.ae` files that import:
 
-- `std.net`, `std.http`, `std.tcp` networking
-- `std.fs` filesystem
-- `std.os` process / environment / shell
+- `std.net`, `std.http` and its children, `std.tcp`, `std.udp` networking
+- `std.fs`, `std.file`, `std.dir` filesystem
+- `std.os`, `std.dl` process, environment, shell, and dynamic loading
+- `contrib.host.*` foreign-language runtimes
 
 The rationale: a library embedded in a host process shouldn't have
 ambient network, filesystem, or process-spawning access. Those are
@@ -456,9 +457,9 @@ other capability-free standard modules are allowed.
 It also rejects an `extern` declared in the program's own code (the entry
 file, an `@extern("…")` binding, or a local module it imports). An extern
 names a C function directly, so `extern system(cmd: string) -> int` would
-reach what `import std.os` is gated to stop. Externs declared by `std.*` and
-`contrib.*` modules are not the program's and are unaffected: those modules
-sit behind the gates above. Opt in with `--with=extern`.
+reach what `import std.os` is gated to stop. Externs declared by other `std.*`
+modules are not the program's and are unaffected. Foreign-language host modules
+sit behind the `contrib.host.*` gate above. Opt in with `--with=extern`.
 
 ### Opting in: `--with=<capabilities>`
 
@@ -467,13 +468,13 @@ handwritten C into one binary, rather than embedding Aether as an
 untrusted user script, opt into specific capability categories:
 
 ```sh
-ae build --emit=lib --with=fs           file.ae   # std.fs
-ae build --emit=lib --with=net          file.ae   # std.net, std.http, std.tcp
-ae build --emit=lib --with=os           file.ae   # std.os
+ae build --emit=lib --with=fs           file.ae   # std.fs, std.file, std.dir
+ae build --emit=lib --with=net          file.ae   # std.net/http/tcp/udp families
+ae build --emit=lib --with=os           file.ae   # std.os, std.dl
 ae build --emit=lib --with=fs,os        file.ae   # multiple, comma-separated
-ae build --emit=lib --with=extern       file.ae   # the program's own C externs
-ae build --emit=lib --with=first-party  file.ae   # alias for fs,net,os
-ae build --emit=lib --with=all          file.ae   # alias for fs,net,os
+ae build --emit=lib --with=extern       file.ae   # own C externs, contrib.host.*
+ae build --emit=lib --with=first-party  file.ae   # alias for fs,net,os,extern
+ae build --emit=lib --with=all          file.ae   # alias for fs,net,os,extern
 ```
 
 The gate stays default-deny: a build without `--with=fs` still rejects
