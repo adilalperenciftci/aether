@@ -295,12 +295,16 @@ typedef struct AetherSandboxHooks {
     void (*show)(const int saved[2]);
 } AetherSandboxHooks;
 
-#define AETHER_SANDBOX_HOOKS_MAX 8
+#define AETHER_SANDBOX_HOOKS_MAX 64
 extern const AetherSandboxHooks* _Atomic aether_sandbox_hooks[AETHER_SANDBOX_HOOKS_MAX];
 // Registers `h`, once: 0, or -1 when every place is taken (a copy past
-// AETHER_SANDBOX_HOOKS_MAX keeps its levels in force through a panic and a
-// step: refused more, never less).
+// AETHER_SANDBOX_HOOKS_MAX refuses every check inside its blocks until a
+// place frees: refused more, never less).
 int aether_sandbox_hooks_add(const AetherSandboxHooks* h);
+// The copies whose levels one step puts aside: those that have some on the
+// thread at once, few; one past it keeps its levels in force for the step
+// (refused more, never less).
+#define AETHER_STEP_SANDBOX_COPIES 8
 // A copy that is unloaded gives its place up.
 void aether_sandbox_hooks_remove(const AetherSandboxHooks* h);
 

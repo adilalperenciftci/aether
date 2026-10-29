@@ -149,6 +149,26 @@ static int sandbox_step_hide(int saved[2]);
 static void sandbox_step_show(const int saved[2]);
 static const AetherSandboxHooks g_hooks = { sandbox_unwind_hook, sandbox_step_hide, sandbox_step_show };
 
+/* Set while this copy's hooks found no place (more than
+ * AETHER_SANDBOX_HOOKS_MAX copies share one panic): a panic does not unwind
+ * its levels nor a step put them aside, and a trusted call's barrier a
+ * panic left would let the rest of a block skip that block's grants, so
+ * while this thread has a level its checks refuse (decide). Each push tries
+ * again, as an unloaded copy frees a place. */
+static _Atomic int g_hooks_unserved = 0;
+
+static void sandbox_register_hooks(void) {
+    static _Atomic int said = 0;
+    int full = aether_sandbox_hooks_add(&g_hooks) != 0;
+    atomic_store_explicit(&g_hooks_unserved, full, memory_order_release);
+    if (full && atomic_exchange_explicit(&said, 1, memory_order_relaxed) == 0)
+        fprintf(stderr,
+                "aether: sandbox: more than %d runtime copies with a sandbox share one panic: "
+                "this copy refuses every check inside its enforce blocks until one leaves; "
+                "build the libraries with --shared-runtime\n",
+                AETHER_SANDBOX_HOOKS_MAX);
+}
+
 typedef const AetherSandboxRendezvous* (*rendezvous_fn)(void);
 
 #define RV_SYMBOL "aether_sandbox_rendezvous"
@@ -177,14 +197,7 @@ static const AetherSandboxRendezvous* rv(void) {
     if (r) return r;
     /* Everything a reader of g_rv needs is in place before g_rv is published
      * (#3419): a thread that sees g_rv set sees all of it. */
-    static _Atomic int hooks_full_said = 0;
-    if (aether_sandbox_hooks_add(&g_hooks) != 0 &&
-        atomic_exchange_explicit(&hooks_full_said, 1, memory_order_relaxed) == 0)
-        fprintf(stderr,
-                "aether: sandbox: more than %d runtime copies with a sandbox share one panic: "
-                "this copy's levels stay in force through a panic and a step (refused more, "
-                "never less); build the libraries with --shared-runtime\n",
-                AETHER_SANDBOX_HOOKS_MAX);
+    sandbox_register_hooks();
     const AetherSandboxRendezvous* found = find_rendezvous();
     if (found && found != &g_own_rv &&
         (found->version != AETHER_SANDBOX_RV_VERSION ||
@@ -282,6 +295,7 @@ static AETHER_TLS_SHARED SandboxThread t_sbx;
 
 static void push_level(SandboxThread* t, void* grants, const void* image, int site, int skip_to) {
     const AetherSandboxRendezvous* r = rv();
+    if (atomic_load_explicit(&g_hooks_unserved, memory_order_acquire)) sandbox_register_hooks();
     if (t->depth >= AETHER_SANDBOX_MAX_LEVELS) {
         /* Left out, the level's grants would not apply, and its pop would
          * take an outer level off instead (a widening, both ways). */
@@ -430,6 +444,10 @@ static int decide(const char* category, const char* resource) {
     SandboxThread* t = &t_sbx;
     int total = rv()->levels(0);
     if (total == 0 && t->depth == t->floor) return -1;
+    if (atomic_load_explicit(&g_hooks_unserved, memory_order_acquire)) {
+        aether_sandbox_audit(category, resource, 0);   /* unserved: refused more, never less */
+        return 0;
+    }
     if (total > t->depth - t->floor) {
         /* Levels of another copy of the runtime are in force on this
          * thread, and their grants cannot be read from here. */

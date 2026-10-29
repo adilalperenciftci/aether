@@ -134,8 +134,8 @@ typedef struct {
     /* The copies of the sandbox that put levels aside, and what each kept
      * (#3438): every copy registered with this barrier hides its own. */
     int sandbox_n;
-    const AetherSandboxHooks* sandbox_hooks[AETHER_SANDBOX_HOOKS_MAX];
-    int sandbox[AETHER_SANDBOX_HOOKS_MAX][2];
+    const AetherSandboxHooks* sandbox_hooks[AETHER_STEP_SANDBOX_COPIES];
+    int sandbox[AETHER_STEP_SANDBOX_COPIES][2];
     AetherExecAside execs;
     struct AetherExecAccount* account;
 } AetherStepAside;
@@ -159,7 +159,7 @@ static AETHER_STEP_COLD void aether_step_put_aside_parts(AetherStepAside* s, uns
         atomic_int* in_force = atomic_load_explicit(&aether_sandbox_in_force, memory_order_acquire);
         if (in_force != NULL && atomic_load_explicit(in_force, memory_order_relaxed) != 0) {
             int n = 0;
-            for (int i = 0; i < AETHER_SANDBOX_HOOKS_MAX; i++) {
+            for (int i = 0; i < AETHER_SANDBOX_HOOKS_MAX && n < AETHER_STEP_SANDBOX_COPIES; i++) {
                 const AetherSandboxHooks* h = atomic_load_explicit(&aether_sandbox_hooks[i], memory_order_acquire);
                 if (h && h->hide && h->show && h->hide(s->sandbox[n])) s->sandbox_hooks[n++] = h;
             }
