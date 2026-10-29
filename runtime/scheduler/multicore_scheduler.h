@@ -660,6 +660,12 @@ void aether_message_drop(ActorBase* target, Message* msg);
  * the program's code) is reported through the death hook, as the step
  * barrier reports one in a release after a handler, and the end goes on. */
 void aether_message_drop_at_end(ActorBase* target, Message* msg);
+/* The drop alone, in its containment frame (#3403): 1 when the release
+ * panicked (what it left is freed; *reason and *reason_release are the
+ * panic's, the caller's to report and release), else 0. The step barrier
+ * drops the message a panicking handler ran on through it. */
+int aether_message_drop_contained(ActorBase* target, Message* msg, const char** reason,
+                                  void (**reason_release)(const void*));
 /* A thread that steps actors without being a core's scheduler thread
  * (aether_actor_thread, which inlines sends to actors of its core) takes
  * part in reclamation like a core (#2517): it registers before its first

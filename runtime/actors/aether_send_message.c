@@ -61,29 +61,37 @@ void aether_message_drop(ActorBase* target, Message* msg) {
  * actor ran it bare: a panic there jumped out of the finalize (to the
  * nearest frame below, or ended the program without one), so the messages
  * after it were not released and the actor's watchers and links were never
- * told. The release runs in a frame of its own instead, the frame a step
- * runs in: a panic in it is caught here, the unwind journal giving back what
- * the release held at its depth, and reported as the step barrier reports a
- * panic in the release that follows a handler, through the death hook with
+ * told. The release runs in a containment frame of its own instead
+ * (aether_contain): a panic in it is caught there, the unwind journal
+ * giving back what the release held at its depth, and reported as the step
+ * barrier reports a panic in the release that follows a handler, through
+ * the death hook with
  * the actor's id and the panic's reason, which is then released. The
  * actor's end has its reason already and keeps it. What the release did not
  * get to free (the payload, an owned zero-copy buffer) goes here, and the
  * finalize goes on with the next message. A message whose release is not
- * the program's (no release_message, a runtime Down) needs no frame. */
-void aether_message_drop_at_end(ActorBase* target, Message* msg) {
+ * the program's (no release_message, a runtime Down) needs no frame. The
+ * step barrier drops the message a panicking handler ran on through here
+ * too (#3403). */
+typedef struct { ActorBase* target; Message* msg; } DropCall;
+
+static void drop_body(void* p) {
+    DropCall* c = (DropCall*)p;
+    aether_message_drop(c->target, c->msg);
+}
+
+/* The drop of `msg` in a containment frame (#3403): 0 when it was dropped,
+ * 1 when its release panicked: what the release did not get to free (the
+ * payload, an owned zero-copy buffer) is freed here, and *reason and
+ * *reason_release are the panic's, the caller's to report and release. */
+int aether_message_drop_contained(ActorBase* target, Message* msg, const char** reason,
+                                  void (**reason_release)(const void*)) {
     if (!target || !target->release_message || !msg->payload_ptr || msg->type == AETHER_MSG_DOWN) {
         aether_message_drop(target, msg);
-        return;
+        return 0;
     }
-    AetherJmpFrame* f = aether_try_push();
-    if (AETHER_SIGSETJMP(f->buf, 1) == 0) {
-        aether_message_drop(target, msg);
-        aether_try_pop();
-        return;
-    }
-    const char* reason = f->reason;
-    void (*reason_release)(const void*) = f->reason_release;
-    aether_try_pop();
+    DropCall c = { target, msg };
+    if (aether_contain(drop_body, &c, reason, reason_release) == 0) return 0;
     if (msg->payload_ptr) {
         aether_free_message(msg->payload_ptr);
         msg->payload_ptr = NULL;
@@ -93,6 +101,13 @@ void aether_message_drop_at_end(ActorBase* target, Message* msg) {
         msg->zerocopy.data = NULL;
         msg->zerocopy.owned = 0;
     }
+    return 1;
+}
+
+void aether_message_drop_at_end(ActorBase* target, Message* msg) {
+    const char* reason = NULL;
+    void (*reason_release)(const void*) = NULL;
+    if (!aether_message_drop_contained(target, msg, &reason, &reason_release)) return;
     aether_fire_death_hook(target->id, reason);
     if (reason_release) reason_release(reason);
 }

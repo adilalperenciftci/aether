@@ -642,3 +642,39 @@ void aether_fire_death_hook(int actor_id, const char* reason) {
     AetherDeathHook h = death_hook;
     if (h) h(actor_id, reason ? aether_panic_reason_text(reason) : "unknown");
 }
+
+/* aether_panic.h (#3403, #3404). */
+int aether_contain(void (*fn)(void*), void* arg, const char** reason,
+                   void (**reason_release)(const void*)) {
+    AetherJmpFrame* f = aether_try_push();
+    if (AETHER_SIGSETJMP(f->buf, 1) == 0) {
+        fn(arg);
+        aether_try_pop();
+        return 0;
+    }
+    const char* r = f->reason;
+    void (*rel)(const void*) = f->reason_release;
+    aether_try_pop();
+    *reason = r;
+    *reason_release = rel;
+    return 1;
+}
+
+typedef struct { int id; const char* reason; } DeathHookCall;
+
+static void death_hook_body(void* p) {
+    DeathHookCall* c = (DeathHookCall*)p;
+    aether_fire_death_hook(c->id, c->reason);
+}
+
+void aether_fire_death_hook_contained(int actor_id, const char* reason) {
+    if (!death_hook) return;
+    DeathHookCall c = { actor_id, reason };
+    const char* r = NULL;
+    void (*rel)(const void*) = NULL;
+    if (aether_contain(death_hook_body, &c, &r, &rel) == 1) {
+        fprintf(stderr, "aether: the death hook of actor %d panicked: %s\n", actor_id,
+                aether_panic_reason_text(r));
+        if (rel) rel(r);
+    }
+}

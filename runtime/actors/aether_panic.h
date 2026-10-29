@@ -236,6 +236,18 @@ const char* aether_panic_reason_text(const char* reason);
 // the hook).
 void aether_fire_death_hook(int actor_id, const char* reason);
 
+// A containment frame (#3403, #3404): fn(arg) runs in a frame of its own,
+// so a panic in it ends there and never jumps past the caller's own cleanup.
+// 0: fn returned. 1: it panicked; *reason and *reason_release are the
+// panic's, the caller's to report and release. The step barrier runs what
+// follows a panicking handler through it, and an ending actor's drops
+// (aether_message_drop_at_end).
+int aether_contain(void (*fn)(void*), void* arg, const char** reason,
+                   void (**reason_release)(const void*));
+// The death hook, inside a containment frame: a hook that panics is
+// reported on stderr and the caller goes on.
+void aether_fire_death_hook_contained(int actor_id, const char* reason);
+
 // Allocation journal for panic-unwind heap cleanup: see aether_unwind.h.
 #include "aether_unwind.h"
 
