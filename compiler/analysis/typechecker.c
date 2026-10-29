@@ -154,6 +154,26 @@ int scope_name_in_whitelist(SymbolTable* table, const char* name) {
     return name_list_contains(table->seal_whitelist, name);
 }
 
+static void scope_apply_visibility_directives(SymbolTable* table, ASTNode* block) {
+    if (!table || !block) return;
+    for (int i = 0; i < block->child_count; i++) {
+        ASTNode* child = block->children[i];
+        if (!child) continue;
+        if (child->type == AST_HIDE_DIRECTIVE) {
+            for (int j = 0; j < child->child_count; j++) {
+                ASTNode* id = child->children[j];
+                if (id && id->value) scope_hide_name(table, id->value);
+            }
+        } else if (child->type == AST_SEAL_DIRECTIVE) {
+            table->is_sealed = 1;
+            for (int j = 0; j < child->child_count; j++) {
+                ASTNode* id = child->children[j];
+                if (id && id->value) scope_seal_except(table, id->value);
+            }
+        }
+    }
+}
+
 // Returns 1 if `name` was blocked by a `hide` or `seal except` directive
 // somewhere in the scope chain AND a real binding for it exists farther
 // up (above the blocking scope). Used to give a better error message than
@@ -533,6 +553,15 @@ static Symbol* lookup_symbol_in(SymbolTable* table, const char* name, const char
     if (symbol && !table->parent) return own_extern_symbol(symbol, merged_from, name);
     if (symbol) return symbol;
 
+    // Leaving this scope, whether through a DSL receiver or the parent chain:
+    // enforce hide / seal directives before resolving an outward name.
+    if (scope_name_is_hidden(table, name)) {
+        return NULL;
+    }
+    if (table->is_sealed && !scope_name_in_whitelist(table, name)) {
+        return NULL;
+    }
+
     // Issue #333 DSL block receiver fallback: when this scope is the
     // body of a `receiver.method(args) { ... }` trailing closure,
     // `dsl_receiver` names the receiver namespace or struct type.
@@ -558,20 +587,14 @@ static Symbol* lookup_symbol_in(SymbolTable* table, const char* name, const char
         snprintf(rewritten, sizeof(rewritten), "%.250s_%.250s",
                  table->dsl_receiver, name);
         for (SymbolTable* t = table; t; t = t->parent) {
+            if (t != table &&
+                (scope_name_is_hidden(t, name) ||
+                 (t->is_sealed && !scope_name_in_whitelist(t, name)))) {
+                return NULL;
+            }
             Symbol* s = lookup_symbol_local(t, rewritten);
             if (s) return s;
         }
-    }
-
-    // Crossing the scope boundary upward: enforce hide / seal directives.
-    // - `hide foo` blocks any name in the hidden_names list.
-    // - `seal except a, b` blocks anything that isn't in the whitelist.
-    // Either way, return NULL so the caller sees an undefined identifier.
-    if (scope_name_is_hidden(table, name)) {
-        return NULL;
-    }
-    if (table->is_sealed && !scope_name_in_whitelist(table, name)) {
-        return NULL;
     }
 
     if (table->parent) {
@@ -15414,22 +15437,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             // PRE-PASS: collect hide / seal directives BEFORE processing any
             // other statements, so they're scope-level (position within the
             // block doesn't matter) and apply to every other statement here.
-            for (int i = 0; i < stmt->child_count; i++) {
-                ASTNode* child = stmt->children[i];
-                if (!child) continue;
-                if (child->type == AST_HIDE_DIRECTIVE) {
-                    for (int j = 0; j < child->child_count; j++) {
-                        ASTNode* id = child->children[j];
-                        if (id && id->value) scope_hide_name(block_table, id->value);
-                    }
-                } else if (child->type == AST_SEAL_DIRECTIVE) {
-                    block_table->is_sealed = 1;
-                    for (int j = 0; j < child->child_count; j++) {
-                        ASTNode* id = child->children[j];
-                        if (id && id->value) scope_seal_except(block_table, id->value);
-                    }
-                }
-            }
+            scope_apply_visibility_directives(block_table, stmt);
 
             for (int i = 0; i < stmt->child_count; i++) {
                 ASTNode* child = stmt->children[i];
@@ -17434,6 +17442,12 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 if (*recv) {
                     closure_scope->dsl_receiver = strdup(recv);
                 }
+            }
+
+            for (int i = 0; i < expr->child_count; i++) {
+                ASTNode* child = expr->children[i];
+                if (child && child->type == AST_BLOCK)
+                    scope_apply_visibility_directives(closure_scope, child);
             }
 
             // Register closure parameters in the child scope
