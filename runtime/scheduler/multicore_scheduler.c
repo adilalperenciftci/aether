@@ -3710,7 +3710,8 @@ void scheduler_send_batch_flush(void) {
         // core writes at every step, read here a whole batch after the add
         // read it, so reading it for every message cost fork_join 2%. Not
         // counted as sent yet, so no credit.
-        if (unlikely(atomic_load_explicit(&g_aether_spawn_watch, memory_order_seq_cst) != 0) &&
+        if (unlikely((atomic_load_explicit(&aether_caps_slow, memory_order_seq_cst) &
+                      AETHER_CAPS_SPAWN_MASK) != 0) &&
             atomic_load_explicit(&g_batch_buffer->actors[i]->dead, memory_order_acquire) != 0) {
             inflight_leave(g_batch_buffer->actors[i], 1);
             send_to_dead_actor(g_batch_buffer->actors[i], &g_batch_buffer->messages[i]);

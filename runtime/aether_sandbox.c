@@ -23,6 +23,7 @@
 #include <string.h>
 #include "aether_sandbox_path.h"
 #include "actors/aether_panic.h"
+#include "aether_resource_caps.h"
 
 #if defined(_WIN32)
 #  ifndef WIN32_LEAN_AND_MEAN
@@ -166,6 +167,8 @@ static const AetherSandboxRendezvous* rv(void) {
                                             memory_order_acq_rel, memory_order_acquire);
     r = atomic_load_explicit(&g_rv, memory_order_acquire);
     atomic_store_explicit(&aether_sandbox_in_force, r->threads, memory_order_release);
+    /* A step looks at the count from now on: its one word says so. */
+    atomic_fetch_or_explicit(&aether_caps_slow, AETHER_CAPS_SLOW_SANDBOX, memory_order_release);
     return r;
 }
 

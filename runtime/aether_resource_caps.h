@@ -171,6 +171,26 @@ AetherExecAccount* aether_exec_account_make(uint64_t memory_bytes, int64_t deadl
  * process. Scalars, read with relaxed loads by the execution frames. */
 extern _Atomic unsigned aether_caps_slow;
 #define AETHER_CAPS_SLOW_ACCOUNTS 2u
+/* The same word says what an actor step must put aside
+ * (aether_step_barrier.h), so a plain step reads this one word and takes one
+ * predicted branch: the accounts bit above; AETHER_CAPS_SLOW_SANDBOX, set for
+ * good once this copy found the sandbox levels' rendezvous (a level may be
+ * in force); and, from bit 8 up, the live restart claims and spawn captures
+ * (aether_supervision.c counts them here, AETHER_CAPS_SPAWN_ONE each). The
+ * allocation fast path asks about its own bits only (AETHER_CAPS_ALLOC_BITS:
+ * the cap, the accounts, the test hook). */
+#define AETHER_CAPS_SLOW_SANDBOX  8u
+#define AETHER_CAPS_SPAWN_ONE     (1u << 8)
+#define AETHER_CAPS_SPAWN_MASK    (~0xFFu)
+#define AETHER_CAPS_ALLOC_BITS    7u
+#define AETHER_CAPS_STEP_BITS     (AETHER_CAPS_SLOW_ACCOUNTS | AETHER_CAPS_SLOW_SANDBOX | AETHER_CAPS_SPAWN_MASK)
+/* Some restart claim or spawn capture is live, on any thread. A claim
+ * counts itself (seq_cst) before it reads its child's inflight count; a
+ * sender that counted its message in flight (seq_cst) and then finds none
+ * here cannot race a claim, which will see the message and wait for it. */
+static inline int aether_spawn_watched(void) {
+    return (atomic_load_explicit(&aether_caps_slow, memory_order_relaxed) & AETHER_CAPS_SPAWN_MASK) != 0;
+}
 /* Set once this copy has found the accounts it shares (the rendezvous). */
 extern _Atomic int aether_accounts_found;
 void aether_accounts_register(void);

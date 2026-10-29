@@ -69,18 +69,21 @@
  *     the thread's meanwhile, so no other thread takes it, and one the step
  *     left in use is let go.
  *
- * Each part costs a step only when some thread holds that kind of context:
- * it is put aside behind a load of a global that says so
- * (g_aether_spawn_watch for the claim; aether_caps_slow's accounts bit for
- * the account; for the levels, the count of threads
- * with one, through aether_sandbox_in_force), or behind two fields of the
+ * A plain step pays for none of the parts: one word says whether some
+ * thread holds any of them, aether_caps_slow's step bits (the accounts
+ * exist; this copy found the sandbox levels' rendezvous; the count of live
+ * restart claims and spawn captures, aether_resource_caps.h), read once at
+ * each end with one predicted branch, and only when it is set are the parts
+ * looked at, out of line, each behind what says this thread holds it (for
+ * the levels, the count of threads with one, through
+ * aether_sandbox_in_force). The executions are behind two fields of the
  * thread's frames block, which the step's try frame is pushed on anyway
- * (the executions: their depth against the floor, and an interruption on
- * its way); the ask and the actor are two
- * thread-local words, and the in-step flags are restored from what the
- * step read when it set them. Neither the locals holding what was put aside
- * nor the variables change between the sigsetjmp and a longjmp back to it,
- * so all of it is intact on the panic path.
+ * (their depth against the floor, and an interruption on its way); the ask
+ * and the actor are two thread-local words, and the in-step flags are
+ * restored from what the step read when it set them. Neither the locals
+ * holding what was put aside nor the variables change between the
+ * sigsetjmp and a longjmp back to it, so all of it is intact on the panic
+ * path.
  *
  * The scheduler's parts are passed as functions it defines static: the
  * compiler sees them at the call and inlines the whole. The caller has
@@ -109,21 +112,47 @@ extern atomic_int* _Atomic aether_sandbox_in_force;
 extern int (*_Atomic aether_step_sandbox_hide)(int saved[2]);
 extern void (*_Atomic aether_step_sandbox_show)(const int saved[2]);
 
-/* What a step put aside, to give back when it ends. */
+/* What a step put aside, to give back when it ends. `hid` has a bit for each
+ * part put aside; the rest is read only under its bit. */
+#define AETHER_STEP_HID_EXECS   1   /* aether_step_push sets it */
+#define AETHER_STEP_HID_SPAWN   2
+#define AETHER_STEP_HID_ACCOUNT 4
+#define AETHER_STEP_HID_SANDBOX 8
 typedef struct {
     void* reply_slot;
     void* step_actor;
     int in_step;
     int actor_id;
-    int spawn_hid;
-    int sandbox_hid;
+    int hid;
     AetherSpawnAside spawn;
     int sandbox[2];
-    int execs_hid;
     AetherExecAside execs;
-    int account_hid;
     struct AetherExecAccount* account;
 } AetherStepAside;
+
+#if defined(__GNUC__) || defined(__clang__)
+#define AETHER_STEP_COLD __attribute__((cold, noinline))
+#else
+#define AETHER_STEP_COLD
+#endif
+
+/* The parts some thread holds, as the caps word's step bits say: each put
+ * aside when this thread holds it. */
+static AETHER_STEP_COLD void aether_step_put_aside_parts(AetherStepAside* s, unsigned word) {
+    if ((word & AETHER_CAPS_SPAWN_MASK) && aether_spawn_put_aside(&s->spawn))
+        s->hid |= AETHER_STEP_HID_SPAWN;
+    if (word & AETHER_CAPS_SLOW_ACCOUNTS) {
+        s->account = aether_account_step_aside();
+        s->hid |= AETHER_STEP_HID_ACCOUNT;
+    }
+    if (word & AETHER_CAPS_SLOW_SANDBOX) {
+        atomic_int* in_force = atomic_load_explicit(&aether_sandbox_in_force, memory_order_acquire);
+        if (in_force != NULL && atomic_load_explicit(in_force, memory_order_relaxed) != 0) {
+            int (*hide)(int saved[2]) = atomic_load_explicit(&aether_step_sandbox_hide, memory_order_relaxed);
+            if (hide && hide(s->sandbox)) s->hid |= AETHER_STEP_HID_SANDBOX;
+        }
+    }
+}
 
 static inline void aether_step_put_aside(AetherStepAside* s) {
     s->reply_slot = g_current_reply_slot;
@@ -131,31 +160,28 @@ static inline void aether_step_put_aside(AetherStepAside* s) {
     g_current_reply_slot = NULL;
     s->in_step = g_aether_in_actor_step;
     s->actor_id = s->in_step ? g_aether_current_actor_id : -1;
-    s->spawn_hid = unlikely(atomic_load_explicit(&g_aether_spawn_watch, memory_order_relaxed) != 0) &&
-                   aether_spawn_put_aside(&s->spawn);
-    s->account_hid = 0;
-    s->account = NULL;
-    if (unlikely(atomic_load_explicit(&aether_caps_slow, memory_order_relaxed) & AETHER_CAPS_SLOW_ACCOUNTS)) {
-        s->account = aether_account_step_aside();
-        s->account_hid = 1;
-    }
-    s->sandbox_hid = 0;
-    atomic_int* in_force = atomic_load_explicit(&aether_sandbox_in_force, memory_order_acquire);
-    if (unlikely(in_force != NULL) && unlikely(atomic_load_explicit(in_force, memory_order_relaxed) != 0)) {
-        int (*hide)(int saved[2]) = atomic_load_explicit(&aether_step_sandbox_hide, memory_order_relaxed);
-        s->sandbox_hid = hide && hide(s->sandbox);
-    }
+    s->hid = 0;
+    /* One word, one predicted branch: 0 on a plain step. */
+    unsigned word = atomic_load_explicit(&aether_caps_slow, memory_order_relaxed) & AETHER_CAPS_STEP_BITS;
+    if (unlikely(word != 0)) aether_step_put_aside_parts(s, word);
+}
+
+static AETHER_STEP_COLD void aether_step_give_back_parts(const AetherStepAside* s) {
+    if (s->hid & AETHER_STEP_HID_EXECS) aether_step_give_back_execs(&s->execs);
+    if (s->hid & AETHER_STEP_HID_SANDBOX)
+        atomic_load_explicit(&aether_step_sandbox_show, memory_order_relaxed)(s->sandbox);
+    /* Accounts made while the step ran, and one it left in use, count too. */
+    if ((s->hid & AETHER_STEP_HID_ACCOUNT) ||
+        (atomic_load_explicit(&aether_caps_slow, memory_order_relaxed) & AETHER_CAPS_SLOW_ACCOUNTS))
+        aether_account_step_back((s->hid & AETHER_STEP_HID_ACCOUNT) ? s->account : NULL);
+    if (s->hid & AETHER_STEP_HID_SPAWN) aether_spawn_give_back(&s->spawn);
 }
 
 static inline void aether_step_give_back(const AetherStepAside* s) {
-    if (unlikely(s->execs_hid)) aether_step_give_back_execs(&s->execs);
-    if (unlikely(s->sandbox_hid))
-        atomic_load_explicit(&aether_step_sandbox_show, memory_order_relaxed)(s->sandbox);
-    /* Accounts made while the step ran, and one it left in use, count too. */
-    if (unlikely(s->account_hid) ||
-        unlikely(atomic_load_explicit(&aether_caps_slow, memory_order_relaxed) & AETHER_CAPS_SLOW_ACCOUNTS))
-        aether_account_step_back(s->account);
-    if (unlikely(s->spawn_hid)) aether_spawn_give_back(&s->spawn);
+    /* What it put aside, and an account made while it ran: one word again. */
+    if (unlikely((unsigned)s->hid |
+                 (atomic_load_explicit(&aether_caps_slow, memory_order_relaxed) & AETHER_CAPS_SLOW_ACCOUNTS)))
+        aether_step_give_back_parts(s);
     g_aether_in_actor_step = s->in_step;
     g_aether_current_actor_id = s->actor_id;
     g_current_reply_slot = s->reply_slot;
@@ -198,7 +224,7 @@ static inline void aether_step_barrier(ActorBase* actor,
 
     /* The try frame, with the executions running on the thread put aside
      * in the same look at its block (aether_unwind.c). */
-    AetherJmpFrame* f = aether_step_push(&aside.execs, &aside.execs_hid);
+    AetherJmpFrame* f = aether_step_push(&aside.execs, &aside.hid);
     if (AETHER_SIGSETJMP(f->buf, 1) == 0) {
         g_aether_in_actor_step = 1;
         g_aether_current_actor_id = actor->id;

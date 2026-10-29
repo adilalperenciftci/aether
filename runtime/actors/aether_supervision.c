@@ -23,6 +23,7 @@
 #include "../scheduler/multicore_scheduler.h"
 #include "../../std/string/aether_string.h"
 #include "aether_panic.h"
+#include "../aether_resource_caps.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -539,14 +540,15 @@ static AETHER_TLS int t_capture_depth = 0;   // the spawn capture, below
 /* The brackets below this depth are an enclosing step's (#3389): a step
  * nested in it notes no spawn into them and closes none of them. */
 static AETHER_TLS int t_capture_floor = 0;
-/* Live rebirth claims and spawn captures, on any thread. Every spawn passes
- * through aether_rebirth_take and scheduler_spawn_ready; while this is 0 they
- * read no thread-local, which on some targets is a call (emutls). A thread
- * with a claim or a capture of its own sees its own count. A claim counts
- * itself before it reads its child's inflight count, so the scheduler's batch
- * flush, which counts each message in flight first, reads a target's death
- * again only while this is not 0 (multicore_scheduler.h). */
-atomic_int g_aether_spawn_watch = 0;
+/* Live rebirth claims and spawn captures, on any thread, are counted in
+ * aether_caps_slow from bit 8 (AETHER_CAPS_SPAWN_ONE each, aether_resource_caps.h),
+ * the word a step reads anyway to know what to put aside. Every spawn passes
+ * through aether_rebirth_take and scheduler_spawn_ready; while the count is 0
+ * they read no thread-local, which on some targets is a call (emutls). A
+ * thread with a claim or a capture of its own sees its own count. A claim
+ * counts itself before it reads its child's inflight count, so the
+ * scheduler's batch flush, which counts each message in flight first, reads a
+ * target's death again only while the count is not 0 (multicore_scheduler.c). */
 static AETHER_TLS ActorBase* t_rebirth_target = NULL;
 static AETHER_TLS ActorBase* t_reborn = NULL;
 
@@ -563,11 +565,11 @@ int aether_actor_rebirth_begin(void* ref) {
     // counts its message in inflight and then reads this count (the batch
     // flush): either the claim sees the message in flight, or the sender
     // sees the claim and reads the death again.
-    atomic_fetch_add_explicit(&g_aether_spawn_watch, 1, memory_order_seq_cst);
+    atomic_fetch_add_explicit(&aether_caps_slow, AETHER_CAPS_SPAWN_ONE, memory_order_seq_cst);
     if (atomic_load_explicit(&a->inflight, memory_order_seq_cst) != 0) {
         // Messages sent before its death still on their way: each is
         // dropped where it arrives, and then the child can be reborn.
-        atomic_fetch_sub_explicit(&g_aether_spawn_watch, 1, memory_order_relaxed);
+        atomic_fetch_sub_explicit(&aether_caps_slow, AETHER_CAPS_SPAWN_ONE, memory_order_relaxed);
         atomic_flag_clear_explicit(&a->step_lock, memory_order_release);
         return 0;
     }
@@ -584,7 +586,7 @@ static void rebirth_clear_state(ActorBase* a) {
 }
 
 ActorBase* aether_rebirth_take(void (*step)(void*), size_t size) {
-    if (likely(atomic_load_explicit(&g_aether_spawn_watch, memory_order_relaxed) == 0)) return NULL;
+    if (likely(!aether_spawn_watched())) return NULL;
     ActorBase* a = t_rebirth_target;
     if (likely(a == NULL) || a->step != step || a->alloc_size != size) return NULL;
     t_rebirth_target = NULL;
@@ -610,11 +612,11 @@ ActorBase* aether_rebirth_take(void (*step)(void*), size_t size) {
 }
 
 void scheduler_spawn_ready(ActorBase* a) {
-    if (likely(atomic_load_explicit(&g_aether_spawn_watch, memory_order_relaxed) == 0)) return;
+    if (likely(!aether_spawn_watched())) return;
     if (unlikely(t_capture_depth > t_capture_floor) && a) aether_actor_capture_note(a);
     if (likely(t_reborn != a) || !a) return;   // a fresh spawn: alive already
     t_reborn = NULL;
-    atomic_fetch_sub_explicit(&g_aether_spawn_watch, 1, memory_order_relaxed);   // the claim is done
+    atomic_fetch_sub_explicit(&aether_caps_slow, AETHER_CAPS_SPAWN_ONE, memory_order_relaxed);   // the claim is done
     // Its state is written: the release makes it visible to whoever reads
     // the cleared bits (a sender, the core that steps it).
     atomic_fetch_and_explicit(&a->dead,
@@ -642,26 +644,26 @@ int aether_actor_rebirth_end(void* ref) {
     if (t_rebirth_target == a) {   // the factory spawned no actor of its type
         t_rebirth_target = NULL;
         rebirth_undo(a, 0);
-        atomic_fetch_sub_explicit(&g_aether_spawn_watch, 1, memory_order_relaxed);
+        atomic_fetch_sub_explicit(&aether_caps_slow, AETHER_CAPS_SPAWN_ONE, memory_order_relaxed);
         return 0;
     }
     if (t_reborn == a) {           // it panicked between the spawn and the ready
         t_reborn = NULL;
         rebirth_undo(a, 1);
-        atomic_fetch_sub_explicit(&g_aether_spawn_watch, 1, memory_order_relaxed);
+        atomic_fetch_sub_explicit(&aether_caps_slow, AETHER_CAPS_SPAWN_ONE, memory_order_relaxed);
         return 0;
     }
     return !(atomic_load_explicit(&a->dead, memory_order_acquire) & AETHER_ACTOR_ENDED);
 }
 
 void aether_rebirth_abandon(void) {
-    if (likely(atomic_load_explicit(&g_aether_spawn_watch, memory_order_relaxed) == 0)) return;
+    if (likely(!aether_spawn_watched())) return;
     if (likely(!t_rebirth_target && !t_reborn)) return;
     if (t_rebirth_target) rebirth_undo(t_rebirth_target, 0);
     if (t_reborn) rebirth_undo(t_reborn, 1);
     t_rebirth_target = NULL;
     t_reborn = NULL;
-    atomic_fetch_sub_explicit(&g_aether_spawn_watch, 1, memory_order_relaxed);
+    atomic_fetch_sub_explicit(&aether_caps_slow, AETHER_CAPS_SPAWN_ONE, memory_order_relaxed);
 }
 
 /* The spawn brackets the running step opened and did not close (a panic
@@ -669,7 +671,7 @@ void aether_rebirth_abandon(void) {
 static void capture_close_to_floor(void) {
     while (t_capture_depth > t_capture_floor) {
         t_capture_depth--;
-        atomic_fetch_sub_explicit(&g_aether_spawn_watch, 1, memory_order_relaxed);
+        atomic_fetch_sub_explicit(&aether_caps_slow, AETHER_CAPS_SPAWN_ONE, memory_order_relaxed);
     }
 }
 
@@ -677,7 +679,7 @@ static void capture_close_to_floor(void) {
  * the reborn block and the brackets this thread holds are the enclosing
  * step's: put aside, so the step's spawns take no claimed block and are no
  * bracket's child, and its panic undoes none of them. 0 when the thread
- * holds none (the caller has seen g_aether_spawn_watch set: some thread
+ * holds none (the caller has seen the spawn count set: some thread
  * does). */
 int aether_spawn_put_aside(AetherSpawnAside* s) {
     ActorBase* target = t_rebirth_target;
@@ -706,7 +708,7 @@ void aether_spawn_give_back(const AetherSpawnAside* s) {
 /* The step panicked: what it made of its own is undone, the enclosing
  * step's (put aside, when there was any) untouched. */
 void aether_spawn_step_panicked(void) {
-    if (likely(atomic_load_explicit(&g_aether_spawn_watch, memory_order_relaxed) == 0)) return;
+    if (likely(!aether_spawn_watched())) return;
     aether_rebirth_abandon();
     capture_close_to_floor();
 }
@@ -732,13 +734,13 @@ static AETHER_TLS ActorBase* t_captured[AETHER_CAPTURE_DEPTH];
 void aether_actor_capture_begin(void) {
     if (t_capture_depth < AETHER_CAPTURE_DEPTH) t_captured[t_capture_depth] = NULL;
     t_capture_depth++;
-    atomic_fetch_add_explicit(&g_aether_spawn_watch, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&aether_caps_slow, AETHER_CAPS_SPAWN_ONE, memory_order_relaxed);
 }
 
 void* aether_actor_capture_end(void) {
     if (t_capture_depth <= t_capture_floor) return NULL;   // an enclosing step's
     t_capture_depth--;
-    atomic_fetch_sub_explicit(&g_aether_spawn_watch, 1, memory_order_relaxed);
+    atomic_fetch_sub_explicit(&aether_caps_slow, AETHER_CAPS_SPAWN_ONE, memory_order_relaxed);
     return t_capture_depth < AETHER_CAPTURE_DEPTH ? t_captured[t_capture_depth] : NULL;
 }
 

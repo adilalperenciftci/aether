@@ -620,12 +620,8 @@ void aether_spawn_give_back(const AetherSpawnAside* s);
 void aether_spawn_step_panicked(void);
 /* The scheduler's part once a reborn actor is alive (wake its core). */
 void scheduler_actor_revived(ActorBase* actor);
-/* Live restart claims and spawn captures, on any thread (aether_supervision.c).
- * A claim counts itself (seq_cst) before it reads its child's inflight count;
- * a sender that counted its message in flight (seq_cst) and then reads 0 here
- * cannot race a claim, which will see the message and wait for it. The
- * runtime's own, never named by generated code. */
-extern atomic_int g_aether_spawn_watch;
+/* Live restart claims and spawn captures, on any thread, are counted in
+ * aether_caps_slow (aether_spawn_watched, aether_resource_caps.h). */
 /* The child a supervisor's factory spawned (#2974): the first actor that
  * comes alive on this thread between begin and end (a fresh spawn or a
  * rebirth), or NULL. Brackets nest. */

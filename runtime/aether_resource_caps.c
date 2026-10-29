@@ -50,7 +50,9 @@ static _Atomic uint64_t g_mem_cap  = 0;   /* 0 = unlimited */
 
 /* What the allocation fast path must ask about, in one word it reads once
  * (#2954): a cap is set, an execution account exists, the test hook is
- * armed. 0: none of them, and an allocation only counts its bytes. */
+ * armed. None of them (AETHER_CAPS_ALLOC_BITS clear), and an allocation only
+ * counts its bytes. The word's other bits are the step barrier's
+ * (aether_resource_caps.h). */
 #define CAPS_SLOW_CAP      1u
 #define CAPS_SLOW_ACCOUNTS 2u
 #define CAPS_SLOW_TEST     4u
@@ -1281,7 +1283,8 @@ static void* caps_alloc_slow(size_t bytes, int zeroed, size_t n, size_t size) {
 }
 
 void* aether_caps_malloc(size_t bytes) {
-    if (__builtin_expect(atomic_load_explicit(&aether_caps_slow, memory_order_relaxed) == 0, 1)) {
+    if (__builtin_expect(
+            (atomic_load_explicit(&aether_caps_slow, memory_order_relaxed) & AETHER_CAPS_ALLOC_BITS) == 0, 1)) {
         void* p = malloc(bytes);
         if (!p) {
             aether_alloc_failed(AETHER_STOP_OUT_OF_MEMORY);
@@ -1299,7 +1302,8 @@ void* aether_caps_calloc(size_t n, size_t size) {
         return NULL;
     }
     size_t bytes = n * size;
-    if (__builtin_expect(atomic_load_explicit(&aether_caps_slow, memory_order_relaxed) == 0, 1)) {
+    if (__builtin_expect(
+            (atomic_load_explicit(&aether_caps_slow, memory_order_relaxed) & AETHER_CAPS_ALLOC_BITS) == 0, 1)) {
         void* p = calloc(n, size);
         if (!p) {
             aether_alloc_failed(AETHER_STOP_OUT_OF_MEMORY);

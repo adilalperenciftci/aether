@@ -84,10 +84,9 @@ AetherJmpFrame* aether_step_push(AetherExecAside* s, int* hid) {
     AetherFrames* F = &t_frames;
     /* An execution above the floor, or an interruption on its way (its
      * unwind runs defers, which can send): the step puts them aside. */
-    *hid = 0;
     if (unlikely(F->exec_depth != F->exec_floor || F->interrupting)) {
         step_put_aside_execs(F, s);
-        *hid = 1;
+        *hid |= 1;   /* AETHER_STEP_HID_EXECS */
     }
     return aether_try_push();
 }
