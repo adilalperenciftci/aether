@@ -11781,17 +11781,27 @@ static const char* effect_scan(ASTNode* program, ASTNode* node, const char* forb
             }
         }
         {
+            ASTNode* def = effect_resolve_callee(program, node->value);
+            const char* callee = def && def->value ? def->value : node->value;
             int seen = 0;
             for (int i = 0; i < *nvisited; i++)
-                if (strcmp(visited[i], node->value) == 0) { seen = 1; break; }
+                if (strcmp(visited[i], callee) == 0) { seen = 1; break; }
             if (!seen && *nvisited < 512) {
-                ASTNode* def = effect_resolve_callee(program, node->value);
                 if (def && def->child_count > 0) {
-                    visited[(*nvisited)++] = node->value;
-                    ASTNode* body = def->children[def->child_count - 1];
-                    const char* c = effect_scan(program, body, forbid, visited,
-                                                nvisited, outcall, outsz, depth + 1);
-                    if (c) return c;
+                    visited[(*nvisited)++] = callee;
+                    for (int i = 0; i < program->child_count; i++) {
+                        ASTNode* clause = program->children[i];
+                        if (!clause ||
+                            (clause->type != AST_FUNCTION_DEFINITION &&
+                             clause->type != AST_BUILDER_FUNCTION) ||
+                            !clause->value || strcmp(clause->value, callee) != 0 ||
+                            clause->child_count == 0)
+                            continue;
+                        ASTNode* body = clause->children[clause->child_count - 1];
+                        const char* c = effect_scan(program, body, forbid, visited,
+                                                    nvisited, outcall, outsz, depth + 1);
+                        if (c) return c;
+                    }
                 }
             }
         }
@@ -11817,14 +11827,24 @@ static void check_effect_tags(ASTNode* program) {
         if (!eff) continue;
         const char* forbid = eff + 7;  /* "fs,net,os" or a subset */
         if (fn->child_count == 0) continue;
-        ASTNode* body = fn->children[fn->child_count - 1];
         const char* visited[512];
         int nv = 0;
         if (fn->value) visited[nv++] = fn->value;  /* no self-recursion loop */
         char offending[160];
         offending[0] = '\0';
-        const char* cap = effect_scan(program, body, forbid, visited, &nv,
-                                      offending, sizeof(offending), 0);
+        const char* cap = NULL;
+        for (int j = 0; j < program->child_count && !cap; j++) {
+            ASTNode* clause = program->children[j];
+            if (!clause ||
+                (clause->type != AST_FUNCTION_DEFINITION &&
+                 clause->type != AST_BUILDER_FUNCTION) ||
+                !clause->value || !fn->value || strcmp(clause->value, fn->value) != 0 ||
+                clause->child_count == 0)
+                continue;
+            ASTNode* body = clause->children[clause->child_count - 1];
+            cap = effect_scan(program, body, forbid, visited, &nv,
+                              offending, sizeof(offending), 0);
+        }
         if (cap) {
             /* #2729: named as the source spells it (`checks.shell`), not by
              * the merged C name (`checks_shell`). */
