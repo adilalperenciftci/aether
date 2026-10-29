@@ -110,8 +110,8 @@ extern AETHER_TLS void* g_current_step_actor;
  * when it first looks for the runtime copies): the threads with a level in
  * force, and how this thread's levels are put aside and given back. */
 extern atomic_int* _Atomic aether_sandbox_in_force;
-extern AETHER_COPY_LOCAL int (*_Atomic aether_step_sandbox_hide)(int saved[2]);
-extern AETHER_COPY_LOCAL void (*_Atomic aether_step_sandbox_show)(const int saved[2]);
+extern int (*_Atomic aether_step_sandbox_hide)(int saved[2]);
+extern void (*_Atomic aether_step_sandbox_show)(const int saved[2]);
 /* scheduler_init joins another copy's count through this (#3438): a step
  * reads only its own copy's word, and a copy that had looked nothing up
  * stepped plainly inside another copy's levels. */

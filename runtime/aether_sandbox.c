@@ -143,8 +143,8 @@ static const AetherSandboxRendezvous* _Atomic g_rv = NULL;
  * aether_panic.c's pointers, set with the unwind's below. */
 static int sandbox_step_hide(int saved[2]);
 static void sandbox_step_show(const int saved[2]);
-extern AETHER_COPY_LOCAL int (*_Atomic aether_step_sandbox_hide)(int saved[2]);
-extern AETHER_COPY_LOCAL void (*_Atomic aether_step_sandbox_show)(const int saved[2]);
+extern int (*_Atomic aether_step_sandbox_hide)(int saved[2]);
+extern void (*_Atomic aether_step_sandbox_show)(const int saved[2]);
 
 typedef const AetherSandboxRendezvous* (*rendezvous_fn)(void);
 
@@ -164,7 +164,7 @@ static const AetherSandboxRendezvous* find_rendezvous(void) {
  * leaves. Set here, before any level of this copy can exist (every push
  * looks for the copies first), so that a program that never enforces does
  * not link this file for its panics. */
-extern AETHER_COPY_LOCAL void (*_Atomic aether_panic_sandbox_unwind)(int frames);
+extern void (*_Atomic aether_panic_sandbox_unwind)(int frames);
 
 /* What a step of this copy reads: the count of the threads with a level,
  * and the step bit when the count is another copy's, whose levels this
@@ -235,11 +235,15 @@ extern AETHER_COPY_LOCAL void (*_Atomic aether_sandbox_join)(void);
 
 #if AETHER_GCC_COMPAT
 /* The pointer is this copy's own (AETHER_COPY_LOCAL): under ELF
- * interposition a later library's constructor reached the first copy's,
- * whose scheduler then joined through this copy's rendezvous and stepped
- * with this copy's hide and show. Set from NULL, once. The runtime is built
- * with GCC or clang only (the MSVC check compiles its headers); a compiler
- * without constructors would leave the join to the first push or check. */
+ * interposition a later library's constructor, which runs whatever the
+ * interposition, reached the first copy's, whose scheduler then joined
+ * through this copy's rendezvous and stepped with this copy's hide and show.
+ * The unwind, hide and show pointers are not: they bind as the panic and the
+ * step barrier that read them do, so a library that runs the program's panic
+ * sets the program's, and the one sandbox and the one panic agree (#3438).
+ * Set from NULL, once. The runtime is built with GCC or clang only (the
+ * MSVC check compiles its headers); a compiler without constructors would
+ * leave the join to the first push or check. */
 AETHER_CONSTRUCTOR static void sandbox_install_join(void) {
     void (*none)(void) = NULL;
     atomic_compare_exchange_strong_explicit(&aether_sandbox_join, &none, sandbox_join_copies,

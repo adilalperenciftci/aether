@@ -92,21 +92,25 @@ static AetherDeathHook death_hook = NULL;
  * copies, before any thread can push a level, and reached through this
  * pointer so that a program that panics but never enforces links no
  * sandbox (aether_sandbox.o and the audit log it writes to). */
-AETHER_COPY_LOCAL void (*_Atomic aether_panic_sandbox_unwind)(int frames) = NULL;
+void (*_Atomic aether_panic_sandbox_unwind)(int frames) = NULL;
 
 /* The sandbox's part of an actor step's context (#3393,
  * aether_step_barrier.h): the threads with a sandbox level in force (the
  * pointer aether_sandbox.h's check reads, set once the copies are found),
  * and how a step puts this thread's levels aside and gives them back. Here,
  * so that the scheduler, which every actor program links, reads them
- * without linking the sandbox. */
+ * without linking the sandbox. These and the unwind bind as the code that
+ * reads them does: under ELF interposition a library that runs the
+ * program's panic and step barrier has its sandbox set the program's
+ * (#3438). */
 atomic_int* _Atomic aether_sandbox_in_force = NULL;
-AETHER_COPY_LOCAL int (*_Atomic aether_step_sandbox_hide)(int saved[2]) = NULL;
-AETHER_COPY_LOCAL void (*_Atomic aether_step_sandbox_show)(const int saved[2]) = NULL;
+int (*_Atomic aether_step_sandbox_hide)(int saved[2]) = NULL;
+void (*_Atomic aether_step_sandbox_show)(const int saved[2]) = NULL;
 /* How this copy joins another copy's sandbox count before its first step
  * (#3438): aether_sandbox.c's, set when that file is loaded, and called by
  * scheduler_init. NULL in a copy without the sandbox, which has no level to
- * see. */
+ * see. This copy's own: a constructor sets it, which runs in every image
+ * whatever the interposition (aether_sandbox.c). */
 AETHER_COPY_LOCAL void (*_Atomic aether_sandbox_join)(void) = NULL;
 
 static void unwind_sandbox_levels(void) {

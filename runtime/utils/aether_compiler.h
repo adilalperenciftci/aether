@@ -144,8 +144,11 @@
 // copy in the global scope, so a library's constructor wrote another copy's
 // pointer and that copy's scheduler called this one's functions. Hidden, every
 // reference binds inside the image that defines it. Only for globals that
-// generated code never names. A PE image (Windows, Cygwin) exports nothing it
-// does not say, so it needs nothing.
+// generated code never names and that code running whatever the interposition
+// sets (a constructor): a global the interposed panic or step barrier reads
+// binds as they do, or a library that runs the program's panic sets a copy
+// nobody reads. A PE image (Windows, Cygwin) exports nothing it does not say,
+// so it needs nothing.
 #if AETHER_GCC_COMPAT && !defined(_WIN32) && !defined(__CYGWIN__)
 #  define AETHER_COPY_LOCAL __attribute__((visibility("hidden")))
 #else
