@@ -626,8 +626,13 @@ binding of an owned message field (the arm takes the field out of the message,
 so the barrier's drop of the message no longer holds it) were released at
 their exits only, and a panic leaked them, their drop never run. One codegen
 rule now covers every such place (`push_owned_place_drop`): its exit release,
-and a journal entry written where it begins, typed so the drop keeps its
-`void*` signature (`aether_unwind_track_owned_place`). The entry is written
+and a journal entry written where it begins (`aether_unwind_track_owned_place`).
+The entry holds a thunk of the drop, one per drop function
+(`_ae_owned_drop_<f>`, written at the end of the program where every drop is
+declared), which calls it as the exit release does: the checker takes any
+one-parameter `@frees ptr` function as a drop, whatever it returns and however
+its C prototype types the pointer (`int fclose(FILE*)`), and passing the drop
+itself as a `void (*)(void*)` did not compile for those (#3413). The entry is written
 only while a frame that can unwind is live, and its token tells the exit
 whether there is one to forget; outside every frame the place costs one call
 that returns at the depth check. Measured on a function whose only work is one

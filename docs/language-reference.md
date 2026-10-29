@@ -2575,9 +2575,12 @@ it with the type's drop function:
   `T` and `null`).
 - **The drop function** takes one `ptr` and frees it: C's `free`, or a
   function or extern whose parameter is `@frees` (`bytes.free`, a function of
-  the program's own). The type's base is a bare `ptr`.
+  the program's own, C's `fclose` for a `FILE*`). What it returns is ignored,
+  and a C prototype may type the pointer (`int fclose(FILE*)`, #3413). The
+  type's base is a bare `ptr`.
 
-A handler that panics while it holds an owned binding does not release it;
+A panic releases what a holder it leaves holds, as the holder's exit would: a
+function's local, and a handler's binding when the handler panics (#3406);
 the message's other owned fields are released with the message.
 
 ## Optionals

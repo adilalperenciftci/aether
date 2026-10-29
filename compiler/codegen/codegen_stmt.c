@@ -5565,16 +5565,39 @@ static void collect_owned_locals(ASTNode* n, const char** names, Type** types, i
     for (int i = 0; i < n->child_count; i++) collect_owned_locals(n->children[i], names, types, count, cap);
 }
 
+/* #3413: the function the unwind journal runs on a place of an owned pointer
+ * type, `void f(void*)` as aether_unwind_track_owned_place takes it. The
+ * checker accepts any one-parameter `@frees ptr` function as a drop, whatever
+ * it returns and however its C prototype spells the pointer (`int
+ * fclose(FILE*)`), so the journal holds a thunk that calls the drop as the
+ * exit release does, `f((void*)p)`. One per drop function, written at the end
+ * of the program with the defer thunks (emit_defer_thunks), where every drop
+ * function is declared, and declared where the function bodies start. */
+static const char* owned_drop_thunk(CodeGenerator* gen, const char* drop_c) {
+    int i = 0;
+    while (i < gen->owned_thunk_count && strcmp(gen->owned_thunks[i], drop_c) != 0) i++;
+    if (i == gen->owned_thunk_count) {
+        if (gen->owned_thunk_count == gen->owned_thunk_cap) {
+            gen->owned_thunk_cap = gen->owned_thunk_cap ? gen->owned_thunk_cap * 2 : 4;
+            gen->owned_thunks = aether_xrealloc((void*)gen->owned_thunks,
+                                                sizeof(char*) * (size_t)gen->owned_thunk_cap);
+        }
+        gen->owned_thunks[gen->owned_thunk_count++] = cg_intern(drop_c);
+    }
+    return cg_internf("_ae_owned_drop_%s", drop_c);
+}
+
 /* #3406: the one rule for every place of an owned pointer type, a local
  * (hoist_owned_locals) or an arm's binding of a message field (the
  * handler's prologue): released at each exit of its scope, and journaled
  * while it lives, so a panic that skips the exit releases it as the exit
  * would. The journal writes nothing outside every frame (no panic can be
  * caught there, so nothing can skip the exit and go on); the exit's release
- * forgets the place first. */
+ * forgets the place first. The journal runs the drop through its thunk. */
 void push_owned_place_drop(CodeGenerator* gen, const char* name, const char* drop_c,
                            int line, int column) {
-    print_line(gen, "int _aeo_%s = aether_unwind_track_owned_place((const void*)&%s, %s);", name, name, drop_c);
+    print_line(gen, "int _aeo_%s = aether_unwind_track_owned_place((const void*)&%s, %s);", name, name,
+               owned_drop_thunk(gen, drop_c));
     ASTNode* carrier = create_ast_node(AST_EXPRESSION_STATEMENT, NULL, line, column);
     if (!carrier) return;
     if (carrier->annotation) free(carrier->annotation);
@@ -8969,11 +8992,19 @@ static void emit_defer_registration(CodeGenerator* gen, ASTNode* body) {
 
 /* The thunks, after everything else, and their prototypes where the
  * function bodies start (gen->defer_proto_pos): the file from there is
- * written again after them. */
+ * written again after them. The defer thunks, and the owned places' drop
+ * thunks (#3413, owned_drop_thunk). */
 void emit_defer_thunks(CodeGenerator* gen) {
-    if (gen->defer_thunk_count == 0) return;
-    fputs("\n// Deferred statements a panic runs (#2923)\n", gen->output);
-    fputs(gen->defer_thunks, gen->output);
+    if (gen->defer_thunk_count == 0 && gen->owned_thunk_count == 0) return;
+    if (gen->defer_thunk_count > 0) {
+        fputs("\n// Deferred statements a panic runs (#2923)\n", gen->output);
+        fputs(gen->defer_thunks, gen->output);
+    }
+    if (gen->owned_thunk_count > 0)
+        fputs("\n// The drops of owned places a panic runs (#3413)\n", gen->output);
+    for (int i = 0; i < gen->owned_thunk_count; i++)
+        fprintf(gen->output, "static void _ae_owned_drop_%s(void* _p) { %s((void*)_p); }\n",
+                gen->owned_thunks[i], gen->owned_thunks[i]);
     fflush(gen->output);
     long end = ftell(gen->output);
     long pos = gen->defer_proto_pos;
@@ -8986,6 +9017,8 @@ void emit_defer_thunks(CodeGenerator* gen) {
     }
     for (int i = 0; i < gen->defer_thunk_count; i++)
         fprintf(gen->output, "static void _ae_defer_%d(const void* _p);\n", i);
+    for (int i = 0; i < gen->owned_thunk_count; i++)
+        fprintf(gen->output, "static void _ae_owned_drop_%s(void* _p);\n", gen->owned_thunks[i]);
     fwrite(tail, 1, n, gen->output);
     fflush(gen->output);
     free(tail);

@@ -1,0 +1,208 @@
+// Every drop function the checker accepts for an owned type compiles in the
+// unwind journal, and runs once on each path (#3413).
+//
+// The checker takes any one-parameter `@frees ptr` function as an owned
+// type's drop, whatever it returns and however its C prototype spells the
+// pointer. The journal entry #3406 writes for an owned place passed the drop
+// itself as `void (*)(void*)`, so a drop that returns a value, or a C drop
+// whose prototype the C compiler sees typed (fclose, or this test's
+// handle_close, `int (Handle*)`), no longer compiled. Each of the three is
+// held here in a function's local and in a handler's binding of a message
+// field, and each place is left by a panic (the unwind runs the drop) and on
+// the normal path (the exit runs it, once).
+
+import std.bytes
+import std.fs
+import std.sync
+
+extern exit(code: int)
+
+extern handle_open(id: int) -> ptr
+extern handle_close(h: @frees ptr) -> int @c_import
+extern handle_closed() -> int
+
+extern fopen(path: string, mode: string) -> ptr
+extern fputs(s: string, f: ptr) -> int
+extern fclose(f: @frees ptr) -> int
+
+var g_rels: ptr = null
+
+// A drop with a result.
+rel(p: @frees ptr) -> int {
+    sync.atomic_add(g_rels, 1)
+    bytes.free(p)
+    return 1
+}
+
+type Ret = owned ptr drop rel
+type Hnd = owned ptr drop handle_close
+type Out = owned ptr drop fclose
+
+message RetHit { b: Ret, boom: bool }
+message HndHit { b: Hnd, boom: bool }
+message OutHit { b: Out, boom: bool }
+
+fn ret_local(boom: bool) -> int {
+    b = bytes.new(16) as Ret
+    if boom {
+        panic("ret local")
+    }
+    return bytes.length(b)
+}
+
+fn hnd_local(boom: bool) -> int {
+    h = handle_open(1) as Hnd
+    if boom {
+        panic("hnd local")
+    }
+    return 1
+}
+
+// fclose flushes what fputs left in the FILE's buffer: the file holds the
+// text only once the drop ran.
+fn out_local(path: string, boom: bool) -> int {
+    f = fopen(path, "w") as Out
+    fputs("local", f)
+    if boom {
+        panic("out local")
+    }
+    return 1
+}
+
+actor Holder {
+    receive {
+        RetHit(b, boom) -> {
+            if boom {
+                panic("ret arm")
+            }
+        }
+        HndHit(b, boom) -> {
+            if boom {
+                panic("hnd arm")
+            }
+        }
+        OutHit(b, boom) -> {
+            fputs("arm", b)
+            if boom {
+                panic("out arm")
+            }
+        }
+    }
+}
+
+// Each is 1 when its function returned, 0 when it panicked.
+fn ret_returned(boom: bool) -> int {
+    r = 0
+    try {
+        _v = ret_local(boom)
+        r = 1
+    } catch e {
+        r = 0
+    }
+    return r
+}
+
+fn hnd_returned(boom: bool) -> int {
+    r = 0
+    try {
+        _v = hnd_local(boom)
+        r = 1
+    } catch e {
+        r = 0
+    }
+    return r
+}
+
+fn out_returned(path: string, boom: bool) -> int {
+    r = 0
+    try {
+        _v = out_local(path, boom)
+        r = 1
+    } catch e {
+        r = 0
+    }
+    return r
+}
+
+check(label: string, ok: bool) -> int {
+    if !ok {
+        println("  FAIL ${label}")
+        return 1
+    }
+    println("  PASS ${label}")
+    return 0
+}
+
+fn holds(path: string, want: string) -> bool {
+    got, err = fs.read(path)
+    if err != "" {
+        return false
+    }
+    return got == want
+}
+
+fn path_of(tag: string) -> string {
+    return "owned_drop_${tag}.txt"
+}
+
+main() {
+    println("=== every drop an owned type accepts compiles in the unwind journal (#3413) ===")
+    g_rels = sync.atomic_new(0)
+    fails = 0
+
+    // A function's local, each drop, left by a panic and by a return.
+    for i in 0..2 {
+        boom = i == 0
+        how = "returned"
+        if boom {
+            how = "panicked"
+        }
+        r0 = sync.atomic_load(g_rels)
+        came = ret_returned(boom)
+        fails = fails + check("local, a drop with a result, ${how}: ran ${sync.atomic_load(g_rels) - r0} time(s)",
+            sync.atomic_load(g_rels) - r0 == 1 && came == i)
+        h0 = handle_closed()
+        came = hnd_returned(boom)
+        fails = fails + check("local, a typed C drop, ${how}: ran ${handle_closed() - h0} time(s)",
+            handle_closed() - h0 == 1 && came == i)
+        p = path_of("local_${how}")
+        came = out_returned(p, boom)
+        fails = fails + check("local, fclose, ${how}: the file was closed", holds(p, "local") && came == i)
+        _d = fs.delete(p)
+    }
+
+    // A handler's binding of a message field, each drop, left by a panic
+    // (the actor ends) and by the handler's end.
+    for i in 0..2 {
+        boom = i == 0
+        how = "ended"
+        if boom {
+            how = "panicked"
+        }
+        r0 = sync.atomic_load(g_rels)
+        a = spawn(Holder())
+        a ! RetHit { b: bytes.new(16) as Ret, boom: boom }
+        wait_for_idle()
+        fails = fails + check("arm, a drop with a result, ${how}: ran ${sync.atomic_load(g_rels) - r0} time(s)",
+            sync.atomic_load(g_rels) - r0 == 1)
+        h0 = handle_closed()
+        b = spawn(Holder())
+        b ! HndHit { b: handle_open(2) as Hnd, boom: boom }
+        wait_for_idle()
+        fails = fails + check("arm, a typed C drop, ${how}: ran ${handle_closed() - h0} time(s)",
+            handle_closed() - h0 == 1)
+        p = path_of("arm_${how}")
+        c = spawn(Holder())
+        c ! OutHit { b: fopen(p, "w") as Out, boom: boom }
+        wait_for_idle()
+        fails = fails + check("arm, fclose, ${how}: the file was closed", holds(p, "arm"))
+        _d = fs.delete(p)
+    }
+
+    sync.atomic_free(g_rels)
+    if fails > 0 {
+        println("FAIL: ${fails} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

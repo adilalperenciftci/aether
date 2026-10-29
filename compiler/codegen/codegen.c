@@ -881,6 +881,9 @@ void code_generator_release(CodeGenerator* gen) {
         gen->hoist_decls = NULL;
         free(gen->defer_thunks);
         gen->defer_thunks = NULL;
+        free(gen->owned_thunks);   /* #3413: the names are interned */
+        gen->owned_thunks = NULL;
+        gen->owned_thunk_count = gen->owned_thunk_cap = 0;
         gen->hoist_decls_len = gen->hoist_decls_cap = 0;
         /* The emitted-typedef registries: one strdup'd name per distinct
          * tuple / optional / sum shape in the program (#1667). */

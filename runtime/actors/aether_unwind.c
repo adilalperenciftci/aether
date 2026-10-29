@@ -14,8 +14,8 @@
  * is the address of a slot holding a value, `owned` the address of the flag
  * that says the slot owns it (NULL: it owns whatever it holds), and a drain
  * releases what the slot holds then, leaving it empty. A place of an owned
- * pointer type (#3406) has `drop_ptr`, the type's drop function, which takes
- * the pointer as `void*`, in place of `free_fn`. */
+ * pointer type (#3406) has `drop_ptr`, a thunk of the type's drop function
+ * that takes the pointer as `void*` (#3413), in place of `free_fn`. */
 typedef struct AetherUnwindEntry {
     const void* ptr;
     const void* owned;
