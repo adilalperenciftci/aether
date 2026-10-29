@@ -214,14 +214,16 @@ TEST(slices_typechecker_wraps_array_argument_and_return) {
 }
 
 TEST(slices_typechecker_slice_decays_for_extern_ptr_null_and_arithmetic) {
+    /* Not `free`: a slice given to `free` is the builtin release whatever
+     * extern `free` is declared (#3450), and `arr[..]` a view it refuses. */
     ASTNode* ast = parse_source(
-        "extern free(p: ptr)\n"
+        "extern c_use(p: ptr)\n"
         "extern take(p: int[])\n"
         "main() { arr = [1, 2, 3]\n  v = arr[..]\n"
-        "  take(v)\n  z = v == null\n  q = v + 1\n  free(v) }");   /* free last: a use after it is E0903 (#1300) */
+        "  take(v)\n  z = v == null\n  q = v + 1\n  c_use(v) }");
     ASSERT_NOT_NULL(ast);
     ASSERT_EQ(1, typecheck_program(ast));
-    ASTNode* fr = find_call(ast, "free");
+    ASTNode* fr = find_call(ast, "c_use");
     ASSERT_NOT_NULL(fr);
     ASSERT_EQ(AST_SLICE_TO_PTR, fr->children[0]->type);
     ASTNode* tk = find_call(ast, "take");
@@ -285,10 +287,37 @@ TEST(slices_codegen_lowers_to_fat_pointer_helpers) {
     /* #2369: Aether's malloc is a zeroing allocation, made by the checked
      * helper that still returns NULL when out of memory (#3377). */
     ASSERT_NOT_NULL(strstr(c, "AetherSlice view = aether_slice_view((void*)(_aether_alloc_or_null((size_t)(8))))"));
-    ASSERT_NOT_NULL(strstr(c, "free((void*)((int*)(view).ptr))"));
+    /* #3450: the builtin release, the program's `extern free` aside: the
+     * view of what malloc gave, taken from its place so the scope releases
+     * nothing after it. */
+    ASSERT_NOT_NULL(strstr(c, "aether_slice_free(aether_slice_take((AetherSlice*)&(view))"));
+    ASSERT_NULL(strstr(c, "free((void*)((int*)(view).ptr))"));
     /* the extern keeps C's shape; the call site wraps the result */
     ASSERT_NOT_NULL(strstr(c, "int* raw_ints("));
     ASSERT_NOT_NULL(strstr(c, "aether_slice_view((void*)(raw_ints()))"));
+    free(c);
+    free_ast_node(ast);
+}
+
+/* #3450: `extern free(p: ptr)` in the program turned `free(xs)` of a `make`
+ * buffer into C's free of its pointer, while slice ownership still released
+ * the buffer at scope exit: a double free (ML-KEM's matrix, in a program
+ * that declared it). The slice stays a slice, and the call is the builtin
+ * release, which takes it from its place. */
+TEST(slices_free_of_a_buffer_is_the_release_under_extern_free) {
+    ASTNode* ast = parse_source(
+        "extern free(p: ptr)\n"
+        "f(n: int) -> int {\n  xs = make([]int, n)\n  xs[0] = 3\n  v = xs[0]\n  free(xs)\n  return v\n}\n"
+        "main() { r = f(4)\n  println(r) }");
+    ASSERT_NOT_NULL(ast);
+    ASSERT_EQ(1, typecheck_program(ast));
+    ASTNode* fr = find_call(ast, "free");
+    ASSERT_NOT_NULL(fr);
+    /* Not decayed to its pointer (slice ownership's take wraps it). */
+    ASSERT_TRUE(fr->children[0]->type != AST_SLICE_TO_PTR);
+    char* c = generate_c(ast);
+    ASSERT_NOT_NULL(strstr(c, "aether_slice_free(aether_slice_take((AetherSlice*)&(xs))"));
+    ASSERT_NULL(strstr(c, "free((void*)((int*)(xs).ptr))"));
     free(c);
     free_ast_node(ast);
 }

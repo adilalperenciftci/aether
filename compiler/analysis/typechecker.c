@@ -21997,10 +21997,22 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                 if (sa) free_type(sa);
             }
 
+            /* #3116, #3450: `free(xs)` of a slice is the builtin release
+             * whatever `free` the program declares as an extern taking a
+             * pointer (`extern free(p: ptr)`), in its own code and in every
+             * module it imports. Decayed to its pointer here, the slice went
+             * to C's free while slice ownership still released it at scope
+             * exit (a double free), and its elements' references were never
+             * given back. A `free` that takes a slice is its own business. */
+            int builtin_free = symbol->node->type == AST_EXTERN_FUNCTION && call->value &&
+                               strcmp(call->value, "free") == 0 && call->child_count == 1 &&
+                               call->children[arg_slot] &&
+                               type_is_slice(call->children[arg_slot]->node_type) &&
+                               !type_is_slice(param_type);
             /* #1286: a `T[N]` array into a `T[]` parameter becomes a slice; a
              * slice into a `ptr` parameter, or into any parameter of an
              * extern C function, decays to its pointer. */
-            if (param_type)
+            if (param_type && !builtin_free)
                 slice_coerce_slot(&call->children[arg_slot], param_type,
                                   symbol->node->type == AST_EXTERN_FUNCTION);
 
