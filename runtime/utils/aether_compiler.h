@@ -139,6 +139,19 @@
 #  define AETHER_DESTRUCTOR
 #endif
 
+// A global each runtime copy keeps to itself (#3438). Under ELF
+// interposition a library's reference to a runtime global binds to the first
+// copy in the global scope, so a library's constructor wrote another copy's
+// pointer and that copy's scheduler called this one's functions. Hidden, every
+// reference binds inside the image that defines it. Only for globals that
+// generated code never names. A PE image (Windows, Cygwin) exports nothing it
+// does not say, so it needs nothing.
+#if AETHER_GCC_COMPAT && !defined(_WIN32) && !defined(__CYGWIN__)
+#  define AETHER_COPY_LOCAL __attribute__((visibility("hidden")))
+#else
+#  define AETHER_COPY_LOCAL
+#endif
+
 // ============================================================================
 // PREFETCH
 // ============================================================================

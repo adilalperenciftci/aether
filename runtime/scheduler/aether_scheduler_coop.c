@@ -330,6 +330,11 @@ void scheduler_init(int cores) {
     g_coop_initialized = 1;
     num_cores = 1;
 
+    // Before this copy's first step, as the threaded scheduler does (#3438):
+    // a build without threads still runs the sandbox and the step barrier.
+    void (*join)(void) = atomic_load_explicit(&aether_sandbox_join, memory_order_acquire);
+    if (join) join();
+
     aether_detect_hardware();
     aether_init_from_env();
 
