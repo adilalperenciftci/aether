@@ -24,6 +24,7 @@
 #include "aether_sandbox_path.h"
 #include "actors/aether_panic.h"
 #include "aether_resource_caps.h"
+#include "aether_rv_mark.h"
 
 #if defined(_WIN32)
 #  ifndef WIN32_LEAN_AND_MEAN
@@ -117,13 +118,21 @@ static const AetherSandboxRendezvous g_own_rv = {
     AETHER_SANDBOX_RV_VERSION, (uint32_t)sizeof(AetherSandboxRendezvous), &g_threads, rv_levels
 };
 
-/* Looked up by name in the other copies, so exported from each. */
+/* Found through this copy's record (aether_rv_mark.h, #3445), and by name
+ * by the copies of a release before the records, so exported from each. */
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((visibility("default"), used))
 #endif
 const AetherSandboxRendezvous* aether_sandbox_rendezvous(void) {
     return &g_own_rv;
 }
+
+#if AETHER_RV_MARKS
+AETHER_RV_MARK(g_rv_mark, AETHER_RV_KIND_SANDBOX, aether_sandbox_rendezvous);
+#  define RV_SELF (&g_rv_mark)
+#else
+#  define RV_SELF NULL
+#endif
 
 static const AetherSandboxRendezvous* _Atomic g_rv = NULL;
 /* aether_sandbox_in_force is aether_panic.c's, where the step barrier reads
@@ -140,12 +149,11 @@ typedef const AetherSandboxRendezvous* (*rendezvous_fn)(void);
 
 #define RV_SYMBOL "aether_sandbox_rendezvous"
 
-/* The first loaded image that exports one (aether_rendezvous_find, in
+/* The first loaded image with a record of the levels, or, of a release
+ * before the records, that exports one (aether_rendezvous_find, in
  * aether_resource_caps.c, which the execution accounts share). */
-void* aether_rendezvous_find(const char* symbol);
-
 static const AetherSandboxRendezvous* find_rendezvous(void) {
-    void* p = aether_rendezvous_find(RV_SYMBOL);
+    void* p = aether_rendezvous_find(RV_SYMBOL, AETHER_RV_KIND_SANDBOX, RV_SELF);
     if (!p) return NULL;
     rendezvous_fn f;
     memcpy(&f, &p, sizeof(f));

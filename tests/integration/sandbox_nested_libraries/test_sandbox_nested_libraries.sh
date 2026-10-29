@@ -16,6 +16,8 @@
 #    the outer block's grants; it refuses, and its message names
 #    --shared-runtime (on Linux and FreeBSD ELF interposition binds both to
 #    one copy: the same answers, no message);
+#    2c. the outer library linked into a program with a runtime of its own
+#    that exports nothing and looks first (#3445);
 # 3. both built with --shared-runtime (skipped where build/shared has none).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -108,6 +110,27 @@ if [ "$got" != "$want" ]; then
     fail=1
 fi
 
+# 2c. the outer library linked into a program with a runtime of its own, an
+# executable that exports nothing (Windows, and Linux, where `ae cflags
+# --libs` adds no -rdynamic), which runs the outer block before it loads the
+# inner library (#3445): the program's copy looked the copies up alone, and
+# the inner library's copy, loaded after, finds it by its record. It found
+# none and kept levels of its own, so the inner reads inside the deny-all
+# block were allowed (inner 1 granted 1).
+# shellcheck disable=SC2046,SC2086
+if ! "$CC" -O1 -DHOST_OUTER_LINKED $("$AE" cflags --cflags) "$TMP/outer.c" "$SCRIPT_DIR/hooks.c" \
+        "$SCRIPT_DIR/host.c" -o "$TMP/host_outer" $("$AE" cflags --libs) $dl > "$TMP/cc_outer.log" 2>&1; then
+    echo "  [FAIL] sandbox_nested_libraries: the host with the outer library linked in did not build"
+    head -10 "$TMP/cc_outer.log" | sed 's/^/        /'
+    exit 1
+fi
+got="$("$TMP/host_outer" "$TMP/static/libinner.$ext" 2>"$TMP/outer_first.err" | tr -d '\r')"
+if [ "$got" != "$want" ]; then
+    echo "  [FAIL] sandbox_nested_libraries: the program's copy first, alone: got '$got', want '$want'"
+    head -5 "$TMP/outer_first.err" | sed 's/^/        /'
+    fail=1
+fi
+
 # 3. one shared runtime
 if ls "$ROOT/build/shared/" 2>/dev/null | grep -q "aether"; then
     if ! build_pair shared "--shared-runtime"; then
@@ -134,6 +157,6 @@ else
 fi
 
 if [ "$fail" = 0 ]; then
-    echo "  [PASS] sandbox_nested_libraries: an inner library's export inside an outer enforce is held to it, its own grant_all narrows nothing, and the outer block stays checked: one runtime, a runtime per library (refused where the copies stay apart)$shared_note"
+    echo "  [PASS] sandbox_nested_libraries: an inner library's export inside an outer enforce is held to it, its own grant_all narrows nothing, and the outer block stays checked: one runtime, a runtime per library (refused where the copies stay apart), a program whose copy looked first and exports nothing$shared_note"
 fi
 exit $fail

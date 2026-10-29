@@ -144,7 +144,12 @@ expect "two copies" "$("$TMP/two_copies" "$TMP/own/libaccts.$ext" 2>"$TMP/two.er
 thread: in use here, refused on another through this copy -1, through the library's -1; holds 0"
 expect "two copies, an account made before the library loaded" \
     "$("$TMP/two_copies" "$TMP/own/libaccts.$ext" early 2>"$TMP/early.err" | tr -d '\r')" \
-    "early: the library's copy shares the account or refuses it: yes"
+    "early: the library's copy shares the account: yes"
+# The program's copy, which exports nothing on Windows and on Linux here (no
+# -rdynamic), found by the library's by its record (#3445).
+expect "two copies, an account put in use before the library loaded" \
+    "$("$TMP/two_copies" "$TMP/own/libaccts.$ext" in_use 2>"$TMP/in_use.err" | tr -d '\r')" \
+    "in use: the library's allocations are charged to the account in use: yes"
 # Accounts of another layout loaded first, then two copies, in a host with no
 # runtime of its own (#3437): where executables export their symbols, a
 # host's own accounts are the first a copy finds.

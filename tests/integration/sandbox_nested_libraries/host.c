@@ -16,7 +16,15 @@
  * first and local (RTLD_LOCAL), and reads PATH at once, so its copy finds
  * the copies first; the outer one is loaded after it, global: its lookup
  * from the program's handle sees the global scope, where the outer library
- * is, and must still agree on the inner one, the first in load order. */
+ * is, and must still agree on the inner one, the first in load order.
+ *
+ * HOST_OUTER_LINKED (#3445): the outer library's C linked into this program
+ * with a runtime of its own, an executable that exports nothing (Windows,
+ * or Linux without -rdynamic), and argv[1] the inner library. The program
+ * runs the outer block once before it loads the inner library, so its copy
+ * looks the copies up alone and keeps the levels; the inner library's copy,
+ * loaded after, must still find them, or its code inside the deny-all block
+ * is allowed everything. */
 #include <stdio.h>
 
 typedef void (*note_fn)(int which, int got);
@@ -33,6 +41,7 @@ static void note(int which, int got) {
 }
 
 static void service(void) {
+    if (!inner_read_fn) return;   /* HOST_OUTER_LINKED's first block, alone */
     notes[0] = inner_read_fn();
     inner_granted_fn();
 }
@@ -73,7 +82,29 @@ static lib_t lib_open_local(const char* path) { return dlopen(path, RTLD_NOW | R
 static void* lib_sym(lib_t h, const char* name) { return dlsym(h, name); }
 #endif
 
+#ifdef HOST_OUTER_LINKED
+extern int aether_outer(void);
+extern void hooks_set(note_fn, service_fn);
 
+static int load(int argc, char** argv) {
+    if (argc < 2) { printf("usage: host <inner>\n"); return 1; }
+    outer_fn = aether_outer;
+    hooks_set(note, service);
+    outer_fn();   /* this copy looks the copies up, alone */
+    lib_t inner = lib_open(argv[1]);
+    if (!inner) { printf("cannot load the inner library\n"); return 1; }
+    void* r = lib_sym(inner, "aether_inner_read");
+    void* g = lib_sym(inner, "aether_inner_read_granted");
+    void* hi = lib_sym(inner, "hooks_set");
+    if (!r || !g || !hi) { printf("missing symbols\n"); return 1; }
+    memcpy(&inner_read_fn, &r, sizeof(r));
+    memcpy(&inner_granted_fn, &g, sizeof(g));
+    hooks_set_fn set_inner;
+    memcpy(&set_inner, &hi, sizeof(hi));
+    set_inner(note, service);
+    return 0;
+}
+#else
 static int load(int argc, char** argv) {
     if (argc < 3) { printf("usage: host <outer> <inner> [mixed]\n"); return 1; }
     g_mixed = argc > 3 && strcmp(argv[3], "mixed") == 0;
@@ -104,6 +135,7 @@ static int load(int argc, char** argv) {
     set_inner(note, service);
     return 0;
 }
+#endif
 #endif
 
 int main(int argc, char** argv) {

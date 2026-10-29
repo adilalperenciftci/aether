@@ -1,8 +1,8 @@
 /* Two runtime copies in one C host (#2954): this program links the runtime
  * (one copy) and loads the library built with a runtime of its own (the
  * other). A copy finds the accounts once, in the first loaded image that
- * exports them; the program's exports none on Windows, so there both copies
- * work through the library's.
+ * has them: this program, first in load order, by its record, though it
+ * exports nothing on Windows, nor on Linux without -rdynamic (#3445).
  *
  *   two_copies <lib>          the library loaded before the first account
  *                             call: an account made and put in use through
@@ -10,9 +10,12 @@
  *                             copy allocates, and is refused on another
  *                             thread whichever copy asks.
  *   two_copies <lib> early    an account made before the library loaded:
- *                             where the copies then did not find each other,
- *                             the library's copy refuses the account rather
- *                             than charge one that the other copy guards.
+ *                             the library's copy finds this program's
+ *                             accounts and shares it (#3445: it found its
+ *                             own, and refused it).
+ *   two_copies <lib> in_use   an account made and put in use before the
+ *                             library loaded: what the library allocates is
+ *                             charged to it (#3445: to nothing).
  *
  * Accounts of another layout loaded first are foreign_first.c's (#3437):
  * where an executable exports its symbols (macOS), this program's own
@@ -68,30 +71,45 @@ static void* other(void* arg) {
 }
 
 int main(int argc, char** argv) {
-    if (argc < 2) { printf("usage: two_copies <library> [early]\n"); return 1; }
+    if (argc < 2) { printf("usage: two_copies <library> [early|in_use]\n"); return 1; }
     int early = argc > 2 && strcmp(argv[2], "early") == 0;
+    int in_use = argc > 2 && strcmp(argv[2], "in_use") == 0;
     AetherExecLimits l = { 64 * 1024, 0, AETHER_DEADLINE_ELAPSED, NULL };
-    if (early) g_a = aether_exec_account_new(&l);
+    if (early || in_use) g_a = aether_exec_account_new(&l);
+    if (in_use) aether_exec_use(g_a, NULL);
     lib_t lib = lib_open(argv[1]);
     if (!lib || !bind_lib(lib)) { printf("cannot load %s\n", argv[1]); return 1; }
 
     if (early) {
-        /* Shared, when the library's copy found this program's (where a
-         * program's symbols can be found), or apart: never taken by a copy
-         * that does not hold it. Shared means one account in use for the
-         * thread, so this copy sees the one the library's copy put in use. */
+        /* Shared: one account in use for the thread, so this copy sees the
+         * one the library's copy put in use, and charged what the library
+         * allocates past it. */
         int rc = lib_use(g_a, NULL);
         int r = grow(4000);
         int out = lib_outcome();
         int charged = aether_exec_account_tripped(g_a) != 0;
         AetherExecAccount* seen = NULL;
         if (rc == 0) aether_exec_use(NULL, &seen);
-        int ok = (rc == 0 && seen == g_a && out == AETHER_MEMORY_CAP && charged) ||
-                 (rc == -1 && out == AETHER_OK && !charged && r == 64000);
-        printf("early: the library's copy shares the account or refuses it: %s\n", ok ? "yes" : "no");
+        int ok = rc == 0 && seen == g_a && out == AETHER_MEMORY_CAP && charged;
+        printf("early: the library's copy shares the account: %s\n", ok ? "yes" : "no");
         if (!ok) printf("  (use %d, seen here %s, grow %d outcome %d, tripped %d)\n",
                         rc, seen == g_a ? "yes" : "no", r, out, charged);
         if (rc == 0) lib_use(NULL, NULL);
+        aether_exec_account_free(g_a);
+        return 0;
+    }
+    if (in_use) {
+        /* The library's first call finds the accounts: this program's, with
+         * the account it put in use, which the library's allocations past
+         * the allowance trip. */
+        int r = grow(4000);
+        int out = lib_outcome();
+        int charged = aether_exec_account_tripped(g_a) != 0;
+        int ok = out == AETHER_MEMORY_CAP && charged && r == 0;
+        printf("in use: the library's allocations are charged to the account in use: %s\n",
+               ok ? "yes" : "no");
+        if (!ok) printf("  (grow %d outcome %d, tripped %d)\n", r, out, charged);
+        aether_exec_use(NULL, NULL);
         aether_exec_account_free(g_a);
         return 0;
     }

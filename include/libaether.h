@@ -202,17 +202,18 @@ AETHER_API int aether_exec_cancel(AetherExecToken token);
  *
  * Runtime copies: a library built without --shared-runtime has a runtime of
  * its own, and the accounts are still one per process. Every copy works
- * through the accounts of the first loaded image that exports them (the
- * same rule as the sandbox's levels), found once, at its first account call
+ * through the accounts of the first loaded image that has them (the same
+ * rule as the sandbox's levels), found once, at its first account call
  * or execution: one lock, one table, each thread's account in use in one
  * place, so an account is charged whichever copy allocates and is refused
  * on another thread whichever copy asks. The copy that owns them must stay
  * loaded while any other runs: unloading it first is not supported; any
- * other copy may be unloaded, and leaves them as it goes (#3411). On
- * Windows a program's own copy is found by nobody (an executable exports
- * nothing), so it finds a library's only if the library was loaded before
- * that first call; where two copies did not find each other, a copy refuses
- * (-1) to put in use an account the other made. Copies of different
+ * other copy may be unloaded, and leaves them as it goes (#3411). Each copy
+ * is found by a record in its image, so a program's own copy is found
+ * though its executable exports nothing (Windows, Linux without -rdynamic;
+ * #3445); a library built by an earlier release has none and is found by its
+ * export, and where two copies did not find each other, a copy refuses (-1)
+ * to put in use an account the other made. Copies of different
  * layouts (another accounts version) never share: a copy that finds the
  * other's says so once on stderr, its aether_exec_account_new returns NULL
  * and its aether_exec_use -1 for an account, its allocations are charged to

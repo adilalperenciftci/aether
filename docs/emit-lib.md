@@ -789,8 +789,8 @@ aether_exec_account_free(script);
 
 **Runtime copies.** A library built without `--shared-runtime` has a
 runtime of its own, and the accounts are still one per process: every copy
-works through the accounts of the first loaded image that exports them,
-found once, at its first account call or execution (the rule the sandbox's
+works through the accounts of the first loaded image that has them, found
+once, at its first account call or execution (the rule the sandbox's
 levels follow). There is one lock, one table of blocks and one account in
 use per thread, so an account is charged whichever copy allocates, and is
 refused on another thread whichever copy is asked.
@@ -798,11 +798,16 @@ refused on another thread whichever copy is asked.
 - The copy that owns the accounts must stay loaded while another runs:
   unloading it first is not supported. Any other copy may be unloaded: it
   leaves the accounts as it goes (#3411), and is never written into after.
-- On Windows an executable exports nothing, so a program's own copy finds a
-  library's only if the library was loaded before the program's first
-  account call. Where two copies did not find each other, a copy refuses
-  (-1) to put in use an account the other made, rather than charge one it
-  does not guard.
+- Each copy marks its image with a record the loader maps with it (a PE
+  section, an ELF note, a Mach-O section), and the copies read the records
+  in load order, the program first. So a program's own copy is found though
+  its executable exports nothing (on Windows, and on Linux without
+  `-rdynamic`, as a C host linked with `ae cflags --libs` is), whenever the
+  libraries are loaded (#3445). An image built by an earlier release has no
+  record, and is found by its export of the accounts. Where two copies did
+  not find each other (such a library, with a program that exports
+  nothing), a copy refuses (-1) to put in use an account the other made,
+  rather than charge one it does not guard.
 - The accounts carry a version and the sizes of what the copies pass each
   other. A copy that finds accounts of another layout (another Aether
   version) does not share them: it says so once on stderr, naming

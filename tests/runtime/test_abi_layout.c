@@ -14,7 +14,8 @@
  *   never change (an importer walks their arrays with its own stride), and
  *   AetherLibMeta gains fields at its end only, each with a new minor.
  * - A rendezvous the copies of the runtime share carries its version and
- *   size: changing its layout bumps its version.
+ *   size: changing its layout bumps its version. The record by which the
+ *   copies find each other (aether_rv_mark.h) never changes.
  * - The runtime ABI is AETHER_VERSION, AETHER_RUNTIME_ABI_REV and the flags
  *   that change layouts; the runtime reports the one it was built with.
  */
@@ -24,6 +25,7 @@
 #include "../../runtime/aether_lib_meta.h"
 #include "../../runtime/aether_abi.h"
 #include "../../runtime/aether_version.h"
+#include "../../runtime/aether_rv_mark.h"
 #include <stddef.h>
 #include <string.h>
 
@@ -213,6 +215,45 @@ TEST_CATEGORY(abi_rendezvous_layouts, TEST_CATEGORY_RUNTIME) {
     ASSERT_EQ(1, ac[0]);
     ASSERT_EQ(sizeof(AccountsRv_1), ac[1]);
     ASSERT_EQ(sizeof(Limits_L1), ac[3]);
+}
+
+/* The record each copy carries in its image (#3445), an ELF note on every
+ * format: how copies of different releases find each other, so it never
+ * changes (another layout takes another name). */
+typedef struct {
+    uint32_t namesz;
+    uint32_t descsz;
+    uint32_t kind;
+    char name[12];
+    void (*fn)(void);
+} RvMark_1;
+
+TEST_CATEGORY(abi_rv_mark_layout, TEST_CATEGORY_RUNTIME) {
+    ASSERT_EQ(sizeof(RvMark_1), sizeof(AetherRvMark));
+    ASSERT_EQ(24, offsetof(AetherRvMark, fn));
+    ASSERT_EQ(offsetof(RvMark_1, fn), offsetof(AetherRvMark, fn));
+    ASSERT_EQ(9, sizeof AETHER_RV_NAME);
+    ASSERT_STREQ("AetherRV", AETHER_RV_NAME);
+    ASSERT_EQ(1, AETHER_RV_KIND_SANDBOX);
+    ASSERT_EQ(2, AETHER_RV_KIND_ACCOUNTS);
+}
+
+/* This runner links its runtime, and on Windows its executable exports
+ * nothing: its copy is still found, by its record, the first in load order
+ * (#3445: a lookup by export found no copy here, or a library's). */
+TEST_CATEGORY(abi_rv_mark_finds_the_program, TEST_CATEGORY_RUNTIME) {
+#if AETHER_RV_MARKS
+    const void* (*sb)(void) = aether_sandbox_rendezvous;
+    const void* (*ac)(void) = aether_accounts_rendezvous;
+    void* want_sb;
+    void* want_ac;
+    memcpy(&want_sb, &sb, sizeof(want_sb));
+    memcpy(&want_ac, &ac, sizeof(want_ac));
+    ASSERT_TRUE(aether_rendezvous_find("aether_sandbox_rendezvous", AETHER_RV_KIND_SANDBOX, NULL) ==
+                want_sb);
+    ASSERT_TRUE(aether_rendezvous_find("aether_accounts_rendezvous", AETHER_RV_KIND_ACCOUNTS, NULL) ==
+                want_ac);
+#endif
 }
 
 /* ---- The runtime ABI ---- */
