@@ -18,7 +18,8 @@
   a repeated extension no longer lets the last copy win, and a BOOLEAN other
   than 0x00 or 0xFF (a cA, or an extension's critical flag) is no longer
   read as TRUE; each makes the certificate refused.
-  A pathLenConstraint that is negative or carries a leading zero it does
+  A basicConstraints field repeated or out of order (the last one won),
+  and a pathLenConstraint that is negative or carries a leading zero it does
   not need is refused too; one of four bytes or more, too large to limit
   any path, reads as unbounded, as OpenSSL reads it.
   `tls13_cert.check_validity_at(c, at)` checks one certificate at a

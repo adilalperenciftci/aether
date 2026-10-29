@@ -1569,9 +1569,10 @@ fn read_extn_value(xr: ptr) -> (ptr, int) {
 // out.is_ca; a pathLenConstraint goes to out.path_len (EXT_PATHLEN), and one
 // of four bytes or more, too large to limit any path, as 2147483647. A
 // BOOLEAN that is not one byte of 0x00 or 0xFF, a pathLenConstraint that is
-// negative or not minimal DER, and anything else make the extension
-// malformed (EXT_MALFORMED), so the certificate is refused rather than read
-// as not a CA.
+// negative or not minimal DER, a field repeated or after the one that
+// follows it (the last no longer wins, as OpenSSL refuses the same), and
+// anything else make the extension malformed (EXT_MALFORMED), so the
+// certificate is refused rather than read as not a CA.
 fn decode_basic_constraints(octet_content: @keep ptr, out: *LeafCert) {
     r = asn1.reader_new(octet_content)
     body, berr = asn1.read_tlv(r)
@@ -1583,6 +1584,8 @@ fn decode_basic_constraints(octet_content: @keep ptr, out: *LeafCert) {
         return
     }
     br = asn1.reader_new(body)
+    // The fields read so far: 1 the cA, 2 the pathLenConstraint, in order.
+    seen = 0
     while asn1.reader_eof(br) != 1 {
         f, ferr = asn1.read_tlv(br)
         ftag = asn1.last_tag(br)
@@ -1590,13 +1593,17 @@ fn decode_basic_constraints(octet_content: @keep ptr, out: *LeafCert) {
             out.ext_bits = out.ext_bits | EXT_MALFORMED
             break
         }
-        if ftag == 0x01 {
+        if (ftag == 0x01 && seen >= 1) || (ftag == 0x02 && seen >= 2) {
+            out.ext_bits = out.ext_bits | EXT_MALFORMED
+        } else if ftag == 0x01 {
+            seen = 1
             if bytes.length(f) == 1 && (bytes.get(f, 0) & 0xFF) == 0xFF {
                 out.is_ca = 1
             } else if bytes.length(f) != 1 || (bytes.get(f, 0) & 0xFF) != 0 {
                 out.ext_bits = out.ext_bits | EXT_MALFORMED
             }
         } else if ftag == 0x02 {
+            seen = 2
             fl = bytes.length(f)
             if fl < 1 || (bytes.get(f, 0) & 0x80) != 0 {
                 out.ext_bits = out.ext_bits | EXT_MALFORMED
