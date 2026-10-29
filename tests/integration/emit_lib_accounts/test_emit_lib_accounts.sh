@@ -7,9 +7,10 @@
 # copies, whose accounts are one per process through the rendezvous), and
 # on the shared runtime. two_copies.c is a C host with a runtime of its own
 # loading the library with another: one lock and one thread per account
-# across the copies, an account made before the copies found each other
-# refused by the copy that does not hold it, and (foreign_rv.c, loaded
-# first) a rendezvous of another layout refused by both copies. unload.c
+# across the copies, and an account made before the copies found each other
+# refused by the copy that does not hold it. foreign_first.c, a host with no
+# runtime of its own, loads foreign_rv.c (a rendezvous of another layout)
+# before two copies, which both refuse accounts (#3437). unload.c
 # unloads a copy that shared the accounts, then makes the first account,
 # and many.c has 70 copies share them, past the 64 the list once held
 # (#3411).
@@ -144,9 +145,19 @@ thread: in use here, refused on another through this copy -1, through the librar
 expect "two copies, an account made before the library loaded" \
     "$("$TMP/two_copies" "$TMP/own/libaccts.$ext" early 2>"$TMP/early.err" | tr -d '\r')" \
     "early: the library's copy shares the account or refuses it: yes"
+# Accounts of another layout loaded first, then two copies, in a host with no
+# runtime of its own (#3437): where executables export their symbols, a
+# host's own accounts are the first a copy finds.
+cp "$TMP/own/libaccts.$ext" "$TMP/libaccts_c.$ext"
+# shellcheck disable=SC2086
+if ! "$CC" -O1 "$SCRIPT_DIR/foreign_first.c" -o "$TMP/foreign_first" $dl > "$TMP/cc_ff.log" 2>&1; then
+    echo "  [FAIL] emit_lib_accounts: the foreign-first host did not build"
+    head -10 "$TMP/cc_ff.log" | sed 's/^/        /'
+    exit 1
+fi
 expect "two copies, accounts of another layout loaded first" \
-    "$("$TMP/two_copies" "$TMP/own/libaccts.$ext" "$TMP/foreign_rv.$ext" 2>"$TMP/foreign.err" | tr -d '\r')" \
-    "foreign: this copy refused, the library's refused; a call still works: 160 outcome 0"
+    "$("$TMP/foreign_first" "$TMP/foreign_rv.$ext" "$TMP/own/libaccts.$ext" "$TMP/libaccts_c.$ext" 2>"$TMP/foreign.err" | tr -d '\r')" \
+    "foreign: the first copy refused, the second refused; a call still works: 160 outcome 0"
 expect "two copies, each copy names the layout once" \
     "$(grep -c "cannot share execution accounts" "$TMP/foreign.err")" "2"
 

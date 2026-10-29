@@ -13,9 +13,10 @@
  *                             where the copies then did not find each other,
  *                             the library's copy refuses the account rather
  *                             than charge one that the other copy guards.
- *   two_copies <lib> <rv>     <rv>, loaded first, exports accounts of another
- *                             layout: both copies refuse accounts, each says
- *                             so once, and calls still work. */
+ *
+ * Accounts of another layout loaded first are foreign_first.c's (#3437):
+ * where an executable exports its symbols (macOS), this program's own
+ * accounts are the first a copy finds, and a foreign one is never read. */
 #include <stdio.h>
 #include <string.h>
 #include <pthread.h>
@@ -41,12 +42,10 @@ static void* lib_sym(lib_t h, const char* name) { return dlsym(h, name); }
 typedef int (*int_fn)(int);
 typedef int (*use_fn)(AetherExecAccount*, AetherExecAccount**);
 typedef int (*outcome_fn)(void);
-typedef AetherExecAccount* (*new_fn)(const AetherExecLimits*);
 
 static int_fn grow;
 static use_fn lib_use;
 static outcome_fn lib_outcome;
-static new_fn lib_new;
 
 static int bind_lib(lib_t lib) {
     void* p;
@@ -56,8 +55,6 @@ static int bind_lib(lib_t lib) {
     memcpy(&lib_use, &p, sizeof(p));
     if (!(p = lib_sym(lib, "aether_last_outcome"))) return 0;
     memcpy(&lib_outcome, &p, sizeof(p));
-    if (!(p = lib_sym(lib, "aether_exec_account_new"))) return 0;
-    memcpy(&lib_new, &p, sizeof(p));
     return 1;
 }
 
@@ -71,11 +68,10 @@ static void* other(void* arg) {
 }
 
 int main(int argc, char** argv) {
-    if (argc < 2) { printf("usage: two_copies <library> [early | <foreign accounts>]\n"); return 1; }
+    if (argc < 2) { printf("usage: two_copies <library> [early]\n"); return 1; }
     int early = argc > 2 && strcmp(argv[2], "early") == 0;
     AetherExecLimits l = { 64 * 1024, 0, AETHER_DEADLINE_ELAPSED, NULL };
     if (early) g_a = aether_exec_account_new(&l);
-    if (argc > 2 && !early && !lib_open(argv[2])) { printf("cannot load %s\n", argv[2]); return 1; }
     lib_t lib = lib_open(argv[1]);
     if (!lib || !bind_lib(lib)) { printf("cannot load %s\n", argv[1]); return 1; }
 
@@ -97,14 +93,6 @@ int main(int argc, char** argv) {
                         rc, seen == g_a ? "yes" : "no", r, out, charged);
         if (rc == 0) lib_use(NULL, NULL);
         aether_exec_account_free(g_a);
-        return 0;
-    }
-    if (argc > 2) {
-        AetherExecAccount* mine = aether_exec_account_new(&l);
-        AetherExecAccount* theirs = lib_new(&l);
-        int r = grow(10);
-        printf("foreign: this copy %s, the library's %s; a call still works: %d outcome %d\n",
-               mine ? "made one" : "refused", theirs ? "made one" : "refused", r, lib_outcome());
         return 0;
     }
 
