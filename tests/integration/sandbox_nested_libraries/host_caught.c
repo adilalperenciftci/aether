@@ -5,7 +5,14 @@
  * interposition), and the library's sandbox, the only one, must reach them
  * through this program's pointers, or a panic caught inside its enforce
  * block leaves the nested level in force. Prints what each read got
- * (1 read, 0 refused). */
+ * (1 read, 0 refused).
+ *
+ * With argv[2], another library with a sandbox of its own (inner.ae's),
+ * loaded too: the first runs its block, the second enforces after it (its
+ * copy looks the copies up last), and the first runs its block again. Both
+ * run this program's panic: one slot of hooks, which the last copy to look
+ * set, served only the second, and the first's caught panic left its level
+ * in force; each copy now adds its own (#3438). */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -58,6 +65,22 @@ int main(int argc, char** argv) {
     set(note, service);
     caught();
     printf("after the catch PATH %d probe %d; after the block probe %d\n", notes[0], notes[1], notes[2]);
+    if (argc > 2) {
+        void* other = lib_open(argv[2]);
+        void* g = other ? lib_sym(other, "aether_inner_read_granted") : NULL;
+        void* oh = other ? lib_sym(other, "hooks_set") : NULL;
+        if (!g || !oh) { printf("cannot load %s\n", argv[2]); return 1; }
+        export_fn granted;
+        hooks_set_fn set_other;
+        memcpy(&granted, &g, sizeof(g));
+        memcpy(&set_other, &oh, sizeof(oh));
+        set_other(note, service);
+        granted();   /* the other copy enforces: it looks the copies up now */
+        notes[0] = notes[1] = notes[2] = -1;
+        caught();
+        printf("again, after another copy looked: after the catch PATH %d probe %d; after the block probe %d\n",
+               notes[0], notes[1], notes[2]);
+    }
     fflush(stdout);
     return 0;
 }

@@ -141,7 +141,7 @@ fi
 # each copy's own, the catch left the nested level in force (PATH 0) and the
 # block's end the outer one (probe 0 after it).
 rdyn=""
-[ "$(uname -s 2>/dev/null)" = Linux ] && rdyn="-rdynamic"
+case "$(uname -s 2>/dev/null)" in Linux|FreeBSD) rdyn="-rdynamic" ;; esac
 # shellcheck disable=SC2046,SC2086
 if ! "$CC" -O1 "$SCRIPT_DIR/host_caught.c" -o "$TMP/host_caught" $("$AE" cflags --libs) $rdyn $dl \
         > "$TMP/cc_caught.log" 2>&1 ||
@@ -156,6 +156,19 @@ want_caught="after the catch PATH 1 probe 0; after the block probe 1"
 if [ "$got" != "$want_caught" ]; then
     echo "  [FAIL] sandbox_nested_libraries: a panic caught inside the library's block, the program's panic: got '$got', want '$want_caught'"
     head -5 "$TMP/caught.err" | sed 's/^/        /'
+    fail=1
+fi
+# 2e. the same, with a second library with a sandbox of its own (inner.ae's)
+# that enforces after the first's block ran, so its copy looks the copies up
+# last (#3438): both run the program's panic, and one slot of hooks the last
+# copy set served only it, so the first's caught panic left its level.
+got="$("$TMP/host_caught" "$TMP/static/libcaught.$ext" "$TMP/static/libinner.$ext" 2>"$TMP/caught2.err" | tr -d '\r')"
+want_two="$want_caught
+again, after another copy looked: $want_caught"
+if [ "$got" != "$want_two" ]; then
+    echo "  [FAIL] sandbox_nested_libraries: two libraries with a sandbox each, the program's panic:"
+    printf '%s\n' "$got" | sed 's/^/        got:  /'
+    head -5 "$TMP/caught2.err" | sed 's/^/        /'
     fail=1
 fi
 
