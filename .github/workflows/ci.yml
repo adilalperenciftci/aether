@@ -169,6 +169,28 @@ jobs:
     - name: Run full CI suite
       run: HARDEN=${{ matrix.harden }} CC=${{ matrix.cc }} AE_SWEEP_SHARD=${{ matrix.shard }} CI_SWEEP_UNIT=${{ matrix.unit }} AE_SWEEP_KEEP_C=${{ matrix.name == 'Linux / GCC' && '1' || '0' }} make ${{ matrix.target || 'ci' }}
 
+    # The cross-version ABI matrix (#2957, docs/abi-policy.md): this tree's
+    # libraries and hosts against the latest published release's, on the
+    # toolchain `make ci` just built. One Linux and one macOS leg (the
+    # release workflow runs it on every platform it ships); without the
+    # release in AETHER_ABI_OLD_HOME the sweep above skipped it.
+    - name: ABI matrix against the latest release
+      if: matrix.name == 'Linux / GCC' || matrix.name == 'macOS / Clang (ARM64)'
+      timeout-minutes: 15
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        case "${{ matrix.os }}" in
+          ubuntu*) target=linux-x86_64 ;;
+          *) target=macos-arm64 ;;
+        esac
+        prev="$RUNNER_TEMP/aether-prev"
+        mkdir -p "$prev"
+        gh release download --repo "${{ github.repository }}" --pattern "aether-*-$target.tar.gz" --dir "$RUNNER_TEMP"
+        tar -xzf "$RUNNER_TEMP"/aether-*-"$target".tar.gz -C "$prev"
+        echo "against $(cat "$prev/VERSION")"
+        AETHER_ABI_OLD_HOME="$prev" CC=${{ matrix.cc }} sh tests/integration/abi_matrix/test_abi_matrix.sh
+
     # The .ae corpus at -O0 (what `ae run` compiles at) against -O2 (what the
     # sweep in `make ci` compiles at), diffing stdout and exit code (#2488).
     # One leg is enough to catch a program that behaves differently at -O0,

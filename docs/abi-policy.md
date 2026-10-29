@@ -90,6 +90,10 @@ catalogs and libraries compiled for a runtime of another ABI.
 | Two self-contained libraries of different versions in one process | Yes; each runs on its own runtime, and the shared facilities are refused across layouts |
 | `--emit=csrc` and `--emit=obj` | Only with the runtime of the Aether that generated them |
 
+Verified by the cross-version matrix below on Windows x86_64 against
+0.856.0 (by hand), and on Linux x86_64 and macOS arm64 in CI against the
+latest published release, on every pull request and before every release.
+
 ## Deprecated names
 
 A removed feature's names stay, accepted and ignored, until the next host
@@ -99,6 +103,34 @@ ABI level removes them. Each is marked where it is declared.
 |---|---|---|---|
 | `AETHER_FLAG_LOCKFREE_POOLS` (`runtime/aether_runtime.h`) | #3374 | accepted, ignored; `aether_runtime_has_feature()` reports it off | host ABI level 2 |
 | `aether_message_pool_stats` (`runtime/actors/aether_send_message.h`) | #3374 | reports zeros | host ABI level 2 |
+
+## The cross-version matrix
+
+`tests/integration/abi_matrix` builds `mlib.ae` with this Aether and with a
+release before it (`AETHER_ABI_OLD_HOME`, an extracted release archive) and
+runs every supported pair, and the refusals of the unsupported ones:
+
+- C hosts that read everything by name: this header with this library and
+  with the old one, and the old header with this library: typed calls, a
+  string given back with no byte kept, errors and deadlines at the levels
+  the pair has;
+- the old and the new library in one process, each with its own runtime:
+  calls interleaved, an account of the new one suspended while the old one
+  runs and resumed, both unloaded;
+- Aether consumers both ways: this importer with the old library, the old
+  importer with this one;
+- the shared runtime: each library on its own, the new library on the old
+  runtime (refused at load or by its preflight), and this importer with the
+  old shared-runtime library (refused).
+
+What each case prints depends on the levels alone, so the matrix holds
+against whichever release came before. To run it:
+
+```sh
+AETHER_ABI_OLD_HOME=/path/to/aether-0.856.0 sh tests/integration/abi_matrix/test_abi_matrix.sh
+```
+
+Without `AETHER_ABI_OLD_HOME` it skips.
 
 ## Changing the ABI
 

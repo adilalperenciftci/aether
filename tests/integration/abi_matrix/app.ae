@@ -1,0 +1,18 @@
+// An Aether consumer of mlib in binary form across versions (#2957): this
+// Aether's importer with the release before it's library, and that
+// release's importer with this Aether's library. Only calls that succeed:
+// a level-0 library has no outcomes, and an importer older than a
+// library's catalog does not check them.
+import mlib
+import std.string
+
+main() {
+    println("typed: add ${mlib.add(2, 3)}, wide ${mlib.wide(7)}, even ${mlib.even(4)}")
+    i = 0
+    total = 0
+    while i < 2000 {
+        total = total + string.length(mlib.greet(i))
+        i = i + 1
+    }
+    println("strings: ${mlib.greet(9)}, 2000 more read: ${total} bytes")
+}

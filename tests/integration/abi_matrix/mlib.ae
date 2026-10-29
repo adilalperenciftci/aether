@@ -1,0 +1,57 @@
+// The library of the cross-version matrix (#2957): built by this Aether and
+// by the release before it, and called across the two. It uses only what
+// both versions compile: typed values, a string handed to the caller,
+// a panic, a loop a deadline cuts, and memory a cap or an account charges.
+import std.string
+
+add(a: int, b: int) -> int {
+    return a + b
+}
+
+scale(x: float, k: float) -> float {
+    return x * k
+}
+
+wide(n: long) -> long {
+    return n * 1000000
+}
+
+even(n: int) -> bool {
+    return n % 2 == 0
+}
+
+// A string the caller owns and gives back through the library's release.
+greet(n: int) -> string {
+    return string.concat("hello ", string.from_int(n))
+}
+
+// A panic for a negative n.
+checked(n: int) -> int {
+    if n < 0 {
+        panic("negative")
+    }
+    return n * 2
+}
+
+// A loop a deadline or a cancellation cuts.
+spin(n: int) -> int {
+    i = 0
+    total = 0
+    while i < n {
+        total = (total + i) % 1000003
+        i = i + 1
+    }
+    return total
+}
+
+// The length of a string of n * 16 bytes, which the call frees: memory a
+// cap or an account charges.
+grow(n: int) -> int {
+    s = ""
+    i = 0
+    while i < n {
+        s = string.concat(s, "0123456789abcdef")
+        i = i + 1
+    }
+    return string.length(s)
+}

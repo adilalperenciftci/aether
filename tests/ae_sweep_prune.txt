@@ -341,3 +341,6 @@ tests/integration/owned_drop_signatures/
 # #2957: app.ae imports a hand-made catalog (fake_catalog.c) and abi_lib.ae is a
 # library with no main; test_abi_policy.sh builds both against each boundary.
 tests/integration/abi_policy/
+# #2957: mlib.ae is a library with no main and app.ae its importer; test_abi_matrix.sh
+# builds them with this Aether and with the release in AETHER_ABI_OLD_HOME.
+tests/integration/abi_matrix/
