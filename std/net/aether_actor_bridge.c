@@ -17,6 +17,9 @@
 #include <unistd.h>
 #include <errno.h>
 #include <string.h>
+#if !defined(_WIN32) && AETHER_HAS_NETWORKING
+#include <sys/socket.h>   /* send, MSG_NOSIGNAL: ae_fd_write (#3457) */
+#endif
 
 // TLS variables owned by the scheduler + send path. We reach into them
 // here to identify the "current" actor and core at the point of call.
@@ -112,10 +115,23 @@ int ae_pipe_write_fd(void) {
 
 // Write a NUL-terminated string to an fd. Returns bytes written
 // on success, -1 on failure.
+//
+// A socket whose peer closed fails with EPIPE rather than ending the process
+// with SIGPIPE (#3457), as std.tcp's sends do: Linux asks it of send(), so a
+// socket is written with send(MSG_NOSIGNAL) and anything else (a pipe) with
+// write(); macOS and the BSDs carry it on the socket (SO_NOSIGPIPE, which
+// std.tcp sets on every socket it makes). send() says an fd is no socket
+// with ENOTSOCK, and lwIP's (ESP-IDF) with EBADF, which write() also gives
+// an fd that is not open.
 int ae_fd_write(int fd, const char* data) {
     if (fd < 0 || !data) return -1;
     size_t len = strlen(data);
+#if !defined(_WIN32) && AETHER_HAS_NETWORKING && defined(MSG_NOSIGNAL)
+    ssize_t n = send(fd, data, len, MSG_NOSIGNAL);
+    if (n < 0 && (errno == ENOTSOCK || errno == EBADF)) n = write(fd, data, len);
+#else
     ssize_t n = write(fd, data, len);
+#endif
     return (int)n;
 }
 

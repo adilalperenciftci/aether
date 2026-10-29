@@ -4,4 +4,5 @@
   output; on macOS the pure TLS client and server died that way when the
   other side closed first. Sends now name `MSG_NOSIGNAL` where the platform
   has it and sockets carry `SO_NOSIGPIPE` where it has that, as the HTTP
-  server's always did, and the write fails with EPIPE (#3457).
+  server's always did, and the write fails with EPIPE. `net.fd_write` on
+  a socket fails the same way (#3457).
