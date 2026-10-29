@@ -131,9 +131,13 @@ TEST_CATEGORY(accounts_free_credits_the_ancestors, TEST_CATEGORY_RUNTIME) {
     ASSERT_EQ(0, child_after_block);
 }
 
-/* #3409: 200 ms spent in an execution nested inside another, both under one
- * ACTIVE account of 300 ms (and under a child of it), is 200 ms of it: the
- * next execution under it is not cut, and one of 150 ms more is. */
+/* #3409: time spent in an execution nested inside another, both under one
+ * ACTIVE account (and under a child of it), is charged to it once: never
+ * more than the time the two took, read on the clock the runtime charges
+ * by. A sleep may take longer than asked (a loaded macOS runner took a
+ * 200 ms one to well past 250), so no bound here leans on what a sleep
+ * takes: the account's 300 ms hold the 100 ms nested and whatever it
+ * overran, and a further 250 ms pass what is left of them. */
 static int ea_nested(AetherExecAccount* inner) {
     AetherJmpFrame* x = aether_exec_enter();
     if (AETHER_SIGSETJMP(x->buf, 1)) {
@@ -146,7 +150,7 @@ static int ea_nested(AetherExecAccount* inner) {
     if (AETHER_SIGSETJMP(y->buf, 1)) {
         aether_exec_failed();
     } else {
-        ea_sleep_ms(200);
+        ea_sleep_ms(100);
         aether_exec_leave();
     }
     if (inner) aether_exec_use(outer, NULL);
@@ -167,27 +171,29 @@ static int ea_poll_under(int ms) {
 }
 
 TEST_CATEGORY(accounts_active_time_once_when_nested, TEST_CATEGORY_RUNTIME) {
-    int first[2], next[2], tripped[2], past[2];
+    int first[2], tripped[2], past[2];
+    int64_t spent[2], took[2];
     for (int k = 0; k < 2; k++) {
         AetherExecAccount* a = ea_new(0, 300, AETHER_DEADLINE_ACTIVE, NULL);
         AetherExecAccount* child = k ? ea_new(0, 0, AETHER_DEADLINE_ELAPSED, a) : NULL;
         aether_exec_use(a, NULL);
+        int64_t t0 = aether_caps_now_ns();
         first[k] = ea_nested(child);
-        next[k] = ea_poll_under(10);
+        took[k] = aether_caps_now_ns() - t0;
+        spent[k] = atomic_load(&a->active_spent_ns);
         tripped[k] = aether_exec_account_tripped(a);
-        past[k] = ea_poll_under(150);   /* 200 + 10 + 150: past its 300 */
+        past[k] = ea_poll_under(250);   /* at least 100 + 250: past its 300 */
         aether_exec_use(NULL, NULL);
         if (child) aether_exec_account_free(child);
         aether_exec_account_free(a);
     }
-    ASSERT_EQ(AETHER_OK, first[0]);
-    ASSERT_EQ(AETHER_OK, next[0]);
-    ASSERT_EQ(0, tripped[0]);
-    ASSERT_EQ(AETHER_OK, first[1]);
-    ASSERT_EQ(AETHER_OK, next[1]);
-    ASSERT_EQ(0, tripped[1]);
-    ASSERT_EQ(AETHER_DEADLINE, past[0]);
-    ASSERT_EQ(AETHER_DEADLINE, past[1]);
+    for (int k = 0; k < 2; k++) {
+        ASSERT_EQ(AETHER_OK, first[k]);
+        ASSERT_TRUE(spent[k] >= 100 * 1000000LL);   /* the nested sleep */
+        ASSERT_TRUE(spent[k] <= took[k]);           /* charged once */
+        ASSERT_EQ(0, tripped[k]);
+        ASSERT_EQ(AETHER_DEADLINE, past[k]);
+    }
 }
 
 
