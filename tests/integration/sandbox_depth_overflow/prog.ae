@@ -1,0 +1,35 @@
+import std.os
+import std.sandbox
+
+fn descend(level: int, allow: sandbox.Grants, deny: sandbox.Grants) -> int {
+    visible = 1
+    if level == 0 {
+        sandbox.enforce(deny) callback {
+            if os.getenv("AE_SANDBOX_DEPTH_SECRET") == null { visible = 0 }
+        }
+        return visible
+    }
+
+    sandbox.enforce(allow) callback {
+        visible = descend(level - 1, allow, deny)
+    }
+    return visible
+}
+
+main() {
+    allow = sandbox.new("allow env") {
+        grant_env("AE_SANDBOX_DEPTH_SECRET")
+    }
+    deny = sandbox.new("deny env") {}
+
+    visible = descend(64, allow, deny)
+    println("overflow-visible=${visible}")
+
+    restored = 0
+    if os.getenv("AE_SANDBOX_DEPTH_SECRET") != null { restored = 1 }
+    println("after-visible=${restored}")
+
+    sandbox.free(deny)
+    sandbox.free(allow)
+    return visible + (1 - restored)
+}

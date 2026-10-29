@@ -9536,6 +9536,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "static AETHER_TLS void* _aether_sandbox_stack[64];");
     print_line(gen, "static AETHER_TLS int _aether_sandbox_depth = 0;");
     if (has_sandbox) {
+        /* Depth continues past the physical stack capacity. The checker
+         * refuses every operation while it is above 64, so a nested enforce
+         * cannot disappear merely because its grant slot did not fit. */
         /* Trusted names in `sandbox.enforce(perms, foo) { ... }`: each level
          * of the stack records which enforce site pushed it (0 for any other
          * push). A trusted call runs with the authority of the code that
@@ -9561,10 +9564,10 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         print_line(gen, "static AETHER_TLS int _aether_sandbox_site_at[64];");
         print_line(gen, "static AETHER_TLS int _aether_sandbox_skip_to[64];");
         print_line(gen, "static AETHER_TLS int _aether_sandbox_pending_site = 0;");
-        print_line(gen, "static inline void _aether_sandbox_push(void* ctx) { if (_aether_sandbox_depth < 64) { _aether_sandbox_site_at[_aether_sandbox_depth] = _aether_sandbox_pending_site; _aether_sandbox_skip_to[_aether_sandbox_depth] = -1; _aether_sandbox_stack[_aether_sandbox_depth++] = ctx; } _aether_sandbox_pending_site = 0; }");
-        print_line(gen, "static inline AETHER_MAYBE_UNUSED int _aether_sandbox_trust_enter(int site) { int saved = _aether_sandbox_depth; for (int l = _aether_sandbox_depth - 1; l >= 0; l--) { if (_aether_sandbox_skip_to[l] >= 0) { l = _aether_sandbox_skip_to[l]; continue; } if (_aether_sandbox_site_at[l] == site) { if (_aether_sandbox_depth < 64) { _aether_sandbox_site_at[_aether_sandbox_depth] = 0; _aether_sandbox_skip_to[_aether_sandbox_depth] = l; _aether_sandbox_stack[_aether_sandbox_depth++] = (void*)0; } break; } } return saved; }");
+        print_line(gen, "static inline void _aether_sandbox_push(void* ctx) { if (_aether_sandbox_depth < 64) { _aether_sandbox_site_at[_aether_sandbox_depth] = _aether_sandbox_pending_site; _aether_sandbox_skip_to[_aether_sandbox_depth] = -1; _aether_sandbox_stack[_aether_sandbox_depth] = ctx; } _aether_sandbox_depth++; _aether_sandbox_pending_site = 0; }");
+        print_line(gen, "static inline AETHER_MAYBE_UNUSED int _aether_sandbox_trust_enter(int site) { int saved = _aether_sandbox_depth; if (_aether_sandbox_depth > 64) return saved; for (int l = _aether_sandbox_depth - 1; l >= 0; l--) { if (_aether_sandbox_skip_to[l] >= 0) { l = _aether_sandbox_skip_to[l]; continue; } if (_aether_sandbox_site_at[l] == site) { if (_aether_sandbox_depth < 64) { _aether_sandbox_site_at[_aether_sandbox_depth] = 0; _aether_sandbox_skip_to[_aether_sandbox_depth] = l; _aether_sandbox_stack[_aether_sandbox_depth] = (void*)0; } _aether_sandbox_depth++; break; } } return saved; }");
     } else {
-        print_line(gen, "static inline void _aether_sandbox_push(void* ctx) { if (_aether_sandbox_depth < 64) _aether_sandbox_stack[_aether_sandbox_depth++] = ctx; }");
+        print_line(gen, "static inline void _aether_sandbox_push(void* ctx) { if (_aether_sandbox_depth < 64) _aether_sandbox_stack[_aether_sandbox_depth] = ctx; _aether_sandbox_depth++; }");
     }
     print_line(gen, "static inline void _aether_sandbox_pop(void) { if (_aether_sandbox_depth > 0) _aether_sandbox_depth--; }");
     if (has_sandbox) {
@@ -9597,6 +9600,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         print_line(gen, "extern void aether_sandbox_audit(const char*, const char*, int);");
         print_line(gen, "static int _aether_sandbox_check_impl(const char* category, const char* resource) {");
         print_line(gen, "    if (_aether_sandbox_depth <= 0) return 1;");
+        print_line(gen, "    if (_aether_sandbox_depth > 64) { aether_sandbox_audit(category, resource, 0); return 0; }");
         print_line(gen, "    int _allowed = 1;");
         /* From the top down, a trusted call's barrier jumping over the
          * levels it hides. With none left in force the check is the one an
