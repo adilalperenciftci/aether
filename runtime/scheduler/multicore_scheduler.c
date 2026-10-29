@@ -2728,12 +2728,8 @@ static _Atomic int g_countdowns_firing = 0;
  * so the wait starts its window again (has_pending_actor_timeout alone read
  * the firing count once, at the window's end). */
 static _Atomic uint64_t g_countdowns_done = 0;
-/* The firing steps this thread is inside: a wait_for_idle() an arm calls
- * waits for the others, not for itself. */
-static AETHER_TLS int t_countdowns_here = 0;
 
 void scheduler_countdown_enter(void) {
-    t_countdowns_here++;
     atomic_fetch_add_explicit(&g_countdowns_firing, 1, memory_order_relaxed);
     /* Before the step's disarm, a plain store: a fence, which an RMW alone
      * is not for the stores after it (AArch64 without LSE). */
@@ -2743,7 +2739,6 @@ void scheduler_countdown_enter(void) {
 void scheduler_countdown_leave(void) {
     atomic_fetch_add_explicit(&g_countdowns_done, 1, memory_order_release);
     atomic_fetch_sub_explicit(&g_countdowns_firing, 1, memory_order_release);
-    t_countdowns_here--;
 }
 
 static int has_pending_actor_timeout(void) {
@@ -2766,9 +2761,12 @@ static int has_pending_actor_timeout(void) {
     }
     reclaim_reader_exit(slot);
     /* A countdown seen disarmed above may be firing: its step counted itself
-     * (a full barrier) before it disarmed. */
+     * (a full barrier) before it disarmed. Acquire: a step seen done here
+     * (its decrement read) has its count of the done read after it too, in
+     * the caller's check, which a relaxed load let a weak memory read first
+     * (AArch64, POWER). */
     atomic_thread_fence(memory_order_acquire);
-    if (atomic_load_explicit(&g_countdowns_firing, memory_order_relaxed) - t_countdowns_here > 0) found = 1;
+    if (atomic_load_explicit(&g_countdowns_firing, memory_order_acquire) > 0) found = 1;
     return found;
 }
 
@@ -2778,7 +2776,14 @@ static int has_pending_actor_timeout(void) {
  * both (#3102); the end of main for the messages alone (#3219). */
 static void scheduler_wait_quiet(int countdowns);
 
+/* wait_for_idle() waits for every actor, the calling one too, so inside an
+ * actor's step (a handler, a receive timeout's arm) it waited for a step
+ * that cannot end while it waits: forever in a handler, whose message stays
+ * counted, and in an arm until the bound (#3463). There it panics, as the
+ * actor's code: the step barrier ends the actor with the reason, and its
+ * watchers are told. */
 void scheduler_wait(void) {
+    if (g_aether_in_actor_step) aether_panic(AETHER_WAIT_IN_STEP_REASON);
     scheduler_wait_quiet(1);
 }
 

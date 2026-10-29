@@ -1,0 +1,74 @@
+// wait_for_idle() inside an actor ends that actor with a panic whose reason
+// says to call it outside the actors, in a handler and in a receive
+// timeout's arm, and the rest of the program goes on (#3463).
+//
+// It waits for every actor, the calling one too, whose step cannot end
+// while it waits: in a handler it hung forever (the handler's own message
+// stays counted as not handled), in an arm until the wait's bound (100 s).
+
+import std.actors
+import std.string
+import std.time
+
+message Watch { who: actor_ref }
+message Go {}
+
+extern exit(code: int)
+
+actor InHandler {
+    state after = 0
+
+    receive {
+        Go() -> {
+            wait_for_idle()
+            after = 1
+        }
+    }
+}
+
+actor InArm {
+    state after = 0
+
+    receive {
+        Go() -> {}
+    } after 20 -> {
+        wait_for_idle()
+        after = 1
+    }
+}
+
+actor Watcher {
+    state downs = 0
+    state told = 0
+
+    receive {
+        Watch(who) -> { _id = actors.monitor(who) }
+        Down(ref, reason) -> {
+            downs = downs + 1
+            if string.starts_with(reason, "wait_for_idle() inside an actor") == 1 {
+                told = told + 1
+            }
+        }
+    }
+}
+
+main() {
+    started = time.now_ms()
+    w = spawn(Watcher())
+    h = spawn(InHandler())
+    a = spawn(InArm())
+    w ! Watch { who: h }
+    w ! Watch { who: a }
+    h ! Go {}
+    wait_for_idle()
+    took = time.now_ms() - started
+    if w.downs != 2 || w.told != 2 {
+        println("FAIL: ${w.downs} Downs, ${w.told} with the reason (want 2 and 2)")
+        exit(1)
+    }
+    if took > 10000 {
+        println("FAIL: the program's wait took ${took} ms")
+        exit(1)
+    }
+    println("PASS: wait_for_idle() inside a handler and inside an arm ends the actor, with the reason")
+}

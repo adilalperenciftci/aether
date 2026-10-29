@@ -593,8 +593,13 @@ static int coop_timeout_armed(void) {
  * down the poll does no work, and the wait sleeps a millisecond at a time,
  * bounded as the multicore scheduler bounds it (100 s); it used to spin on
  * the CPU, the poll counting each check of the deadline as work. The end of
- * main does not wait for countdowns (scheduler_shutdown, #3219). */
+ * main does not wait for countdowns (scheduler_shutdown, #3219).
+ *
+ * Inside an actor's step it panics, as on the multicore scheduler (#3463):
+ * it waits for every actor, the calling one too, whose step cannot end
+ * while it waits. */
 void scheduler_wait(void) {
+    if (g_aether_in_actor_step) aether_panic(AETHER_WAIT_IN_STEP_REASON);
     uint64_t give_up = aether_now_ns() + 100ULL * 1000000000ULL;
     for (;;) {
         if (aether_scheduler_poll(0) > 0) continue;
