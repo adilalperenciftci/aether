@@ -67,6 +67,16 @@ for first in 1 0; do
         "$("$TMP/cross_host" "$TMP/libcross.$ext" $first 2>"$TMP/cross$first.err" | tr -d '\r')" \
         "cross: the host's own check inside its block 0; the actor was stepped inside it, and read PATH 1"
 done
+# A third copy loaded first owns the count, on every platform (#3438): the
+# library, which looked nothing up, joins it before its first step. (On
+# macOS the executable's own copy is found first, so the cases above are
+# this one there.)
+cp "$TMP/libcross.$ext" "$TMP/libfirst.$ext"
+for first in 1 0; do
+    expect "across three runtime copies, the library looked up first: $first" \
+        "$("$TMP/cross_host" "$TMP/libcross.$ext" $first "$TMP/libfirst.$ext" 2>"$TMP/third$first.err" | tr -d '\r')" \
+        "cross: the host's own check inside its block 0; the actor was stepped inside it, and read PATH 1"
+done
 
 if [ "$fail" = 0 ]; then
     echo "  [PASS] step_word: a program that reads the environment and files keeps its steps plain (step bits 0); an enforce block sets the sandbox bit and a receiver stepped inside it, in this copy or another, runs without its levels"

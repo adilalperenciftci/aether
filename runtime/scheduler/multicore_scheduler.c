@@ -2484,6 +2484,12 @@ void scheduler_init(int cores) {
         return;
     }
 
+    // Before this copy's first step, its sandbox joins another copy's count
+    // holding levels this copy's steps may run inside (#3438). Through a
+    // pointer, so the scheduler links nothing of the sandbox (#3393).
+    void (*join)(void) = atomic_load_explicit(&aether_sandbox_join, memory_order_acquire);
+    if (join) join();
+
     // A scheduler stopped by scheduler_shutdown() keeps its per-core tables
     // (an executable exits right after). Starting it again -- a host running
     // an --emit=lib program's aether_main() a second time -- allocates new

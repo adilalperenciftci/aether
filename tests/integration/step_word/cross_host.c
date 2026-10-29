@@ -3,7 +3,10 @@
  * of the host's copy, on the actor's core thread, sends to an idle actor of
  * that core, which is stepped inside the send, inside the host's level, and
  * has it leave. argv[2] is 1 when the library looks the levels up before
- * (it reads PATH first), 0 when it does not.
+ * (it reads PATH first), 0 when it does not. argv[3], when given, is a third
+ * copy loaded before the library (#3438): the host's first push then finds
+ * that copy's count, which neither the host nor the library owns, and the
+ * library must join it before its first step.
  *
  *   cross: the host's own check inside its block 0; the actor was stepped
  *   inside it, and read PATH 1 */
@@ -41,7 +44,8 @@ static void host_leave(void) {
 }
 
 int main(int argc, char** argv) {
-    if (argc < 3) { printf("usage: cross_host <library> <look_first>\n"); return 2; }
+    if (argc < 3) { printf("usage: cross_host <library> <look_first> [<loaded first>]\n"); return 2; }
+    if (argc > 3 && !lib_open(argv[3])) { printf("cannot load %s\n", argv[3]); return 2; }
     void* h = lib_open(argv[1]);
     if (!h) { printf("cannot load %s\n", argv[1]); return 2; }
     set_hooks_fn set_hooks = (set_hooks_fn)lib_sym(h, "cross_set_hooks");

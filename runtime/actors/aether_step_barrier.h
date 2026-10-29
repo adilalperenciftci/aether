@@ -112,6 +112,10 @@ extern AETHER_TLS void* g_current_step_actor;
 extern atomic_int* _Atomic aether_sandbox_in_force;
 extern int (*_Atomic aether_step_sandbox_hide)(int saved[2]);
 extern void (*_Atomic aether_step_sandbox_show)(const int saved[2]);
+/* scheduler_init joins another copy's count through this (#3438): a step
+ * reads only its own copy's word, and a copy that had looked nothing up
+ * stepped plainly inside another copy's levels. */
+extern void (*_Atomic aether_sandbox_join)(void);
 
 /* What a step put aside, to give back when it ends. `hid` has a bit for each
  * part put aside (AETHER_STEP_HID_*, aether_frames.h, where aether_step_push

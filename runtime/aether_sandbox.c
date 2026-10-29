@@ -205,6 +205,37 @@ static const AetherSandboxRendezvous* rv(void) {
     return found;
 }
 
+/* Before this copy's first step (#3438): a step reads only its own copy's
+ * word, and the SANDBOX bit was set only when this copy's own count first
+ * held a level or its own rv() found another copy's. A copy that had looked
+ * nothing up when another copy's count held levels stepped an actor plainly
+ * inside them, and the actor's first check found levels it could not read
+ * and refused. Every step needs this copy's scheduler, so scheduler_init
+ * joins once. Only another copy's rendezvous of this layout is pinned here:
+ * this copy's own, none, or another layout is left to the first push or
+ * check, as before, so a copy loaded before the one that will own the count
+ * still finds it then, and another layout is reported where it matters. */
+static void sandbox_join_copies(void) {
+    if (atomic_load_explicit(&g_rv, memory_order_acquire)) return;
+    const AetherSandboxRendezvous* found = find_rendezvous();
+    if (found && found != &g_own_rv && found->version == AETHER_SANDBOX_RV_VERSION &&
+        found->size == (uint32_t)sizeof(AetherSandboxRendezvous))
+        (void)rv();   /* pins and publishes it, and sets this copy's step bit */
+}
+
+extern void (*_Atomic aether_sandbox_join)(void);
+
+#if AETHER_GCC_COMPAT
+/* From NULL only: where a library's references bind to the program's
+ * runtime (ELF interposition), its constructor reaches the program's
+ * pointer, which the program's own copy set first. */
+AETHER_CONSTRUCTOR static void sandbox_install_join(void) {
+    void (*none)(void) = NULL;
+    atomic_compare_exchange_strong_explicit(&aether_sandbox_join, &none, sandbox_join_copies,
+                                            memory_order_release, memory_order_relaxed);
+}
+#endif
+
 // ---------------------------------------------------------------------------
 // This thread's levels
 // ---------------------------------------------------------------------------
