@@ -56,6 +56,13 @@ static _Atomic uint64_t g_mem_cap  = 0;   /* 0 = unlimited */
 #define CAPS_SLOW_CAP      1u
 #define CAPS_SLOW_ACCOUNTS 2u
 #define CAPS_SLOW_TEST     4u
+_Static_assert(AETHER_CAPS_ALLOC_BITS == (CAPS_SLOW_CAP | CAPS_SLOW_ACCOUNTS | CAPS_SLOW_TEST),
+               "the allocation fast path tests exactly its own bits");
+_Static_assert(CAPS_SLOW_ACCOUNTS == AETHER_CAPS_SLOW_ACCOUNTS, "one accounts bit");
+_Static_assert(((CAPS_SLOW_CAP | CAPS_SLOW_TEST) & AETHER_CAPS_STEP_BITS) == 0 &&
+               (AETHER_CAPS_SLOW_SANDBOX & AETHER_CAPS_ALLOC_BITS) == 0 &&
+               (AETHER_CAPS_SPAWN_MASK & (AETHER_CAPS_ALLOC_BITS | AETHER_CAPS_SLOW_SANDBOX)) == 0,
+               "the step's bits and the allocation's share only the accounts bit");
 _Atomic unsigned aether_caps_slow = 0;
 
 /* Per-thread. The deadline is monotonic-clock nanoseconds; 0 means

@@ -86,7 +86,7 @@ AetherJmpFrame* aether_step_push(AetherExecAside* s, int* hid) {
      * unwind runs defers, which can send): the step puts them aside. */
     if (unlikely(F->exec_depth != F->exec_floor || F->interrupting)) {
         step_put_aside_execs(F, s);
-        *hid |= 1;   /* AETHER_STEP_HID_EXECS */
+        *hid |= AETHER_STEP_HID_EXECS;
     }
     return aether_try_push();
 }

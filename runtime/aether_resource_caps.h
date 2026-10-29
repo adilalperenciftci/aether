@@ -174,9 +174,12 @@ extern _Atomic unsigned aether_caps_slow;
 /* The same word says what an actor step must put aside
  * (aether_step_barrier.h), so a plain step reads this one word and takes one
  * predicted branch: the accounts bit above; AETHER_CAPS_SLOW_SANDBOX, set for
- * good once this copy found the sandbox levels' rendezvous (a level may be
- * in force); and, from bit 8 up, the live restart claims and spawn captures
- * (aether_supervision.c counts them here, AETHER_CAPS_SPAWN_ONE each). The
+ * good once a sandbox level may be in force where this copy's steps can see
+ * it: the first thread with a level in this copy's count, or this copy
+ * sharing another copy's count (aether_sandbox.c; a mere check of a getenv or
+ * a file read sets nothing, #3419); and, from bit 8 up, the live restart
+ * claims and spawn captures (aether_supervision.c counts them here,
+ * AETHER_CAPS_SPAWN_ONE each). The
  * allocation fast path asks about its own bits only (AETHER_CAPS_ALLOC_BITS:
  * the cap, the accounts, the test hook). */
 #define AETHER_CAPS_SLOW_SANDBOX  8u

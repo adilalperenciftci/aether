@@ -71,8 +71,9 @@
  *
  * A plain step pays for none of the parts: one word says whether some
  * thread holds any of them, aether_caps_slow's step bits (the accounts
- * exist; this copy found the sandbox levels' rendezvous; the count of live
- * restart claims and spawn captures, aether_resource_caps.h), read once at
+ * exist; a sandbox level may be in force where this copy's steps can see
+ * it, #3419; the count of live restart claims and spawn captures,
+ * aether_resource_caps.h), read once at
  * each end with one predicted branch, and only when it is set are the parts
  * looked at, out of line, each behind what says this thread holds it (for
  * the levels, the count of threads with one, through
@@ -113,11 +114,13 @@ extern int (*_Atomic aether_step_sandbox_hide)(int saved[2]);
 extern void (*_Atomic aether_step_sandbox_show)(const int saved[2]);
 
 /* What a step put aside, to give back when it ends. `hid` has a bit for each
- * part put aside; the rest is read only under its bit. */
-#define AETHER_STEP_HID_EXECS   1   /* aether_step_push sets it */
-#define AETHER_STEP_HID_SPAWN   2
-#define AETHER_STEP_HID_ACCOUNT 4
-#define AETHER_STEP_HID_SANDBOX 8
+ * part put aside (AETHER_STEP_HID_*, aether_frames.h, where aether_step_push
+ * sets the executions'); the rest is read only under its bit. */
+_Static_assert((AETHER_STEP_HID_EXECS & (AETHER_STEP_HID_SPAWN | AETHER_STEP_HID_ACCOUNT |
+                                         AETHER_STEP_HID_SANDBOX)) == 0 &&
+               (AETHER_STEP_HID_SPAWN & (AETHER_STEP_HID_ACCOUNT | AETHER_STEP_HID_SANDBOX)) == 0 &&
+               (AETHER_STEP_HID_ACCOUNT & AETHER_STEP_HID_SANDBOX) == 0,
+               "the step's part bits are distinct");
 typedef struct {
     void* reply_slot;
     void* step_actor;

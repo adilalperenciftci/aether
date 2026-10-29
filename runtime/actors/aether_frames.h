@@ -103,9 +103,14 @@ typedef struct {
 extern void (*_Atomic aether_step_execs_hook)(AetherExecAside* s, int hide);
 
 /* An actor step begins and ends (aether_step_barrier.h): the executions
- * running on this thread are put aside, bit 1 set in *hid when there were
- * any (or an interruption on its way), and given back. The step's try
- * frame is pushed with them, in one look at this thread's block. */
+ * running on this thread are put aside, AETHER_STEP_HID_EXECS set in *hid
+ * when there were any (or an interruption on its way), and given back. The
+ * step's try frame is pushed with them, in one look at this thread's block.
+ * The step's other parts have the other bits of *hid. */
+#define AETHER_STEP_HID_EXECS   1
+#define AETHER_STEP_HID_SPAWN   2
+#define AETHER_STEP_HID_ACCOUNT 4
+#define AETHER_STEP_HID_SANDBOX 8
 AetherJmpFrame* aether_step_push(AetherExecAside* s, int* hid);
 void aether_step_give_back_execs(const AetherExecAside* s);
 

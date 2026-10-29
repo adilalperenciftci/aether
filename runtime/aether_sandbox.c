@@ -78,6 +78,18 @@ typedef struct AetherSandboxRendezvous {
 static atomic_int g_threads;
 static AETHER_TLS_SHARED int t_total;
 
+/* A step of this copy looks at the levels' count from now on (the step bit
+ * of its one word, aether_step_barrier.h): levels may be in force where its
+ * steps can see them (#3419). Set for good, and only then: a program that
+ * checks a getenv or a file read but enforces nothing keeps its plain
+ * steps. */
+static void sandbox_levels_may_exist(void) {
+    if (!(atomic_load_explicit(&aether_caps_slow, memory_order_relaxed) & AETHER_CAPS_SLOW_SANDBOX))
+        atomic_fetch_or_explicit(&aether_caps_slow, AETHER_CAPS_SLOW_SANDBOX, memory_order_release);
+}
+
+static const struct AetherSandboxRendezvous* rv(void);
+
 static int rv_levels(int delta) {
     int before = t_total;
     int after = before + delta;
@@ -86,8 +98,18 @@ static int rv_levels(int delta) {
     /* Read only by this thread's own checks: another thread seeing a stale
      * count takes the slow path and finds nothing of its own, or skips a
      * level that is not its own. */
-    if (before == 0 && after > 0) atomic_fetch_add_explicit(&g_threads, 1, memory_order_relaxed);
-    else if (before > 0 && after == 0) atomic_fetch_sub_explicit(&g_threads, 1, memory_order_relaxed);
+    if (before == 0 && after > 0) {
+        if (atomic_fetch_add_explicit(&g_threads, 1, memory_order_relaxed) == 0) {
+            /* No thread had a level: from now on this copy's steps look. Its
+             * count and hooks are published first, for a level another copy
+             * pushed through this one's count (this copy may have looked up
+             * nothing yet). */
+            (void)rv();
+            sandbox_levels_may_exist();
+        }
+    } else if (before > 0 && after == 0) {
+        atomic_fetch_sub_explicit(&g_threads, 1, memory_order_relaxed);
+    }
     return after;
 }
 
@@ -136,13 +158,22 @@ static const AetherSandboxRendezvous* find_rendezvous(void) {
  * not link this file for its panics. */
 extern void (*_Atomic aether_panic_sandbox_unwind)(int frames);
 
+/* What a step of this copy reads: the count of the threads with a level,
+ * and the step bit when the count is another copy's, whose levels this
+ * copy's steps may run inside (a thread in that copy's enforce block that
+ * steps an actor of this one). */
+static void sandbox_publish(const AetherSandboxRendezvous* r) {
+    atomic_store_explicit(&aether_sandbox_in_force, r->threads, memory_order_release);
+    if (r != &g_own_rv) sandbox_levels_may_exist();
+}
+
 static const AetherSandboxRendezvous* rv(void) {
     const AetherSandboxRendezvous* r = atomic_load_explicit(&g_rv, memory_order_acquire);
     if (r) return r;
-    /* Before g_rv is published: a thread that sees g_rv set sees this. */
+    /* Everything a reader of g_rv needs is in place before g_rv is published
+     * (#3419): a thread that sees g_rv set sees all of it. */
     atomic_store_explicit(&aether_panic_sandbox_unwind, aether_sandbox_unwind_to_frame,
                           memory_order_relaxed);
-    /* Before aether_sandbox_in_force, which the step barrier reads first. */
     atomic_store_explicit(&aether_step_sandbox_hide, sandbox_step_hide, memory_order_relaxed);
     atomic_store_explicit(&aether_step_sandbox_show, sandbox_step_show, memory_order_relaxed);
     const AetherSandboxRendezvous* found = find_rendezvous();
@@ -162,14 +193,16 @@ static const AetherSandboxRendezvous* rv(void) {
         found = NULL;
     }
     if (!found) found = &g_own_rv;
+    sandbox_publish(found);
     const AetherSandboxRendezvous* expected = NULL;
-    atomic_compare_exchange_strong_explicit(&g_rv, &expected, found,
-                                            memory_order_acq_rel, memory_order_acquire);
-    r = atomic_load_explicit(&g_rv, memory_order_acquire);
-    atomic_store_explicit(&aether_sandbox_in_force, r->threads, memory_order_release);
-    /* A step looks at the count from now on: its one word says so. */
-    atomic_fetch_or_explicit(&aether_caps_slow, AETHER_CAPS_SLOW_SANDBOX, memory_order_release);
-    return r;
+    if (!atomic_compare_exchange_strong_explicit(&g_rv, &expected, found,
+                                                 memory_order_acq_rel, memory_order_acquire)) {
+        /* Another thread published first, the rendezvous it found: this
+         * copy's count is that one's. */
+        sandbox_publish(expected);
+        return expected;
+    }
+    return found;
 }
 
 // ---------------------------------------------------------------------------
