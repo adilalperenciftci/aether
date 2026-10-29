@@ -101,7 +101,11 @@ static int serialize_grants(void* grant_list, char* shm_name, size_t shm_name_si
         const char* cat = aether_string_data(list_get_raw(grant_list, i));
         const char* pat = aether_string_data(list_get_raw(grant_list, i + 1));
         if (!cat || !pat) continue;
-        pos += snprintf(buf + pos, sizeof(buf) - pos, "%s:%s\n", cat, pat);
+        int w = snprintf(buf + pos, sizeof(buf) - pos, "%s:%s\n", cat, pat);
+        // snprintf returns the length it WOULD have written; an entry that
+        // does not fit must deny the spawn, not advance pos past buf.
+        if (w < 0 || (size_t)w >= sizeof(buf) - (size_t)pos) return -1;
+        pos += w;
     }
 
     return aether_sandbox_shm_write(

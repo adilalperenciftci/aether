@@ -14,7 +14,7 @@
 #define AETHER_SANDBOX_SHM_NAME_SIZE 64
 #define AETHER_SANDBOX_SHM_CREATE_ATTEMPTS 128
 
-static atomic_uint aether_sandbox_shm_sequence = ATOMIC_VAR_INIT(0);
+static atomic_uint aether_sandbox_shm_sequence = 0;
 
 static int aether_sandbox_shm_create(char* name, size_t name_size) {
     for (int attempt = 0; attempt < AETHER_SANDBOX_SHM_CREATE_ATTEMPTS; attempt++) {
