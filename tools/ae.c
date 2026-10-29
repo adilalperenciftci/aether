@@ -2277,18 +2277,8 @@ found_root:
                     "Warning: out of memory building the include list for the dev tree; some -I dirs dropped.\n");
         }
 
-        if (!tc.has_lib) {
-            char mpath[1200];
-            snprintf(mpath, sizeof(mpath), "%s/build/MANIFEST", tc.root);
-            if (!append_manifest_srcs(&tc.runtime_srcs, &tc.runtime_srcs_cap,
-                                      mpath, tc.root)) {
-                fprintf(stderr,
-                    "error: cannot build the runtime source list from %s\n"
-                    "  run `make stdlib` to regenerate it\n",
-                    mpath);
-                exit(1);
-            }
-        }
+        // No libaether.a: the runtime is compiled from this tree, by the
+        // list ae_runtime_srcs_ready reads.
     } else {
         // Installed layout: headers in include/aether/, source in
         // share/aether/. Walk both trees — include/ is the canonical
@@ -2319,23 +2309,43 @@ found_root:
                     "Warning: out of memory building the include list for the installed tree; some -I dirs dropped.\n");
         }
 
-        // No libaether.a: compile the runtime from share/aether/.
-        if (!tc.has_lib) {
-            char src[1024];
-            snprintf(src, sizeof(src), "%s/share/aether", tc.root);
-            char mpath2[1200];
-            snprintf(mpath2, sizeof(mpath2), "%s/MANIFEST", src);
-            if (!append_manifest_srcs(&tc.runtime_srcs, &tc.runtime_srcs_cap,
-                                      mpath2, src)) {
-                fprintf(stderr,
-                    "error: cannot build the runtime source list from %s\n"
-                    "  reinstall Aether, or copy build/MANIFEST from a source\n"
-                    "  tree to that path; it lists the sources to compile\n",
-                    mpath2);
-                exit(1);
-            }
-        }
+        // No libaether.a: the runtime is compiled from share/aether/, by
+        // the list ae_runtime_srcs_ready reads.
     }
+}
+
+/* The runtime sources a build without libaether.a compiles, from MANIFEST:
+ * build/MANIFEST in a source tree, share/aether/MANIFEST installed. Read
+ * where a native link needs them, not when the toolchain is found: no
+ * other command reads them (a wasm build compiles the list in
+ * runtime/coop_runtime_sources.txt, a check compiles nothing), and failing
+ * every command on a file only a native link reads stopped
+ * `ae build --target=wasm` in a tree `make compiler ae` built. 0, said
+ * why, when the list cannot be read. */
+static int ae_runtime_srcs_ready(void) {
+    if (tc.runtime_srcs && tc.runtime_srcs[0]) return 1;
+    char base[1024], mpath[1200];
+    if (tc.dev_mode) {
+        snprintf(base, sizeof(base), "%s", tc.root);
+        snprintf(mpath, sizeof(mpath), "%s/build/MANIFEST", tc.root);
+    } else {
+        snprintf(base, sizeof(base), "%s/share/aether", tc.root);
+        snprintf(mpath, sizeof(mpath), "%s/MANIFEST", base);
+    }
+    if (append_manifest_srcs(&tc.runtime_srcs, &tc.runtime_srcs_cap, mpath, base)) return 1;
+    if (tc.dev_mode) {
+        fprintf(stderr,
+            "error: cannot build the runtime source list from %s\n"
+            "  run `make stdlib` to regenerate it\n",
+            mpath);
+    } else {
+        fprintf(stderr,
+            "error: cannot build the runtime source list from %s\n"
+            "  reinstall Aether, or copy build/MANIFEST from a source\n"
+            "  tree to that path; it lists the sources to compile\n",
+            mpath);
+    }
+    return 0;
 }
 
 // Expand ${VAR} occurrences in `src` against the process environment,
@@ -5008,6 +5018,7 @@ void build_gcc_cmd(char* cmd, size_t size,
             cmd_too_long(cmd, size, w);
         }
     } else {
+        if (!ae_runtime_srcs_ready()) { free(opt); set_failing_cmd(cmd, size); return; }
         /* #2757: the runtime sources compiled to objects in parallel, when
          * that can be done; else the sources, compiled by this command. */
         char* rt_objs = NULL;
@@ -5281,6 +5292,7 @@ void build_gcc_cmd(char* cmd, size_t size,
             cmd_too_long(cmd, size, w);
         }
     } else {
+        if (!ae_runtime_srcs_ready()) { free(opt); set_failing_cmd(cmd, size); return; }
         /* #2757: the runtime sources compiled to objects in parallel, when
          * that can be done; else the sources, compiled by this command. */
         char* rt_objs = NULL;

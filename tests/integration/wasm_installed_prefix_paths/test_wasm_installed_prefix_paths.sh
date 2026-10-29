@@ -75,4 +75,24 @@ count="$(echo "$out" | sed -n 's/.*SOURCES: \([0-9]*\).*/\1/p' | head -1)"
 [ "${count:-0}" -gt 10 ] \
     || fail "only ${count:-0} sources passed to emcc — the list looks truncated"
 
-echo "  PASS: wasm_installed_prefix_paths: $count runtime sources resolve under <prefix>/share/aether"
+# #3420: the list a native build without libaether.a compiles (MANIFEST) is
+# read where that link needs it. ae read it when it found the toolchain, for
+# every command, and exited when it could not, so a wasm build, which compiles
+# runtime/coop_runtime_sources.txt, stopped on a tree without libaether.a and
+# MANIFEST. A native build there still says which list it lacks.
+# Each copy: the prefix holds the release under versions/ and current/ too.
+find "$TMP/prefix" -name 'libaether.a' -exec rm -f {} +
+find "$TMP/prefix" -path '*/share/aether/MANIFEST' -exec rm -f {} +
+out="$(cd "$TMP" && PATH="$TMP/bin:$PATH" "$TMP/prefix/bin/ae" build --target=wasm hi.ae -o "$TMP/hi" 2>&1 || true)"
+echo "$out" | grep -q 'SOURCES:' \
+    || { echo "$out" | tail -6 | sed 's/^/    /';
+         fail "without libaether.a and MANIFEST, the wasm build stopped before emcc (#3420)"; }
+(cd "$TMP" && "$TMP/prefix/bin/ae" check hi.ae > "$TMP/check.txt" 2>&1) \
+    || { tail -6 "$TMP/check.txt" | sed 's/^/    /';
+         fail "without libaether.a and MANIFEST, ae check failed (#3420)"; }
+out="$(cd "$TMP" && "$TMP/prefix/bin/ae" build hi.ae -o "$TMP/hi_native" 2>&1 || true)"
+echo "$out" | grep -q 'cannot build the runtime source list' \
+    || { echo "$out" | tail -6 | sed 's/^/    /';
+         fail "without libaether.a and MANIFEST, a native build did not name the list it lacks (#3420)"; }
+
+echo "  PASS: wasm_installed_prefix_paths: $count runtime sources resolve under <prefix>/share/aether; a wasm build and a check need no MANIFEST"
