@@ -6189,7 +6189,7 @@ static void td_emit_dispatch(CodeGenerator* gen, int level, const char* fallback
         print_line(gen, "if (--_aether_reductions <= 0) { _aether_reductions = 10000; sched_yield(); }");
     }
     if (gen->emit_lib) {
-        print_line(gen, "if (atomic_load_explicit(&aether_caps_armed, memory_order_relaxed) && aether_exec_poll()) { __aether_abort_call(); goto _ae_td_exit_%d; }", id);
+        print_line(gen, "if (AETHER_RT_DATA_PRESENT(aether_caps_armed) && atomic_load_explicit(&aether_caps_armed, memory_order_relaxed) && aether_exec_poll()) { __aether_abort_call(); goto _ae_td_exit_%d; }", id);
     }
     g_td_in_head++;
     for (int i = 0; i < si; i++) {
@@ -11390,7 +11390,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             // --emit=exe builds (the if (gen->emit_lib) gate elides
             // the print entirely).
             if (gen->emit_lib) {
-                print_line(gen, "if (atomic_load_explicit(&aether_caps_armed, memory_order_relaxed) && aether_exec_poll()) { __aether_abort_call(); break; }");
+                print_line(gen, "if (AETHER_RT_DATA_PRESENT(aether_caps_armed) && atomic_load_explicit(&aether_caps_armed, memory_order_relaxed) && aether_exec_poll()) { __aether_abort_call(); break; }");
             }
             /* Issue #501: snapshot try_frame_depth at loop entry.
              * #893: record the loop's label / containing scope / C-label id. */
@@ -11510,7 +11510,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             }
             // Issue #343 codegen tripwire — see AST_FOR_LOOP comment.
             if (gen->emit_lib) {
-                print_line(gen, "if (atomic_load_explicit(&aether_caps_armed, memory_order_relaxed) && aether_exec_poll()) { __aether_abort_call(); break; }");
+                print_line(gen, "if (AETHER_RT_DATA_PRESENT(aether_caps_armed) && atomic_load_explicit(&aether_caps_armed, memory_order_relaxed) && aether_exec_poll()) { __aether_abort_call(); break; }");
             }
             /* Issue #501: snapshot try_frame_depth at loop entry so
              * `break` / `continue` inside the body drains only

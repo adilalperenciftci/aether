@@ -8762,18 +8762,40 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * (aether_test_fail_alloc_after): one load while no test armed it. The
      * names are parenthesized where the helpers are defined, so a test can
      * wrap the call sites in a macro of the same name (closure_local_env_free
-     * counts closure environments and cells that way). */
-    print_line(gen, "extern _Atomic int aether_alloc_test_armed;");
+     * counts closure environments and cells that way).
+     *
+     * #3455: a library's references to the runtime's data are weak on ELF
+     * and Mach-O, as its callback registry's is (below): a library linked
+     * with its runtime left to the host (a raw `cc -shared`, a gateway
+     * script) binds a function at its first call, but a datum when it is
+     * loaded, so with the flags strong it did not load at all where no
+     * runtime was yet (`ae lib-info`). A flag that is absent reads as
+     * unarmed. A PE DLL is always fully linked, and a weak reference does
+     * not bind to a DLL import, so there they stay strong; so do they in an
+     * executable, which links its runtime. */
+    if (gen->emit_lib) {
+        print_line(gen, "#if !defined(_WIN32) && (defined(__GNUC__) || defined(__clang__))");
+        print_line(gen, "#define AETHER_RT_DATA __attribute__((weak))");
+        print_line(gen, "#define AETHER_RT_DATA_PRESENT(s) (&(s) != 0)");
+        print_line(gen, "#endif");
+    }
+    print_line(gen, "#ifndef AETHER_RT_DATA");
+    print_line(gen, "#define AETHER_RT_DATA");
+    print_line(gen, "#define AETHER_RT_DATA_PRESENT(s) 1");
+    print_line(gen, "#endif");
+    print_line(gen, "extern _Atomic int aether_alloc_test_armed AETHER_RT_DATA;");
     print_line(gen, "extern int  aether_alloc_test_refuses(void);");
     print_line(gen, "extern void aether_alloc_failed(int why);");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED void* (_aether_alloc)(size_t size, int zeroed, const char* what) {");
-    print_line(gen, "    void* p = (atomic_load_explicit(&aether_alloc_test_armed, memory_order_relaxed) &&");
+    print_line(gen, "    void* p = (AETHER_RT_DATA_PRESENT(aether_alloc_test_armed) &&");
+    print_line(gen, "               atomic_load_explicit(&aether_alloc_test_armed, memory_order_relaxed) &&");
     print_line(gen, "               aether_alloc_test_refuses()) ? (void*)0 : zeroed ? calloc(1, size) : malloc(size);");
     print_line(gen, "    if (!p) aether_out_of_memory(what);");
     print_line(gen, "    return p;");
     print_line(gen, "}");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED void* (_aether_alloc_or_null)(size_t size) {");
-    print_line(gen, "    void* p = (atomic_load_explicit(&aether_alloc_test_armed, memory_order_relaxed) &&");
+    print_line(gen, "    void* p = (AETHER_RT_DATA_PRESENT(aether_alloc_test_armed) &&");
+    print_line(gen, "               atomic_load_explicit(&aether_alloc_test_armed, memory_order_relaxed) &&");
     print_line(gen, "               aether_alloc_test_refuses()) ? (void*)0 : calloc(1, size);");
     print_line(gen, "    if (!p) aether_alloc_failed(5);  /* AETHER_STOP_OUT_OF_MEMORY */");
     print_line(gen, "    return p;");
@@ -8819,7 +8841,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
          * atomic, loaded relaxed (a plain load on x86 and ARM), so a loop
          * sees a cancel another thread makes while it runs (#2956): as a
          * plain int, clang loaded it once before a loop that calls nothing. */
-        print_line(gen, "extern _Atomic int aether_caps_armed;");
+        print_line(gen, "extern _Atomic int aether_caps_armed AETHER_RT_DATA;   /* weak: see _aether_alloc */");
         print_line(gen, "extern int  aether_caps_deadline_tripped(void);");
         print_line(gen, "extern void __aether_abort_call(void);");
         /* #2956: the safe point. Inside an execution a passed deadline or a
