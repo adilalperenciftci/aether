@@ -23,7 +23,7 @@ static void* lib_sym(void* h, const char* n) { return dlsym(h, n); }
 extern void* list_new(void);
 extern void list_free(void* l);
 
-typedef void (*set_host_fn)(void (*)(void), void (*)(void));
+typedef void (*set_hooks_fn)(void (*)(void), void (*)(void));
 typedef int (*start_fn)(int);
 
 static void* g_nothing;
@@ -44,10 +44,10 @@ int main(int argc, char** argv) {
     if (argc < 3) { printf("usage: cross_host <library> <look_first>\n"); return 2; }
     void* h = lib_open(argv[1]);
     if (!h) { printf("cannot load %s\n", argv[1]); return 2; }
-    set_host_fn set_host = (set_host_fn)lib_sym(h, "cross_set_host");
+    set_hooks_fn set_hooks = (set_hooks_fn)lib_sym(h, "cross_set_hooks");
     start_fn start = (start_fn)lib_sym(h, "aether_start");
-    if (!set_host || !start) { printf("missing a symbol\n"); return 2; }
-    set_host(host_enter, host_leave);
+    if (!set_hooks || !start) { printf("missing a symbol\n"); return 2; }
+    set_hooks(host_enter, host_leave);
     int r = start(atoi(argv[2]));
     printf("cross: the host's own check inside its block %d; the actor %s inside it, and read PATH %d\n",
            g_inside, (r / 10) % 10 == 1 ? "was stepped" : "was not stepped", r % 10);

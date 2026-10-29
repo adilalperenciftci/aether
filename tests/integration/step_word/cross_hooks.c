@@ -5,7 +5,7 @@ static void (*g_enter)(void) = 0;
 static void (*g_leave)(void) = 0;
 static int g_looked = 0;
 
-void cross_set_host(void (*enter)(void), void (*leave)(void)) {
+void cross_set_hooks(void (*enter)(void), void (*leave)(void)) {
     g_enter = enter;
     g_leave = leave;
 }
