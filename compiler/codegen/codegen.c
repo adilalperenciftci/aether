@@ -8771,10 +8771,15 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * loaded, so with the flags strong it did not load at all where no
      * runtime was yet (`ae lib-info`). A flag that is absent reads as
      * unarmed. A PE DLL is always fully linked, and a weak reference does
-     * not bind to a DLL import, so there they stay strong; so do they in an
-     * executable, which links its runtime. */
+     * not bind to a DLL import, so there they stay strong (Cygwin's and
+     * MSYS2's gcc make PE too, and define no _WIN32: a weak flag read as
+     * absent there would have left a shared-runtime library's loops
+     * unpolled); so do they in an executable, which links its runtime.
+     * Loaded before any runtime with lazy binding, such a library now runs
+     * with the flags absent, so without deadline polls, where it would not
+     * have loaded at all: a load order no host Aether makes uses. */
     if (gen->emit_lib) {
-        print_line(gen, "#if !defined(_WIN32) && (defined(__GNUC__) || defined(__clang__))");
+        print_line(gen, "#if !defined(_WIN32) && !defined(__CYGWIN__) && (defined(__GNUC__) || defined(__clang__))");
         print_line(gen, "#define AETHER_RT_DATA __attribute__((weak))");
         print_line(gen, "#define AETHER_RT_DATA_PRESENT(s) (&(s) != 0)");
         print_line(gen, "#endif");
@@ -11026,7 +11031,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
             fprintf(gen->output,
                 "\n/* @c_callback registry (#2297): hooks reach a shared runtime by name. */\n"
                 "#if defined(__GNUC__) || defined(__clang__)\n"
-                "#if defined(_WIN32)\n"
+                "#if defined(_WIN32) || defined(__CYGWIN__)\n"   /* PE: Cygwin and MSYS2's gcc define no _WIN32 */
                 "extern void aether_callback_register(const char*, void*);\n"
                 "#define AE_CALLBACK_REGISTRY_PRESENT 1\n"
                 "#else\n"
