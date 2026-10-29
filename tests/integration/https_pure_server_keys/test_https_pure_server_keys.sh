@@ -67,7 +67,11 @@ ssl openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384 -out "$TMP/p3
 ssl openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-521 -out "$TMP/p521.key"
 ssl openssl genpkey -algorithm ed25519 -out "$TMP/ed25519.key"
 ssl openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$TMP/rsa.key"
-ssl openssl rsa -in "$TMP/rsa.key" -traditional -out "$TMP/rsa1.key"
+# PKCS#1: OpenSSL 3 writes it with -traditional; LibreSSL (the macOS
+# openssl) and OpenSSL 1.1 know no such flag and write it by default.
+if ! openssl rsa -in "$TMP/rsa.key" -traditional -out "$TMP/rsa1.key" >"$TMP/ssl.log" 2>&1; then
+    ssl openssl rsa -in "$TMP/rsa.key" -out "$TMP/rsa1.key"
+fi
 grep -q "BEGIN RSA PRIVATE KEY" "$TMP/rsa1.key" || fail "the PKCS#1 fixture is not PKCS#1"
 for k in p256 p384 p521 ed25519 rsa; do cert "$k"; done
 cp "$TMP/rsa.pem" "$TMP/rsa1.pem"

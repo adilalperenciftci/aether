@@ -87,13 +87,25 @@ serve() {
     stop_server "$spid"
 }
 
-# check <key type> <sigalg> <the name s_client gives the signature type>
+# The scheme s_client says the server signed with. OpenSSL 3.2 and later
+# name it ("Peer signature type: ecdsa_secp256r1_sha256"); 3.0 (Ubuntu 24.04)
+# gives its type and digest on two lines ("Peer signature type: ECDSA",
+# "Peer signing digest: SHA256"). With -sigalgs naming one scheme, the type
+# and digest of a completed handshake are that scheme.
+# signed_with <sigalg> <3.0 type> <3.0 digest, or nothing>
+signed_with() {
+    grep -q "Peer signature type: $1" "$TMP/c.log" && return 0
+    grep -q "Peer signature type: $2" "$TMP/c.log" || return 1
+    [ -z "$3" ] || grep -q "Peer signing digest: $3" "$TMP/c.log"
+}
+
+# check <key type> <sigalg> <3.0 type> <3.0 digest, or nothing>
 check() {
     serve "$TMP/$1.pem" "$TMP/$1.key" "$2"
-    if grep -q "Peer signature type: $3" "$TMP/c.log" && grep -q ACCEPTED "$TMP/server.out"; then
+    if signed_with "$2" "$3" "$4" && grep -q ACCEPTED "$TMP/server.out"; then
         echo "    ok: $2: its own key's signature is sent"
     else
-        echo "    FAIL: $2, its own key: server [$(tr '\n' '|' <"$TMP/server.out")], s_client [$(grep -i 'signature type\|alert\|error' "$TMP/c.log" | tr '\n' '|')]"
+        echo "    FAIL: $2, its own key: server [$(tr '\n' '|' <"$TMP/server.out")], s_client [$(grep -i 'signature type\|signing digest\|alert\|error' "$TMP/c.log" | tr '\n' '|')]"
         fails=$((fails + 1))
     fi
     serve "$TMP/$1.pem" "$TMP/$1.other.key" "$2"
@@ -105,13 +117,13 @@ check() {
     fi
 }
 
-check p256 ecdsa_secp256r1_sha256 ecdsa_secp256r1_sha256
-check p384 ecdsa_secp384r1_sha384 ecdsa_secp384r1_sha384
-check p521 ecdsa_secp521r1_sha512 ecdsa_secp521r1_sha512
-check ed25519 ed25519 ed25519
-check rsa rsa_pss_rsae_sha256 rsa_pss_rsae_sha256
-check rsa rsa_pss_rsae_sha384 rsa_pss_rsae_sha384
-check rsa rsa_pss_rsae_sha512 rsa_pss_rsae_sha512
+check p256 ecdsa_secp256r1_sha256 ECDSA SHA256
+check p384 ecdsa_secp384r1_sha384 ECDSA SHA384
+check p521 ecdsa_secp521r1_sha512 ECDSA SHA512
+check ed25519 ed25519 Ed25519
+check rsa rsa_pss_rsae_sha256 RSA-PSS SHA256
+check rsa rsa_pss_rsae_sha384 RSA-PSS SHA384
+check rsa rsa_pss_rsae_sha512 RSA-PSS SHA512
 
 # 3. The key is kept shielded (std.cryptography.shield): one bit flipped in
 # its shielded form, as a bit flipped in memory would, and the server

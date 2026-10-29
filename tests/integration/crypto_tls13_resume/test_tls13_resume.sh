@@ -130,8 +130,15 @@ if command -v openssl >/dev/null 2>&1 && openssl s_server -help 2>&1 | grep -q -
                 break
             fi
             kill_server "$spid"
+            # OpenSSL 3.0 (Ubuntu 24.04's) refuses -early_data beside -www
+            # and exits saying so; 3.5 and 3.6 take it. No port changes that.
+            grep -q "Can't use -early_data" "$TMP/s.log" 2>/dev/null && break
         done
-        [ -n "$SP" ] || fail "could not start openssl s_server -early_data"
+        if [ -z "$SP" ] && grep -q "Can't use -early_data" "$TMP/s.log" 2>/dev/null; then
+            echo "    skip: openssl s_server -early_data, $suite: $(openssl version | cut -d' ' -f1-2) takes no -early_data beside -www"
+            continue
+        fi
+        [ -n "$SP" ] || { sed -n '1,8p' "$TMP/s.log"; fail "could not start openssl s_server -early_data"; }
         got=$(RESUME_PORT="$SP" RESUME_HOST=localhost CAFILE="$TMP/c.pem" EARLY="X-Early: 1" AFTER=GET RESUME_READ=1 \
             "$TMP/resumeclient" 2>&1 | tr '\n' '|')
         n=0
