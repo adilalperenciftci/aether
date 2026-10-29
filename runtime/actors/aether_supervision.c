@@ -278,6 +278,11 @@ int aether_actor_claim_end(ActorBase* a, const char* reason, int bit) {
     return !(was & AETHER_ACTOR_ENDED);
 }
 
+/* The journal's release of the entries a death notice took. */
+static void watch_entries_unwind(const void* p) {
+    free((void*)p);
+}
+
 void aether_watch_notify(ActorBase* a, const char* reason) {
     AetherWatch* w = watch_of(a);
     if (!w) {
@@ -297,6 +302,9 @@ void aether_watch_notify(ActorBase* a, const char* reason) {
     w->cap = 0;
     watch_unlock(w);
 
+    /* The entries are this call's now, and a link's effect ends actors, so
+     * a panic that leaves it skips the free below: journaled until then. */
+    if (e) aether_unwind_track(e, watch_entries_unwind);
     for (int i = 0; i < n; i++) {
         switch (e[i].kind) {
         case WATCH_WATCHER:
@@ -315,6 +323,7 @@ void aether_watch_notify(ActorBase* a, const char* reason) {
             break;
         }
     }
+    if (e) aether_unwind_forget(e);
     free(e);
 }
 
