@@ -452,6 +452,15 @@ the lot is full or unavailable the worker keeps its connection, which
 is what happened before parking existed. `aether_http_parked_connections`
 in the metrics output reports how many are held.
 
+On a TLS connection, "the client speaks again" means application data.
+A client may also send records that carry none, a KeyUpdate above all,
+and a read would handle such a record and then wait for a request for
+the whole idle timeout, holding its worker. So when the socket of a TLS
+connection turns readable, the server asks the TLS library, without
+waiting, whether a read would find data. If none, the connection goes,
+or goes back, to the lot for what is left of its idle time. This holds
+on both backends (#3405).
+
 Server emits `Connection: keep-alive` and `Keep-Alive: timeout=N,
 max=M` headers per response.
 

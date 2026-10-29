@@ -2,6 +2,7 @@
 // test_https_pure_server_keys.sh (#3326, #3328).
 //
 //   CERT_PATH, KEY_PATH   the certificate and key
+//   SERVER_BACKEND        "openssl" for that backend (default "aether")
 //
 // Prints "READY <port>" and serves "/", "/big" (40000 bytes) and POST "/len"
 // (the request body's length) until killed, or "FAIL: server_set_tls:
@@ -54,7 +55,10 @@ main() {
         exit(1)
     }
     http.server_set_host(raw, "127.0.0.1")
-    berr = http.server_set_tls_backend(raw, "aether")
+    // SERVER_BACKEND=openssl serves on the OpenSSL backend instead (#3405).
+    backend = "aether"
+    if os.getenv("SERVER_BACKEND") != "" { backend = os.getenv("SERVER_BACKEND") }
+    berr = http.server_set_tls_backend(raw, backend)
     if berr != "" {
         println("FAIL: server_set_tls_backend: ${berr}")
         exit(1)

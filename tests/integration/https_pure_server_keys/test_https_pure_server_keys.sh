@@ -22,7 +22,10 @@
 #   6. a request body of 16384 bytes or more reaches the handler whole
 #      (#3381);
 #   7. a pipelined request in the record that ends a body is answered on a
-#      keep-alive connection, not parked unseen (#3384).
+#      keep-alive connection, not parked unseen (#3384);
+#   8. a KeyUpdate a keep-alive client sends behind its request is handled
+#      and is not a request: with every worker's connection holding one,
+#      the next connection is answered at once, as they are parked (#3405).
 #
 # In a build without OpenSSL only the "aether" client cases run.
 
@@ -74,7 +77,7 @@ cert weak
 ssl openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$TMP/other.key"
 ssl openssl pkey -in "$TMP/p256.key" -aes256 -passout pass:secret -out "$TMP/enc.key"
 
-for p in server client pipe; do
+for p in server client pipe keyupdate_park; do
     "$AE" build "$SCRIPT_DIR/$p.ae" -o "$TMP/$p" >"$TMP/b_$p.log" 2>&1 \
         || { sed -n '1,12p' "$TMP/b_$p.log"; fail "$p did not build"; }
 done
@@ -247,4 +250,25 @@ case "$OUT" in
     *) echo "    got: $OUT"; fail "a pipelined request in the record that ends a body: not answered" ;;
 esac
 
+
+# 8. A KeyUpdate behind a request (#3405), on each server backend. The
+#    server runs with 8 workers (the pool's floor, AETHER_HTTP_WORKERS); 8
+#    keep-alive connections each send a GET and a KeyUpdate back to back,
+#    read the answer and stay open. The KeyUpdate is not data, so each
+#    connection must be parked: a worker left reading it blocks until the
+#    30 s idle timeout, and with all 8 so held the next connection waits for
+#    that. Whether the KeyUpdate is already in the server's buffer when it
+#    answers, or still on its way, it must not count as a request.
+for sb in $BACKENDS; do
+    SERVER_BACKEND="$sb" AETHER_HTTP_WORKERS=8 start_server p256 p256
+    [ -n "$S_PORT" ] || { echo "    got: $OUT"; fail "the 8-worker P-256 server, backend \"$sb\", did not start"; }
+    run env PORT="$S_PORT" CAFILE="$TMP/p256.pem" HELD=8 "$TMP/keyupdate_park"
+    next_ms=$(printf '%s\n' "$OUT" | sed -n 's/^NEXT \([0-9]*\).*/\1/p' | head -1)
+    case "$OUT" in
+        *"HELD 8"*"NEXT "*) ;;
+        *) echo "    got: $OUT"; fail "server backend \"$sb\": keep-alive connections with a KeyUpdate: no result" ;;
+    esac
+    [ "${next_ms:-99999}" -lt 5000 ] || { echo "    got: $OUT"; fail "server backend \"$sb\": with 8 connections each holding a KeyUpdate, the next request waited ${next_ms} ms: their workers were not freed"; }
+    echo "    ok: server backend \"$sb\": 8 connections each holding a KeyUpdate were parked; the next request was answered in ${next_ms} ms"
+done
 echo "  [PASS] $NAME"

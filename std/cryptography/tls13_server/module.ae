@@ -83,6 +83,9 @@ struct ServerConn {
     recv_pend: ptr
     recv_pend_len: int
     recv_pend_off: int
+    // 1 while the pending check (#3405) runs conn_recv: it handles only the
+    // records already read, and returns instead of reading the socket.
+    buffered_only: int
 }
 
 // RecordIO framing over a raw TCP socket.
@@ -94,6 +97,10 @@ struct RecordIO {
     alert: int // the alert recio_next says to send, when it refuses a record
     ccs: int // dummy change_cipher_spec records read so far
     hs_seen: int // 1 once the ClientHello has been read
+    // 1 once the connection is established (#3405): a read that times out
+    // is then the socket's timeout, which the caller set (std.http's wait
+    // for a next request), so it is reported, not retried.
+    after_hs: int
 }
 
 fn recio_new(sock: @keep ptr) -> *RecordIO {
@@ -106,6 +113,7 @@ fn recio_new(sock: @keep ptr) -> *RecordIO {
     r.alert = 0
     r.ccs = 0
     r.hs_seen = 0
+    r.after_hs = 0
     return r
 }
 
@@ -153,7 +161,12 @@ fn recio_fill(r: *RecordIO) -> int {
                 filling = 0
             }
         } else {
-            if string.equals(err, "timeout") == 1 {
+            if string.equals(err, "timeout") == 1 && r.after_hs == 1 {
+                // The socket's own timeout, which its owner set: reported,
+                // so a wait for a next request can end (#3405).
+                result = -2
+                filling = 0
+            } else if string.equals(err, "timeout") == 1 {
                 tries = tries + 1
                 if tries >= 500 {
                     result = -1
@@ -192,6 +205,8 @@ fn recio_next(r: *RecordIO) -> (ptr, int, string) {
             }
         }
         got = recio_fill(r)
+        // What was read of a record stays in the buffer for the next call.
+        if got == -2 { return null, 0, "timeout" }
         if got <= 0 {
             return null, 0, "record: connection closed before a full record"
         }
@@ -886,6 +901,7 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
     conn = malloc(sizeof(ServerConn)) as *ServerConn
     conn.sock = sock
     conn.rio = rio as ptr
+    rio.after_hs = 1
     conn.app_send = app_send as ptr
     conn.app_recv = app_recv as ptr
     conn.suite = suite
@@ -896,6 +912,7 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
     conn.recv_pend = null
     conn.recv_pend_len = 0
     conn.recv_pend_off = 0
+    conn.buffered_only = 0
     conn.empties = 0
     conn.key_updates = 0
     conn.warnings = 0
@@ -1107,7 +1124,10 @@ fn conn_fail(c: *ServerConn, desc: int, why: string) -> (ptr, int, string) {
 
 // Receive the next application-data record's plaintext (fresh bytes; caller
 // frees via bytes.free): (data, len, ""), (null, 0, "") at the client's
-// close_notify, or (null, 0, error). RFC 8446 5 (#3317): a change_cipher_spec
+// close_notify, (null, 0, "timeout") when a receive timeout set on the socket
+// fires before a record is whole (the connection is kept, and what was read
+// of the record waits for the next call, #3405), or (null, 0, error). RFC
+// 8446 5 (#3317): a change_cipher_spec
 // or a plaintext record after the handshake, a record that does not open
 // or is too long, an empty handshake record, and more than
 // MAX_EMPTY_RECORDS empty application-data records in a row are each
@@ -1125,7 +1145,13 @@ conn_recv(conn: ptr) -> (ptr, int, string) {
     if c.closed == 1 { return null, 0, "" }
     if c.closed == 2 { return null, 0, "recv: the connection failed earlier" }
     while 1 == 1 {
+        // The pending check reads nothing new: with no whole record held,
+        // it has its answer (#3405).
+        if c.buffered_only == 1 && recio_whole_record(rio) == 0 { return null, 0, "" }
         rec, rlen, e = recio_next(rio)
+        // The socket's timeout: nothing more yet, and the connection stays
+        // as it was, so a later call goes on where this one stopped (#3405).
+        if string.equals(e, "timeout") == 1 { return null, 0, "timeout" }
         if string.equals(e, "") != 1 {
             if rio.alert != 0 { send_alert_app(c, rio.alert) }
             c.closed = 2
@@ -1867,6 +1893,10 @@ pure_tls_server_recv(sconn: ptr, buf: ptr, len: int) -> int {
         return take
     }
     p, n, err = conn_recv(sconn)
+    // -2: the socket's timeout fired with no data yet, and the connection
+    // is kept; std.http takes it as its wait for a next request ending
+    // (#3405). -1: the end or an error.
+    if err == "timeout" { return -2 }
     if err != "" || n <= 0 {
         if p != null { bytes.free(p) }
         return -1
@@ -1884,23 +1914,50 @@ pure_tls_server_recv(sconn: ptr, buf: ptr, len: int) -> int {
     return take
 }
 
-// Is there something to read without waiting on the socket (#3384)? The
-// bytes of a record the last pure_tls_server_recv could not hand over
-// whole, else 1 when the record reader holds a whole record it has already
-// read from the socket, else 0. std.http asks before it parks a connection
-// or waits on its descriptor: neither shows on poll(2), as OpenSSL's
-// buffered plaintext does not, which SSL_pending answers there.
+// Is there application data to read without waiting on the socket (#3384)?
+// std.http asks before it parks a connection or waits on its descriptor:
+// what the record reader already holds does not show on poll(2), as
+// OpenSSL's buffered plaintext does not, which SSL_pending answers there.
+// The bytes not yet handed over, after handling the whole records the reader
+// holds as conn_recv does: a KeyUpdate, an empty record or a warning is
+// handled and is not data (#3405), so a connection with only those left is
+// parked, not read from. A record that ends the connection or fails it
+// answers 1, so the next read reports that at once. Else 0.
 @c_callback("aether_pure_tls_server_pending")
 pure_tls_server_pending(sconn: ptr) -> int {
     if sconn == null { return 0 }
     c = sconn as *ServerConn
     if c.recv_pend != null { return c.recv_pend_len - c.recv_pend_off }
+    if c.closed != 0 { return 1 }
     r = c.rio as *RecordIO
-    avail = r.len - r.off
-    if avail >= 5 {
-        plen = ((bytes.get(r.buf, r.off + 3) & 0xFF) << 8) | (bytes.get(r.buf, r.off + 4) & 0xFF)
-        if avail >= 5 + plen { return 1 }
+    // What the socket already holds, taken without waiting: each read takes
+    // no more than FIONREAD counts, and they go on until a record is whole
+    // or the socket has nothing left (#3405).
+    while recio_whole_record(r) == 0 && tcp.available(r.sock) > 0 {
+        if recio_fill(r) <= 0 { return 1 }
     }
+    if recio_whole_record(r) == 0 { return 0 }
+    c.buffered_only = 1
+    p, n, _err = conn_recv(sconn)
+    c.buffered_only = 0
+    if p != null && n > 0 {
+        c.recv_pend = p
+        c.recv_pend_len = n
+        c.recv_pend_off = 0
+        return n
+    }
+    if p != null { bytes.free(p) }
+    if c.closed != 0 { return 1 }
+    return 0
+}
+
+// 1 when the record reader holds a whole record it has already read from
+// the socket: its 5-byte header and the length the header gives.
+fn recio_whole_record(r: *RecordIO) -> int {
+    avail = r.len - r.off
+    if avail < 5 { return 0 }
+    plen = ((bytes.get(r.buf, r.off + 3) & 0xFF) << 8) | (bytes.get(r.buf, r.off + 4) & 0xFF)
+    if avail >= 5 + plen { return 1 }
     return 0
 }
 

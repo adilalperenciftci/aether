@@ -1,0 +1,97 @@
+// Keep-alive connections that send a KeyUpdate after their request, for
+// test_https_pure_server_keys.sh (#3405): to localhost PORT, trusting CAFILE,
+// HELD connections each send a GET of / and a KeyUpdate right behind it, read
+// the answer, and stay open. The KeyUpdate is not a request: the server must
+// park each connection, not hold a worker waiting on it. Then one more
+// connection's GET must be answered at once. Prints "HELD <n>" and
+// "NEXT <ms>" (the time to the last answer), or "ERR: <why>".
+
+import std.os
+import std.tcp
+import std.bytes
+import std.string
+import std.list
+import std.time
+import std.cryptography.tls13_client
+
+extern string_char_at(str: string, index: int) -> int
+
+fn send_text(conn: ptr, s: string) -> string {
+    n = string.length(s)
+    b = bytes.new(n)
+    i = 0
+    while i < n {
+        bytes.set(b, i, string_char_at(s, i))
+        i = i + 1
+    }
+    err = tls13_client.conn_send(conn, bytes.view(b)[0..n])
+    bytes.free(b)
+    return err
+}
+
+fn dial(port: int) -> (ptr, string) {
+    sock, derr = tcp.connect("127.0.0.1", port)
+    if derr != "" { return null, "connect: ${derr}" }
+    conn, herr = tls13_client.connect_socket(sock, "localhost", os.getenv("CAFILE"))
+    if herr != "" { return null, herr }
+    return conn, ""
+}
+
+// Read until the answer's body marker has come, or the connection ends.
+fn answered(conn: ptr) -> int {
+    while 1 == 1 {
+        buf, n, rerr = tls13_client.conn_recv(conn)
+        if rerr != "" || buf == null { return 0 }
+        s = bytes.to_string(buf, n)
+        bytes.free(buf)
+        if string.contains(s, "keys-ok") == 1 { return 1 }
+    }
+    return 0
+}
+
+main() {
+    port, _pe = string.to_int(os.getenv("PORT"))
+    held_n, _he = string.to_int(os.getenv("HELD"))
+    held = list.new()
+    k = 0
+    while k < held_n {
+        conn, err = dial(port)
+        if conn == null {
+            println("ERR: held ${k}: ${err}")
+            return
+        }
+        // The request and the KeyUpdate go out back to back, so the server
+        // reads both at once and holds the KeyUpdate when it has answered.
+        serr = send_text(conn, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        kerr = tls13_client.conn_key_update(conn, 0)
+        if serr != "" || kerr != "" {
+            println("ERR: held ${k}: send: ${serr}${kerr}")
+            return
+        }
+        if answered(conn) == 0 {
+            println("ERR: held ${k}: no answer")
+            return
+        }
+        list.add(held, conn)
+        k = k + 1
+    }
+    println("HELD ${held_n}")
+    t0 = time.now_ms()
+    conn, err = dial(port)
+    if conn == null {
+        println("ERR: next: ${err}")
+        return
+    }
+    serr = send_text(conn, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    if serr != "" || answered(conn) == 0 {
+        println("ERR: next: no answer ${serr}")
+        return
+    }
+    println("NEXT ${time.now_ms() - t0}")
+    tls13_client.close_conn(conn)
+    k = 0
+    while k < held_n {
+        tls13_client.close_conn(list.at(held, k) as ptr)
+        k = k + 1
+    }
+}

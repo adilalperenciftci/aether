@@ -9,6 +9,7 @@
 #include "../../runtime/utils/aether_cpu_available.h"
 #if !defined(_WIN32)
 #include <signal.h>    /* pthread_sigmask / sigset_t for the embedded-server signal mask */
+#include <sys/ioctl.h> /* FIONREAD: conn_fd_unread (#3405) */
 /* The portable thread shim, not raw <pthread.h> (see its header note).
  * It is real pthreads on POSIX, a CRITICAL_SECTION shim on Windows, and
  * no-op stubs where AETHER_HAS_THREADS is 0. Including <pthread.h> directly
@@ -449,9 +450,22 @@ static int pt_server_send(void* c, const void* buf, int len) {
     pt_server_send_fn f = (pt_server_send_fn)aether_callback_lookup("aether_pure_tls_server_send");
     return f ? f(c, buf, len) : aether_pure_tls_server_send(c, buf, len);
 }
+/* -2 from the pure server is its socket's receive timeout, with the
+ * connection kept (#3405): it is reported as SSL_read's is, -1 with the
+ * timeout's error code, which conn_recv_timed_out reads, so a wait for a
+ * next request ends and the connection is parked. */
 static int pt_server_recv(void* c, void* buf, int len) {
     pt_server_recv_fn f = (pt_server_recv_fn)aether_callback_lookup("aether_pure_tls_server_recv");
-    return f ? f(c, buf, len) : aether_pure_tls_server_recv(c, buf, len);
+    int n = f ? f(c, buf, len) : aether_pure_tls_server_recv(c, buf, len);
+    if (n == -2) {
+#if defined(_WIN32)
+        WSASetLastError(WSAETIMEDOUT);
+#else
+        errno = EAGAIN;
+#endif
+        return -1;
+    }
+    return n;
 }
 static int pt_server_pending(void* c) {
     pt_server_pending_fn f = (pt_server_pending_fn)aether_callback_lookup("aether_pure_tls_server_pending");
@@ -624,6 +638,10 @@ typedef struct HttpConn {
     HttpServerResponse* pending_res;
     HttpMiddlewareNode* pending_from;
     int64_t             pending_t_start;
+    /* When the connection last went idle into the lot, so a wake with no
+     * request in it (a TLS KeyUpdate) parks it again for what is left of
+     * its idle time, not a fresh one (#3405). */
+    int64_t             parked_since_ms;
 } HttpConn;
 
 /* The parking lot holds HttpConn by pointer and needs exactly two things from
@@ -6768,6 +6786,67 @@ static void conn_apply_send_timeout(HttpServer* server, HttpConn* c) {
 #endif
 }
 
+/* Bytes received on fd and not yet read, or -1. */
+static long conn_fd_unread(int fd) {
+#if defined(_WIN32)
+    u_long n = 0;
+    if (ioctlsocket((SOCKET)fd, FIONREAD, &n) != 0) return -1;
+    return (long)n;
+#else
+    int n = 0;
+    if (ioctl(fd, FIONREAD, &n) != 0) return -1;
+    return (long)n;
+#endif
+}
+
+/* A connection its socket says is readable: will a read find a request?
+ *
+ * On a plain connection readable is bytes of one, or the peer's end. On a
+ * TLS connection it can be records with no application data, a KeyUpdate
+ * above all, which a read handles and then waits behind for the whole idle
+ * timeout, holding a worker for nothing (#3405). So TLS asks the library
+ * without waiting:
+ * - the pure server handles the whole records the socket holds (its
+ *   pending check takes only what FIONREAD counts) and reports data, or an
+ *   end or an error;
+ * - OpenSSL peeks with the socket non-blocking for that one call.
+ * 1 when a read now has data, or an end or an error to report; 0 when the
+ * connection should wait in the lot instead. Readable with nothing to read
+ * is the peer's end, which a read must see. */
+static int conn_readable_has_request(HttpConn* conn) {
+    if (conn->pure_tls) {
+        if (pt_server_pending(conn->pure_tls) != 0) return 1;
+        return conn_fd_unread(conn->fd) <= 0;
+    }
+#ifdef AETHER_HAS_OPENSSL
+    if (conn->ssl) {
+        SSL* ssl = (SSL*)conn->ssl;
+        if (SSL_pending(ssl) > 0) return 1;
+        char b;
+#if defined(_WIN32)
+        u_long on = 1, off = 0;
+        ioctlsocket((SOCKET)conn->fd, FIONBIO, &on);
+#else
+        conn_set_nonblocking(conn, 1);
+#endif
+        int n = SSL_peek(ssl, &b, 1);
+        int err = n > 0 ? SSL_ERROR_NONE : SSL_get_error(ssl, n);
+#if defined(_WIN32)
+        ioctlsocket((SOCKET)conn->fd, FIONBIO, &off);
+#else
+        conn_set_nonblocking(conn, 0);
+#endif
+        if (n > 0) return 1;
+        if (err == SSL_ERROR_WANT_READ) {
+            ERR_clear_error();
+            return 0;
+        }
+        return 1;
+    }
+#endif
+    return 1;
+}
+
 /* Is the next request already here, or about to be?
  *
  * Bytes in the connection's own buffer (a pipelined request, or an over-read
@@ -6824,13 +6903,16 @@ static int conn_next_request_imminent(HttpConn* conn) {
     int grace_ms = http_pool_has_spare_worker() ? HTTP_PARK_GRACE_MS : 0;
 #if !defined(_WIN32)
     struct pollfd pfd = { .fd = conn->fd, .events = POLLIN, .revents = 0 };
-    return poll(&pfd, 1, grace_ms) > 0;
+    /* Readable is a request only if a read would find one (#3405). */
+    if (poll(&pfd, 1, grace_ms) <= 0) return 0;
+    return conn_readable_has_request(conn);
 #else
     fd_set rfds;
     FD_ZERO(&rfds);
     FD_SET(conn->fd, &rfds);
     struct timeval tv = { .tv_sec = 0, .tv_usec = grace_ms * 1000 };
-    return select(conn->fd + 1, &rfds, NULL, NULL, &tv) > 0;
+    if (select(conn->fd + 1, &rfds, NULL, NULL, &tv) <= 0) return 0;
+    return conn_readable_has_request(conn);
 #endif
 }
 
@@ -6880,6 +6962,7 @@ static void conn_serve(HttpServer* server, HttpConn* conn) {
             if (idle_since_ms == 0) idle_since_ms = conn_now_ms();
             int64_t waited = conn_now_ms() - idle_since_ms;
             if (waited >= idle_ms) break;   /* silent past the deadline: close */
+            conn->parked_since_ms = idle_since_ms;
             if (http_park_add(lot, conn, (int)(idle_ms - waited)) == 0) {
                 atomic_fetch_sub(&server->inflight_connections, 1);
                 return;
@@ -6915,6 +6998,7 @@ static void conn_serve(HttpServer* server, HttpConn* conn) {
         if (lot && !atomic_load(&server->stopping) && !conn_next_request_imminent(conn)) {
             int idle_ms = server->keep_alive_idle_ms > 0
                 ? server->keep_alive_idle_ms : 30000;
+            conn->parked_since_ms = conn_now_ms();
             if (http_park_add(lot, conn, idle_ms) == 0) {
                 atomic_fetch_sub(&server->inflight_connections, 1);
                 return;
@@ -6931,6 +7015,22 @@ static void conn_serve(HttpServer* server, HttpConn* conn) {
  * worker. Runs on the poller thread, so it must not serve the request here. */
 void http_server_resume_connection(HttpServer* server, HttpConn* conn) {
     if (!server || !conn) return;
+    /* Woken by bytes with no request in them (a TLS KeyUpdate): back to the
+     * lot for what is left of its idle time, not on to a read that would
+     * wait the whole of it on this worker (#3405); past that time, closed,
+     * as a silent connection is. */
+    HttpParkLot* lot = (HttpParkLot*)server->park_lot;
+    if (lot && (conn->pure_tls || conn->ssl) && !atomic_load(&server->stopping) &&
+        !conn_readable_has_request(conn)) {
+        int idle_ms = server->keep_alive_idle_ms > 0 ? server->keep_alive_idle_ms : 30000;
+        int64_t left = (int64_t)idle_ms - (conn_now_ms() - conn->parked_since_ms);
+        if (left <= 0) {
+            conn_close(conn);
+            free(conn);
+            return;
+        }
+        if (http_park_add(lot, conn, (int)left) == 0) return;
+    }
     conn_serve(server, conn);
 }
 
