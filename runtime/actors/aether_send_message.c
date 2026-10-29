@@ -160,6 +160,7 @@ static Message payload_message(ActorBase* actor, void* message_data, size_t mess
             if (actor->release_message) actor->release_message(*(int*)message_data, message_data);
             aether_out_of_memory("out of memory copying a message");
         }
+        fflush(stdout);   /* the program's lines first: abort() flushes nothing on glibc (#3435) */
         fprintf(stderr, "aether: malloc(%zu) failed for msg type %d to actor %d\n",
                 message_size, *(int*)message_data, actor->id);
         abort();

@@ -194,6 +194,7 @@ static void coop_deliver(ActorBase* actor, Message msg) {
     if (!ib) {
         ib = actor_inbox_new();
         if (!ib) {
+            fflush(stdout);   /* the program's lines first: abort() flushes nothing on glibc (#3435) */
             fprintf(stderr, "aether: out of memory queueing message type %d for actor %d\n",
                     msg.type, actor->id);
             abort();
@@ -201,6 +202,7 @@ static void coop_deliver(ActorBase* actor, Message msg) {
         atomic_store_explicit(&actor->inbox, ib, memory_order_relaxed);
     }
     if (!actor_inbox_push(ib, msg)) {
+        fflush(stdout);   /* the program's lines first: abort() flushes nothing on glibc (#3435) */
         fprintf(stderr, "aether: out of memory queueing message type %d for actor %d\n",
                 msg.type, actor->id);
         abort();
@@ -342,6 +344,7 @@ void scheduler_init(int cores) {
         // The scheduler cannot run any actor without this table; leaving it NULL
         // would crash scheduler_register_actor on the first spawn. Fail loudly
         // at init instead of a delayed NULL deref.
+        fflush(stdout);   /* the program's lines first: abort() flushes nothing on glibc (#3435) */
         fprintf(stderr, "aether: failed to allocate cooperative scheduler actor table\n");
         abort();
     }

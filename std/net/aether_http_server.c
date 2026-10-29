@@ -7602,6 +7602,7 @@ static int http_server_serve(HttpServer* server) {
                 // The join loop below assumes exactly n_threads accept threads;
                 // continuing with a NULL ctx would write through NULL here and
                 // leave a never-created thread to join. Fail loudly instead.
+                fflush(stdout);   /* the program's lines first: abort() flushes nothing on glibc (#3435) */
                 fprintf(stderr, "aether: failed to allocate accept-thread context\n");  /* silent-ok: last line before abort */
                 abort();
             }

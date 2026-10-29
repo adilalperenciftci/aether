@@ -117,6 +117,7 @@ void aether_exec_set_next_deadline(int64_t ms) {
 
 static inline AetherJmpFrame* exec_push(AetherFrames* F, void** buf) {
     if (F->depth >= AETHER_PANIC_MAX_DEPTH) {
+        fflush(stdout);   /* the program's lines first: abort() flushes nothing on glibc (#3435) */
         fprintf(stderr, "aether: try/catch and executions nested deeper than %d on one thread, aborting\n",
                 AETHER_PANIC_MAX_DEPTH);
         abort();

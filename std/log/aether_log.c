@@ -172,6 +172,7 @@ void log_writef(LogLevel level, const char* fmt, ...) {
 
     // If fatal, abort
     if (level == LOG_LEVEL_FATAL) {
+        fflush(stdout);   /* the program's lines first: abort() flushes nothing on glibc (#3435) */
         abort();
     }
 }
@@ -230,6 +231,7 @@ void log_with_location(LogLevel level, const char* file, int line,
 
     // If fatal, abort
     if (level == LOG_LEVEL_FATAL) {
+        fflush(stdout);   /* the program's lines first: abort() flushes nothing on glibc (#3435) */
         abort();
     }
 }

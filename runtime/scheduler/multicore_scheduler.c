@@ -129,6 +129,7 @@ static inline ActorInbox* actor_overflow_pending(ActorBase* actor) {
  * out-of-memory deferred send does (overflow_append). */
 static void actor_overflow_push(ActorBase* actor, ActorInbox* ib, Message msg) {
     if (likely(actor_inbox_push(ib, msg))) return;
+    fflush(stdout);   /* the program's lines first: abort() flushes nothing on glibc (#3435) */
     fprintf(stderr, "aether: out of memory queueing a message for actor %d behind its "
                     "overflow\n", actor->id);
     abort();
@@ -779,6 +780,7 @@ static void overflow_append(int target, ActorBase* actor, Message msg) {
             while (nc <= tail) nc *= 2;
             ActorBase** new_actors = realloc(b->actors, (size_t)nc * sizeof(ActorBase*));
             if (unlikely(!new_actors)) {
+                fflush(stdout);   /* the program's lines first: abort() flushes nothing on glibc (#3435) */
                 fprintf(stderr, "aether: OOM in overflow_append (target=%d count=%d cap=%d)\n",
                         target, b->count, b->capacity);
                 abort();
@@ -786,6 +788,7 @@ static void overflow_append(int target, ActorBase* actor, Message msg) {
             b->actors = new_actors;
             Message* new_msgs = realloc(b->msgs, (size_t)nc * sizeof(Message));
             if (unlikely(!new_msgs)) {
+                fflush(stdout);   /* the program's lines first: abort() flushes nothing on glibc (#3435) */
                 fprintf(stderr, "aether: OOM in overflow_append (target=%d count=%d cap=%d)\n",
                         target, b->count, b->capacity);
                 abort();

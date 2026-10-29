@@ -535,6 +535,11 @@ void aether_panic_owned(const char* reason, void (*release)(const void*)) {
     // frame reach the fallback. Suppress the trace via
     // AETHER_STACK_TRACE=0 if the noise gets in the way (e.g. tests
     // that diff stderr line-for-line).
+    //
+    // The program's own lines first (#3435): stdout is fully buffered when it
+    // is a file or a pipe, and abort() flushes no stdio stream on glibc, so
+    // what the program printed last was lost behind this message.
+    fflush(stdout);
     fprintf(stderr, "aether: panic outside any try/catch or actor: %s\n",
             aether_panic_reason_text(reason));
     const char* trace_env = getenv("AETHER_STACK_TRACE");
