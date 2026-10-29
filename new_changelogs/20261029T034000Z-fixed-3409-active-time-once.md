@@ -6,4 +6,7 @@
   Now a thread times each ACTIVE account from the start of the outermost
   call open under it to that call's end, and a call nested inside adds no
   time of its own; the deadline a nested call gets counts the time open so
-  far (#3409).
+  far. The thread's list of the accounts it times has no bound: a call
+  whose account cannot be timed for want of memory ends at once with
+  `AETHER_OUT_OF_MEMORY` (the allocation test hook covers that growth), so
+  a budget is never left unenforced (#3409).

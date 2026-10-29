@@ -206,8 +206,9 @@ int64_t aether_caps_now_ns(void);
 /* Test hook (runtime C tests and C hosts of tests only; generated code never
  * arms it): the n-th checked allocation from now on this thread fails as if
  * the allocator were out of memory, once; 0 turns it off. The checked ones
- * are the cap-aware allocators, a send's payload copy and every allocation
- * the generated code makes (_aether_alloc and _aether_alloc_or_null). */
+ * are the cap-aware allocators, a send's payload copy, every allocation
+ * the generated code makes (_aether_alloc and _aether_alloc_or_null), and
+ * the growth of a thread's list of timed ACTIVE accounts (#3409). */
 void aether_test_fail_alloc_after(int n);
 /* Whether the hook refuses this allocation (it counts it); read the flag
  * first, as the generated code does: nonzero once a test armed the hook. */

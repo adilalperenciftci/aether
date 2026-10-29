@@ -524,6 +524,8 @@ static int timed_push(AetherExecAccount* a, int64_t now) {
     int i = t_timed_n;
     if (i >= ACCT_TIMED_INLINE && i - ACCT_TIMED_INLINE >= t_timed_more_cap) {
         int cap = t_timed_more_cap ? t_timed_more_cap * 2 : ACCT_TIMED_INLINE;
+        /* A checked allocation: the test hook refuses it as it does any. */
+        if (aether_alloc_test_refuses()) return 0;
         AcctTimed* more = (AcctTimed*)realloc(t_timed_more, sizeof(AcctTimed) * (size_t)cap);
         if (!more) return 0;
         t_timed_more = more;

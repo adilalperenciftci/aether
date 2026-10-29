@@ -7,7 +7,8 @@
  * - #3408: freeing an account credits its ancestors with what its live
  *   blocks were charged, and its children keep narrowing under its parent.
  * - #3409: an ACTIVE account is charged once for time spent in executions
- *   under it, however they nest, and however many are timed at once.
+ *   under it, however they nest, and however many are timed at once;
+ *   an account that cannot be timed for want of memory ends its call.
  * - #3410: freeing an account is linear in its blocks.
  */
 
@@ -257,3 +258,57 @@ TEST_CATEGORY(accounts_free_is_linear_in_its_blocks, TEST_CATEGORY_RUNTIME) {
     ASSERT_TRUE(large < small * 8.0 || large < 2.0);
 }
 
+
+/* #3409: the growth of a thread's list of timed accounts is a checked
+ * allocation. The test hook refuses it for the account of the ninth
+ * execution nested (the first the inline entries cannot hold): that call
+ * ends at its first safe point with AETHER_OUT_OF_MEMORY, having run none
+ * of its code untimed, the calls around it end as they would, and the next
+ * call under that account times it. */
+#define EA_GROW 10
+static AetherExecAccount* g_ea_grow[EA_GROW];
+static int g_ea_refuse_at = -1;
+static int g_ea_refused_outcome = -1;
+
+static void ea_grow_nest(int i) {
+    if (i == g_ea_refuse_at) aether_test_fail_alloc_after(1);
+    AetherJmpFrame* x = aether_exec_enter();
+    if (AETHER_SIGSETJMP(x->buf, 1)) {
+        aether_exec_failed();
+        return;
+    }
+    (void)aether_exec_poll();   /* its first safe point */
+    if (i + 1 < EA_GROW) {
+        AetherExecAccount* prev = NULL;
+        aether_exec_use(g_ea_grow[i + 1], &prev);
+        ea_grow_nest(i + 1);
+        if (i + 1 == g_ea_refuse_at) g_ea_refused_outcome = aether_last_outcome();
+        aether_exec_use(prev, NULL);
+    } else {
+        ea_sleep_ms(50);
+    }
+    aether_exec_leave();
+}
+
+TEST_CATEGORY(accounts_active_timing_growth_refused, TEST_CATEGORY_RUNTIME) {
+    for (int i = 0; i < EA_GROW; i++) g_ea_grow[i] = ea_new(0, 10000, AETHER_DEADLINE_ACTIVE, NULL);
+    aether_exec_use(g_ea_grow[0], NULL);
+    g_ea_refuse_at = 8;
+    ea_grow_nest(0);
+    int first = aether_last_outcome();
+    int64_t refused_spent = atomic_load(&g_ea_grow[8]->active_spent_ns);
+    g_ea_refuse_at = -1;
+    ea_grow_nest(0);
+    int second = aether_last_outcome();
+    int64_t spent_after = atomic_load(&g_ea_grow[8]->active_spent_ns);
+    int64_t deepest_after = atomic_load(&g_ea_grow[9]->active_spent_ns);
+    aether_exec_use(NULL, NULL);
+    aether_test_fail_alloc_after(0);
+    for (int i = 0; i < EA_GROW; i++) aether_exec_account_free(g_ea_grow[i]);
+    ASSERT_EQ(AETHER_OUT_OF_MEMORY, g_ea_refused_outcome);
+    ASSERT_EQ(AETHER_OK, first);
+    ASSERT_TRUE(refused_spent < 20 * 1000000LL);
+    ASSERT_EQ(AETHER_OK, second);
+    ASSERT_TRUE(spent_after >= 45 * 1000000LL);
+    ASSERT_TRUE(deepest_after >= 45 * 1000000LL);
+}
