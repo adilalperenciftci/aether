@@ -10,7 +10,6 @@ import std.strbuilder
 import std.bytes
 import std.mem
 import std.encoding
-import std.map(map_new, map_put, map_has, map_free)
 
 exports(
     CBOR_INT, CBOR_BYTES, CBOR_TEXT, CBOR_ARRAY, CBOR_MAP, CBOR_TAG, CBOR_SIMPLE, CBOR_FLOAT,
@@ -406,29 +405,57 @@ fn rd_byte(b: ptr, off: int) -> int {
     return bytes.get(b, off) & 255
 }
 
-// Duplicate map keys (RFC 8949 §5.6) are found through a set of the keys
-// seen so far in this map, keyed by the hex of each key's deterministic
-// encoding: two keys are the same value exactly when those encodings match,
-// whether either was written definite or indefinite. Hex, because a set key
-// is a C string and an encoding can hold a zero byte. A pairwise scan was
-// quadratic: 131072 small keys in about 400 KB cost billions of comparisons.
-// Returns "" when key_cv is new (and records it), else the error.
-fn seen_key_check(seen: ptr, key_cv: ptr) -> string {
-    enc, eerr = encode_deterministic(key_cv)
-    if eerr != "" { return eerr }
-    hx = encoding.hex_encode(string.bytes(enc))
-    string.release(enc)
-    if map_has(seen, hx) == 1 {
-        string.release(hx)
-        return duplicate_key_error(key_cv)
+// Duplicate map keys (RFC 8949 §5.6): two keys are the same value exactly
+// when their deterministic encodings match, whether either was written
+// definite or indefinite. Once a map is parsed its key encodings are
+// merge-sorted and neighbours compared. A pairwise scan was quadratic:
+// 131072 small keys in about 400 KB cost billions of comparisons. (A hash
+// set from std.map would do, but importing std.map collides with this
+// module's own map_get.) Returns "" when every key is distinct, else the error.
+fn duplicate_key_check(cv: *CborValue) -> string {
+    n = list.size(cv.map_keys)
+    if n < 2 { return "" }
+    pairs = list.new()
+    err = ""
+    i = 0
+    while i < n {
+        k = list.get_raw(cv.map_keys, i)
+        ek, kerr = encode_deterministic(k)
+        if kerr != "" {
+            err = kerr
+            break
+        }
+        p = heap.new(MapPair)
+        p.key = k
+        p.val = null
+        p.enc_k = ek
+        p.enc_v = ""
+        _ = list.add(pairs, p as ptr)
+        i = i + 1
     }
-    _ = map_put(seen, hx, hx)
-    string.release(hx)
-    return ""
-}
-
-fn free_seen(seen: ptr) {
-    if seen != null { map_free(seen) }
+    m = list.size(pairs)
+    if err == "" {
+        sort_pairs(pairs, m)
+        j = 0
+        while j < m - 1 {
+            pa = list.get_raw(pairs, j) as *MapPair
+            pb = list.get_raw(pairs, j + 1) as *MapPair
+            if bytes_lex_cmp(pa.enc_k, pb.enc_k) == 0 {
+                err = duplicate_key_error(pa.key)
+                break
+            }
+            j = j + 1
+        }
+    }
+    j = 0
+    while j < m {
+        p = list.get_raw(pairs, j) as *MapPair
+        string.release(p.enc_k)
+        heap.free(p)
+        j = j + 1
+    }
+    list.free(pairs)
+    return err
 }
 
 fn duplicate_key_error(key_cv: ptr) -> string {
@@ -678,9 +705,6 @@ parse_item(r: ptr, depth: int) -> (ptr, string) {
         cv.type = CBOR_MAP
         cv.map_keys = list.new()
         cv.map_values = list.new()
-        seen = null
-        if reader.allow_duplicate_keys == 0 { seen = map_new() }
-        defer free_seen(seen)
         if ai == 31 {
             if reader.allow_indefinite == 0 {
                 free_value(cv)
@@ -708,18 +732,8 @@ parse_item(r: ptr, depth: int) -> (ptr, string) {
                     return null, err
                 }
                 string.release(err)
-
-                if seen != null {
-                    dup_err = seen_key_check(seen, key_cv)
-                    if dup_err != "" {
-                        free_value(key_cv)
-                        free_value(cv)
-                        return null, dup_err
-                    }
-                }
                 // A break here, where the value belongs, is not the end of
                 // the map: parse_item refuses it as an unexpected break.
-
                 val_cv, err2 = parse_item(r, depth + 1)
                 if err2 != "" {
                     free_value(key_cv)
@@ -730,6 +744,13 @@ parse_item(r: ptr, depth: int) -> (ptr, string) {
                 _ = list.add(cv.map_keys, key_cv)
                 _ = list.add(cv.map_values, val_cv)
                 map_count = map_count + 1
+            }
+            if reader.allow_duplicate_keys == 0 {
+                dup_err = duplicate_key_check(cv as *CborValue)
+                if dup_err != "" {
+                    free_value(cv)
+                    return null, dup_err
+                }
             }
             return cv as ptr, ""
         }
@@ -759,16 +780,6 @@ parse_item(r: ptr, depth: int) -> (ptr, string) {
                 return null, err
             }
             string.release(err)
-
-            if seen != null {
-                dup_err = seen_key_check(seen, key_cv)
-                if dup_err != "" {
-                    free_value(key_cv)
-                    free_value(cv)
-                    return null, dup_err
-                }
-            }
-
             val_cv, err2 = parse_item(r, depth + 1)
             if err2 != "" {
                 free_value(key_cv)
@@ -779,6 +790,13 @@ parse_item(r: ptr, depth: int) -> (ptr, string) {
             _ = list.add(cv.map_keys, key_cv)
             _ = list.add(cv.map_values, val_cv)
             i = i + 1
+        }
+        if reader.allow_duplicate_keys == 0 {
+            dup_err = duplicate_key_check(cv as *CborValue)
+            if dup_err != "" {
+                free_value(cv)
+                return null, dup_err
+            }
         }
         return cv as ptr, ""
     }
