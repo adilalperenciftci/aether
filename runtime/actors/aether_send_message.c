@@ -83,7 +83,9 @@ static void drop_body(void* p) {
 /* The drop of `msg` in a containment frame (#3403): 0 when it was dropped,
  * 1 when its release panicked: what the release did not get to free (the
  * payload, an owned zero-copy buffer) is freed here, and *reason and
- * *reason_release are the panic's, the caller's to report and release. */
+ * *reason_release are the panic's, the caller's to report and release. A
+ * drop cut by an interruption of the call it runs inside (#3404) leaves
+ * the same freed and reports nothing: the call ends with it. */
 int aether_message_drop_contained(ActorBase* target, Message* msg, const char** reason,
                                   void (**reason_release)(const void*)) {
     if (!target || !target->release_message || !msg->payload_ptr || msg->type == AETHER_MSG_DOWN) {
@@ -91,7 +93,8 @@ int aether_message_drop_contained(ActorBase* target, Message* msg, const char** 
         return 0;
     }
     DropCall c = { target, msg };
-    if (aether_contain(drop_body, &c, reason, reason_release) == 0) return 0;
+    int how = aether_contain(drop_body, &c, reason, reason_release);
+    if (how == 0) return 0;
     if (msg->payload_ptr) {
         aether_free_message(msg->payload_ptr);
         msg->payload_ptr = NULL;
@@ -101,13 +104,17 @@ int aether_message_drop_contained(ActorBase* target, Message* msg, const char** 
         msg->zerocopy.data = NULL;
         msg->zerocopy.owned = 0;
     }
-    return 1;
+    return how == 1;
 }
 
 void aether_message_drop_at_end(ActorBase* target, Message* msg) {
     const char* reason = NULL;
     void (*reason_release)(const void*) = NULL;
     if (!aether_message_drop_contained(target, msg, &reason, &reason_release)) return;
+    /* Bare, not in a frame of its own as the step barrier's are (#3403): a
+     * hook that panics here goes on to the finalize's caller, whose link drain
+     * is journaled for that (#3400), and leaves no step context put aside,
+     * since a finalize runs after its step has given the context back. */
     aether_fire_death_hook(target->id, reason);
     if (reason_release) reason_release(reason);
 }

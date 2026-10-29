@@ -239,9 +239,12 @@ void aether_fire_death_hook(int actor_id, const char* reason);
 // A containment frame (#3403, #3404): fn(arg) runs in a frame of its own,
 // so a panic in it ends there and never jumps past the caller's own cleanup.
 // 0: fn returned. 1: it panicked; *reason and *reason_release are the
-// panic's, the caller's to report and release. The step barrier runs what
-// follows a panicking handler through it, and an ending actor's drops
-// (aether_message_drop_at_end).
+// panic's, the caller's to report and release. 2: an interruption of the
+// library call this code runs inside was raised in it (#3404): it is not the
+// frame's to end, and ends the call at the call's next safe point or its
+// return, as a stop noted for the call does; nothing to report. The step
+// barrier runs what follows a panicking handler through it, and an ending
+// actor's drops (aether_message_drop_at_end).
 int aether_contain(void (*fn)(void*), void* arg, const char** reason,
                    void (**reason_release)(const void*));
 // The death hook, inside a containment frame: a hook that panics is

@@ -1,12 +1,16 @@
 #!/bin/sh
-# #3392, #3396: an actor stepped inside a library call runs outside it. On
+# #3392, #3396, #3404: an actor stepped inside a library call runs outside it. On
 # the cooperative runtime an export's ask polls, stepping the asked actor on
 # the call's thread: the call's deadline was raised inside the actor's loop
 # and caught by the actor's barrier (the actor died, "the call's deadline
 # passed"), the interruption stayed marked for the next call (whose try then
 # could not catch an ordinary panic), and the actor read the caller info the
 # host set for the call. Run on threads by the suite and on the cooperative
-# scheduler by make ci-coop; the output is the same on both.
+# scheduler by make ci-coop; the output is the same on both. Last, a kill
+# whose message drop runs a loop past the call's deadline (on the cooperative
+# runtime the kill finalizes there and then): the interruption was caught
+# as the drop's panic and left on its way, so the next call's try could not
+# catch an ordinary panic (#3404).
 #
 # Fixtures, not tests: steps.ae is a library the driver builds and links
 # into host.c.
@@ -25,7 +29,8 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP" || true' EXIT
 want='spin: 0 outcome 2, the spinner finished: yes
 catch: 1 outcome 0
-teller: "" outcome 0'
+teller: "" outcome 0
+after a kill: catch 1 outcome 0'
 
 if ! "$AETHERC" --emit=lib --with=extern,os "$SCRIPT_DIR/steps.ae" "$TMP/steps.c" > "$TMP/steps.log" 2>&1; then
     echo "  [FAIL] emit_lib_actor_step_context: aetherc --emit=lib failed"
@@ -48,4 +53,4 @@ if [ "$got" != "$want" ]; then
     head -5 "$TMP/host.err" | sed 's/^/        /'
     exit 1
 fi
-echo "  [PASS] emit_lib_actor_step_context: an actor a call's ask steps runs outside the call: not cut by its deadline, no interruption left for the next call, no caller info of the call"
+echo "  [PASS] emit_lib_actor_step_context: an actor a call's ask steps runs outside the call: not cut by its deadline, no interruption left for the next call, no caller info of the call; a kill whose drop the deadline cuts leaves the next call's try its own"

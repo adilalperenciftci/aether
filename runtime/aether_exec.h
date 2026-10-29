@@ -100,6 +100,11 @@ int aether_exec_should_stop(void);
  * link this file's. */
 int aether_exec_interrupting(void);
 void aether_exec_reraise(void);
+/* A containment frame caught an interruption of the call it runs inside
+ * (#3404, aether_contain): it is not the frame's to end. It is taken off
+ * its way and noted as the call's stop, as a failed allocation's is: the
+ * call ends with it at its next safe point, or when it returns. */
+void aether_exec_defer_interruption(void);
 
 /* The reason text of an interruption's outcome (aether_panic.c). */
 const char* aether_exec_reason(int outcome);

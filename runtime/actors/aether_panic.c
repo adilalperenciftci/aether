@@ -655,6 +655,16 @@ int aether_contain(void (*fn)(void*), void* arg, const char** reason,
     const char* r = f->reason;
     void (*rel)(const void*) = f->reason_release;
     aether_try_pop();
+    if (aether_exec_interrupting()) {
+        /* An interruption of the call this code runs inside, raised in it (a
+         * drop function's loop past the call's deadline, in a finalize the
+         * call runs): not this frame's to end, nor to report as a panic.
+         * The call ends at its own next safe point, or at its return. Left
+         * on its way, it turned the call's next ordinary panic into it. */
+        if (rel) rel(r);
+        aether_exec_defer_interruption();
+        return 2;
+    }
     *reason = r;
     *reason_release = rel;
     return 1;

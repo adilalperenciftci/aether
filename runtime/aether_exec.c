@@ -239,16 +239,18 @@ static inline void exec_finish(AetherFrames* F, int outcome) {
 
 int aether_exec_leave_outcome(void) {
     AetherFrames* F = aether_frames_here();
-    /* Read only once some deadline or cancel was ever armed: the trip
-     * flag, and a C-backed std loop that stopped early (it returned an
-     * error, and no safe point came before the export returned). */
-    if (atomic_load_explicit(&aether_caps_armed, memory_order_relaxed)) {
-        int why = aether_caps_deadline_flag() ? AETHER_DEADLINE : F->exec[F->exec_depth - 1].stop;
-        if (why) {
-            set_text(F, aether_exec_reason(why));
-            exec_finish(F, why);
-            return why;
-        }
+    /* A stop noted for it: a C-backed std loop that stopped early (it
+     * returned an error, and no safe point came before the export
+     * returned), or an interruption a containment frame took off its way
+     * (#3404, which an allocation failure's needs no arming for). The trip
+     * flag only once some deadline or cancel was ever armed. */
+    int why = F->exec[F->exec_depth - 1].stop;
+    if (atomic_load_explicit(&aether_caps_armed, memory_order_relaxed) && aether_caps_deadline_flag())
+        why = AETHER_DEADLINE;
+    if (why) {
+        set_text(F, aether_exec_reason(why));
+        exec_finish(F, why);
+        return why;
     }
     exec_finish(F, AETHER_OK);
     return AETHER_OK;

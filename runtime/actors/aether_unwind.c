@@ -130,6 +130,18 @@ int aether_exec_interrupting(void) {
     return t_frames.interrupting != 0;
 }
 
+/* aether_exec.h (#3404). The execution it targets is the innermost one
+ * this code runs in (an interruption is raised only there); none left
+ * running here (it already ended) takes nothing. */
+void aether_exec_defer_interruption(void) {
+    AetherFrames* F = &t_frames;
+    int why = F->interrupting;
+    F->interrupting = 0;
+    if (!why || F->exec_depth <= F->exec_floor) return;
+    AetherExecRecord* x = &F->exec[F->exec_depth - 1];
+    if (!x->stop) x->stop = why;
+}
+
 static void journal_at(const void* p, AetherUnwindFree free_fn, int depth);
 
 void aether_unwind_track(const void* p, AetherUnwindFree free_fn) {

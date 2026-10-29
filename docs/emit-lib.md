@@ -671,7 +671,11 @@ deadline, as it did before. An actor stepped on the call's thread inside
 it (a send's inline step, a cooperative ask's poll) is outside it too: the
 call's deadline and cancel do not reach its loops, a `try` in it catches
 its own panics, and the call is cut at its own next safe point once the
-step returns (#3392).
+step returns (#3392). Code the runtime runs inside the call in a frame of
+its own (the drop of an ending actor's messages, when the call ends an
+actor there and then) is cut by the interruption, and the interruption
+goes on to the call: it ends at the call's next safe point, or when it
+returns, and a later call's `try` is not touched by it (#3404).
 
 The safe points are loop heads, and `json.parse`, which checks every 4096
 values it reads and then fails with "stopped: the call's deadline passed or

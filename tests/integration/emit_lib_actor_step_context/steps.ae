@@ -5,6 +5,8 @@
 // call's deadline does not interrupt it, an interruption is never left on
 // its way for a later call, and it reads no caller info the host set for
 // the call.
+import std.actors
+import std.bytes
 import std.host
 import std.time
 
@@ -74,4 +76,34 @@ teller_sees() -> string {
         return "error: ${err}"
     }
     return s
+}
+
+// #3404: an actor ended inside a call (on the cooperative runtime a kill
+// finalizes it there and then) has its queued message dropped there, and
+// the field's drop runs a loop past the call's deadline. The interruption is
+// the call's: it ends the call, and nothing of it is left for the next one.
+fn slow_drop(p: @frees ptr) {
+    i = 0
+    while i < 3 {
+        i = next_of(i)
+    }
+    bytes.free(p)
+}
+
+type Slow = owned ptr drop slow_drop
+
+message Keep { s: Slow }
+
+actor Holder {
+    receive {
+        Keep(s) -> { _n = bytes.length(s) }
+    }
+}
+
+// Queues a Slow for a Holder and kills it before it runs.
+kill_holder() -> int {
+    h = spawn(Holder())
+    h ! Keep { s: bytes.new(4) as Slow }
+    actors.kill(h)
+    return 1
 }
