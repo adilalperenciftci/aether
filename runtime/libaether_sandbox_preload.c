@@ -392,6 +392,51 @@ FILE* fopen64(const char* path, const char* mode) {
 
 #endif // __linux__ (open64 / openat64 / fopen64)
 
+#define MAX_EXEC_ENV_ENTRIES 4096
+extern char** environ;
+
+static int env_key_is(const char* entry, const char* key) {
+    size_t n;
+    if (!entry || !key) return 0;
+    n = strlen(key);
+    return strncmp(entry, key, n) == 0 && entry[n] == '=';
+}
+
+static int same_env_key(const char* a, const char* b) {
+    const char* ae;
+    const char* be;
+    if (!a || !b) return 0;
+    ae = strchr(a, '=');
+    be = strchr(b, '=');
+    if (!ae || !be) return 0;
+    return (ae - a) == (be - b) && strncmp(a, b, (size_t)(ae - a)) == 0;
+}
+
+static int is_sandbox_control_env(const char* entry) {
+    static const char prefix[] = "AETHER_SANDBOX_";
+    if (!entry) return 0;
+    return env_key_is(entry, "LD_PRELOAD") ||
+           env_key_is(entry, "AETHER_CAPSICUM") ||
+           strncmp(entry, prefix, sizeof(prefix) - 1) == 0;
+}
+
+static int env_has_same_key(char* const env[], size_t count, const char* entry) {
+    for (size_t i = 0; i < count; i++) {
+        if (same_env_key(env[i], entry)) return 1;
+    }
+    return 0;
+}
+
+static int env_has_nonempty(char* const env[], size_t count, const char* key) {
+    for (size_t i = 0; i < count; i++) {
+        if (env_key_is(env[i], key)) {
+            const char* value = strchr(env[i], '=');
+            return value && value[1] != '\0';
+        }
+    }
+    return 0;
+}
+
 // execve
 int execve(const char* pathname, char* const argv[], char* const envp[]) {
     if (!real_execve) real_execve = dlsym(RTLD_NEXT, "execve");
@@ -399,7 +444,56 @@ int execve(const char* pathname, char* const argv[], char* const envp[]) {
         errno = EPERM;
         return -1;
     }
-    return real_execve(pathname, argv, envp);
+    if (!sandbox_active) return real_execve(pathname, argv, envp);
+
+    // An explicit envp is the child's whole environment. Rebuild it on the
+    // stack so application entries survive while sandbox controls come only
+    // from this contained process. This avoids allocation in the common
+    // fork-then-exec path and prevents an explicit environment from dropping
+    // or replacing the preload and grant source.
+    char* merged_env[MAX_EXEC_ENV_ENTRIES + 1];
+    size_t count = 0;
+    size_t scanned = 0;
+    while (envp && envp[scanned]) {
+        if (scanned >= MAX_EXEC_ENV_ENTRIES) {
+            errno = E2BIG;
+            return -1;
+        }
+        if (!is_sandbox_control_env(envp[scanned])) {
+            if (count >= MAX_EXEC_ENV_ENTRIES) {
+                errno = E2BIG;
+                return -1;
+            }
+            merged_env[count++] = envp[scanned];
+        }
+        scanned++;
+    }
+
+    scanned = 0;
+    while (environ && environ[scanned]) {
+        if (scanned >= MAX_EXEC_ENV_ENTRIES) {
+            errno = E2BIG;
+            return -1;
+        }
+        if (is_sandbox_control_env(environ[scanned]) &&
+            !env_has_same_key(merged_env, count, environ[scanned])) {
+            if (count >= MAX_EXEC_ENV_ENTRIES) {
+                errno = E2BIG;
+                return -1;
+            }
+            merged_env[count++] = environ[scanned];
+        }
+        scanned++;
+    }
+    merged_env[count] = NULL;
+
+    if (!env_has_nonempty(merged_env, count, "LD_PRELOAD") ||
+        (!env_has_nonempty(merged_env, count, "AETHER_SANDBOX_SHM") &&
+         !env_has_nonempty(merged_env, count, "AETHER_SANDBOX_GRANTS"))) {
+        errno = EPERM;
+        return -1;
+    }
+    return real_execve(pathname, argv, merged_env);
 }
 
 // stat/access/fstatat — NOT intercepted. Modern glibc inlines these as
