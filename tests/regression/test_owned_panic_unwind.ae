@@ -86,8 +86,8 @@ main() {
 
     d0 = sync.atomic_load(drops)
     grown = mem.steady_growth(|| {
-        _r = caught(4096)
-    }, 20)
+            _r = caught(4096)
+        }, 20)
     ran = sync.atomic_load(drops) - d0
     if mem.heap_in_use_exact() {
         fails = fails + check("a function's local unwound by a panic: 0 bytes a round, got ${grown}", grown == 0)
@@ -95,16 +95,16 @@ main() {
     fails = fails + check("and its drop ran each time, ${ran} drops", ran > 0)
 
     g_unbound = mem.steady_growth(|| {
-        x = spawn(Unbound())
-        x ! Hit { a: 1, b: filled(4096) }
-        wait_for_idle()
-    }, 30)
+            x = spawn(Unbound())
+            x ! Hit { a: 1, b: filled(4096) }
+            wait_for_idle()
+        }, 30)
     d1 = sync.atomic_load(drops)
     g_bound = mem.steady_growth(|| {
-        x = spawn(Binds())
-        x ! Hit { a: 1, b: filled(4096) }
-        wait_for_idle()
-    }, 30)
+            x = spawn(Binds())
+            x ! Hit { a: 1, b: filled(4096) }
+            wait_for_idle()
+        }, 30)
     bound_drops = sync.atomic_load(drops) - d1
     if mem.heap_in_use_exact() {
         fails = fails + check("an arm's binding unwound by a panic: ${g_bound} bytes a round, as with the field not bound: ${g_unbound}",
