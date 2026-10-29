@@ -1,0 +1,44 @@
+// Test: a wait_for_idle() a receive timeout's arm calls waits for the rest of
+// the program, not for the arm itself (#3443).
+//
+// wait_for_idle() counts a step that fires a countdown until its arm returns.
+// An arm that called it counted itself, so the wait polled for its own end
+// until it gave up, 100000 rounds of a millisecond or more, and returned
+// minutes late. Each thread now leaves out the arms it is inside.
+
+import std.time
+
+message Ping {}
+
+extern exit(code: int)
+
+actor Waiter {
+    state took = -1
+
+    receive {
+        Ping -> {}
+    } after 20 -> {
+        started = time.now_ms()
+        wait_for_idle()
+        took = time.now_ms() - started
+    }
+}
+
+actor Idle {
+    state n = 0
+
+    receive {
+        Ping -> { n = n + 1 }
+    }
+}
+
+main() {
+    w = spawn(Waiter())
+    _i = spawn(Idle()) // two actors: the cores step them, not main
+    wait_for_idle()
+    if w.took < 0 || w.took > 10000 {
+        println("FAIL: the arm's wait_for_idle took ${w.took} ms")
+        exit(1)
+    }
+    println("PASS: an arm's wait_for_idle does not wait for itself")
+}

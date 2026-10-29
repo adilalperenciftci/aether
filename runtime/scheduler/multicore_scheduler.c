@@ -2723,13 +2723,27 @@ static inline int count_pending_messages(void) {
  * that fires a countdown is counted from before it starts until it returns,
  * and wait_for_idle() waits for it as for a message. */
 static _Atomic int g_countdowns_firing = 0;
+/* How many such steps ever returned: an arm that sent its last message and
+ * returned inside a quiet window, after the window's counts, moves it on,
+ * so the wait starts its window again (has_pending_actor_timeout alone read
+ * the firing count once, at the window's end). */
+static _Atomic uint64_t g_countdowns_done = 0;
+/* The firing steps this thread is inside: a wait_for_idle() an arm calls
+ * waits for the others, not for itself. */
+static AETHER_TLS int t_countdowns_here = 0;
 
 void scheduler_countdown_enter(void) {
-    atomic_fetch_add_explicit(&g_countdowns_firing, 1, memory_order_seq_cst);
+    t_countdowns_here++;
+    atomic_fetch_add_explicit(&g_countdowns_firing, 1, memory_order_relaxed);
+    /* Before the step's disarm, a plain store: a fence, which an RMW alone
+     * is not for the stores after it (AArch64 without LSE). */
+    atomic_thread_fence(memory_order_seq_cst);
 }
 
 void scheduler_countdown_leave(void) {
+    atomic_fetch_add_explicit(&g_countdowns_done, 1, memory_order_release);
     atomic_fetch_sub_explicit(&g_countdowns_firing, 1, memory_order_release);
+    t_countdowns_here--;
 }
 
 static int has_pending_actor_timeout(void) {
@@ -2754,7 +2768,7 @@ static int has_pending_actor_timeout(void) {
     /* A countdown seen disarmed above may be firing: its step counted itself
      * (a full barrier) before it disarmed. */
     atomic_thread_fence(memory_order_acquire);
-    if (atomic_load_explicit(&g_countdowns_firing, memory_order_relaxed) > 0) found = 1;
+    if (atomic_load_explicit(&g_countdowns_firing, memory_order_relaxed) - t_countdowns_here > 0) found = 1;
     return found;
 }
 
@@ -2791,18 +2805,24 @@ static void scheduler_wait_quiet(int countdowns) {
     uint64_t last_processed = 0;
     int stall_checks = 0;
     int timeout_rounds = 0;
+    uint64_t quiet_done = 0;   // countdown steps done when the window began (#3443)
     while (stable_count < 5) {
         atomic_thread_fence(memory_order_acquire);
 
         int pending = count_pending_messages();
 
         if (pending == 0) {
+            if (stable_count == 0)
+                quiet_done = atomic_load_explicit(&g_countdowns_done, memory_order_acquire);
             stable_count++;
             // Quiet, but a receive timeout is armed (#3102): its core fires
             // it once the deadline passes, and its arm may send more, so the
             // wait goes on, polling every millisecond (100000 times at most).
+            // So it does when an arm ended inside the window, after the
+            // counts that found it quiet (#3443).
             if (countdowns && stable_count == 5 && timeout_rounds < 100000 &&
-                has_pending_actor_timeout()) {
+                (has_pending_actor_timeout() ||
+                 atomic_load_explicit(&g_countdowns_done, memory_order_acquire) != quiet_done)) {
                 stable_count = 0;
                 timeout_rounds++;
                 aether_usleep(1000);
