@@ -310,13 +310,25 @@ static int slots_grow(void) {
 }
 
 /* Which addresses may have a block in the table (#3410): one bit per hash
- * of an address, set before a block is recorded, under the lock. A thread
- * with no account in use that frees or allocates a block whose bit is clear
- * asks nothing more, and takes no lock: no account's block is there. A free
- * of an account's block comes after its allocation (the program handed the
- * pointer over), so it sees the bit. The bits are cleared, under the lock,
- * when the table has no block left and enough of them are set to be worth
- * it: no address can then be in it. 32 KiB, the owning copy's only. */
+ * of an address. A thread with no account in use that frees or allocates a
+ * block whose bit is clear asks nothing more, and takes no lock.
+ *
+ * Why a clear bit is enough. A block is recorded only under the lock, and
+ * its bit is set first (a release), before the allocator returns the
+ * block to its caller. Whatever thread frees it got the pointer from that
+ * caller, after that return (the program's own hand-over orders the two),
+ * so its load (an acquire) sees the bit. A free that sees the bit clear is
+ * of a block no account was charged for. The bits are cleared only under
+ * the lock, when the table holds no block at all and enough of them are
+ * set to be worth it: no address is in the table then, and a block
+ * recorded after sets its bit again before it is handed out.
+ *
+ * What a false positive costs. A free (or an allocation with no account in
+ * use) whose bit another recorded block set takes the lock and finds no
+ * entry: one table probe under the lock. With n blocks recorded, about
+ * n / 2^18 of such frees take it (20,000 blocks: 8%).
+ *
+ * 32 KiB, the owning copy's only. */
 #define ACCT_FILTER_BITS  (1u << 18)
 #define ACCT_FILTER_WORDS (ACCT_FILTER_BITS / 64)
 static _Atomic uint64_t g_filter[ACCT_FILTER_WORDS];

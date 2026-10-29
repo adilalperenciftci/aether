@@ -806,7 +806,14 @@ While an account exists anywhere in the process (#3410):
   of the addresses the accounts recorded (32 KiB); only an address whose
   bit is set (another account's block, or one sharing its bit) takes the
   accounts' lock to look the table up. Actor cores and HTTP workers pay
-  nothing for a script's account.
+  nothing for a script's account. A clear bit is enough: a block is
+  recorded under the lock with its bit set first, before the allocator
+  returns it, and whatever thread frees it got the pointer after that, so
+  it sees the bit; a free that finds the bit clear is of a block no
+  account was charged for. The bits are cleared only when the table holds
+  no block. A false positive, a free whose bit another block set, costs a
+  table probe under the lock: with n blocks recorded about n / 262,144 of
+  such frees (8% with 20,000).
 - A thread with an account in use takes the lock for each allocation and
   free (a table probe and a walk of the account's chain), so threads that
   each have one contend on it. A waiter pauses, then yields.
