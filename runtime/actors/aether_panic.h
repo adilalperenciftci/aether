@@ -278,6 +278,32 @@ void aether_fnptr_mark(const void* s);
 // Whether r is the marked pointer; clears the mark either way.
 int aether_fnptr_claim(const void* r);
 
+/* How the panic and the step barrier reach a copy of the sandbox, which
+ * they do not link (#2955, #3393): its unwind of the levels pushed inside a
+ * frame a panic leaves, and how a step puts this thread's levels aside and
+ * gives them back, each on that copy's own levels. Every copy of the sandbox
+ * registers its hooks once, when it first looks for the runtime copies, and
+ * the panic and the step barrier serve every copy registered with them:
+ * their own, and under ELF interposition several (a library whose code runs
+ * the program's panic registers its own sandbox there, beside the program's
+ * or another library's). One slot of each, which the last copy to look set,
+ * served only that one: a panic caught inside another copy's block left its
+ * level in force (#3438). */
+typedef struct AetherSandboxHooks {
+    void (*unwind)(int frames);
+    int (*hide)(int saved[2]);
+    void (*show)(const int saved[2]);
+} AetherSandboxHooks;
+
+#define AETHER_SANDBOX_HOOKS_MAX 8
+extern const AetherSandboxHooks* _Atomic aether_sandbox_hooks[AETHER_SANDBOX_HOOKS_MAX];
+// Registers `h`, once: 0, or -1 when every place is taken (a copy past
+// AETHER_SANDBOX_HOOKS_MAX keeps its levels in force through a panic and a
+// step: refused more, never less).
+int aether_sandbox_hooks_add(const AetherSandboxHooks* h);
+// A copy that is unloaded gives its place up.
+void aether_sandbox_hooks_remove(const AetherSandboxHooks* h);
+
 #ifdef __cplusplus
 }
 #endif

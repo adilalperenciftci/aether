@@ -137,12 +137,17 @@ static const AetherSandboxRendezvous* _Atomic g_rv = NULL;
 /* aether_sandbox_in_force is aether_panic.c's, where the step barrier reads
  * it without linking this file (#3393). */
 
-/* A step's part (aether_step_barrier.h, #3393), reached through
- * aether_panic.c's pointers, set with the unwind's below. */
+/* This copy's hooks (aether_panic.h's AetherSandboxHooks, #3438): how a
+ * panic ends the levels pushed inside the frame it leaves (#2955), and a
+ * step's part (aether_step_barrier.h, #3393), each on this copy's own
+ * levels, reached through no exported name another copy could interpose.
+ * Registered before any level of this copy can exist (every push looks for
+ * the copies first), so that a program that never enforces does not link
+ * this file for its panics or its steps. */
+static void sandbox_unwind_hook(int frames);
 static int sandbox_step_hide(int saved[2]);
 static void sandbox_step_show(const int saved[2]);
-extern int (*_Atomic aether_step_sandbox_hide)(int saved[2]);
-extern void (*_Atomic aether_step_sandbox_show)(const int saved[2]);
+static const AetherSandboxHooks g_hooks = { sandbox_unwind_hook, sandbox_step_hide, sandbox_step_show };
 
 typedef const AetherSandboxRendezvous* (*rendezvous_fn)(void);
 
@@ -158,12 +163,6 @@ static const AetherSandboxRendezvous* find_rendezvous(void) {
     return f();
 }
 
-/* aether_panic.c's: how a panic ends the levels pushed inside the frame it
- * leaves. Set here, before any level of this copy can exist (every push
- * looks for the copies first), so that a program that never enforces does
- * not link this file for its panics. */
-extern void (*_Atomic aether_panic_sandbox_unwind)(int frames);
-
 /* What a step of this copy reads: the count of the threads with a level,
  * and the step bit when the count is another copy's, whose levels this
  * copy's steps may run inside (a thread in that copy's enforce block that
@@ -178,10 +177,14 @@ static const AetherSandboxRendezvous* rv(void) {
     if (r) return r;
     /* Everything a reader of g_rv needs is in place before g_rv is published
      * (#3419): a thread that sees g_rv set sees all of it. */
-    atomic_store_explicit(&aether_panic_sandbox_unwind, aether_sandbox_unwind_to_frame,
-                          memory_order_relaxed);
-    atomic_store_explicit(&aether_step_sandbox_hide, sandbox_step_hide, memory_order_relaxed);
-    atomic_store_explicit(&aether_step_sandbox_show, sandbox_step_show, memory_order_relaxed);
+    static _Atomic int hooks_full_said = 0;
+    if (aether_sandbox_hooks_add(&g_hooks) != 0 &&
+        atomic_exchange_explicit(&hooks_full_said, 1, memory_order_relaxed) == 0)
+        fprintf(stderr,
+                "aether: sandbox: more than %d runtime copies with a sandbox share one panic: "
+                "this copy's levels stay in force through a panic and a step (refused more, "
+                "never less); build the libraries with --shared-runtime\n",
+                AETHER_SANDBOX_HOOKS_MAX);
     const AetherSandboxRendezvous* found = find_rendezvous();
     if (found && found != &g_own_rv &&
         (found->version != AETHER_SANDBOX_RV_VERSION ||
@@ -232,16 +235,20 @@ static void sandbox_join_copies(void) {
 extern AETHER_COPY_LOCAL void (*_Atomic aether_sandbox_join)(void);
 
 #if AETHER_GCC_COMPAT
+/* A copy unloaded gives up its place among the hooks a panic and a step
+ * call, which may be another copy's (#3438). */
+AETHER_DESTRUCTOR static void sandbox_remove_hooks(void) {
+    aether_sandbox_hooks_remove(&g_hooks);
+}
+
 /* The pointer is this copy's own (AETHER_COPY_LOCAL): under ELF
  * interposition a later library's constructor, which runs whatever the
  * interposition, reached the first copy's, whose scheduler then joined
- * through this copy's rendezvous and stepped with this copy's hide and show.
- * The unwind, hide and show pointers are not: they bind as the panic and the
- * step barrier that read them do, so a library that runs the program's panic
- * sets the program's, and the one sandbox and the one panic agree (#3438).
- * Set from NULL, once. The runtime is built with GCC or clang only (the
- * MSVC check compiles its headers); a compiler without constructors would
- * leave the join to the first push or check. */
+ * through this copy's rendezvous. The hooks a panic and a step call are a
+ * list each copy adds its own to (aether_panic.h), not a pointer the last to
+ * look set (#3438). Set from NULL, once. The runtime is built with GCC or
+ * clang only (the MSVC check compiles its headers); a compiler without
+ * constructors would leave the join to the first push or check. */
 AETHER_CONSTRUCTOR static void sandbox_install_join(void) {
     void (*none)(void) = NULL;
     atomic_compare_exchange_strong_explicit(&aether_sandbox_join, &none, sandbox_join_copies,
@@ -311,13 +318,19 @@ int aether_sandbox_depth(void) {
     return t_sbx.depth;
 }
 
-void aether_sandbox_restore(int depth) {
-    SandboxThread* t = &t_sbx;
+/* This copy's levels down to `depth`: what the exported restore, this copy's
+ * unwind and its step's show do, through no name another copy could
+ * interpose (#3438). */
+static void restore_levels(SandboxThread* t, int depth) {
     if (depth < t->floor) depth = t->floor;
     if (depth >= t->depth) return;
     int left = t->depth - depth;
     t->depth = depth;
     rv()->levels(-left);
+}
+
+void aether_sandbox_restore(int depth) {
+    restore_levels(&t_sbx, depth);
 }
 
 void aether_sandbox_tag_site(const void* image, int site) {
@@ -349,13 +362,17 @@ int aether_sandbox_trust_enter(const void* image, int site) {
     return saved;
 }
 
-void aether_sandbox_unwind_to_frame(int frames) {
+static void sandbox_unwind_hook(int frames) {
     SandboxThread* t = &t_sbx;
     t->pending_image = NULL;
     t->pending_site = 0;
     int d = t->depth;
     while (d > t->floor && t->level[d - 1].frame >= frames) d--;
-    aether_sandbox_restore(d);
+    restore_levels(t, d);
+}
+
+void aether_sandbox_unwind_to_frame(int frames) {
+    sandbox_unwind_hook(frames);
 }
 
 /* A step begins (aether_step_barrier.h, #3393): the levels of the code it
@@ -378,7 +395,7 @@ static int sandbox_step_hide(int saved[2]) {
 
 static void sandbox_step_show(const int saved[2]) {
     SandboxThread* t = &t_sbx;
-    aether_sandbox_restore(t->floor);
+    restore_levels(t, t->floor);
     t->floor = saved[0];
     const AetherSandboxRendezvous* r = rv();
     int now = r->levels(0);

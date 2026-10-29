@@ -106,12 +106,11 @@
 extern AETHER_TLS void* g_current_reply_slot;
 extern AETHER_TLS void* g_current_step_actor;
 
-/* The sandbox's part (aether_panic.c's pointers, which aether_sandbox.c sets
- * when it first looks for the runtime copies): the threads with a level in
- * force, and how this thread's levels are put aside and given back. */
+/* The sandbox's part (aether_panic.c's, which aether_sandbox.c sets when it
+ * first looks for the runtime copies): the threads with a level in force,
+ * and each copy's hooks, by which this thread's levels are put aside and
+ * given back (aether_sandbox_hooks, aether_panic.h). */
 extern atomic_int* _Atomic aether_sandbox_in_force;
-extern int (*_Atomic aether_step_sandbox_hide)(int saved[2]);
-extern void (*_Atomic aether_step_sandbox_show)(const int saved[2]);
 /* scheduler_init joins another copy's count through this (#3438): a step
  * reads only its own copy's word, and a copy that had looked nothing up
  * stepped plainly inside another copy's levels. */
@@ -132,7 +131,11 @@ typedef struct {
     int actor_id;
     int hid;
     AetherSpawnAside spawn;
-    int sandbox[2];
+    /* The copies of the sandbox that put levels aside, and what each kept
+     * (#3438): every copy registered with this barrier hides its own. */
+    int sandbox_n;
+    const AetherSandboxHooks* sandbox_hooks[AETHER_SANDBOX_HOOKS_MAX];
+    int sandbox[AETHER_SANDBOX_HOOKS_MAX][2];
     AetherExecAside execs;
     struct AetherExecAccount* account;
 } AetherStepAside;
@@ -155,8 +158,13 @@ static AETHER_STEP_COLD void aether_step_put_aside_parts(AetherStepAside* s, uns
     if (word & AETHER_CAPS_SLOW_SANDBOX) {
         atomic_int* in_force = atomic_load_explicit(&aether_sandbox_in_force, memory_order_acquire);
         if (in_force != NULL && atomic_load_explicit(in_force, memory_order_relaxed) != 0) {
-            int (*hide)(int saved[2]) = atomic_load_explicit(&aether_step_sandbox_hide, memory_order_relaxed);
-            if (hide && hide(s->sandbox)) s->hid |= AETHER_STEP_HID_SANDBOX;
+            int n = 0;
+            for (int i = 0; i < AETHER_SANDBOX_HOOKS_MAX; i++) {
+                const AetherSandboxHooks* h = atomic_load_explicit(&aether_sandbox_hooks[i], memory_order_acquire);
+                if (h && h->hide && h->show && h->hide(s->sandbox[n])) s->sandbox_hooks[n++] = h;
+            }
+            s->sandbox_n = n;
+            if (n) s->hid |= AETHER_STEP_HID_SANDBOX;
         }
     }
 }
@@ -175,8 +183,8 @@ static inline void aether_step_put_aside(AetherStepAside* s) {
 
 static AETHER_STEP_COLD void aether_step_give_back_parts(const AetherStepAside* s) {
     if (s->hid & AETHER_STEP_HID_EXECS) aether_step_give_back_execs(&s->execs);
-    if (s->hid & AETHER_STEP_HID_SANDBOX)
-        atomic_load_explicit(&aether_step_sandbox_show, memory_order_relaxed)(s->sandbox);
+    if (s->hid & AETHER_STEP_HID_SANDBOX)   /* the last to hide gives back first */
+        for (int i = s->sandbox_n - 1; i >= 0; i--) s->sandbox_hooks[i]->show(s->sandbox[i]);
     /* Accounts made while the step ran, and one it left in use, count too. */
     if ((s->hid & AETHER_STEP_HID_ACCOUNT) ||
         (atomic_load_explicit(&aether_caps_slow, memory_order_relaxed) & AETHER_CAPS_SLOW_ACCOUNTS))

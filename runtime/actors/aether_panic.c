@@ -87,25 +87,42 @@ int aether_fnptr_claim(const void* r) {
 
 static AetherDeathHook death_hook = NULL;
 
-/* The sandbox's unwind of the levels pushed inside a frame a panic leaves
- * (#2955): set by aether_sandbox.c when it first looks for the runtime
- * copies, before any thread can push a level, and reached through this
- * pointer so that a program that panics but never enforces links no
- * sandbox (aether_sandbox.o and the audit log it writes to). */
-void (*_Atomic aether_panic_sandbox_unwind)(int frames) = NULL;
-
-/* The sandbox's part of an actor step's context (#3393,
- * aether_step_barrier.h): the threads with a sandbox level in force (the
- * pointer aether_sandbox.h's check reads, set once the copies are found),
- * and how a step puts this thread's levels aside and gives them back. Here,
- * so that the scheduler, which every actor program links, reads them
- * without linking the sandbox. These and the unwind bind as the code that
- * reads them does: under ELF interposition a library that runs the
- * program's panic and step barrier has its sandbox set the program's
- * (#3438). */
+/* The copies of the sandbox the panic and the step barrier serve
+ * (aether_panic.h, #3438): each registers its unwind of the levels pushed
+ * inside a frame a panic leaves (#2955) and its part of an actor step's
+ * context (#3393) when it first looks for the runtime copies, before any
+ * thread can push one of its levels. Reached through here so that a program
+ * that panics but never enforces links no sandbox (aether_sandbox.o and the
+ * audit log it writes to), and the scheduler, which every actor program
+ * links, none either. With them, the threads with a sandbox level in force
+ * (the pointer aether_sandbox.h's check reads, set once the copies are
+ * found). These bind as the code that reads them does: under ELF
+ * interposition a library that runs the program's panic and step barrier
+ * registers its sandbox with the program's. */
 atomic_int* _Atomic aether_sandbox_in_force = NULL;
-int (*_Atomic aether_step_sandbox_hide)(int saved[2]) = NULL;
-void (*_Atomic aether_step_sandbox_show)(const int saved[2]) = NULL;
+const AetherSandboxHooks* _Atomic aether_sandbox_hooks[AETHER_SANDBOX_HOOKS_MAX];
+
+int aether_sandbox_hooks_add(const AetherSandboxHooks* h) {
+    if (!h) return -1;
+    for (int i = 0; i < AETHER_SANDBOX_HOOKS_MAX; i++)
+        if (atomic_load_explicit(&aether_sandbox_hooks[i], memory_order_acquire) == h) return 0;
+    for (int i = 0; i < AETHER_SANDBOX_HOOKS_MAX; i++) {
+        const AetherSandboxHooks* none = NULL;
+        if (atomic_compare_exchange_strong_explicit(&aether_sandbox_hooks[i], &none, h, memory_order_acq_rel,
+                                                    memory_order_acquire) ||
+            none == h)
+            return 0;
+    }
+    return -1;
+}
+
+void aether_sandbox_hooks_remove(const AetherSandboxHooks* h) {
+    for (int i = 0; i < AETHER_SANDBOX_HOOKS_MAX; i++) {
+        const AetherSandboxHooks* mine = h;
+        atomic_compare_exchange_strong_explicit(&aether_sandbox_hooks[i], &mine, NULL, memory_order_acq_rel,
+                                                memory_order_relaxed);
+    }
+}
 /* How this copy joins another copy's sandbox count before its first step
  * (#3438): aether_sandbox.c's, set when that file is loaded, and called by
  * scheduler_init. NULL in a copy without the sandbox, which has no level to
@@ -113,9 +130,14 @@ void (*_Atomic aether_step_sandbox_show)(const int saved[2]) = NULL;
  * whatever the interposition (aether_sandbox.c). */
 AETHER_COPY_LOCAL void (*_Atomic aether_sandbox_join)(void) = NULL;
 
+/* Every copy's levels pushed inside the frame the panic leaves: each copy
+ * keeps its own, and the try depth is the one every copy reads. */
 static void unwind_sandbox_levels(void) {
-    void (*u)(int) = atomic_load_explicit(&aether_panic_sandbox_unwind, memory_order_relaxed);
-    if (u) u(aether_try_depth());
+    int frames = aether_try_depth();
+    for (int i = 0; i < AETHER_SANDBOX_HOOKS_MAX; i++) {
+        const AetherSandboxHooks* h = atomic_load_explicit(&aether_sandbox_hooks[i], memory_order_acquire);
+        if (h && h->unwind) h->unwind(frames);
+    }
 }
 
 // ---------------------------------------------------------------------------
