@@ -25,6 +25,8 @@ check_rejected() {
 check_rejected reject_fs fs
 check_rejected reject_transitive os
 check_rejected reject_net net
+check_rejected reject_multiclause os
+check_rejected reject_multiclause_transitive os
 
-echo "  [PASS] effect_tags: @no_fs / @pure-transitive / @no_net violations all rejected"
+echo "  [PASS] effect_tags: direct, transitive, and multi-clause violations all rejected"
 exit 0

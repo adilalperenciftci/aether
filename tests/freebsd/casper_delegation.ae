@@ -1,7 +1,8 @@
-// FreeBSD-only Casper delegation test (run as a subprocess by the nightly
-// harness). Proves the two-phase pattern that std.casper's docstring (and
+// FreeBSD-only Casper delegation test (run as a subprocess by
+// tests/freebsd/run.sh in the native FreeBSD CI job). Proves the two-phase
+// pattern that std.casper's docstring (and
 // aeo's design) depend on: open the service channel BEFORE entering
-// capability mode, then use it AFTER — a passwd lookup that would
+// capability mode, then use it AFTER - a passwd lookup that would
 // otherwise be impossible in capability mode (no /etc/passwd access)
 // succeeds because Casper performs it on the other side of the boundary.
 //

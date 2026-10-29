@@ -1086,15 +1086,51 @@ static const char* inspect_import_origin(const char* mod) {
     return "local";
 }
 
+typedef struct {
+    const char* module;
+    const char* capability;
+} ModuleCapability;
+
+// Keep aliases and nested module families behind the same gate as their
+// underlying authority. A match ends at the module name or a '.' boundary,
+// so std.filex does not inherit std.file's classification.
+static const ModuleCapability module_capabilities[] = {
+    { "std.fs", "fs" },
+    { "std.file", "fs" },
+    { "std.dir", "fs" },
+    { "std.net", "net" },
+    { "std.http", "net" },
+    { "std.tcp", "net" },
+    { "std.udp", "net" },
+    { "std.os", "os" },
+    { "std.dl", "os" },
+    { "contrib.host", "extern" },
+};
+
+static int module_is_or_descends_from(const char* mod, const char* root) {
+    size_t n;
+    if (!mod || !root) return 0;
+    n = strlen(root);
+    return strncmp(mod, root, n) == 0 && (mod[n] == '\0' || mod[n] == '.');
+}
+
 // The --with capability a gated module needs, or NULL if ungated.
-static const char* inspect_module_capability(const char* mod) {
-    if (!mod) return NULL;
-    if (strcmp(mod, "std.fs") == 0)   return "fs";
-    if (strcmp(mod, "std.net") == 0)  return "net";
-    if (strcmp(mod, "std.http") == 0) return "net";
-    if (strcmp(mod, "std.tcp") == 0)  return "net";
-    if (strcmp(mod, "std.os") == 0)   return "os";
+static const char* module_capability(const char* mod) {
+    size_t count = sizeof(module_capabilities) / sizeof(module_capabilities[0]);
+    for (size_t i = 0; i < count; i++) {
+        if (module_is_or_descends_from(mod, module_capabilities[i].module))
+            return module_capabilities[i].capability;
+    }
     return NULL;
+}
+
+static int module_capability_is_granted(const char* capability) {
+    if (!capability) return 1;
+    if (strcmp(capability, "fs") == 0) return with_fs;
+    if (strcmp(capability, "net") == 0) return with_net;
+    if (strcmp(capability, "os") == 0) return with_os;
+    if (strcmp(capability, "extern") == 0) return with_extern;
+    return 0;
 }
 
 // True iff `c` is a declaration from THIS file (not merged in from an
@@ -1115,7 +1151,7 @@ static void emit_inspect_report(FILE* out, ASTNode* program, const char* path) {
     // First pass: tallies + artifact shape.
     int n_import = 0, n_fn = 0, n_actor = 0, n_struct = 0, n_const = 0,
         n_extern = 0, n_builder = 0, n_export = 0, has_main = 0;
-    int need_fs = 0, need_net = 0, need_os = 0;
+    int need_fs = 0, need_net = 0, need_os = 0, need_extern = 0;
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* c = program->children[i];
         // Skip declarations merged in from imported modules — inspect
@@ -1124,11 +1160,12 @@ static void emit_inspect_report(FILE* out, ASTNode* program, const char* path) {
         switch (c->type) {
             case AST_IMPORT_STATEMENT: {
                 n_import++;
-                const char* cap = inspect_module_capability(c->value);
+                const char* cap = module_capability(c->value);
                 if (cap) {
                     if (strcmp(cap, "fs") == 0) need_fs = 1;
                     else if (strcmp(cap, "net") == 0) need_net = 1;
                     else if (strcmp(cap, "os") == 0) need_os = 1;
+                    else if (strcmp(cap, "extern") == 0) need_extern = 1;
                 }
                 break;
             }
@@ -1143,7 +1180,7 @@ static void emit_inspect_report(FILE* out, ASTNode* program, const char* path) {
             case AST_ACTOR_DEFINITION:   n_actor++;  break;
             case AST_STRUCT_DEFINITION:  n_struct++; break;
             case AST_CONST_DECLARATION:  n_const++;  break;
-            case AST_EXTERN_FUNCTION:    n_extern++; break;
+            case AST_EXTERN_FUNCTION:    n_extern++; need_extern = 1; break;
             case AST_EXPORTS_LIST:       n_export += c->child_count; break;
             default: break;
         }
@@ -1163,7 +1200,6 @@ static void emit_inspect_report(FILE* out, ASTNode* program, const char* path) {
 
     // Capability posture: what the gated imports require, and whether the
     // current --with flags would grant it.
-    int need_extern = n_extern > 0;
     if (need_fs || need_net || need_os || need_extern) {
         fprintf(out, "  capabilities required (gated imports):");
         if (need_fs)  fprintf(out, " fs%s",  with_fs  ? "(granted)" : "");
@@ -1184,7 +1220,7 @@ static void emit_inspect_report(FILE* out, ASTNode* program, const char* path) {
         for (int i = 0; i < program->child_count; i++) {
             ASTNode* c = program->children[i];
             if (!inspect_is_local(c, path) || c->type != AST_IMPORT_STATEMENT || !c->value) continue;
-            const char* cap = inspect_module_capability(c->value);
+            const char* cap = module_capability(c->value);
             fprintf(out, "    %-28s [%s%s%s]\n", c->value,
                     inspect_import_origin(c->value),
                     cap ? ", capability: " : "", cap ? cap : "");
@@ -1630,43 +1666,30 @@ int compile_source(const char* input_path, const char* output_path) {
     // / --with=os. The gate stays default-deny; --with is the explicit
     // acknowledgement that the host owns and audits the surface it's
     // enabling. Keeping the capability categories coarse (three buckets)
-    // matches the three banned-import groupings below.
+    // matches the capability registry shared with `inspect`.
     if (emit_lib) {
-        // Each entry is (module_name, granted_flag, capability_name).
-        // When granted_flag is non-zero, that module is allowed; otherwise
-        // it's rejected with a message that names the --with flag needed.
-        struct { const char* module; bool granted; const char* cap; } gated[] = {
-            { "std.fs",   with_fs,  "fs"  },
-            { "std.net",  with_net, "net" },
-            { "std.http", with_net, "net" },
-            { "std.tcp",  with_net, "net" },
-            { "std.os",   with_os,  "os"  },
-        };
-        int num_gated = (int)(sizeof(gated) / sizeof(gated[0]));
         for (int i = 0; i < program->child_count; i++) {
             ASTNode* child = program->children[i];
             if (!child || child->type != AST_IMPORT_STATEMENT || !child->value) continue;
-            for (int g = 0; g < num_gated; g++) {
-                if (strcmp(child->value, gated[g].module) != 0) continue;
-                if (gated[g].granted) break;  // opted in; allow.
-                fprintf(stderr,
-                    "Error: --emit=lib rejects 'import %s' without --with=%s.\n"
-                    "\n"
-                    "       The library ABI is capability-empty by default so an\n"
-                    "       embedded Aether script can't escalate beyond what its\n"
-                    "       host grants. Pass --with=%s if the binary linking this\n"
-                    "       library is itself the capability owner (i.e. you're\n"
-                    "       writing systems code that compiles .ae and handwritten\n"
-                    "       C into one executable). Multiple capabilities can be\n"
-                    "       comma-separated: --with=%s,os\n",
-                    gated[g].module, gated[g].cap, gated[g].cap, gated[g].cap);
-                module_registry_shutdown();
-                free_ast_node(program);
-                free_tokens(tokens, token_count);
-                free_parser(parser);
-                free(source);
-                return 0;
-            }
+            const char* cap = module_capability(child->value);
+            if (!cap || module_capability_is_granted(cap)) continue;
+            fprintf(stderr,
+                "Error: --emit=lib rejects 'import %s' without --with=%s.\n"
+                "\n"
+                "       The library ABI is capability-empty by default so an\n"
+                "       embedded Aether script can't escalate beyond what its\n"
+                "       host grants. Pass --with=%s if the binary linking this\n"
+                "       library is itself the capability owner (i.e. you're\n"
+                "       writing systems code that compiles .ae and handwritten\n"
+                "       C into one executable). Multiple capabilities can be\n"
+                "       comma-separated: --with=%s,os\n",
+                child->value, cap, cap, cap);
+            module_registry_shutdown();
+            free_ast_node(program);
+            free_tokens(tokens, token_count);
+            free_parser(parser);
+            free(source);
+            return 0;
         }
     }
 

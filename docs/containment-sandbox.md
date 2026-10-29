@@ -433,6 +433,19 @@ should have both.
   An IPv4-mapped peer (`::ffff:127.0.0.1`, how a dual-stack socket reaches
   an IPv4 host) is the IPv4 host, and matches its grant.
 
+- **Unreadable grant sources deny everything.** If the preload layer is
+  configured with a grant source (`AETHER_SANDBOX_SHM` or
+  `AETHER_SANDBOX_GRANTS`) that cannot be read, or is larger than the
+  size limit, the sandbox stays active with zero grants rather than
+  running unrestricted.
+
+- **`execve` with an explicit environment keeps the sandbox controls.**
+  The preload layer re-adds `LD_PRELOAD` and the `AETHER_SANDBOX_*` /
+  `AETHER_CAPSICUM` entries it captured at startup, so the child stays
+  contained and edits to the live environment do not change them. Only
+  `execve` is interposed; `execvp` and `posix_spawn` paths that reach the
+  kernel through glibc internals are not (a known gap).
+
 - **Application-level only.** See "Cross-process containment" below
   for extending enforcement to child processes.
 

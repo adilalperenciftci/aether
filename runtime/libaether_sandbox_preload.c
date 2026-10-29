@@ -27,6 +27,7 @@
 
 // Grant storage
 #define MAX_GRANTS 256
+#define MAX_GRANT_SOURCE_SIZE 8192
 static struct { char cat[64]; char pat[256]; } grants[MAX_GRANTS];
 static int grant_count = 0;
 static int sandbox_active = 0;
@@ -121,7 +122,8 @@ static void parse_grants(const char* data, int len) {
     char line[320];
     int lpos = 0;
     for (int i = 0; i <= len && grant_count < MAX_GRANTS; i++) {
-        if (i == len || data[i] == '\n' || data[i] == '\0') {
+        int at_end = i == len;
+        if (at_end || data[i] == '\n' || data[i] == '\0') {
             line[lpos] = '\0';
             if (lpos > 0 && line[0] != '#') {
                 char* colon = strchr(line, ':');
@@ -135,12 +137,15 @@ static void parse_grants(const char* data, int len) {
                 }
             }
             lpos = 0;
-            if (data[i] == '\0') break;
+            if (at_end || data[i] == '\0') break;
         } else if (lpos < 319) {
             line[lpos++] = data[i];
         }
     }
 }
+
+extern char** environ;
+static void snapshot_sandbox_env(void);
 
 // Load grants from shared memory or file
 static void __attribute__((constructor)) sandbox_init(void) {
@@ -154,6 +159,9 @@ static void __attribute__((constructor)) sandbox_init(void) {
     real_mmap = dlsym(RTLD_NEXT, "mmap");
     real_mprotect = dlsym(RTLD_NEXT, "mprotect");
 
+    // Capture the sandbox controls before any user code can edit environ.
+    snapshot_sandbox_env();
+
     // Log mode: file (default), stderr, or none
     const char* log_env = real_getenv("AETHER_SANDBOX_LOG");
     if (log_env) {
@@ -164,37 +172,58 @@ static void __attribute__((constructor)) sandbox_init(void) {
     // Legacy: AETHER_SANDBOX_VERBOSE=1 sets stderr mode
     if (real_getenv("AETHER_SANDBOX_VERBOSE")) log_mode = LOG_STDERR;
 
-    // Try shared memory first (set by aether_spawn_sandboxed)
+    // An explicitly configured source is a containment request. If every
+    // configured source fails to load, leave the sandbox active with zero
+    // grants so intercepted operations are denied rather than running
+    // unrestricted. With no source configured at all, preload stays inert.
+    int source_requested = 0;
+    int source_loaded = 0;
+
+    // Try shared memory first (set by aether_spawn_sandboxed).
     const char* shm_name = real_getenv("AETHER_SANDBOX_SHM");
     if (shm_name) {
+        source_requested = 1;
         int fd = shm_open(shm_name, O_RDONLY, 0);
         if (fd >= 0) {
             struct stat st;
-            fstat(fd, &st);
-            char* data = mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
-            if (data != MAP_FAILED) {
-                parse_grants(data, st.st_size);
-                munmap(data, st.st_size);
-                sandbox_active = 1;
+            if (fstat(fd, &st) == 0 && st.st_size >= 0 &&
+                st.st_size <= MAX_GRANT_SOURCE_SIZE) {
+                if (st.st_size == 0) {
+                    source_loaded = 1;
+                } else {
+                    char* data = mmap(NULL, (size_t)st.st_size, PROT_READ,
+                                      MAP_SHARED, fd, 0);
+                    if (data != MAP_FAILED) {
+                        parse_grants(data, (int)st.st_size);
+                        munmap(data, (size_t)st.st_size);
+                        source_loaded = 1;
+                    }
+                }
             }
             close(fd);
         }
     }
 
     // Fall back to grant file (manual LD_PRELOAD usage)
-    if (!sandbox_active) {
+    if (!source_loaded) {
         const char* grant_file = real_getenv("AETHER_SANDBOX_GRANTS");
-        if (!grant_file) return;
-        FILE* f = real_fopen(grant_file, "r");
-        if (!f) return;
-        // Read entire file
-        char buf[8192];
-        int n = fread(buf, 1, sizeof(buf) - 1, f);
-        buf[n] = '\0';
-        fclose(f);
-        parse_grants(buf, n);
-        sandbox_active = 1;
+        if (grant_file) {
+            source_requested = 1;
+            FILE* f = real_fopen(grant_file, "r");
+            if (f) {
+                char buf[MAX_GRANT_SOURCE_SIZE];
+                size_t n = fread(buf, 1, sizeof(buf), f);
+                int extra = fgetc(f);
+                int read_failed = ferror(f) || extra != EOF;
+                fclose(f);
+                if (!read_failed) {
+                    parse_grants(buf, (int)n);
+                    source_loaded = 1;
+                }
+            }
+        }
     }
+    sandbox_active = source_requested;
 
     if (log_mode == LOG_STDERR && sandbox_active) {
         fprintf(stderr, "AETHER_SANDBOX: active with %d grants\n", grant_count);
@@ -392,6 +421,74 @@ FILE* fopen64(const char* path, const char* mode) {
 
 #endif // __linux__ (open64 / openat64 / fopen64)
 
+#define MAX_EXEC_ENV_ENTRIES 4096
+extern char** environ;
+
+static int env_key_is(const char* entry, const char* key) {
+    size_t n;
+    if (!entry || !key) return 0;
+    n = strlen(key);
+    return strncmp(entry, key, n) == 0 && entry[n] == '=';
+}
+
+static int same_env_key(const char* a, const char* b) {
+    const char* ae;
+    const char* be;
+    if (!a || !b) return 0;
+    ae = strchr(a, '=');
+    be = strchr(b, '=');
+    if (!ae || !be) return 0;
+    return (ae - a) == (be - b) && strncmp(a, b, (size_t)(ae - a)) == 0;
+}
+
+static int is_sandbox_control_env(const char* entry) {
+    static const char prefix[] = "AETHER_SANDBOX_";
+    if (!entry) return 0;
+    return env_key_is(entry, "LD_PRELOAD") ||
+           env_key_is(entry, "AETHER_CAPSICUM") ||
+           strncmp(entry, prefix, sizeof(prefix) - 1) == 0;
+}
+
+// Snapshot of the sandbox controls taken once in sandbox_init, from the
+// environment as it was before user code ran. execve rebuilds the child's
+// controls from this, never from live environ, which the contained process can
+// edit (setenv/unsetenv). A key absent from the snapshot was absent at init;
+// an empty value ("KEY=") is recorded as present. Fixed buffers, no malloc,
+// so execve stays async-signal-safe.
+#define SNAP_MAX_ENTRIES 32
+#define SNAP_BUF_SIZE 16384
+static char snap_buf[SNAP_BUF_SIZE];
+static char* snap_entries[SNAP_MAX_ENTRIES];
+static size_t snap_count = 0;
+static int snap_overflow = 0;
+
+static void snapshot_sandbox_env(void) {
+    size_t used = 0;
+    for (size_t i = 0; environ && environ[i]; i++) {
+        const char* e = environ[i];
+        if (!is_sandbox_control_env(e)) continue;
+        size_t len = strlen(e);
+        if (snap_count >= SNAP_MAX_ENTRIES || len + 1 > SNAP_BUF_SIZE - used) {
+            snap_overflow = 1;   // cannot preserve controls: execve fails closed
+            return;
+        }
+        memcpy(snap_buf + used, e, len);
+        snap_buf[used + len] = '\0';
+        snap_entries[snap_count++] = snap_buf + used;
+        used += len + 1;
+    }
+}
+
+static int env_has_nonempty(char* const env[], size_t count, const char* key) {
+    for (size_t i = 0; i < count; i++) {
+        if (env_key_is(env[i], key)) {
+            const char* value = strchr(env[i], '=');
+            return value && value[1] != '\0';
+        }
+    }
+    return 0;
+}
+
 // execve
 int execve(const char* pathname, char* const argv[], char* const envp[]) {
     if (!real_execve) real_execve = dlsym(RTLD_NEXT, "execve");
@@ -399,7 +496,51 @@ int execve(const char* pathname, char* const argv[], char* const envp[]) {
         errno = EPERM;
         return -1;
     }
-    return real_execve(pathname, argv, envp);
+    if (!sandbox_active) return real_execve(pathname, argv, envp);
+
+    // An explicit envp is the child's whole environment. Rebuild it on the
+    // stack so application entries survive while sandbox controls come only
+    // from the init-time snapshot of this contained process. This avoids allocation in the common
+    // fork-then-exec path and prevents an explicit environment from dropping
+    // or replacing the preload and grant source.
+    char* merged_env[MAX_EXEC_ENV_ENTRIES + 1];
+    size_t count = 0;
+    size_t scanned = 0;
+    while (envp && envp[scanned]) {
+        if (scanned >= MAX_EXEC_ENV_ENTRIES) {
+            errno = E2BIG;
+            return -1;
+        }
+        if (!is_sandbox_control_env(envp[scanned])) {
+            if (count >= MAX_EXEC_ENV_ENTRIES) {
+                errno = E2BIG;
+                return -1;
+            }
+            merged_env[count++] = envp[scanned];
+        }
+        scanned++;
+    }
+
+    if (snap_overflow) {
+        errno = EPERM;
+        return -1;
+    }
+    for (size_t i = 0; i < snap_count; i++) {
+        if (count >= MAX_EXEC_ENV_ENTRIES) {
+            errno = E2BIG;
+            return -1;
+        }
+        merged_env[count++] = snap_entries[i];
+    }
+    merged_env[count] = NULL;
+
+    if (!env_has_nonempty(merged_env, count, "LD_PRELOAD") ||
+        (!env_has_nonempty(merged_env, count, "AETHER_SANDBOX_SHM") &&
+         !env_has_nonempty(merged_env, count, "AETHER_SANDBOX_GRANTS"))) {
+        errno = EPERM;
+        return -1;
+    }
+    return real_execve(pathname, argv, merged_env);
 }
 
 // stat/access/fstatat — NOT intercepted. Modern glibc inlines these as

@@ -1,5 +1,4 @@
-// std.capsicum / std.casper portability (#1584) — co-located, replacing
-// tests/regression/test_capsicum_portability.ae.
+// std.capsicum / std.casper portability (#1584), co-located with the module.
 //
 // Capsicum is FreeBSD-only, and that is exactly why this suite runs
 // EVERYWHERE rather than skipping. Two contracts, and both matter:
@@ -16,9 +15,8 @@
 // half everywhere and asserts something real on every leg.
 //
 // The kernel-enforcement behaviour itself (entering capability mode,
-// rights narrowing, Casper delegation) needs a live FreeBSD box: that
-// lives in tests/freebsd/ and the nightly harness, which the CI matrix
-// has no runner for.
+// rights narrowing, Casper delegation) needs a live FreeBSD box. Those
+// tests live in tests/freebsd/ and run in the native FreeBSD CI job.
 
 import std.spec
 import std.capsicum
