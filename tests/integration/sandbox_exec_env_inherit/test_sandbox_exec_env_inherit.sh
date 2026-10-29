@@ -50,6 +50,20 @@ expect_denied() {
 expect_denied omit
 expect_denied override
 
+# The contained launcher points GRANTS at a permissive file and unsets SHM
+# before exec; the child must still run under the ORIGINAL policy.
+if LD_PRELOAD="$LIB" AETHER_SANDBOX_GRANTS="$TMP/deny-read.grants" \
+        AETHER_SANDBOX_LOG=none "$TMP/launcher" "$TMP/data.txt" tamper \
+        "$TMP/allow-read.grants" >"$TMP/out" 2>"$TMP/err"; then
+    echo "  [FAIL] env tampering before execve widened the child policy: exited zero"
+    fail=1
+elif grep -qF 'exec sentinel' "$TMP/out"; then
+    echo "  [FAIL] env tampering before execve widened the child policy: child read the file"
+    fail=1
+else
+    echo "  [PASS] env tampering before execve does not change the child policy"
+fi
+
 if LD_PRELOAD="$LIB" AETHER_SANDBOX_GRANTS="$TMP/allow-read.grants" \
         AETHER_SANDBOX_LOG=none "$TMP/launcher" "$TMP/data.txt" omit \
         >"$TMP/out" 2>"$TMP/err" && grep -qF 'exec sentinel' "$TMP/out"; then

@@ -144,6 +144,9 @@ static void parse_grants(const char* data, int len) {
     }
 }
 
+extern char** environ;
+static void snapshot_sandbox_env(void);
+
 // Load grants from shared memory or file
 static void __attribute__((constructor)) sandbox_init(void) {
     // Resolve real libc functions FIRST, before we intercept getenv
@@ -155,6 +158,9 @@ static void __attribute__((constructor)) sandbox_init(void) {
     real_dlopen = dlsym(RTLD_NEXT, "dlopen");
     real_mmap = dlsym(RTLD_NEXT, "mmap");
     real_mprotect = dlsym(RTLD_NEXT, "mprotect");
+
+    // Capture the sandbox controls before any user code can edit environ.
+    snapshot_sandbox_env();
 
     // Log mode: file (default), stderr, or none
     const char* log_env = real_getenv("AETHER_SANDBOX_LOG");
@@ -443,11 +449,34 @@ static int is_sandbox_control_env(const char* entry) {
            strncmp(entry, prefix, sizeof(prefix) - 1) == 0;
 }
 
-static int env_has_same_key(char* const env[], size_t count, const char* entry) {
-    for (size_t i = 0; i < count; i++) {
-        if (same_env_key(env[i], entry)) return 1;
+// Snapshot of the sandbox controls taken once in sandbox_init, from the
+// environment as it was before user code ran. execve rebuilds the child's
+// controls from this, never from live environ, which the contained process can
+// edit (setenv/unsetenv). A key absent from the snapshot was absent at init;
+// an empty value ("KEY=") is recorded as present. Fixed buffers, no malloc,
+// so execve stays async-signal-safe.
+#define SNAP_MAX_ENTRIES 32
+#define SNAP_BUF_SIZE 16384
+static char snap_buf[SNAP_BUF_SIZE];
+static char* snap_entries[SNAP_MAX_ENTRIES];
+static size_t snap_count = 0;
+static int snap_overflow = 0;
+
+static void snapshot_sandbox_env(void) {
+    size_t used = 0;
+    for (size_t i = 0; environ && environ[i]; i++) {
+        const char* e = environ[i];
+        if (!is_sandbox_control_env(e)) continue;
+        size_t len = strlen(e);
+        if (snap_count >= SNAP_MAX_ENTRIES || len + 1 > SNAP_BUF_SIZE - used) {
+            snap_overflow = 1;   // cannot preserve controls: execve fails closed
+            return;
+        }
+        memcpy(snap_buf + used, e, len);
+        snap_buf[used + len] = '\0';
+        snap_entries[snap_count++] = snap_buf + used;
+        used += len + 1;
     }
-    return 0;
 }
 
 static int env_has_nonempty(char* const env[], size_t count, const char* key) {
@@ -471,7 +500,7 @@ int execve(const char* pathname, char* const argv[], char* const envp[]) {
 
     // An explicit envp is the child's whole environment. Rebuild it on the
     // stack so application entries survive while sandbox controls come only
-    // from this contained process. This avoids allocation in the common
+    // from the init-time snapshot of this contained process. This avoids allocation in the common
     // fork-then-exec path and prevents an explicit environment from dropping
     // or replacing the preload and grant source.
     char* merged_env[MAX_EXEC_ENV_ENTRIES + 1];
@@ -492,21 +521,16 @@ int execve(const char* pathname, char* const argv[], char* const envp[]) {
         scanned++;
     }
 
-    scanned = 0;
-    while (environ && environ[scanned]) {
-        if (scanned >= MAX_EXEC_ENV_ENTRIES) {
+    if (snap_overflow) {
+        errno = EPERM;
+        return -1;
+    }
+    for (size_t i = 0; i < snap_count; i++) {
+        if (count >= MAX_EXEC_ENV_ENTRIES) {
             errno = E2BIG;
             return -1;
         }
-        if (is_sandbox_control_env(environ[scanned]) &&
-            !env_has_same_key(merged_env, count, environ[scanned])) {
-            if (count >= MAX_EXEC_ENV_ENTRIES) {
-                errno = E2BIG;
-                return -1;
-            }
-            merged_env[count++] = environ[scanned];
-        }
-        scanned++;
+        merged_env[count++] = snap_entries[i];
     }
     merged_env[count] = NULL;
 
