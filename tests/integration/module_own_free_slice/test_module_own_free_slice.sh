@@ -76,9 +76,9 @@ ints(n: int) -> int[] {
 }
 
 // This module's free takes the slice itself, so a slice is its business.
-free(xs: int[]) {
+// `@keep`: it takes the caller's buffer, which its scope exit releases.
+free(xs: @keep int[]) {
     released = released + xs.len
-    heap.free(xs as ptr)
 }
 
 freed() -> int {

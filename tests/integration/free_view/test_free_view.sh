@@ -6,8 +6,8 @@
 # once to it. They gave the allocator a pointer it never handed out, or one
 # the buffer's slice still holds. The slice that holds a `make` buffer, a
 # view of a raw pointer the program owns from its start, a local bound
-# again, and a slice parameter compile; a view given to a function is the
-# run-time check's (tests/regression/test_issue3072_free_view.ae).
+# again, and a `@keep` slice parameter compile; a view given to a function
+# is the run-time check's (tests/regression/test_issue3072_free_view.ae).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -112,15 +112,16 @@ main() {
 AE
 
 accepted owners <<'AE'
-drop(b: byte[]) {
+extern malloc(n: int) -> ptr
+
+drop(b: @keep byte[]) {
     free(b)
 }
 
 main() {
     b = make([]byte, 8)
     free(b)
-    c = make([]byte, 4)
-    p = c as ptr
+    p = malloc(4)
     owned = (p as byte[])[0..4]
     free(owned)
     d = make([]byte, 4)

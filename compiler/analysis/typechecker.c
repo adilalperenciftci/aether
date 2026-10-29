@@ -11,6 +11,7 @@
 #include "actor_reply.h"
 #include "missing_return.h"
 #include "slice_escape.h"
+#include "slice_own.h"
 #include "actor_protocol.h"
 #include "free_check.h"
 #include "quote.h"
@@ -679,29 +680,31 @@ static int user_explicit_namespace_count = 0;
 static int user_explicit_namespace_cap = 0;
 
 // Import alias table: maps short names to dotted qualified names
-// for selective imports (e.g. "release" -> "build.release")
-#define MAX_IMPORT_ALIASES 512
-static struct {
-    char short_name[128];
-    char qualified_name[256];
-} import_aliases[MAX_IMPORT_ALIASES];
-static int import_alias_count = 0;
+// for selective imports (e.g. "release" -> "build.release"). Keys and
+// values are owned copies; iteration is in insertion order, and the first
+// binding of a short name wins, as a linear scan of the table found it.
+//
+// It was a fixed 512-entry array that dropped entries past the last one
+// without a word. A glob import of a module wider than that (aether-ui's
+// `ui`, about 700 exports) left the dropped names bound in the symbol table
+// but not rewritten, so the program type-checked and its C called the bare
+// `window(...)` and `vstack(...)`, undeclared, while the same names imported
+// selectively, a handful of entries, built.
+static StrMap import_aliases;
 
 static void add_import_alias(const char* short_name, const char* qualified) {
-    if (import_alias_count < MAX_IMPORT_ALIASES) {
-        snprintf(import_aliases[import_alias_count].short_name, sizeof(import_aliases[0].short_name), "%s", short_name);
-        snprintf(import_aliases[import_alias_count].qualified_name, sizeof(import_aliases[0].qualified_name), "%s", qualified);
-        import_alias_count++;
-    }
+    if (strmap_has(&import_aliases, short_name)) return;
+    strmap_put(&import_aliases, short_name, strdup(qualified));
 }
 
 static const char* find_import_alias(const char* name) {
-    for (int i = 0; i < import_alias_count; i++) {
-        if (strcmp(import_aliases[i].short_name, name) == 0) {
-            return import_aliases[i].qualified_name;
-        }
-    }
-    return NULL;
+    return (const char*)strmap_get(&import_aliases, name);
+}
+
+static void reset_import_aliases(void) {
+    for (int i = 0; i < strmap_count(&import_aliases); i++)
+        free(strmap_value_at(&import_aliases, i));
+    strmap_free(&import_aliases);
 }
 
 void register_namespace(const char* ns) {
@@ -1174,6 +1177,8 @@ static void narrowing_message(char* msg, size_t size, const char* nm, TypeKind a
             "make the narrowing explicit.", nm, nm, nm, nm);
     }
 }
+
+static int is_definition(const ASTNode* n);
 
 void type_error(const char* message, int line, int column) {
     AetherErrorCode code = AETHER_ERR_TYPE_MISMATCH;
@@ -2277,8 +2282,12 @@ static int is_const_expression(ASTNode* expr, SymbolTable* table) {
  * compile-time constant (literal, const identifier, folded const
  * expression, or a whitelisted pure-conversion call). Used by the
  * array_const branch of the const-declaration typecheck. */
+static int is_const_struct_literal(ASTNode* e, SymbolTable* table);
 static int is_const_array_element(ASTNode* elem, SymbolTable* table) {
-    return is_const_expression(elem, table);
+    /* A struct literal of constants is one too: the element is emitted as
+     * its initializer list (emit_static_value_init), `{ .x = 1 }`, which C
+     * takes inside a static array's initializer. */
+    return is_const_expression(elem, table) || is_const_struct_literal(elem, table);
 }
 
 /* #3113: does `e` name only literals and the program's `const`s, as this
@@ -3012,6 +3021,80 @@ static void reject_pointer_argument(ASTNode* call, ASTNode* arg, Type* arg_type,
              index, param_name ? param_name : "?", call->value ? call->value : "?",
              type_name(param_type), type_name(arg_type));
     type_error(emsg, arg->line, arg->column);
+}
+
+/* Does this call leave a `_ctx`-first callee's `_ctx` to be injected? A
+ * builder's block supplies it, so the call gives one argument fewer than the
+ * parameters (`input("order", "map")` for `input(_ctx, name, type)`), or
+ * ends in a trailing block that no parameter takes (`vstack(4) { ... }` is
+ * one argument and a block for two parameters). An extern's parameters are
+ * plain identifiers, which has_ctx_first_param does not read, so the name is
+ * looked for directly. */
+static int ctx_injected_by_block(ASTNode* fn, ASTNode* call) {
+    int first = -1;
+    for (int i = 0; i < fn->child_count && first < 0; i++) {
+        if (is_call_param(fn, fn->children[i])) first = i;
+    }
+    if (first < 0 || !fn->children[first]->value ||
+        strcmp(fn->children[first]->value, "_ctx") != 0)
+        return 0;
+    int expected = 0;
+    int limit = fn->type == AST_EXTERN_FUNCTION ? fn->child_count : fn->child_count - 1;
+    for (int i = 0; i < limit; i++) {
+        if (is_call_param(fn, fn->children[i])) expected++;
+    }
+    int non_closure = 0;
+    for (int i = 0; i < call->child_count; i++) {
+        if (call->children[i] && call->children[i]->type != AST_CLOSURE) non_closure++;
+    }
+    return call->child_count == expected - 1 || non_closure == expected - 1;
+}
+
+/* A float or a bool passed to a `ptr` parameter. Argument checking is
+ * lenient, so `f(p: ptr)` called as `f(0.1)` passed `ae check` and only the C
+ * compiler refused it ("passing 'double' to parameter of incompatible type
+ * 'void *'"). An int still goes to a `ptr` (C's `(void*)(intptr_t)` idiom for
+ * a value held in a container) and so does a string (its characters, or the
+ * AetherString for an `@aether` parameter), so neither is refused in general.
+ * The one place they are is a builder's `_ctx`: it is filled from the
+ * enclosing block, never from a value, and an argument landing there means
+ * the call gave one too many (aether-ui's `text_color(_ctx, r, g, b)` called
+ * with four floats in a trailing block fills every parameter, so no `_ctx`
+ * is injected and `0.1` falls into it). A literal 0 stays: it is `null`. */
+static void reject_scalar_for_ptr_argument(ASTNode* call, ASTNode* arg, Type* arg_type,
+                                           Type* param_type, int index,
+                                           const char* param_name) {
+    if (!arg_type || !param_type || param_type->kind != TYPE_PTR) return;
+    /* A `_ctx` is only reached with an argument when the call names it: an
+     * injected one has no argument slot. */
+    int is_ctx = param_name && strcmp(param_name, "_ctx") == 0 && index == 1;
+    const char* what = NULL;
+    switch (arg_type->kind) {
+        case TYPE_FLOAT: case TYPE_FLOAT32: what = "a float"; break;
+        case TYPE_BOOL: what = "a bool"; break;
+        default: break;
+    }
+    if (!what && is_ctx) {
+        int zero = arg->type == AST_LITERAL && arg->value && strcmp(arg->value, "0") == 0;
+        if (arg_type->kind == TYPE_STRING) what = "a string";
+        /* Only a literal: a local that holds a handle (`row = hstack(...)`)
+         * is inferred an int, and is passed as `_ctx` on purpose. */
+        else if (arg_type->kind == TYPE_INT && arg->type == AST_LITERAL && !zero)
+            what = "an int";
+    }
+    if (!what) return;
+    char emsg[512];
+    snprintf(emsg, sizeof(emsg),
+             "Argument %d '%s' of '%s': expected %s, got %s (%s)",
+             index, param_name ? param_name : "?", call->value ? call->value : "?",
+             type_name(param_type), type_name(arg_type), what);
+    if (is_ctx)
+        type_error_hint(emsg,
+                        "too many arguments? `_ctx` is supplied by the enclosing block; "
+                        "leave it out and pass only the arguments after it",
+                        arg->line, arg->column);
+    else
+        type_error(emsg, arg->line, arg->column);
 }
 
 /* An optional is never unwrapped implicitly (is_type_compatible's #340
@@ -4514,9 +4597,22 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
             if (expr->value && strcmp(expr->value, "__slice_readonly") == 0 &&
                 expr->child_count == 1)
                 return infer_type(expr->children[0], table);   /* #3025 */
+            /* The slice-ownership intrinsics (slice_own.c) carry their type. */
+            if (expr->value && strncmp(expr->value, "__slice_", 8) == 0 && expr->node_type)
+                return clone_type(expr->node_type);
             if (expr->value && strcmp(expr->value, "make") == 0 &&
                 expr->node_type && expr->node_type->kind == TYPE_ARRAY)
                 return clone_type(expr->node_type);
+            /* `append(xs, v)` is `xs`'s slice type, unless a function of
+             * the program's own takes the name. */
+            if (expr->value && strcmp(expr->value, "append") == 0 && expr->child_count == 2) {
+                Symbol* as = lookup_symbol(table, "append");
+                if (!(as && is_definition(as->node))) {
+                    Type* st = infer_type(expr->children[0], table);
+                    if (type_is_slice(st)) return st;
+                    if (st) free_type(st);
+                }
+            }
             /* select(...) yields whatever its branches yield. Nothing inferred
              * it before, so it fell to unresolved and codegen defaulted to int:
              * a select over strings assigned a pointer into an int slot and
@@ -5699,6 +5795,10 @@ static void place_to_array_literal(ASTNode* value, Type* place) {
     set_node_type(value, create_array_type(clone_type(place->element_type), value->child_count));
 }
 
+static int reject_view_owner_op(ASTNode* arg, ASTNode* at, const char* verb);
+#define APPEND_VIEW_HINT "`append` grows a buffer the program owns: copy the elements into " \
+                         "one (`make([]T, 0)` and `append` each), or start from `[]`"
+
 /* #3072: `free` of what the checker can see owns nothing (R1, R2): a
  * read-only view of a string's bytes, a view of another slice's or an
  * array's elements, a local bound once to either, or an array `T[N]`, which
@@ -5707,6 +5807,12 @@ static void place_to_array_literal(ASTNode* value, Type* place) {
  * free). A view the checker cannot see is the run-time check's
  * (aether_slice_free). Returns 1 when it reported. */
 static int reject_free_of_view(ASTNode* arg, ASTNode* at) {
+    return reject_view_owner_op(arg, at, "free");
+}
+
+/* `verb` (`free`, or `append to`, which releases the old buffer as it
+ * grows) of a view the checker can see, which owns nothing. */
+static int reject_view_owner_op(ASTNode* arg, ASTNode* at, const char* verb) {
     if (!arg) return 0;
     int local = arg->type == AST_IDENTIFIER && arg->value;
     const ASTNode* src = local ? local_single_init(arg->value) : arg;
@@ -5718,22 +5824,28 @@ static int reject_free_of_view(ASTNode* arg, ASTNode* at) {
     Type* t = arg->node_type;
     if (t && type_is_sized_array(t) && t->array_size > 0) {
         snprintf(msg, sizeof(msg),
-                 "cannot free %s: an array `%s` lives in its function or its struct, not in "
+                 "cannot %s %s: an array `%s` lives in its function or its struct, not in "
                  "an allocation",
-                 what, type_spelled(t));
-        hint = "`free` takes a buffer `make([]T, n)` gave; an array needs no freeing";
+                 verb, what, type_spelled(t));
+        hint = strcmp(verb, "free") == 0
+                   ? "`free` takes a buffer `make([]T, n)` gave; an array needs no freeing"
+                   : APPEND_VIEW_HINT;
     } else if (src && is_readonly_view_source(src, 0)) {
         snprintf(msg, sizeof(msg),
-                 "cannot free %s: it is a read-only view of a string's bytes (string.bytes), "
+                 "cannot %s %s: it is a read-only view of a string's bytes (string.bytes), "
                  "which owns nothing",
-                 what);
-        hint = "the string owns its bytes: release the string when it is done, not the view";
+                 verb, what);
+        hint = strcmp(verb, "free") == 0
+                   ? "the string owns its bytes: release the string when it is done, not the view"
+                   : APPEND_VIEW_HINT;
     } else if (src && is_borrowed_view_source(src)) {
         snprintf(msg, sizeof(msg),
-                 "cannot free %s: it is a view of elements another slice or an array holds, "
+                 "cannot %s %s: it is a view of elements another slice or an array holds, "
                  "which owns nothing",
-                 what);
-        hint = "free the buffer `make` gave, once, through the slice that holds it";
+                 verb, what);
+        hint = strcmp(verb, "free") == 0
+                   ? "free the buffer `make` gave, once, through the slice that holds it"
+                   : APPEND_VIEW_HINT;
     } else {
         return 0;
     }
@@ -6958,6 +7070,8 @@ int typecheck_program(ASTNode* program) {
      * marks its view of a string with: `v` itself, read-only (a store
      * through it panics). Its type is its argument's (infer_type). */
     add_symbol(global_table, "__slice_readonly", create_type(TYPE_UNKNOWN), 0, 1, 0);
+    /* `xs.push(v)`, a method of every slice (try_ufcs_rewrite). */
+    add_symbol(global_table, "__slice_push", create_type(TYPE_VOID), 0, 1, 0);
 
     // Output builtins
     Type* println_type = create_type(TYPE_VOID);
@@ -7491,7 +7605,7 @@ int typecheck_program(ASTNode* program) {
     // namespace prefix (`<ns>_`) and registering the trailing short name
     // as an alias. Names with a leading underscore in the short part are
     // treated as private and skipped. Issue #171 (P1).
-    import_alias_count = 0;  // Reset for fresh compilation
+    reset_import_aliases();  // Reset for fresh compilation
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* child = program->children[i];
         if (child->type != AST_IMPORT_STATEMENT || !child->value) continue;
@@ -7652,9 +7766,9 @@ int typecheck_program(ASTNode* program) {
     // full symbol, but the glob path did not; refreshing every alias from
     // the canonical full symbol makes both forms carry the wrappers' real
     // tuple return types. (fbs-core ask #1.)
-    for (int a = 0; a < import_alias_count; a++) {
-        const char* short_name = import_aliases[a].short_name;
-        const char* dotted = import_aliases[a].qualified_name;
+    for (int a = 0; a < strmap_count(&import_aliases); a++) {
+        const char* short_name = strmap_key_at(&import_aliases, a);
+        const char* dotted = (const char*)strmap_value_at(&import_aliases, a);
         // The full C name the dotted alias reaches ("fs.list_dir" ->
         // "fs_list_dir", #2978: as a qualified call reaches it).
         char full_name[256];
@@ -7794,6 +7908,12 @@ int typecheck_program(ASTNode* program) {
      * Asked once the program type-checks: whether a `match` covers its type
      * depends on the type the checker gave the value it matches on. */
     if (error_count == 0) error_count += check_missing_returns(program);
+    /* #1300: a value used or freed after it was freed, a view after its
+     * storage went, and the `@frees` and `@moves` declarations. Asked of the
+     * program as written, before slice ownership adds its intrinsics. */
+    if (error_count == 0) error_count += check_frees(program);
+    /* Slice ownership: owned buffers freed at scope exit, moves checked. */
+    if (error_count == 0) error_count += check_slice_ownership(program);
     /* A slice of a function's own storage must not outlive it (#2785): asked
      * of the checked program, whose coercions into slices are explicit. */
     if (error_count == 0) error_count += check_slice_escapes(program);
@@ -7806,9 +7926,6 @@ int typecheck_program(ASTNode* program) {
         check_owned_types(program);
         check_owned_rules(program);
     }
-    /* #1300: a value used or freed after it was freed, a view after its
-     * storage went, and the `@frees` and `@moves` declarations. */
-    if (error_count == 0) error_count += check_frees(program);
 
     // #481: validate effect tags over the whole-program call graph.
     check_effect_tags(program);
@@ -14291,6 +14408,14 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                                           init->value && strcmp(et->struct_name, init->value) == 0 &&
                                           is_const_struct_literal(init, table));
                     }
+                    /* A `const` of a struct type set to a struct literal of
+                     * constants is a constant too: a `static const T` with
+                     * the literal as its initializer list (codegen's
+                     * emit_static_value_init), as a module `var` takes it
+                     * (#2590). */
+                    if (!is_struct_init && !stmt->annotation && struct_typed &&
+                        is_const_struct_literal(init, table))
+                        is_struct_init = 1;
                     /* #2807: so is an optional `const`'s `none`. */
                     if (!is_struct_init && !stmt->annotation && dt && dt->kind == TYPE_OPTIONAL &&
                         init->type == AST_NONE_LITERAL)
@@ -19039,6 +19164,11 @@ static int try_ufcs_rewrite(ASTNode* call, SymbolTable* table) {
     Type* rtype = infer_type(recv, table);
 
     char* resolved = ufcs_resolve(method, rtype, table);  /* the name to put on the call */
+    /* `xs.push(v)`: grows the slice `xs` names in place, one element longer
+     * with `v` at its end (the slice method no function of the program's
+     * own claims). The checks are __slice_push's. */
+    if (!resolved && strcmp(method, "push") == 0 && type_is_slice(rtype))
+        resolved = strdup("__slice_push");
 
     if (rtype) free_type(rtype);
     free(method);
@@ -20655,6 +20785,140 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
         return 1;
     }
 
+    /* `xs.push(v)` (try_ufcs_rewrite names it __slice_push): the slice `xs`
+     * names, grown in place by one element with `v` at its end, as
+     * `xs = append(xs, v)` grows it. `xs` is a place (a local, a field, an
+     * element, a module-level `var`) the program owns a buffer in; a view
+     * is refused as `append` refuses it. A statement: it gives no value. */
+    if (call->value && strcmp(call->value, "__slice_push") == 0 && call->child_count == 2) {
+        ASTNode* xs = call->children[0];
+        typecheck_expression(xs, table);
+        typecheck_expression(call->children[1], table);
+        set_node_type(call, create_type(TYPE_VOID));
+        if (reject_view_owner_op(xs, call, "push to")) return 0;
+        ASTNode* root = xs;
+        while (root && (root->type == AST_MEMBER_ACCESS || root->type == AST_ARRAY_ACCESS) &&
+               root->child_count > 0)
+            root = root->children[0];
+        if (!root || root->type != AST_IDENTIFIER) {
+            type_error_hint("`push` grows a slice in place, so it is called on a place that "
+                            "holds one: a local, a field, an element or a module-level `var`",
+                            "bind the slice to a local first, or use `append(xs, v)`",
+                            call->line, call->column);
+            return 0;
+        }
+        Type* st = infer_type(xs, table);
+        if (!type_is_slice(st) || !st->element_type) {
+            if (st) free_type(st);
+            return 0;
+        }
+        if (type_is_sized_array(st->element_type)) {
+            char msg[300];
+            snprintf(msg, sizeof(msg), "`push` does not take a slice of arrays (%s) yet",
+                     type_spelled(st));
+            type_error_hint(msg, "wrap the array in a struct, and push those", call->line,
+                            call->column);
+            free_type(st);
+            return 0;
+        }
+        Type* vt = NULL;
+        if (st->element_type->kind == TYPE_FUNCTION && st->element_type->is_fnptr &&
+            fn_name_matches_signature(table, call->children[1], st->element_type)) {
+            set_node_type(call->children[1], clone_type(st->element_type));
+            vt = clone_type(st->element_type);
+        } else {
+            if (st->element_type->kind == TYPE_FUNCTION)
+                function_value_annotate(call->children[1], table);
+            vt = infer_type(call->children[1], table);
+        }
+        int fits = !vt || is_type_compatible(vt, st->element_type);
+        if (fits && vt &&
+            reject_closure_in_fnptr_slot(table, call->children[1], vt, st->element_type,
+                                         FNPTR_SLOT_ELEMENT,
+                                         root->value ? root->value : "push",
+                                         call->children[1]->line, call->children[1]->column))
+            fits = 0;
+        else if (!fits) {
+            char msg[300];
+            snprintf(msg, sizeof(msg), "xs.push(v): v is %s, but the elements of xs are %s",
+                     type_spelled(vt), type_spelled(st->element_type));
+            type_error(msg, call->children[1]->line, call->children[1]->column);
+        }
+        if (vt) free_type(vt);
+        free_type(st);
+        return fits;
+    }
+
+    /* `append(xs, v)`: `xs`, a `T[]` the program owns (a `make` buffer, one
+     * `append` gave, or the empty slice), one element longer, `v` at its end.
+     * The buffer grows in place with its capacity doubling, so n appends cost
+     * O(n) in all (aether_slice_grow1). Not a function symbol: a program's or
+     * a module's own `append` (std.strbuilder's, in its body or imported by
+     * name) keeps the name. */
+    if (call->value && strcmp(call->value, "append") == 0 && call->child_count == 2) {
+        Symbol* as = lookup_symbol(table, "append");
+        if (!(as && is_definition(as->node))) {
+            typecheck_expression(call->children[0], table);
+            typecheck_expression(call->children[1], table);
+            if (reject_view_owner_op(call->children[0], call, "append to")) {
+                set_node_type(call, create_type(TYPE_UNKNOWN));
+                return 0;
+            }
+            Type* st = infer_type(call->children[0], table);
+            if (!type_is_slice(st) || !st->element_type) {
+                char msg[300];
+                snprintf(msg, sizeof(msg),
+                         "append(xs, v) takes a slice `T[]` as its first argument, got %s",
+                         st ? type_spelled(st) : "an unknown type");
+                type_error_hint(msg, "start one with `make([]T, 0)` or a `T[]` bound to `[]`",
+                                call->line, call->column);
+                if (st) free_type(st);
+                set_node_type(call, create_type(TYPE_UNKNOWN));
+                return 0;
+            }
+            if (type_is_sized_array(st->element_type)) {
+                char msg[300];
+                snprintf(msg, sizeof(msg),
+                         "append(xs, v) does not take a slice of arrays (%s) yet",
+                         type_spelled(st));
+                type_error_hint(msg, "wrap the array in a struct, and append those",
+                                call->line, call->column);
+                free_type(st);
+                set_node_type(call, create_type(TYPE_UNKNOWN));
+                return 0;
+            }
+            /* A named function given as the value is its function value. */
+            Type* vt = NULL;
+            if (st->element_type->kind == TYPE_FUNCTION && st->element_type->is_fnptr &&
+                fn_name_matches_signature(table, call->children[1], st->element_type)) {
+                set_node_type(call->children[1], clone_type(st->element_type));
+                vt = clone_type(st->element_type);
+            } else {
+                if (st->element_type->kind == TYPE_FUNCTION)
+                    function_value_annotate(call->children[1], table);
+                vt = infer_type(call->children[1], table);
+            }
+            int fits = !vt || is_type_compatible(vt, st->element_type);
+            ASTNode* a0 = call->children[0];
+            if (fits && vt &&
+                reject_closure_in_fnptr_slot(table, call->children[1], vt, st->element_type,
+                                             FNPTR_SLOT_ELEMENT,
+                                             a0->type == AST_IDENTIFIER ? a0->value : "append",
+                                             call->children[1]->line, call->children[1]->column))
+                fits = 0;
+            else if (!fits) {
+                char msg[300];
+                snprintf(msg, sizeof(msg),
+                         "append(xs, v): v is %s, but the elements of xs are %s",
+                         type_spelled(vt), type_spelled(st->element_type));
+                type_error(msg, call->children[1]->line, call->children[1]->column);
+            }
+            if (vt) free_type(vt);
+            set_node_type(call, st);
+            return fits;
+        }
+    }
+
     /* `call(f, x)` through a typed C function pointer (a `fn(int)` parameter
      * or a cast local) is the call `f(x)`. call() invokes a closure, whose C
      * shape (an environment beside the function) a function pointer does not
@@ -20937,6 +21201,8 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
     if ((!symbol || !symbol->is_function) && call->value &&
         strchr(call->value, '.')) {
         if (try_ufcs_rewrite(call, table)) {
+            if (call->value && strcmp(call->value, "__slice_push") == 0)
+                return typecheck_function_call(call, table);
             symbol = lookup_qualified_symbol(table, call->value);
         }
     }
@@ -21610,6 +21876,19 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                     reject_fn_mode_argument(table, call, darg, da, param_type, arg_slot + 1, param->value);
                     reject_struct_argument(call, darg, da, param_type, arg_slot + 1, param->value);
                     reject_pointer_argument(call, darg, da, param_type, arg_slot + 1, param->value);
+                    /* A builder's `_ctx` that the trailing block injects has no
+                     * argument, and the arguments after it sit one slot earlier
+                     * than this loop's position (`vstack(4) { ... }` is one
+                     * argument and a block for two parameters). */
+                    int blk_inj = ctx_injected_by_block(symbol->node, call);
+                    if (!blk_inj) {
+                        reject_scalar_for_ptr_argument(call, darg, da, param_type, arg_slot + 1, param->value);
+                    } else if (arg_slot >= 1 && call->children[arg_slot - 1]) {
+                        ASTNode* sarg = call->children[arg_slot - 1];
+                        Type* sa = infer_type(sarg, table);
+                        reject_scalar_for_ptr_argument(call, sarg, sa, param_type, arg_slot, param->value);
+                        if (sa) free_type(sa);
+                    }
                     reject_sized_array_argument(call, darg, da, param_type, arg_slot + 1, param->value);
                     int nominal = param_type->distinct_name || (da && da->distinct_name) ||
                                   param_type->kind == TYPE_BITSTRUCT ||

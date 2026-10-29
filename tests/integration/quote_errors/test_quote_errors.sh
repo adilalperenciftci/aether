@@ -15,8 +15,20 @@ TMPDIR="$(mktemp -d)"; trap 'rm -rf "$TMPDIR"' EXIT
 reject() {
     name="$1"; code="$2"; line="$3"; want="$4"
     log="$TMPDIR/$name.log"
-    if "$AE" build "$SCRIPT_DIR/reject_$name.ae" -o "$TMPDIR/out" >"$log" 2>&1; then
+    "$AE" build "$SCRIPT_DIR/reject_$name.ae" -o "$TMPDIR/out" >"$log" 2>&1
+    if [ $? = 0 ]; then
         echo "  [FAIL] quote_errors: reject_$name.ae compiled (should be rejected)"; exit 1
+    fi
+    # A rejection is a diagnostic and exit 1. `ae build` folds a compiler signal
+    # into exit 1 and says so; aetherc itself exits 128+signal.
+    if grep -q "killed by signal" "$log"; then
+        echo "  [FAIL] quote_errors: reject_$name.ae crashed the compiler"
+        sed 's/^/    /' "$log" | head -12; exit 1
+    fi
+    "$ROOT/build/aetherc" "$SCRIPT_DIR/reject_$name.ae" "$TMPDIR/out.c" >/dev/null 2>&1
+    rc=$?
+    if [ "$rc" -ge 128 ]; then
+        echo "  [FAIL] quote_errors: reject_$name.ae crashed aetherc (exit $rc)"; exit 1
     fi
     if ! grep -q "error\[$code\]: .*$want" "$log"; then
         echo "  [FAIL] quote_errors: reject_$name.ae: no error[$code] saying \"$want\""

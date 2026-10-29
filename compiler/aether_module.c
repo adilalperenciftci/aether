@@ -2941,6 +2941,29 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
             snprintf(prefixed, sizeof(prefixed), "%s_%s", prefix, node->value);
             free(node->value);
             node->value = strdup(prefixed);
+            renamed = 1;
+        }
+        /* A method called on a module-level `var` (`views.push(h)`, a
+         * slice the module grows): the receiver is the module's own cell,
+         * `<prefix>_views`, as a bare read of it is; kept bare, the checker
+         * found no value of the name and reported "Undefined function". A
+         * local of the name is the receiver instead, and one dot only: a
+         * longer path is a module's. */
+        const char* dot = renamed ? NULL : strchr(node->value, '.');
+        if (dot && dot != node->value && !strchr(dot + 1, '.')) {
+            size_t rlen = (size_t)(dot - node->value);
+            char recv[200];
+            if (rlen < sizeof(recv)) {
+                memcpy(recv, node->value, rlen);
+                recv[rlen] = '\0';
+                if (!name_in_list(recv, local_names, local_count) &&
+                    name_is_module_global_var(prefix, recv)) {
+                    char prefixed[256];
+                    snprintf(prefixed, sizeof(prefixed), "%s_%s%s", prefix, recv, dot);
+                    free(node->value);
+                    node->value = strdup(prefixed);
+                }
+            }
         }
     }
 

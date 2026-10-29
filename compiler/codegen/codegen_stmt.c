@@ -9209,7 +9209,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                       ? stmt->node_type->element_type : NULL;
                     const char* ctype = elem_type ? const_array_elem_c_type(elem_type) : "const char*";
                     fprintf(gen->output, "static const %s %s[] = ", ctype, stmt->value);
-                    generate_expression(gen, stmt->children[0]);
+                    emit_static_array_init(gen, stmt->children[0], elem_type);
                     fprintf(gen->output, ";\n");
                 } else {
                     Type* var_type = stmt->node_type;

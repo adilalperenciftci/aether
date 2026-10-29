@@ -26,6 +26,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "actors/aether_panic.h"
 
 #ifdef __cplusplus
@@ -63,6 +64,15 @@ typedef struct AetherSlice {
  * holds before the buffer goes. A view of a raw pointer is not marked: its
  * elements are C's, and a store there takes nothing. */
 #define AETHER_SLICE_MADE 4u
+
+/* `append(s, v)`: a `make` buffer `append` has grown. Its capacity is not
+ * stored: it is the smallest power of two, at least 4, that holds its
+ * length (aether_slice_grown_cap), so `append` doubles the buffer when the
+ * length reaches one and writes in place otherwise, amortised O(1), with
+ * the slice still `{ ptr, len, flags }`. A buffer that is not marked holds
+ * exactly its length. A sub-slice, a pattern's tail or an array view is
+ * BORROWED, so the mark never describes a length it was not grown to. */
+#define AETHER_SLICE_GROWN 8u
 
 /* `const void*`: a view is made over an array of strings too, `const char*
  * xs[N]`. Taken as `void*`, cl.exe read the elements' `const` as the array's
@@ -244,6 +254,133 @@ static inline AetherSlice aether_slice_from(AetherSlice s, int64_t lo,
         return d;
     }
     return aether_slice_sub(s, lo, (int64_t)s.len, elem_size, file, line);
+}
+
+/* The capacity of a buffer marked AETHER_SLICE_GROWN of length `len`. */
+static inline uint64_t aether_slice_grown_cap(uint64_t len) {
+    uint64_t c = 4;
+    while (c < len) c <<= 1;
+    return c;
+}
+
+/* `append(s, v)`, its first half: `s` one element longer, the new last
+ * element zeroed for the generated code to store `v` into (a store that
+ * takes the value, as `s[i] = v` does). `s` must be a buffer the program
+ * owns, which `free(s)` would release: one `make` or `append` handed out,
+ * or the empty slice (`[]`, `null`), which starts a buffer. When the buffer
+ * is full it is reallocated to twice its capacity: the old storage goes, as
+ * `free` would release it, and its elements move to the new storage with
+ * what they hold. A view (a sub-slice, an array, a string's bytes, C
+ * memory) owns nothing, so growing it is a named panic, as freeing it is. */
+static inline AetherSlice aether_slice_grow1(AetherSlice s, size_t elem_size,
+                                             const char* file, int line) {
+    if (s.len == AETHER_SLICE_UNBOUNDED)
+        aether_slice_panicf("%s:%d: append to a view of unknown length, which owns nothing",
+                            file, line);
+    if (s.flags & AETHER_SLICE_READONLY)
+        aether_slice_panicf("%s:%d: append to a read-only view of a string, which owns nothing",
+                            file, line);
+    if (s.flags & AETHER_SLICE_BORROWED)
+        aether_slice_panicf("%s:%d: append to a view of elements another slice or an array "
+                            "holds, which owns nothing", file, line);
+    int empty = s.ptr == NULL && s.len == 0;
+    if (!empty && !(s.flags & AETHER_SLICE_MADE))
+        aether_slice_panicf("%s:%d: append to a view of memory the program did not make "
+                            "(make([]T, n) or append), which it cannot grow", file, line);
+    uint64_t len = empty ? 0 : s.len;
+    int grown = !empty && (s.flags & AETHER_SLICE_GROWN);
+    if (!grown || len == aether_slice_grown_cap(len)) {
+        uint64_t cap = aether_slice_grown_cap(len + 1);
+        if (cap > SIZE_MAX / (elem_size ? elem_size : 1))
+            aether_slice_panicf("%s:%d: append: out of memory", file, line);
+        void* p = realloc(empty ? NULL : s.ptr, (size_t)cap * elem_size);
+        if (!p) aether_slice_panicf("%s:%d: append: out of memory", file, line);
+        s.ptr = p;
+        s.flags = AETHER_SLICE_MADE | AETHER_SLICE_GROWN;
+    }
+    memset((char*)s.ptr + len * elem_size, 0, elem_size);
+    s.len = len + 1;
+    return s;
+}
+
+/* ---- Slice ownership (docs/memory-management.md, Slices) ----
+ *
+ * A `make` buffer, or one `append` or `push` grew, has one owner: a local
+ * (or a `@keep` parameter) that holds it, an element of a slice of slices,
+ * or a place the program frees by hand (a field, a module-level `var`).
+ * The owning local is dropped at every exit of its scope, unless the buffer
+ * was moved out of it first: a move reads the slice and leaves the place
+ * empty (aether_slice_take), so the drop that follows finds nothing. A copy
+ * read out of a place that does not own it (a parameter, a field, an
+ * element, a module-level `var`) is marked BORROWED (aether_slice_lend), so
+ * whatever holds the copy never frees it. */
+
+/* Does `s` own the buffer it views: one `make` handed out or `append`
+ * grew, not a view of one? */
+static inline int aether_slice_owned(AetherSlice s) {
+    return (s.flags & AETHER_SLICE_MADE) &&
+           !(s.flags & (AETHER_SLICE_READONLY | AETHER_SLICE_BORROWED)) &&
+           s.len != AETHER_SLICE_UNBOUNDED;
+}
+
+/* A move: the slice at `p`, and `p` left empty. */
+static inline AetherSlice aether_slice_take(AetherSlice* p) {
+    AetherSlice s = *p;
+    p->ptr = NULL;
+    p->len = 0;
+    p->flags = 0;
+    return s;
+}
+
+/* A copy of a slice some other place owns: a view of it, which never frees
+ * it. The empty slice stays itself, so a place given one may start a buffer
+ * of its own (`push`, `append`). */
+static inline AetherSlice aether_slice_lend(AetherSlice s) {
+    if (s.ptr != NULL || s.len != 0) s.flags |= AETHER_SLICE_BORROWED;
+    return s;
+}
+
+/* The drop of an owning place: the buffer it owns, if it owns one, is
+ * released, its elements first (`drop`, each element's own release, or
+ * NULL when they own nothing), and the place is left empty. A view, the
+ * empty slice and a moved-from place release nothing. */
+static inline void aether_slice_drop(AetherSlice* p, size_t elem_size,
+                                     void (*drop)(const void*)) {
+    AetherSlice s = aether_slice_take(p);
+    if (!aether_slice_owned(s)) return;
+    if (drop) {
+        for (uint64_t i = 0; i < s.len; i++) drop((const char*)s.ptr + i * elem_size);
+    }
+    free(s.ptr);
+}
+
+/* aether_slice_drop of a slice whose elements own nothing, at `p`: the
+ * element drop of a slice of slices of numbers, and an unwind drop. */
+static inline void aether_slice_drop_plain(const void* p) {
+    aether_slice_drop((AetherSlice*)(void*)p, 0, NULL);
+}
+
+/* A store into an owning place (`xs = v` for a local that owns, `rows[i] =
+ * v` for an element of a slice of slices): what the place owned is
+ * dropped, and `v` is what to store. `v` may not view the buffer the place
+ * owns (`xs = xs[1..]`, or a function handing back the slice it was lent):
+ * the store would free what `v` views, so that is a named panic. */
+static inline AetherSlice aether_slice_set(AetherSlice* p, AetherSlice v, size_t elem_size,
+                                           void (*drop)(const void*), const char* file,
+                                           int line) {
+    AetherSlice old = *p;
+    if (aether_slice_owned(old) && v.ptr != NULL) {
+        uint64_t cap = (old.flags & AETHER_SLICE_GROWN) ? aether_slice_grown_cap(old.len)
+                                                         : old.len;
+        const char* lo = (const char*)old.ptr;
+        const char* at = (const char*)v.ptr;
+        if (at >= lo && at < lo + cap * elem_size)
+            aether_slice_panicf("%s:%d: a slice re-bound to a view of the buffer it owned, "
+                                "which the store frees: copy the elements out first",
+                                file, line);
+    }
+    aether_slice_drop(p, elem_size, drop);
+    return v;
 }
 
 /* #3072: `free(s)`: the buffer `make([]T, n)` handed out, or a pointer the

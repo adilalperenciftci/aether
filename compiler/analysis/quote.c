@@ -931,10 +931,16 @@ int quote_check_recursion(QuoteErrorFn report) {
     return errors;
 }
 
-/* Every helper `h` reaches, callees before callers, appended once each. */
+/* Every helper `h` reaches, callees before callers, appended once each.
+ * A cycle is already an error (quote_check_recursion), but quote_finish still
+ * runs after it, so a helper on the current path is skipped: mark 3 = on it. */
 static void reach(QHelper* h, QHelper*** out, int* n, int* cap) {
+    if (h->mark == 3) return;
     for (int i = 0; i < *n; i++) if ((*out)[i] == h) return;
+    int saved = h->mark;
+    h->mark = 3;
     for (int i = 0; i < h->ncallees; i++) reach(h->callees[i], out, n, cap);
+    h->mark = saved;
     for (int i = 0; i < *n; i++) if ((*out)[i] == h) return;
     if (*n == *cap) {
         *cap = *cap ? *cap * 2 : 4;
