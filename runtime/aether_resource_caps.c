@@ -41,9 +41,6 @@
 #    include <mach-o/getsect.h>
 #  elif defined(__linux__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
 #    include <link.h>
-#    if defined(__linux__) || defined(__FreeBSD__)
-#      include <sys/auxv.h>   /* AT_PHDR: the program's headers, among the objects */
-#    endif
 #    define AETHER_RV_PHDR 1
 #  endif
 #endif
@@ -951,9 +948,9 @@ static void own_realloc_end(void* p, void* np, size_t old_bytes, size_t new_byte
  * copy of this file, while the account in use was set through another (an
  * Aether host's std.host, or a C host's). So the accounts, the table of
  * blocks, the lock and each thread's account in use live in one copy, the
- * first loaded image with a record of them, or that exports
- * aether_accounts_rendezvous (aether_rendezvous_find, as the sandbox levels
- * do; an executable that exports nothing has its record, #3445), and every
+ * first loaded image with a record of them (aether_rendezvous_find, as the
+ * sandbox levels do; an executable that exports nothing has its record,
+ * #3445), and every
  * copy works through it: the lock is one per process, and an account in use
  * on one thread is refused on another whichever copy asks. A copy finds it
  * once, the first time it enters an execution or calls the account API, and
@@ -1005,11 +1002,9 @@ static const AetherAccountsRendezvous g_own_accounts = {
 };
 
 /* This copy's, which its record names (aether_rv_mark.h, #3445): the other
- * copies find it by the record, never by name, so it is the copy's own. */
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((used))
-#endif
-AETHER_COPY_LOCAL const AetherAccountsRendezvous* aether_accounts_rendezvous(void) {
+ * copies find it by the record where records are read, and by name where
+ * not (AETHER_RV_FN). */
+AETHER_RV_FN const AetherAccountsRendezvous* aether_accounts_rendezvous(void) {
     return &g_own_accounts;
 }
 
@@ -1198,23 +1193,32 @@ AETHER_CAPS_API AetherExecAccount* aether_exec_account_make(uint64_t memory_byte
  * that must be one per process (the sandbox levels a thread is inside, the
  * execution accounts) lives in one copy, the first loaded image, in load
  * order, with a record of it (aether_rv_mark.h): every copy asks the same
- * question, so they agree, whatever the images export (#3445). An image is
- * read while it is held loaded, and a record counts only when the function
- * it names lies inside its image. The copy that owns the state must stay
- * loaded while another uses it.
+ * question, so they agree, whatever the images export (#3445). A record
+ * counts only when the function it names lies inside its image.
+ *
+ * The walk stops at the first record, and the asking copy's own image has
+ * one, so it reads no image loaded after that one. Those before it are
+ * loaded whole, relocated: the loader loads one library at a time (glibc's
+ * and musl's load lock, dyld's, the Windows loader lock), adds each at the
+ * end of the list, and relocates what one load brings before any of its
+ * constructors runs. So no copy waits for a load or tests an image by name,
+ * and every copy answers alike at any moment. An image is held, or read
+ * under the loader's lock, while it is read; the copy that owns the state
+ * must stay loaded while another uses it.
  * ------------------------------------------------------------------ */
 
 #if AETHER_RV_MARKS
 #  if AETHER_RV_ELF
 #    define RV_DESC_AT offsetof(AetherRvMark, fn_offset)
-#    define RV_DESC_SIZE sizeof(int32_t)
+#    define RV_DESC_SIZE (2 * sizeof(int32_t))
 #  else
 #    define RV_DESC_AT offsetof(AetherRvMark, fn)
 #    define RV_DESC_SIZE sizeof(aether_rv_fn)
 #  endif
 
 /* The record of `kind` among the notes in [p, p + size), aligned to `align`
- * (4 or 8) as ELF notes are (aether_rv_mark.h), or NULL. */
+ * (4 or 8) as ELF notes are (aether_rv_mark.h), or NULL. Sizes past what is
+ * left end the walk, so a malformed note never wraps it around. */
 static const AetherRvMark* rv_mark_in(const unsigned char* p, size_t size, size_t align,
                                       uint32_t kind) {
     if (align != 8) align = 4;
@@ -1224,7 +1228,8 @@ static const AetherRvMark* rv_mark_in(const unsigned char* p, size_t size, size_
         memcpy(&namesz, p + at, 4);
         memcpy(&descsz, p + at + 4, 4);
         memcpy(&type, p + at + 8, 4);
-        if (namesz > size || descsz > size) break;
+        size_t left = size - at - 12;
+        if ((size_t)namesz > left || (size_t)descsz > left) break;
         size_t desc = (12 + (size_t)namesz + align - 1) & ~(align - 1);
         size_t next = (desc + (size_t)descsz + align - 1) & ~(align - 1);
         if (next > size - at) break;
@@ -1256,7 +1261,7 @@ static void* rv_mark_fn(const AetherRvMark* m) {
 /* The function the module's record of `kind` names (its .aerv section, from
  * the headers the loader maps with it), when it lies inside the module;
  * NULL otherwise. The module is held while it is read, and one another
- * thread has unloaded is skipped. */
+ * thread has unloaded since the list was taken is skipped. */
 static void* rv_pe_mark(HMODULE listed, uint32_t kind) {
     HMODULE m = NULL;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCWSTR)(const void*)listed, &m) ||
@@ -1265,7 +1270,7 @@ static void* rv_pe_mark(HMODULE listed, uint32_t kind) {
     void* f = NULL;
     const unsigned char* base = (const unsigned char*)m;
     const IMAGE_DOS_HEADER* dos = (const IMAGE_DOS_HEADER*)(const void*)base;
-    if (dos->e_magic == IMAGE_DOS_SIGNATURE && dos->e_lfanew > 0) {
+    if (m == listed && dos->e_magic == IMAGE_DOS_SIGNATURE && dos->e_lfanew > 0) {
         const IMAGE_NT_HEADERS* nt = (const IMAGE_NT_HEADERS*)(const void*)(base + dos->e_lfanew);
         if (nt->Signature == IMAGE_NT_SIGNATURE) {
             const IMAGE_SECTION_HEADER* s = IMAGE_FIRST_SECTION(nt);
@@ -1289,17 +1294,18 @@ static void* rv_pe_mark(HMODULE listed, uint32_t kind) {
 #if defined(__APPLE__) && AETHER_RV_MARKS && defined(RTLD_NOLOAD)
 /* The function image `i`'s record of `kind` names (its __DATA_CONST,
  * __aether_rv section), when it lies inside the image; NULL otherwise. An
- * image but the program is held while it is read (a dlopen without loading,
- * which waits for a load in progress and fails for an image no longer
- * loaded), and read only while it is still the image listed. */
-static void* rv_macho_mark(uint32_t i, uint32_t kind, const AetherRvMark* self) {
+ * image but the program is held while it is read (a dlopen of the path the
+ * loader gives for its header, without loading), and read only while that
+ * header is still an image's. */
+static void* rv_macho_mark(uint32_t i, uint32_t kind) {
     const struct mach_header* h = _dyld_get_image_header(i);
     if (!h) return NULL;
     void* held = NULL;
     if (i > 0) {
-        const char* name = _dyld_get_image_name(i);
         Dl_info di;
-        if (!name || !(held = dlopen(name, RTLD_LAZY | RTLD_NOLOAD))) return NULL;
+        if (!dladdr(h, &di) || di.dli_fbase != (const void*)h || !di.dli_fname) return NULL;
+        held = dlopen(di.dli_fname, RTLD_LAZY | RTLD_NOLOAD);
+        if (!held) return NULL;
         if (!dladdr(h, &di) || di.dli_fbase != (const void*)h) {
             dlclose(held);
             return NULL;
@@ -1317,72 +1323,43 @@ static void* rv_macho_mark(uint32_t i, uint32_t kind, const AetherRvMark* self) 
     if (mark) {
         void* q = rv_mark_fn(mark);
         Dl_info di;
-        if (mark == self || (dladdr(q, &di) && di.dli_fbase == (const void*)h)) f = q;
+        if (dladdr(q, &di) && di.dli_fbase == (const void*)h) f = q;
     }
     if (held) dlclose(held);
     return f;
 }
 #endif
 
-#if defined(AETHER_RV_PHDR) && AETHER_RV_ELF && defined(RTLD_NOLOAD)
-/* A loaded object, the addresses its segments span, and the function its
- * record of the kind looked for names, when that lies inside it (#3442),
- * read from its notes while dl_iterate_phdr holds the loader's lock; and
- * whether it is the program, which is loaded whole before any of its code
- * runs: the object whose headers the kernel gave the loader (AT_PHDR), and
- * where those are not known, the one with no name or the walk's first
- * (musl and FreeBSD name the program, glibc does not). */
-typedef struct {
-    const char* name;
-    uintptr_t lo, hi;
-    const AetherRvMark* mark;
-    void* fn;
-    int program;
-} RvObject;
-typedef struct { RvObject* o; int n, cap, oom; uint32_t kind; const void* program_phdr; } RvObjects;
-
-static const void* rv_program_phdr(void) {
-#  if defined(__linux__)
-    return (const void*)getauxval(AT_PHDR);
-#  elif defined(__FreeBSD__)
-    void* p = NULL;
-    return elf_aux_info(AT_PHDR, &p, (int)sizeof(p)) == 0 ? p : NULL;
-#  else
-    return NULL;
-#  endif
-}
+#if defined(AETHER_RV_PHDR) && AETHER_RV_ELF
+/* The function the first object with a record of `kind` names, read while
+ * dl_iterate_phdr holds the loader's lock: its notes, each inside the
+ * object's loaded segments, and the function inside them too (#3442). */
+typedef struct { uint32_t kind; void* fn; } RvWalk;
 
 static int rv_collect(struct dl_phdr_info* info, size_t size, void* data) {
     (void)size;
-    RvObjects* objs = (RvObjects*)data;
-    if (objs->n == objs->cap) {
-        int cap = objs->cap ? objs->cap * 2 : 64;
-        RvObject* grown = (RvObject*)realloc(objs->o, (size_t)cap * sizeof(RvObject));
-        if (!grown) { objs->oom = 1; return 1; }   /* stops the walk */
-        objs->o = grown;
-        objs->cap = cap;
-    }
-    RvObject* o = &objs->o[objs->n++];
-    o->name = info->dlpi_name;
-    o->lo = UINTPTR_MAX;
-    o->hi = 0;
-    o->mark = NULL;
-    o->fn = NULL;
-    o->program = objs->program_phdr ? (const void*)info->dlpi_phdr == objs->program_phdr
-                                    : (objs->n == 1 || !info->dlpi_name || !info->dlpi_name[0]);
+    RvWalk* w = (RvWalk*)data;
+    uintptr_t lo = UINTPTR_MAX, hi = 0;
     for (int k = 0; k < (int)info->dlpi_phnum; k++) {
-        uintptr_t a = (uintptr_t)info->dlpi_addr + (uintptr_t)info->dlpi_phdr[k].p_vaddr;
-        if (info->dlpi_phdr[k].p_type == PT_NOTE && !o->mark)
-            o->mark = rv_mark_in((const unsigned char*)a, (size_t)info->dlpi_phdr[k].p_memsz,
-                                 (size_t)info->dlpi_phdr[k].p_align, objs->kind);
         if (info->dlpi_phdr[k].p_type != PT_LOAD) continue;
+        uintptr_t a = (uintptr_t)info->dlpi_addr + (uintptr_t)info->dlpi_phdr[k].p_vaddr;
         uintptr_t b = a + (uintptr_t)info->dlpi_phdr[k].p_memsz;
-        if (a < o->lo) o->lo = a;
-        if (b > o->hi) o->hi = b;
+        if (a < lo) lo = a;
+        if (b > hi) hi = b;
     }
-    if (o->mark) {
-        uintptr_t f = (uintptr_t)rv_mark_fn(o->mark);
-        if (f >= o->lo && f < o->hi) o->fn = (void*)f;
+    for (int k = 0; k < (int)info->dlpi_phnum; k++) {
+        if (info->dlpi_phdr[k].p_type != PT_NOTE) continue;
+        uintptr_t a = (uintptr_t)info->dlpi_addr + (uintptr_t)info->dlpi_phdr[k].p_vaddr;
+        size_t n = (size_t)info->dlpi_phdr[k].p_memsz;
+        if (a < lo || a >= hi || n > hi - a) continue;
+        const AetherRvMark* m =
+            rv_mark_in((const unsigned char*)a, n, (size_t)info->dlpi_phdr[k].p_align, w->kind);
+        if (!m) continue;
+        uintptr_t f = (uintptr_t)rv_mark_fn(m);
+        if (f >= lo && f < hi) {
+            w->fn = (void*)f;
+            return 1;   /* the first: the walk ends */
+        }
     }
     return 0;
 }
@@ -1414,27 +1391,13 @@ void* aether_rendezvous_find(const char* symbol, uint32_t kind, const AetherRvMa
     /* The images in load order, the program first: the first with a
      * record. */
     uint32_t n = _dyld_image_count();
-    for (uint32_t i = 0; i < n && !p; i++) p = rv_macho_mark(i, kind, self);
-#elif defined(AETHER_RV_PHDR) && AETHER_RV_ELF && defined(RTLD_NOLOAD)
+    for (uint32_t i = 0; i < n && !p; i++) p = rv_macho_mark(i, kind);
+#elif defined(AETHER_RV_PHDR) && AETHER_RV_ELF
     /* The loaded objects in load order, the program first: the first with a
-     * record. Their records are read while dl_iterate_phdr holds the
-     * loader's lock; an object but the program and this one counts once it
-     * is loaded whole, its relocations done: a dlopen without loading waits
-     * for a load in progress, and fails for an object no longer loaded. Out
-     * of memory partway, what was taken is searched. */
-    RvObjects objs = { NULL, 0, 0, 0, kind, rv_program_phdr() };
-    dl_iterate_phdr(rv_collect, &objs);
-    for (int i = 0; i < objs.n && !p; i++) {
-        if (!objs.o[i].fn) continue;
-        if (!objs.o[i].program && objs.o[i].mark != self) {
-            const char* name = objs.o[i].name;
-            void* h = (name && name[0]) ? dlopen(name, RTLD_LAZY | RTLD_NOLOAD) : NULL;
-            if (!h) continue;
-            dlclose(h);
-        }
-        p = objs.o[i].fn;
-    }
-    free(objs.o);
+     * record. */
+    RvWalk w = { kind, NULL };
+    dl_iterate_phdr(rv_collect, &w);
+    p = w.fn;
 #elif (defined(__unix__) || defined(__APPLE__)) && defined(RTLD_DEFAULT)
     /* The global scope in load order. */
     p = dlsym(RTLD_DEFAULT, symbol);

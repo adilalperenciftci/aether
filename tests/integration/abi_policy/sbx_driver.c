@@ -1,5 +1,5 @@
 /* A host with no runtime of its own (#3437): loads argv[1], a library
- * exporting a sandbox rendezvous of another layout (foreign_sbx.c), global,
+ * with a sandbox rendezvous of another layout (foreign_sbx.c, by its record), global,
  * then argv[2], sbx_copy.c's library with a runtime copy, local, and runs
  * that copy's checks. The foreign rendezvous is then the first a copy finds
  * on every platform. */

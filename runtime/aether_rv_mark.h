@@ -15,12 +15,14 @@
  *
  * The record is laid out as an ELF note on every format: the 12-byte header,
  * the name "AetherRV" (9 bytes, so what follows starts at 24 whether notes
- * are aligned to 4 or to 8), and what names the copy's rendezvous function:
+ * are aligned to 4 or to 8), and what names the copy's rendezvous function,
+ * 32 bytes in all, a multiple of 8, so the note after it is found either way:
  *
- * - ELF: a note in a read-only section, emitted by assembly, whose 4-byte
- *   desc is the function's offset from the desc, fixed when the image is
- *   linked (the function is hidden, so nothing relocates it at load and
- *   nothing interposes it). A loaded object shows its notes (PT_NOTE).
+ * - ELF: a note in a read-only section aligned to 8, emitted by assembly,
+ *   whose 8-byte desc is the function's offset from the desc (then 4 zero
+ *   bytes), fixed when the image is linked (the function is hidden, so
+ *   nothing relocates it at load and nothing interposes it). A loaded
+ *   object shows its notes (PT_NOTE).
  * - PE: a .aerv section holding the function's address, read from the
  *   section table the loader maps with the module.
  * - Mach-O: a __DATA_CONST,__aether_rv section holding the address.
@@ -62,6 +64,7 @@ typedef struct AetherRvMark {
     char name[12];       /* AETHER_RV_NAME, padded to 4 */
 #if AETHER_RV_ELF
     int32_t fn_offset;   /* the function's address less this field's */
+    uint32_t reserved;   /* 0: the desc is 8 bytes, for notes aligned to 8 */
 #else
     aether_rv_fn fn;     /* the function's address */
 #endif
@@ -69,6 +72,18 @@ typedef struct AetherRvMark {
 
 #define AETHER_RV_STR2(x) #x
 #define AETHER_RV_STR(x) AETHER_RV_STR2(x)
+
+/* A rendezvous function a record names: the copy's own (hidden) where
+ * records are read, so ELF's offset is fixed at link time and nothing
+ * interposes it; exported where the copies look each other up by name in
+ * the global scope instead (Cygwin, and the systems not listed above). */
+#if AETHER_RV_MARKS
+#  define AETHER_RV_FN __attribute__((used)) AETHER_COPY_LOCAL
+#elif AETHER_GCC_COMPAT
+#  define AETHER_RV_FN __attribute__((used, visibility("default")))
+#else
+#  define AETHER_RV_FN
+#endif
 
 /* AETHER_RV_MARK(anchor, kind, fn): this image's record of `kind` naming
  * `fn`, a function of this image (hidden on ELF, AETHER_COPY_LOCAL, so its
@@ -78,15 +93,15 @@ typedef struct AetherRvMark {
 #if AETHER_RV_MARKS && AETHER_RV_ELF
 #  define AETHER_RV_MARK(anchor, kind, fn)                                    \
     __asm__(".pushsection .note.aether.rv,\"a\",%note\n"                      \
-            "\t.balign 4\n"                                                   \
+            "\t.balign 8\n"                                                   \
             "\t.globl " #anchor "\n"                                          \
             "\t.hidden " #anchor "\n"                                         \
             #anchor ":\n"                                                     \
-            "\t.long 9, 4, " AETHER_RV_STR(kind) "\n"                         \
+            "\t.long 9, 8, " AETHER_RV_STR(kind) "\n"                         \
             "\t.asciz \"" AETHER_RV_NAME "\"\n"                               \
             "\t.balign 4\n"                                                   \
             "\t.long " #fn " - .\n"                                           \
-            "\t.balign 4\n"                                                   \
+            "\t.long 0\n"                                                     \
             "\t.popsection\n");                                               \
     extern __attribute__((visibility("hidden"))) const AetherRvMark anchor
 #elif AETHER_RV_MARKS

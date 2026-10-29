@@ -120,11 +120,9 @@ static const AetherSandboxRendezvous g_own_rv = {
 };
 
 /* This copy's, which its record names (aether_rv_mark.h, #3445): the other
- * copies find it by the record, never by name, so it is the copy's own. */
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((used))
-#endif
-AETHER_COPY_LOCAL const AetherSandboxRendezvous* aether_sandbox_rendezvous(void) {
+ * copies find it by the record where records are read, and by name where
+ * not (AETHER_RV_FN). */
+AETHER_RV_FN const AetherSandboxRendezvous* aether_sandbox_rendezvous(void) {
     return &g_own_rv;
 }
 

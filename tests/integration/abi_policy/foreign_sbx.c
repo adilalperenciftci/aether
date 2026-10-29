@@ -46,7 +46,7 @@ typedef struct {
 static const Later g_rv = { RV_VERSION, (uint32_t)sizeof(Later), &g_threads, levels, 0 };
 #endif
 
-__attribute__((used)) AETHER_COPY_LOCAL const void* foreign_sandbox_rendezvous(void) {
+AETHER_RV_FN const void* foreign_sandbox_rendezvous(void) {
     return &g_rv;
 }
 

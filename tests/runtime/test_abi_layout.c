@@ -220,7 +220,8 @@ TEST_CATEGORY(abi_rendezvous_layouts, TEST_CATEGORY_RUNTIME) {
 /* The record each copy carries in its image (#3445), an ELF note on every
  * format: how copies of different releases find each other, so it never
  * changes (another layout takes another name). Its desc is the function's
- * offset from the desc on ELF, the function's address elsewhere. */
+ * offset from the desc on ELF (then 4 zero bytes), the function's address
+ * elsewhere. */
 typedef struct {
     uint32_t namesz;
     uint32_t descsz;
@@ -232,7 +233,7 @@ TEST_CATEGORY(abi_rv_mark_layout, TEST_CATEGORY_RUNTIME) {
     ASSERT_EQ(24, sizeof(RvMarkHead_1));
 #if AETHER_RV_ELF
     ASSERT_EQ(24, offsetof(AetherRvMark, fn_offset));
-    ASSERT_EQ(28, sizeof(AetherRvMark));
+    ASSERT_EQ(32, sizeof(AetherRvMark));   /* an 8-byte desc: 4 of offset, 4 of zeros */
 #else
     ASSERT_EQ(24, offsetof(AetherRvMark, fn));
     ASSERT_EQ(24 + sizeof(void (*)(void)), sizeof(AetherRvMark));

@@ -804,9 +804,11 @@ refused on another thread whichever copy is asked.
   in load order, the program first. So a program's own copy is found though
   its executable exports nothing (on Windows, and on Linux without
   `-rdynamic`, as a C host linked with `ae cflags --libs` is), whenever the
-  libraries are loaded (#3445). Where two copies do not find each other
-  (on Cygwin, which reads no records), a copy refuses (-1) to put in use an
-  account the other made, rather than charge one it does not guard.
+  libraries are loaded (#3445). Where no records are read (Cygwin, and
+  systems with no `dl_iterate_phdr`), copies look each other up by name in
+  the global scope; where two do not find each other, a copy refuses (-1)
+  to put in use an account the other made, rather than charge one it does
+  not guard.
 - The accounts carry a version and the sizes of what the copies pass each
   other. A copy that finds accounts of another layout (another Aether
   version) does not share them: it says so once on stderr, naming

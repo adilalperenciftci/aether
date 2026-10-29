@@ -7,7 +7,7 @@
 
 static const struct { uint32_t version, size, account_size, limits_size; } g_foreign = { 99, 16, 0, 0 };
 
-__attribute__((used)) AETHER_COPY_LOCAL const void* foreign_accounts_rendezvous(void) {
+AETHER_RV_FN const void* foreign_accounts_rendezvous(void) {
     return &g_foreign;
 }
 
