@@ -171,6 +171,12 @@ fn run(data: string, chunk: int, window: int, quiet: bool) {
     scheduler_release_actor(pp)
     scheduler_release_actor(cp)
     wait_for_idle()
+    // Reclaimed now, so the next run's spawns reuse their blocks: left to the
+    // cores, a parked core holds the reclaim back past them, the spawns take
+    // new blocks, and the high-water mark that sets could rise in every
+    // window the leak check measures, a leak it is not. One that never
+    // becomes reusable still grows every run.
+    check(scheduler_reclaim_released() == 0, "released actors still retired after a run")
 }
 
 fn round() {
