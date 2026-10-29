@@ -670,18 +670,29 @@ int scheduler_actor_end(ActorBase* actor, const char* reason, int bit) {
     return 1;
 }
 
-void scheduler_step_actor(ActorBase* actor) {
-    if (!actor || !actor->step) return;
-    if (atomic_load_explicit(&actor->dead, memory_order_relaxed)) return;
-    // Taken by the outermost step of the actor on the stack (an ask's poll
-    // can step it again inside its own), for scheduler_actor_end.
-    int outer_step = atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire);
+/* One step of `actor`, or none: 1 when it stepped. Its step lock is held
+ * while it steps. An actor whose step is on the stack already (it asked, and
+ * this is the ask's poll) is not stepped again inside it (#3391): its next
+ * message waits for the handler to return, as with threads, where the
+ * waiting thread steps only its target and an actor stepping is left alone.
+ * A second step there ran the actor's next handler inside the first, its
+ * state changing under it, and a stop() or a panic in it finalized the
+ * actor (its Down sent, its queue dropped) while the first still ran. */
+static int coop_step(ActorBase* actor) {
+    if (!actor || !actor->step) return 0;
+    if (atomic_load_explicit(&actor->dead, memory_order_relaxed)) return 0;
+    if (atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire)) return 0;
     // Inside the panic barrier both schedulers share (#2974): a panic is a
     // death, finalized here, with its Down, not the end of the program; a
     // stop() or a kill that came while the handler ran is finalized after it.
     // Where the target has no setjmp (wasi) a panic still ends the program.
     aether_step_barrier(actor, coop_finalize, coop_fail_slot, NULL);
-    if (!outer_step) atomic_flag_clear_explicit(&actor->step_lock, memory_order_release);
+    atomic_flag_clear_explicit(&actor->step_lock, memory_order_release);
+    return 1;
+}
+
+void scheduler_step_actor(ActorBase* actor) {
+    (void)coop_step(actor);
 }
 
 int aether_scheduler_poll(int max_per_actor) {
@@ -704,7 +715,7 @@ int aether_scheduler_poll(int max_per_actor) {
             while (processed < limit) {
                 coop_refill(actor);
                 if (atomic_load_explicit(&actor->mailbox.count, memory_order_acquire) == 0) break;
-                scheduler_step_actor(actor);
+                if (!coop_step(actor)) break;   /* stepping higher up the stack, or dead */
                 processed++;
             }
         } else if (has_timeout) {
@@ -714,8 +725,7 @@ int aether_scheduler_poll(int max_per_actor) {
              * check counted as one kept wait_for_idle() and the end of main
              * spinning until the deadline (#3219). */
             uint64_t armed_at = actor->last_activity_ns;
-            scheduler_step_actor(actor);
-            if (actor->last_activity_ns != armed_at) processed++;
+            if (coop_step(actor) && actor->last_activity_ns != armed_at) processed++;
         }
         total += processed;
     }

@@ -3647,6 +3647,7 @@ ci-coop: clean compiler ae
 	           tests/regression/test_actor_down_notices.ae \
 	           tests/regression/test_actor_links.ae \
 	           tests/regression/test_ask_failure_reasons.ae \
+	           tests/regression/test_actor_step_reentry.ae \
 	           examples/01-language/01-hello.ae; do \
 		printf "  %-50s " "$$src"; \
 		if AETHER_HOME="" ./$(BUILD_DIR)/ae run "$$src" >/tmp/ae_coop_out.txt 2>&1; then \

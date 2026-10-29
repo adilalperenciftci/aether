@@ -22,7 +22,11 @@
  *   - at entry, the step puts aside the per-thread context of the code it
  *     runs inside, and starts with none of it;
  *   - at exit, normal or by panic, it gives that context back as it was;
- *   - its panic, and its end, undo only what the step itself made.
+ *   - its panic, and its end, undo only what the step itself made;
+ *   - no step runs an actor whose step is already on the stack, so none
+ *     finalizes an actor whose handler is still running: the multicore
+ *     scheduler steps an actor only under its step lock, and the
+ *     cooperative one leaves an actor stepping out of its polls (#3391).
  *
  * The context, part by part:
  *   - the ask in hand (g_current_reply_slot) and the actor stepping
