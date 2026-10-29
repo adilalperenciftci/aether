@@ -10,7 +10,10 @@
  *
  * A step inside a library call is not the call either (#3392, #3396):
  * the third test steps an actor inside an execution, on a core's thread.
- * Nor is it charged to the execution account in use (#2954): the last.
+ * Nor is it charged to the execution account in use (#2954): the fourth.
+ * And what a step runs after its handler, the drops of an actor that
+ * panicked or ended in it, is the step's as its handler is (#3416): the
+ * last.
  */
 
 #include "test_harness.h"
@@ -298,4 +301,137 @@ TEST_CATEGORY(step_context_account_put_aside, TEST_CATEGORY_RUNTIME) {
     aether_caps_free(q->kept, 4000);
     free(p);
     free(q);
+}
+
+/* #3416: what a step runs after its handler is the step's, inline too. On
+ * core 0's thread, D's handler puts an account in use, arms a deadline that
+ * has passed by then and enters an execution, as a host service calling an
+ * export from a handler does; inside it, it sends to E and to F, idle on
+ * core 0, so each is stepped inline, inside the call. E queues a message to
+ * itself and panics: its barrier drops the message E ran on and, finalizing
+ * E, the one queued. F queues one and stops: the finalize after its handler
+ * drops it. Each drop is the receiver's code (its release_message): it keeps
+ * a 4000-byte cap-aware block, then polls as a loop head does. Before, the
+ * drops ran in D's context, given back first: each block was charged to D's
+ * account, and the poll raised D's deadline in the drop. Now they run in the
+ * receiver's step, as on a core's thread: nothing charged, nothing cut, and
+ * D's call is cut at its own next safe point. */
+enum { DC_CALLER = 0, DC_PANICS = 1, DC_STOPS = 2 };
+
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    int how;
+    ActorBase* tell[2];
+    atomic_long held;          // D: what its account holds after the sends
+    atomic_int outcome;        // D: its call's outcome
+    atomic_int done;
+} DcActor;
+
+static atomic_int g_dc_began;  // drops begun
+static atomic_int g_dc_ended;  // drops that ran to their end (not cut)
+static void* g_dc_kept[4];
+static atomic_int g_dc_kept_n;
+
+static void dc_release(int type, void* payload) {
+    (void)type;
+    (void)payload;
+    atomic_fetch_add(&g_dc_began, 1);
+    int i = atomic_fetch_add(&g_dc_kept_n, 1);
+    void* b = aether_caps_malloc(4000);
+    if (i < 4) g_dc_kept[i] = b;
+    (void)aether_exec_poll();   // a loop head: the call's deadline cut it here
+    atomic_fetch_add(&g_dc_ended, 1);
+}
+
+static void dc_step(DcActor* self) {
+    Message msg;
+    if (!mailbox_receive(&self->mailbox, &msg)) {
+        atomic_store_explicit(&self->active, 0, memory_order_relaxed);
+        return;
+    }
+    aether_reply_slot_set(msg._reply_slot);
+    if (self->how == DC_CALLER) {
+        if (msg.payload_ptr) aether_free_message(msg.payload_ptr);
+        AetherExecLimits lim = { 0, 0, AETHER_DEADLINE_ELAPSED, NULL };
+        AetherExecAccount* a = aether_exec_account_new(&lim);
+        aether_exec_use(a, NULL);
+        aether_set_call_deadline(1);
+        sc_sleep_ms(5);
+        AetherJmpFrame* x = aether_exec_enter();
+        if (AETHER_SIGSETJMP(x->buf, 1)) {
+            aether_exec_failed();
+        } else {
+            ScMsg m = { 1, 0 };
+            aether_send_message(self->tell[0], &m, sizeof m);
+            aether_send_message(self->tell[1], &m, sizeof m);
+            atomic_store(&self->held, (long)aether_exec_account_used(a));
+            (void)aether_exec_poll();   // the call's own loop head: cut here
+            aether_exec_leave();
+        }
+        atomic_store(&self->outcome, aether_last_outcome());
+        aether_set_call_deadline(0);
+        aether_exec_use(NULL, NULL);
+        aether_exec_account_free(a);
+        atomic_store(&self->done, 1);
+    } else {
+        ScMsg m = { 1, 0 };
+        aether_send_message(self, &m, sizeof m);   // queued: its finalize drops it
+        atomic_store(&self->done, 1);
+        if (self->how == DC_PANICS) {
+            /* The message the handler runs on, as a handler records it. */
+            self->step_type = msg.type;
+            self->step_payload = msg.payload_ptr;
+            aether_panic("the receiver panicked");
+        }
+        if (msg.payload_ptr) aether_free_message(msg.payload_ptr);
+        aether_actor_claim_end((ActorBase*)self, "normal", AETHER_ACTOR_STOPPED);
+    }
+    atomic_store_explicit(&self->active, self->mailbox.count > 0, memory_order_relaxed);
+}
+
+static DcActor* dc_actor(int core, int how) {
+    DcActor* a = calloc(1, sizeof(DcActor));
+    static int next_id = 9950;
+    a->id = next_id++;
+    a->how = how;
+    a->step = (void (*)(void*))dc_step;
+    atomic_init(&a->assigned_core, -1);
+    atomic_init(&a->migrate_to, -1);
+    atomic_init(&a->reply_slot, NULL);
+    atomic_flag_clear_explicit(&a->step_lock, memory_order_relaxed);
+    mailbox_init(&a->mailbox);
+    scheduler_register_actor((ActorBase*)a, core);
+    /* After the registration, which leaves a caller's actor none. */
+    if (how != DC_CALLER) a->release_message = dc_release;
+    return a;
+}
+
+TEST_CATEGORY(step_context_drops_after_the_handler, TEST_CATEGORY_RUNTIME) {
+    scheduler_init(1);
+    DcActor* e = dc_actor(0, DC_PANICS);
+    DcActor* f = dc_actor(0, DC_STOPS);
+    DcActor* d = dc_actor(0, DC_CALLER);
+    d->tell[0] = (ActorBase*)e;
+    d->tell[1] = (ActorBase*)f;
+    scheduler_start();
+
+    ScMsg m = { 1, 0 };
+    aether_send_message(d, &m, sizeof m);
+    int done = sc_wait(&d->done, 1, 6000);
+    int stepped = sc_wait(&e->done, 1, 2000) && sc_wait(&f->done, 1, 2000);
+    int dropped = sc_wait(&g_dc_began, 3, 2000);
+    scheduler_shutdown();
+    scheduler_cleanup();
+
+    ASSERT_TRUE(done);
+    ASSERT_TRUE(stepped);
+    ASSERT_TRUE(dropped);
+    ASSERT_EQ(3, atomic_load(&g_dc_began));  // E's held message and queued one, F's queued one
+    ASSERT_EQ(3, atomic_load(&g_dc_ended));  // none cut by D's deadline
+    ASSERT_EQ(0, (int)atomic_load(&d->held));  // none charged to D's account
+    ASSERT_EQ(AETHER_DEADLINE, atomic_load(&d->outcome));  // D cut at its own loop head
+    for (int i = 0; i < atomic_load(&g_dc_kept_n) && i < 4; i++) aether_caps_free(g_dc_kept[i], 4000);
+    free(d);
+    free(e);
+    free(f);
 }

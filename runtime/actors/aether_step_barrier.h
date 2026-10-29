@@ -22,13 +22,14 @@
  *   - at entry, the step puts aside the per-thread context of the code it
  *     runs inside, and starts with none of it;
  *   - at exit, normal or by panic, it gives that context back as it was;
- *   - its panic, and its end, undo only what the step itself made; the
- *     context is given back as soon as the handler is done, before the
- *     scheduler's after-step work (a finalize runs an ending actor's drops)
- *     and, after a panic, before the program code that follows (the drop
- *     of the message it ran on, the death hook), which runs in containment
- *     frames of its own (aether_contain): a panic there ends nothing but
- *     itself, and never leaves the context put aside (#3403);
+ *   - its panic, and its end, undo only what the step itself made;
+ *   - what follows the handler is the step's too, and runs in its context
+ *     as on the actor's own thread: the drop of the message a panicking
+ *     handler ran on, the finalize of an actor the step ended (its drops
+ *     are the actor's code), the death hook. Each runs in a containment
+ *     frame of its own (aether_contain), so a panic there ends nothing but
+ *     itself and cannot leave with the context put aside (#3403), and the
+ *     context is given back once they are done (#3416);
  *   - no step runs an actor whose step is already on the stack, so none
  *     finalizes an actor whose handler is still running: the multicore
  *     scheduler steps an actor only under its step lock, and the
@@ -37,7 +38,9 @@
  * The context, part by part:
  *   - the ask in hand (g_current_reply_slot) and the actor stepping
  *     (g_current_step_actor): a handler that sends, or asks, before it
- *     replies still answers its own asker;
+ *     replies still answers its own asker. Once the handler is done there
+ *     is neither, as on a core's thread after a step: what follows is no
+ *     handler's;
  *   - the in-step flags (g_aether_in_actor_step, g_aether_current_actor_id):
  *     the outer handler keeps its signal recovery after an inner step;
  *   - a supervisor's restart claim, the reborn block and the spawn brackets
@@ -47,7 +50,8 @@
  *     every other it shares the count with (aether_sandbox.c, #3393): a
  *     receiver stepped inside an enforce block is checked as it is on a
  *     thread of its own, against the levels it pushes itself and no other,
- *     and the block's levels are in force again when the send returns;
+ *     its drops after the handler included (#3416), and the block's levels
+ *     are in force again when the send returns;
  *   - the library calls (executions) running on the thread, with what they
  *     carry (aether_unwind.c, aether_exec.c, aether_host.c, #3392, #3396):
  *     an interruption on its way through them, the call's deadline and
@@ -56,13 +60,14 @@
  *     send's inline step, a cooperative ask's poll in an export) is not the
  *     call: its loop heads are not cut by the call's deadline, a try in it
  *     catches its own panics, its failed allocations are its own, and it
- *     reads no caller info, as on a core's thread. The call is cut at its
- *     own next safe point once the step returns;
+ *     reads no caller info, as on a core's thread, in its handler and in
+ *     its drops after it. The call is cut at its own next safe point once
+ *     the step returns;
  *   - the execution account in use (aether_resource_caps.c, #2954): an
  *     actor stepped inside code that has one in use is charged nothing to
- *     it, as on a thread of its own; the account stays the thread's
- *     meanwhile, so no other thread takes it, and one the step left in use
- *     is let go.
+ *     it, its drops included, as on a thread of its own; the account stays
+ *     the thread's meanwhile, so no other thread takes it, and one the step
+ *     left in use is let go.
  *
  * Each part costs a step only when some thread holds that kind of context:
  * it is put aside behind a load of a global that says so
@@ -85,6 +90,8 @@
  *
  * Where the target has no setjmp (wasi), AETHER_SIGSETJMP always takes the
  * first arm and a panic aborts the program (aether_panic.h). */
+
+#include <stdio.h>
 
 #include "aether_panic.h"
 #include "aether_frames.h"
@@ -155,6 +162,33 @@ static inline void aether_step_give_back(const AetherStepAside* s) {
     g_current_step_actor = s->step_actor;
 }
 
+/* The finalize of an actor its step ended, in the step's context and in a
+ * containment frame of its own (#3416). Its drops are the actor's code, each
+ * contained already (aether_message_drop_at_end); what can still leave a
+ * finalize is the panic of the death hook a drop's panic is reported to.
+ * Caught here, it is reported on stderr and the step goes on: it never
+ * leaves with the context put aside. */
+typedef struct {
+    ActorBase* actor;
+    void (*finalize)(ActorBase*);
+} AetherStepFinalize;
+
+static inline void aether_step_finalize_body(void* p) {
+    AetherStepFinalize* c = (AetherStepFinalize*)p;
+    c->finalize(c->actor);
+}
+
+static inline void aether_step_finalize(ActorBase* actor, void (*finalize)(ActorBase*)) {
+    AetherStepFinalize c = { actor, finalize };
+    const char* r = NULL;
+    void (*rel)(const void*) = NULL;
+    if (aether_contain(aether_step_finalize_body, &c, &r, &rel) == 1) {
+        fprintf(stderr, "aether: the end of actor %d panicked: %s\n", actor->id,
+                aether_panic_reason_text(r));
+        if (rel) rel(r);
+    }
+}
+
 static inline void aether_step_barrier(ActorBase* actor,
                                        void (*finalize)(ActorBase*),
                                        void (*fail_slot)(void* slot, int why),
@@ -174,26 +208,30 @@ static inline void aether_step_barrier(ActorBase* actor,
         g_aether_in_actor_step = 0;
         g_aether_current_actor_id = -1;
         aether_try_pop();
-        /* The step is over: what follows is the scheduler's, and it runs in
-         * the context given back (#3403). A finalize runs program code (an
-         * ending actor's drops) that may panic past it. */
+        /* The handler is done; what follows is still the step's, in its
+         * context, and gives the context back last (#3416). */
         void* unanswered = g_current_reply_slot;
         g_current_reply_slot = NULL;
-        aether_step_give_back(&aside);
         /* A handler that took an ask and returned without replying: no
          * reply can come, since a reply answers the ask its own step took.
          * Its asker learns that now, not at its timeout. */
         if (unanswered) fail_slot(unanswered, AETHER_ASK_NO_REPLY);
         /* Ended while the handler ran (#2974): its stop(), or a kill or a
          * linked actor's death from elsewhere, takes effect now that the
-         * handler has returned, so no Down is sent while it runs. A release
-         * ends it by its own path. */
+         * handler has returned, so no Down is sent while it runs. Its drops
+         * are the actor's code, run as on its own thread, where no handler
+         * is running; the finalize is contained, so nothing leaves it with
+         * the context put aside. A release ends it by its own path. */
         int ended = atomic_load_explicit(&actor->dead, memory_order_acquire);
         if (unlikely(ended != 0)) {
-            if (!(ended & AETHER_ACTOR_RELEASED)) finalize(actor);
+            if (!(ended & AETHER_ACTOR_RELEASED)) {
+                g_current_step_actor = NULL;
+                aether_step_finalize(actor, finalize);
+            }
         } else if (after_step) {
             after_step(actor);
         }
+        aether_step_give_back(&aside);
         return;
     }
 
@@ -223,12 +261,13 @@ static inline void aether_step_barrier(ActorBase* actor,
     void* unanswered = g_current_reply_slot;
     g_current_reply_slot = NULL;
     aether_spawn_step_panicked();
-    /* The step is over. What follows runs program code (drop functions, the
-     * host's death hook) that may panic, and this frame is gone: given back
-     * first, the context is never left put aside by a panic past here, and
-     * each piece of program code runs in a containment frame of its own, so
-     * none ends anything but itself (#3403). */
-    aether_step_give_back(&aside);
+    /* The step is over, and this frame is gone. What follows runs program
+     * code (drop functions, the host's death hook) that may panic: the
+     * actor's, so in the step's context, as on its own thread, where no
+     * handler is running (#3416); each piece in a containment frame of its
+     * own, so none ends anything but itself or leaves with the context put
+     * aside (#3403). The context is given back after them. */
+    g_current_step_actor = NULL;
 
     /* The message (#3142): the release that follows the handler did not
      * run, so what the message owns and its payload go here, as a dropped
@@ -248,12 +287,13 @@ static inline void aether_step_barrier(ActorBase* actor,
     if (unanswered) fail_slot(unanswered, AETHER_ASK_DIED);
 
     // What waits for it is dropped and credited, and its watchers told.
-    finalize(actor);
+    aether_step_finalize(actor, finalize);
 
     aether_fire_death_hook_contained(actor->id, reason);
     /* A heap-built panic message (aether_panic_owned) belongs to whoever
      * caught it, here this barrier. The hook has seen it; release it. */
     if (reason_release) reason_release(reason);
+    aether_step_give_back(&aside);
 }
 
 #endif /* AETHER_STEP_BARRIER_H */

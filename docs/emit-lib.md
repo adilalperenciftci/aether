@@ -671,7 +671,9 @@ deadline, as it did before. An actor stepped on the call's thread inside
 it (a send's inline step, a cooperative ask's poll) is outside it too: the
 call's deadline and cancel do not reach its loops, a `try` in it catches
 its own panics, and the call is cut at its own next safe point once the
-step returns (#3392). Code the runtime runs inside the call in a frame of
+step returns (#3392). The drops its step runs after its handler (of the
+message a panicking handler ran on, and of the messages waiting for an
+actor the step ended) are outside the call as well (#3416). Code the runtime runs inside the call in a frame of
 its own (the drop of an ending actor's messages, when the call ends an
 actor there and then) is cut by the interruption, and the interruption
 goes on to the call: it ends at the call's next safe point, or when it
@@ -760,8 +762,8 @@ aether_exec_account_free(script);
   move to another thread once let go there. Allocations on other threads (an
   actor's handler) are not charged to it, nor those of an actor stepped on
   this thread while it is in use (a send's inline step, a cooperative ask's
-  poll): a step runs in its own context (actor-concurrency.md, "The
-  delivery contract").
+  poll), the drops its step runs after its handler included (#3416): a step
+  runs in its own context (actor-concurrency.md, "The delivery contract").
 - **Ownership.** The account is the host's from `aether_exec_account_new`
   to `aether_exec_account_free`; the runtime keeps nothing of `limits` past
   the call, writes `previous` and keeps nothing of it. Freeing an account

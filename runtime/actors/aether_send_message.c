@@ -113,8 +113,10 @@ void aether_message_drop_at_end(ActorBase* target, Message* msg) {
     if (!aether_message_drop_contained(target, msg, &reason, &reason_release)) return;
     /* Bare, not in a frame of its own as the step barrier's are (#3403): a
      * hook that panics here goes on to the finalize's caller, whose link drain
-     * is journaled for that (#3400), and leaves no step context put aside,
-     * since a finalize runs after its step has given the context back. */
+     * is journaled for that (#3400). It leaves no step context put aside: the
+     * step barrier runs its finalize in a containment frame of its own,
+     * before it gives the context back (#3416), and a finalize elsewhere runs
+     * in no step's put-aside context. */
     aether_fire_death_hook(target->id, reason);
     if (reason_release) reason_release(reason);
 }
