@@ -17,16 +17,21 @@
 #   The shared runtime:
 #     this host, this library on this shared runtime       the baseline
 #     this host, the old library on the old shared runtime
-#     this host, this library on the old shared runtime    refused: at load
+#     this host, this library on the old shared runtime    accepted if the
+#                                                          ABI IDs match;
+#                                                          otherwise refused: at load
 #                                                          (a level-0 runtime
 #                                                          lacks what it
 #                                                          calls) or by the
 #                                                          library's preflight
-#     this importer, the old shared-runtime library        refused at import
+#     this importer, the old shared-runtime library        accepted if the
+#                                                          ABI IDs match,
+#                                                          otherwise refused at import
 #
-# What each prints depends on the host ABI levels alone (the old library's,
-# read from its catalog, and the old header's), never on the versions, so
-# the matrix holds against whichever release came before.
+# Call output depends on the host ABI levels (the old library's, read from
+# its catalog, and the old header's). Shared-runtime acceptance depends on
+# the full runtime ABI IDs, so the matrix also holds against a release
+# with the same ABI as this tree.
 #
 # Fixtures, not tests: mlib.ae is a library with no main and app.ae imports
 # it; the driver builds both.
@@ -160,7 +165,8 @@ run_app() {
 run_app "this importer, the $old_version library" "$TMP/old" "$ROOT" "$AE"
 run_app "the $old_version importer, this library" "$TMP/new" "$OLD_HOME" "$OLD_AE"
 
-# The shared runtime. $1 = case dir, $2 = library dir, $3 = runtime dir:
+# The shared runtime. $1 = case dir, $2 = library dir, $3 = runtime dir,
+# $4 = optional host mode:
 # the runtime's files and the host in one directory, as an application
 # ships them, the runtime loaded first.
 rt_file() { ls "$1/"aether.dll "$1/"libaether.dylib "$1/"libaether.so 2>/dev/null | head -1; }
@@ -170,7 +176,7 @@ run_shared() {
     cp "$2/libmlib.$ext" "$TMP/host_new$exe" "$1/"
     (cd "$1" && PATH="$1:$PATH" LD_LIBRARY_PATH="$1${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
         DYLD_LIBRARY_PATH="$1${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" \
-        "./host_new$exe" "$1/libmlib.$ext" "$(rt_file "$1")" 2>"$1/err" | norm)
+        "./host_new$exe" "$1/libmlib.$ext" "$(rt_file "$1")" "${4:-}" 2>"$1/err" | norm)
 }
 if [ -n "$(rt_file "$ROOT/build/shared")" ] && [ -n "$(rt_file "$OLD_HOME/lib/shared")" ]; then
     build_lib "$TMP/newsh" "$ROOT" "$AE" "--shared-runtime" &&
@@ -179,19 +185,34 @@ if [ -n "$(rt_file "$ROOT/build/shared")" ] && [ -n "$(rt_file "$OLD_HOME/lib/sh
         got="$(run_shared "$TMP/sh_oo" "$TMP/oldsh" "$OLD_HOME/lib/shared")"
         if [ "$old_level" = 0 ]; then want="$level0"; else want="$level1"; fi
         expect "the $old_version library on its shared runtime" "$got" "$want"
+        # The latest published release can have this tree's ABI (especially
+        # just after a release). Read the IDs the libraries actually record:
+        # equal versions alone would miss a revision or layout-flag change.
+        new_abi="$(run_shared "$TMP/sh_nn" "$TMP/newsh" "$ROOT/build/shared" --runtime-abi)"
+        old_abi="$(run_shared "$TMP/sh_oo" "$TMP/oldsh" "$OLD_HOME/lib/shared" --runtime-abi)"
+        [ -n "$new_abi" ] || { bad "this shared-runtime library records no runtime ABI"; exit 1; }
+        if [ "$old_level" != 0 ] && [ -z "$old_abi" ]; then
+            bad "the $old_version shared-runtime library records no runtime ABI"
+            exit 1
+        fi
         got="$(run_shared "$TMP/sh_no" "$TMP/newsh" "$OLD_HOME/lib/shared")"
-        case "$got" in
-            "cannot load the library") [ "$old_level" = 0 ] ||
-                bad "this library on the $old_version shared runtime (level $old_level): refused at load, not by its preflight" ;;
-            "catalog: schema 1.x, host ABI level 1
+        if [ "$new_abi" = "$old_abi" ]; then
+            expect "this library on the $old_version shared runtime (same ABI)" "$got" "$level1"
+            run_app "this importer, the $old_version shared-runtime library (same ABI)" "$TMP/oldsh" "$ROOT" "$AE"
+        else
+            case "$got" in
+                "cannot load the library") [ "$old_level" = 0 ] ||
+                    bad "this library on the $old_version shared runtime (level $old_level): refused at load, not by its preflight" ;;
+                "catalog: schema 1.x, host ABI level 1
 preflight: refused, the library was made for Aether runtime "*) ;;
-            *) bad "this library on the $old_version shared runtime is not refused:"
-               printf '%s\n' "$got" | sed 's/^/        /' ;;
-        esac
-        if (cd "$TMP/oldsh" && cp "$SCRIPT_DIR/app.ae" . && AETHER_HOME="$ROOT" "$AE" build app.ae -o app > app_build.log 2>&1); then
-            bad "this importer took the $old_version shared-runtime library"
-        elif ! grep -q "host ABI level 0\|was made for the Aether runtime" "$TMP/oldsh/app_build.log"; then
-            bad "this importer's refusal of the $old_version shared-runtime library says why" "$TMP/oldsh/app_build.log"
+                *) bad "this library on the $old_version shared runtime is not refused:"
+                   printf '%s\n' "$got" | sed 's/^/        /' ;;
+            esac
+            if (cd "$TMP/oldsh" && cp "$SCRIPT_DIR/app.ae" . && AETHER_HOME="$ROOT" "$AE" build app.ae -o app > app_build.log 2>&1); then
+                bad "this importer took the $old_version shared-runtime library"
+            elif ! grep -q "host ABI level 0\|was made for the Aether runtime" "$TMP/oldsh/app_build.log"; then
+                bad "this importer's refusal of the $old_version shared-runtime library says why" "$TMP/oldsh/app_build.log"
+            fi
         fi
         shared_note=", and on the shared runtimes"
     }
@@ -200,6 +221,6 @@ else
 fi
 
 if [ "$fail" = 0 ]; then
-    echo "  [PASS] abi_matrix: against $old_version (host ABI level $old_level): C hosts of either header and level, two libraries with a runtime each in one process (an account suspended and resumed beside the old one), and Aether consumers both ways run typed calls, strings given back with no byte kept, errors and deadlines at their levels$shared_note; an unsupported pair is refused"
+    echo "  [PASS] abi_matrix: against $old_version (host ABI level $old_level): C hosts of either header and level, two libraries with a runtime each in one process (an account suspended and resumed beside the old one), and Aether consumers both ways run typed calls, strings given back with no byte kept, errors and deadlines at their levels$shared_note; shared-runtime pairs checked by runtime ABI ID"
 fi
 exit $fail
