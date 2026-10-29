@@ -3063,6 +3063,7 @@ ci: clean
 	@$(CI_STAGE) 900 check-tests $(MAKE) check-tests
 	@$(CI_STAGE) 900 check-extern-widths $(MAKE) check-extern-widths
 	@$(CI_STAGE) 600 check-raw-calls $(MAKE) check-raw-calls
+	@$(CI_STAGE) 600 check-crypto-wipe $(MAKE) check-crypto-wipe
 	@$(CI_STAGE) 900 check-warnings $(MAKE) check-warnings
 	@echo ""
 	@echo "[5/11] Running .ae integration tests..."
@@ -3180,6 +3181,22 @@ check-raw-calls: compiler ae stdlib
 	    > $(BUILD_DIR)/raw_calls/self_test.log 2>&1 || \
 	    { cat $(BUILD_DIR)/raw_calls/self_test.log; exit 1; }
 	@./$(RAW_CALLS_CHECKER) --exclude tests/raw_calls/fixture std contrib tests examples
+
+# Every buffer the cryptography modules free is wiped first (#3402, #3414):
+# a module under std/cryptography frees a std.bytes buffer with
+# bytes.wipe_free, never bytes.free, since a rule decided call by call
+# missed one secret after another. The checker is Aether
+# (tests/crypto_wipe/check.ae); its self-test first, over a fixture with
+# exactly 3 plain frees.
+CRYPTO_WIPE_CHECKER := $(BUILD_DIR)/crypto_wipe/check$(EXE_EXT)
+.PHONY: check-crypto-wipe
+check-crypto-wipe: compiler ae stdlib
+	@mkdir -p $(BUILD_DIR)/crypto_wipe
+	@./$(BUILD_DIR)/ae$(EXE_EXT) build tests/crypto_wipe/check.ae -o $(CRYPTO_WIPE_CHECKER)
+	@./$(CRYPTO_WIPE_CHECKER) --expect 3 tests/crypto_wipe/fixture \
+	    > $(BUILD_DIR)/crypto_wipe/self_test.log 2>&1 || \
+	    { cat $(BUILD_DIR)/crypto_wipe/self_test.log; exit 1; }
+	@./$(CRYPTO_WIPE_CHECKER) std/cryptography
 
 # -----------------------------------------------------------------
 # Examples (#3105): examples/ is the path a learner follows, so each example

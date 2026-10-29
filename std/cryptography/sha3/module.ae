@@ -253,7 +253,8 @@ new(variant: string) -> {
     ctx.buf_len = 0
     ok = config_variant(ctx, variant)
     if ok == 0 {
-        bytes.free(ctx.buf)
+        bytes.wipe_free(ctx.buf)
+        mem.wipe(ctx, sizeof(Sha3Ctx))
         free(ctx)
         return null, "unknown sha3 variant"
     }

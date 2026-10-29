@@ -137,7 +137,7 @@ fn sign_with(seed: ptr, msg: byte[], extra: ptr) -> ptr {
     bytes.copy_from_bytes(sig, 32, s, 0, 32)
 
     wipe_free(a_le); wipe_free(prefix); wipe_free(rin); wipe_free(rh); wipe_free(r)
-    bytes.free(aenc); bytes.free(renc); bytes.free(kin); bytes.free(kh); bytes.free(k); bytes.free(s)
+    bytes.wipe_free(aenc); bytes.wipe_free(renc); bytes.wipe_free(kin); bytes.wipe_free(kh); bytes.wipe_free(k); bytes.wipe_free(s)
     return sig
 }
 
@@ -163,6 +163,6 @@ verify(public: ptr, msg: byte[], sig: byte[]) -> int {
     k = ecc.ed_reduce(ecc.ED25519, kh)
 
     ok = ecc.ed_verify(ecc.ED25519, public, renc, senc, k)
-    bytes.free(renc); bytes.free(senc); bytes.free(kin); bytes.free(kh); bytes.free(k)
+    bytes.wipe_free(renc); bytes.wipe_free(senc); bytes.wipe_free(kin); bytes.wipe_free(kh); bytes.wipe_free(k)
     return ok
 }

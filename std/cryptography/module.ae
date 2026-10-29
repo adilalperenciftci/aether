@@ -26,6 +26,7 @@
 
 import std.string
 import std.bytes
+import std.mem
 import std.encoding
 import std.fs
 import std.cryptography.hmac
@@ -728,6 +729,7 @@ digest_final_hex(ctx: ptr) -> {
     inner = w.inner
     if kind == 0 {
         out = cryptography_digest_final_hex_raw(inner)
+        mem.wipe(ctx, sizeof(DigestCtx))
         free(ctx)
         if out == 0 {
             return "", "digest finalize failed"
@@ -742,6 +744,7 @@ digest_final_hex(ctx: ptr) -> {
     if kind == 2 { out = sha2.final_hex(inner) }
     if kind == 3 { out = md5.final_hex(inner) }
     if kind == 4 { out = md4.final_hex(inner) }
+    mem.wipe(ctx, sizeof(DigestCtx))
     free(ctx)
     if string.length(out) == 0 {
         return "", "digest finalize failed"
@@ -764,6 +767,7 @@ digest_final_bytes(ctx: ptr) -> {
     dlen = w.dlen
     if kind == 0 {
         ok = cryptography_digest_final_bytes_raw(inner)
+        mem.wipe(ctx, sizeof(DigestCtx))
         free(ctx)
         if ok == 0 {
             return "", 0, "digest finalize failed"
@@ -782,6 +786,7 @@ digest_final_bytes(ctx: ptr) -> {
     if kind == 2 { buf = sha2.final_bytes(inner) }
     if kind == 3 { buf = md5.final_bytes(inner) }
     if kind == 4 { buf = md4.final_bytes(inner) }
+    mem.wipe(ctx, sizeof(DigestCtx))
     free(ctx)
     if buf == null {
         return "", 0, "digest finalize failed"
@@ -803,5 +808,6 @@ digest_free(ctx: @frees ptr) {
     } else {
         pure_digest_free(w.kind, w.inner)
     }
+    mem.wipe(ctx, sizeof(DigestCtx))
     free(ctx)
 }

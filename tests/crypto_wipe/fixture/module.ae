@@ -1,0 +1,20 @@
+// The crypto wipe checker's self-test fixture (#3414): exactly 3 calls of
+// bytes.free must be reported. Not a program; never run.
+
+import std.bytes
+
+fn reported() {
+    a = bytes.new(4)
+    bytes.free(a)
+    b = bytes.new(4)
+    c = bytes.new(4)
+    bytes.free(b); bytes.free(c)
+}
+
+fn not_reported() {
+    // bytes.free(x) in a comment
+    s = "bytes.free(x) in a string"
+    d = bytes.new(4)
+    bytes.wipe_free(d)
+    println(s)
+}

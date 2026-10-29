@@ -232,7 +232,7 @@ transcript_hash_algo(t: ptr, algo: string) -> ptr {
 
 transcript_free(t: @frees ptr) {
     tt = t as *Transcript
-    bytes.free(tt.buf)
+    bytes.wipe_free(tt.buf)
     libc_free(t)
 }
 
@@ -286,7 +286,7 @@ derive_handshake_keys_algo(ecdhe: byte[], th: byte[], key_len: int, hash_algo: s
     k.server_iv = siv
     k.handshake_secret = hs
 
-    bytes.free(early)
+    bytes.wipe_free(early)
     return k as ptr
 }
 
@@ -317,7 +317,7 @@ fn derive_handshake_keys_psk(psk: byte[], ecdhe: byte[], th: byte[], key_len: in
     k.server_iv = siv
     k.handshake_secret = hs
 
-    bytes.free(early)
+    bytes.wipe_free(early)
     return k as ptr
 }
 
@@ -340,7 +340,7 @@ finished_key_algo(secret: ptr, hash_algo: string, hlen: int) -> ptr {
     empty = bytes.new(1)
     bytes.set(empty, 0, 0)
     fk = tls13_kdf.expand_label(hash_algo, bytes.view(secret)[0..hlen], "finished", bytes.view(empty)[0..0], hlen)
-    bytes.free(empty)
+    bytes.wipe_free(empty)
     return fk
 }
 
@@ -352,7 +352,7 @@ finished_verify_data(secret: ptr, th: byte[]) -> ptr {
 finished_verify_data_algo(secret: ptr, th: byte[], hash_algo: string, hlen: int) -> ptr {
     fk = finished_key_algo(secret, hash_algo, hlen)
     vd = hmac.bytes(hash_algo, bytes.view(fk)[0..hlen], th)
-    bytes.free(fk)
+    bytes.wipe_free(fk)
     return vd
 }
 
@@ -388,13 +388,13 @@ hs_server_iv(k: ptr) -> ptr { kk = k as *HsKeys; return kk.server_iv }
 
 free_hs_keys(k: ptr) {
     kk = k as *HsKeys
-    bytes.free(kk.client_hs_secret)
-    bytes.free(kk.server_hs_secret)
-    bytes.free(kk.client_key)
-    bytes.free(kk.client_iv)
-    bytes.free(kk.server_key)
-    bytes.free(kk.server_iv)
-    bytes.free(kk.handshake_secret)
+    bytes.wipe_free(kk.client_hs_secret)
+    bytes.wipe_free(kk.server_hs_secret)
+    bytes.wipe_free(kk.client_key)
+    bytes.wipe_free(kk.client_iv)
+    bytes.wipe_free(kk.server_key)
+    bytes.wipe_free(kk.server_iv)
+    bytes.wipe_free(kk.handshake_secret)
     libc_free(k)
 }
 
@@ -430,7 +430,7 @@ fn recio_new(sock: @keep ptr) -> *RecordIO {
 }
 
 fn recio_free(r: *RecordIO) {
-    bytes.free(r.buf)
+    bytes.wipe_free(r.buf)
     libc_free(r as ptr)
 }
 
@@ -452,7 +452,7 @@ fn recio_compact(r: *RecordIO) {
     rest = r.len - r.off
     nb = bytes.new(rest + 4096)
     bytes.copy_from_bytes(nb, 0, r.buf, r.off, rest)
-    bytes.free(r.buf)
+    bytes.wipe_free(r.buf)
     r.buf = nb
     r.off = 0
     r.len = rest
@@ -513,7 +513,7 @@ fn recio_next_hs(r: *RecordIO) -> (ptr, int, string) {
     while 1 == 1 {
         rec, rlen, err = recio_next(r)
         if string.equals(err, "") != 1 {
-            bytes.free(acc)
+            bytes.wipe_free(acc)
             return null, 0, err
         }
         ct = bytes.get(rec, 0) & 0xFF
@@ -523,9 +523,9 @@ fn recio_next_hs(r: *RecordIO) -> (ptr, int, string) {
             // unexpected_message (#3379).
             ok = 0
             if rlen == 6 && (bytes.get(rec, 5) & 0xFF) == 1 && r.ccs == 0 && alen == 0 { ok = 1 }
-            bytes.free(rec)
+            bytes.wipe_free(rec)
             if ok == 0 {
-                bytes.free(acc)
+                bytes.wipe_free(acc)
                 r.alert = ALERT_UNEXPECTED_MESSAGE
                 return null, 0, "record: a change_cipher_spec other than the one compatibility mode allows"
             }
@@ -536,28 +536,28 @@ fn recio_next_hs(r: *RecordIO) -> (ptr, int, string) {
             // speak TLS 1.3 (protocol_version from OpenSSL) or shares no
             // cipher suite (handshake_failure).
             aerr = server_hello_alert_error(rec, rlen)
-            bytes.free(rec)
-            bytes.free(acc)
+            bytes.wipe_free(rec)
+            bytes.wipe_free(acc)
             return null, 0, aerr
         } else if ct != 0x16 {
-            bytes.free(rec)
-            bytes.free(acc)
+            bytes.wipe_free(rec)
+            bytes.wipe_free(acc)
             r.alert = ALERT_UNEXPECTED_MESSAGE
             return null, 0, "record: a record of type ${ct} where the ServerHello belongs"
         } else {
             bytes.copy_from_bytes(acc, alen, rec, 5, rlen - 5)
             alen = alen + rlen - 5
-            bytes.free(rec)
+            bytes.wipe_free(rec)
             if alen >= 4 {
                 ml = ((bytes.get(acc, 1) & 0xFF) << 16) | ((bytes.get(acc, 2) & 0xFF) << 8) | (bytes.get(acc, 3) & 0xFF)
                 if ml > 65536 {
-                    bytes.free(acc)
+                    bytes.wipe_free(acc)
                     r.alert = ALERT_UNEXPECTED_MESSAGE
                     return null, 0, "handshake: a ServerHello over 2^16 bytes"
                 }
                 if alen >= 4 + ml {
                     if alen != 4 + ml {
-                        bytes.free(acc)
+                        bytes.wipe_free(acc)
                         r.alert = ALERT_UNEXPECTED_MESSAGE
                         return null, 0, "handshake: data after the ServerHello in its record"
                     }
@@ -568,7 +568,7 @@ fn recio_next_hs(r: *RecordIO) -> (ptr, int, string) {
                     bytes.set(out, 3, (alen >> 8) & 0xFF)
                     bytes.set(out, 4, alen & 0xFF)
                     bytes.copy_from_bytes(out, 5, acc, 0, alen)
-                    bytes.free(acc)
+                    bytes.wipe_free(acc)
                     return out, 5 + alen, ""
                 }
             }
@@ -715,7 +715,7 @@ fn cli_send_sealed(sock: ptr, ctx: ptr, content_type: int, msg: byte[]) -> int {
     if recs == null { return 0 }
     rl = bytes.length(recs)
     n = cli_send_view(sock, bytes.view(recs)[0..rl])
-    bytes.free(recs)
+    bytes.wipe_free(recs)
     if n != rl { return 0 }
     return 1
 }
@@ -735,7 +735,7 @@ fn send_dummy_ccs(sock: ptr) {
     bytes.set(ccs, 4, 0x01)
     bytes.set(ccs, 5, 0x01)
     cli_send_view(sock, bytes.view(ccs)[0..6])
-    bytes.free(ccs)
+    bytes.wipe_free(ccs)
 }
 
 // Send a plaintext handshake record: type 0x16 (handshake), legacy version
@@ -759,7 +759,7 @@ fn send_plaintext_handshake_v(sock: ptr, msg: byte[], minor: int) -> string {
     bytes.set(rec, 4, msg_len & 0xFF)
     bytes.copy_from_slice(rec, 5, msg[0..msg_len])
     n = cli_send_view(sock, bytes.view(rec)[0..total])
-    bytes.free(rec)
+    bytes.wipe_free(rec)
     if n != total { return "failed to send handshake record" }
     return ""
 }
@@ -781,7 +781,7 @@ fn fresh_p256_priv() -> ptr {
         k = rand_into(32)
         if k == null { return null }
         if p256.private_key_valid(k) == 1 { return k }
-        bytes.free(k)
+        bytes.wipe_free(k)
     }
 }
 
@@ -792,15 +792,15 @@ fn fresh_p384_priv() -> ptr {
         k = rand_into(48)
         if k == null { return null }
         if p384.private_key_valid(k) == 1 { return k }
-        bytes.free(k)
+        bytes.wipe_free(k)
     }
 }
 
 // Free the key exchange secrets of a full handshake (each may be null).
 fn free_hello_keys(dk: @frees ptr, p256_priv: @frees ptr, p384_priv: @frees ptr) {
-    if dk != null { bytes.free(dk) }
-    if p256_priv != null { bytes.free(p256_priv) }
-    if p384_priv != null { bytes.free(p384_priv) }
+    if dk != null { bytes.wipe_free(dk) }
+    if p256_priv != null { bytes.wipe_free(p256_priv) }
+    if p384_priv != null { bytes.wipe_free(p384_priv) }
 }
 
 // Close the socket of a handshake that failed once what the server has
@@ -829,12 +829,12 @@ fn close_drained(sock: ptr) {
             }
         }
     }
-    bytes.free(buf)
+    bytes.wipe_free(buf)
     tcp.close(sock)
 }
 
 fn cleanup_hello(pub: ptr, rnd: ptr, sid: ptr, ch: ptr) {
-    bytes.free(pub); bytes.free(rnd); bytes.free(sid); bytes.free(ch)
+    bytes.wipe_free(pub); bytes.wipe_free(rnd); bytes.wipe_free(sid); bytes.wipe_free(ch)
 }
 
 // Build the client key_share public value for `group` from its private
@@ -857,7 +857,7 @@ fn keyshare_for_group(group: int, priv: ptr) -> (ptr, int) {
         bytes.set(pt, 0, 0x04)
         bytes.copy_from_bytes(pt, 1, px, 0, cl)
         bytes.copy_from_bytes(pt, 1 + cl, py, 0, cl)
-        bytes.free(px); bytes.free(py)
+        bytes.wipe_free(px); bytes.wipe_free(py)
         return pt, 1 + 2 * cl
     }
     // default: x25519
@@ -885,7 +885,7 @@ fn ecdhe_shared(group: int, priv: ptr, server_ks: ptr, server_ks_len: int) -> (p
         bytes.copy_from_bytes(sy, 0, server_ks, 1 + cl, cl)
         sh = null
         if group == tls13_hs.GROUP_SECP256R1 { sh = p256.ecdh(priv, sx, sy) } else { sh = p384.ecdh(priv, sx, sy) }
-        bytes.free(sx); bytes.free(sy)
+        bytes.wipe_free(sx); bytes.wipe_free(sy)
         if sh == null { return null, "${name} ECDH failed" }
         return sh, ""
     }
@@ -937,7 +937,7 @@ connect_socket(sock: @keep ptr, host: string, cafile: string) -> (ptr, string) {
         return null, "no randomness for the key share"
     }
     conn, err = connect_full(host, 443, priv, null, 0, null, sock, 0, cafile)
-    bytes.free(priv)
+    bytes.wipe_free(priv)
     return conn, err
 }
 
@@ -980,15 +980,15 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
     rnd = rand_into(32)
     sid = rand_into(32)
     if p256_priv == null || rnd == null || sid == null {
-        if p256_priv != null { bytes.free(p256_priv) }
-        if rnd != null { bytes.free(rnd) }
-        if sid != null { bytes.free(sid) }
+        if p256_priv != null { bytes.wipe_free(p256_priv) }
+        if rnd != null { bytes.wipe_free(rnd) }
+        if sid != null { bytes.wipe_free(sid) }
         tcp.close(sock)
         return null, "no randomness available for the handshake"
     }
     ek, dk, kerr = mlkem.mlkem768_keygen()
     if kerr != "" {
-        bytes.free(p256_priv); bytes.free(rnd); bytes.free(sid)
+        bytes.wipe_free(p256_priv); bytes.wipe_free(rnd); bytes.wipe_free(sid)
         tcp.close(sock)
         return null, kerr
     }
@@ -1001,12 +1001,12 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
     bytes.set(hybrid, ek_len + 32 - 1, 0)
     bytes.copy_from_bytes(hybrid, 0, ek, 0, ek_len)
     bytes.copy_from_bytes(hybrid, ek_len, x_pub, 0, 32)
-    bytes.free(ek) // dk carries what decapsulation needs
+    bytes.wipe_free(ek) // dk carries what decapsulation needs
 
     // secp384r1 is named with no share, for a server that asks for it in a
     // HelloRetryRequest (#3369).
     ch = tls13_hs.client_hello_offer(rnd, bytes.view(sid)[0..32], tls13_hs.GROUP_X25519MLKEM768, bytes.view(hybrid)[0..ek_len + 32], tls13_hs.GROUP_X25519, bytes.view(x_pub)[0..x_pub_len], tls13_hs.GROUP_SECP256R1, bytes.view(p_pub)[0..p_pub_len], host, tls13_hs.GROUP_SECP384R1)
-    bytes.free(p_pub); bytes.free(hybrid) // copied into the CH
+    bytes.wipe_free(p_pub); bytes.wipe_free(hybrid) // copied into the CH
     pub = x_pub // cleanup_hello frees this
     ch_len = bytes.length(ch)
     tr = transcript_new()
@@ -1064,8 +1064,8 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
             // The alert the ServerHello earned, in the clear (#3315).
             if parsed.alert != 0 { send_plain_alert(sock, parsed.alert) }
             free_hello_keys(dk, p256_priv, p384_priv)
-            if parsed.key_share != null { bytes.free(parsed.key_share) }
-            bytes.free(sh); bytes.free(shrec)
+            if parsed.key_share != null { bytes.wipe_free(parsed.key_share) }
+            bytes.wipe_free(sh); bytes.wipe_free(shrec)
             cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); close_drained(sock)
             return null, perr
         }
@@ -1083,26 +1083,26 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
             if parsed.group == tls13_hs.GROUP_SECP384R1 {
                 p384_priv = fresh_p384_priv()
                 if p384_priv == null {
-                    bytes.free(share)
+                    bytes.wipe_free(share)
                     free_hello_keys(dk, p256_priv, p384_priv)
-                    bytes.free(sh); bytes.free(shrec)
+                    bytes.wipe_free(sh); bytes.wipe_free(shrec)
                     cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); close_drained(sock)
                     return null, "no randomness available for the handshake"
                 }
-                bytes.free(share)
+                bytes.wipe_free(share)
                 share, share_len = keyshare_for_group(tls13_hs.GROUP_SECP384R1, p384_priv)
                 shares = GB_SECP384R1
             }
             tls13_hs.client_hello_retry(bytes.view(ch)[0..ch_len], parsed.group, bytes.view(share)[0..share_len], bytes.view(sh)[parsed.cookie_off..parsed.cookie_off + parsed.cookie_len], &pch)
-            bytes.free(share)
-            bytes.free(ch)
+            bytes.wipe_free(share)
+            bytes.wipe_free(ch)
             ch = pch.buf
             ch_len = pch.buf_len
             transcript_add(tr, bytes.view(ch)[0..ch_len])
             send_dummy_ccs(sock)
             ccs_sent = 1
             serr2 = send_plaintext_handshake_v(sock, bytes.view(ch)[0..ch_len], 0x03)
-            bytes.free(sh); bytes.free(shrec)
+            bytes.wipe_free(sh); bytes.wipe_free(shrec)
             sh = null
             shrec = null
             if string.equals(serr2, "") != 1 {
@@ -1148,9 +1148,9 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
     if string.equals(agerr, "") != 1 || shared == null {
         if string.equals(agerr, "") == 1 { agerr = "key exchange failed" }
         send_plain_alert(sock, ag_alert)
-        if shared != null { bytes.free(shared) }
-        if parsed.key_share != null { bytes.free(parsed.key_share) }
-        bytes.free(sh); bytes.free(shrec)
+        if shared != null { bytes.wipe_free(shared) }
+        if parsed.key_share != null { bytes.wipe_free(parsed.key_share) }
+        bytes.wipe_free(sh); bytes.wipe_free(shrec)
         cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); close_drained(sock)
         return null, agerr
     }
@@ -1163,9 +1163,9 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
     if string.length(host) > 0 { offered = offered | tls13_hs.OFFER_SNI }
     result, result_err = run_handshake_tail(sock, rio, tr, host, bytes.view(shared)[0..shared_len], parsed.cipher_suite, client_cert, client_cert_len, client_key, insecure, cafile, offered, ccs_sent)
 
-    bytes.free(shared)
-    if parsed.key_share != null { bytes.free(parsed.key_share) }
-    bytes.free(sh); bytes.free(shrec)
+    bytes.wipe_free(shared)
+    if parsed.key_share != null { bytes.wipe_free(parsed.key_share) }
+    bytes.wipe_free(sh); bytes.wipe_free(shrec)
     cleanup_hello(pub, rnd, sid, ch); transcript_free(tr)
     if result == null {
         recio_free(rio); close_drained(sock)
@@ -1245,11 +1245,11 @@ transcript_retry(tr: @frees ptr, ch1: byte[], hrr: byte[], algo: string) -> ptr 
     bytes.set(mh, 2, 0)
     bytes.set(mh, 3, hl)
     bytes.copy_from_bytes(mh, 4, h, 0, hl)
-    bytes.free(h)
+    bytes.wipe_free(h)
     t = transcript_new()
     transcript_add(t, bytes.view(mh)[0..4 + hl])
     transcript_add(t, hrr)
-    bytes.free(mh)
+    bytes.wipe_free(mh)
     return t
 }
 
@@ -1264,23 +1264,23 @@ fn hybrid_shared(dk: ptr, x25519_priv: ptr, server_ks: ptr, server_ks_len: int) 
     sxpub = bytes.new(32); bytes.set(sxpub, 31, 0)
     bytes.copy_from_bytes(sxpub, 0, server_ks, 1088, 32)
     mlk_ss, merr = mlkem.mlkem768_decaps(dk, ct)
-    bytes.free(ct)
+    bytes.wipe_free(ct)
     if merr != "" {
-        bytes.free(sxpub)
+        bytes.wipe_free(sxpub)
         return null, merr
     }
     x_ss, xerr = ecdhe_shared(tls13_hs.GROUP_X25519, x25519_priv, sxpub, 32)
-    bytes.free(sxpub)
+    bytes.wipe_free(sxpub)
     if xerr != "" || x_ss == null {
-        bytes.free(mlk_ss)
-        if x_ss != null { bytes.free(x_ss) }
+        bytes.wipe_free(mlk_ss)
+        if x_ss != null { bytes.wipe_free(x_ss) }
         if xerr == "" { xerr = "x25519 agreement failed" }
         return null, xerr
     }
     shared = bytes.new(64); bytes.set(shared, 63, 0)
     bytes.copy_from_bytes(shared, 0, mlk_ss, 0, 32)
     bytes.copy_from_bytes(shared, 32, x_ss, 0, 32)
-    bytes.free(mlk_ss); bytes.free(x_ss)
+    bytes.wipe_free(mlk_ss); bytes.wipe_free(x_ss)
     return shared, ""
 }
 
@@ -1299,7 +1299,7 @@ connect_pq(host: string, port: int) -> (ptr, string) {
     priv = rand_into(32)
     if priv == null { return null, "no randomness available for the key share" }
     conn, err = connect(host, port, priv)
-    bytes.free(priv)
+    bytes.wipe_free(priv)
     return conn, err
 }
 
@@ -1450,21 +1450,21 @@ fn run_handshake_tail(sock: @keep ptr, rio: @keep ptr, tr: ptr, host: string, sh
                             ccv = build_cert_verify_msg(0x0403, bytes.view(cvsig))
                             sent = sent & cli_send_sealed(sock, cli_hs_ctx, tls13_record.CONTENT_HANDSHAKE, bytes.view(ccv))
                             transcript_add(tr, bytes.view(ccv))
-                            bytes.free(cvsig); bytes.free(ccv)
+                            bytes.wipe_free(cvsig); bytes.wipe_free(ccv)
                         }
-                        bytes.free(th_ccv); bytes.free(ccert)
+                        bytes.wipe_free(th_ccv); bytes.wipe_free(ccert)
                     } else {
                         ccert = build_empty_certificate()
                         sent = sent & cli_send_sealed(sock, cli_hs_ctx, tls13_record.CONTENT_HANDSHAKE, bytes.view(ccert))
                         transcript_add(tr, bytes.view(ccert))
-                        bytes.free(ccert)
+                        bytes.wipe_free(ccert)
                     }
                 }
                 // Client Finished MAC is over the transcript through the client
                 // Certificate (if any) — RFC 8446 §4.4.4.
                 th_cvd = transcript_hash_algo(tr, hash_algo)
                 cvd = finished_verify_data_algo(hs_client_secret(keys), bytes.view(th_cvd)[0..hash_len], hash_algo, hash_len)
-                bytes.free(th_cvd)
+                bytes.wipe_free(th_cvd)
                 cfin = build_finished_msg(cvd)
                 if cv_refused == "" {
                     sent = sent & cli_send_sealed(sock, cli_hs_ctx, tls13_record.CONTENT_HANDSHAKE, bytes.view(cfin))
@@ -1472,7 +1472,7 @@ fn run_handshake_tail(sock: @keep ptr, rio: @keep ptr, tr: ptr, host: string, sh
                 transcript_add(tr, bytes.view(cfin))
                 th_cf = transcript_hash_algo(tr, hash_algo)
                 res_master = tls13_kdf.derive_secret(hash_algo, bytes.view(ms)[0..hash_len], "res master", bytes.view(th_cf)[0..hash_len])
-                bytes.free(th_cf)
+                bytes.wipe_free(th_cf)
                 // The connection keeps c_ap and s_ap for KeyUpdate (#3320);
                 // connect_full sets its group.
                 if sent == 1 {
@@ -1482,21 +1482,21 @@ fn run_handshake_tail(sock: @keep ptr, rio: @keep ptr, tr: ptr, host: string, sh
                     result_err = "handshake: the client's flight could not be sent"
                     if cv_refused != "" { result_err = "handshake: ${cv_refused}" }
                 }
-                bytes.free(cvd); bytes.free(cfin)
+                bytes.wipe_free(cvd); bytes.wipe_free(cfin)
                 tls13_record.free_ctx(cli_hs_ctx)
-                tls13_ks.free_secret(ms); bytes.free(th_sf)
+                tls13_ks.free_secret(ms); bytes.wipe_free(th_sf)
             }
-            bytes.free(expected)
+            bytes.wipe_free(expected)
         }
     }
 
-    if th_through_cert != null { bytes.free(th_through_cert) }
-    if th_before_finished != null { bytes.free(th_before_finished) }
-    if server_verify_data != null { bytes.free(server_verify_data) }
-    bytes.free(fl)
+    if th_through_cert != null { bytes.wipe_free(th_through_cert) }
+    if th_before_finished != null { bytes.wipe_free(th_before_finished) }
+    if server_verify_data != null { bytes.wipe_free(server_verify_data) }
+    bytes.wipe_free(fl)
     tls13_record.free_ctx(srv_ctx)
     free_hs_keys(keys)
-    bytes.free(th_chsh)
+    bytes.wipe_free(th_chsh)
     return result, result_err
 }
 
@@ -1558,7 +1558,7 @@ fn add_flight_capture_prefinished(tr: ptr, fl: ptr, flen: int, hash_algo: string
                 bytes.set(sub, total - 1, 0)
                 bytes.copy_from_bytes(sub, 0, fl, p, total)
                 transcript_add(tr, bytes.view(sub)[0..total])
-                bytes.free(sub)
+                bytes.wipe_free(sub)
                 // Snapshot the hash THROUGH Certificate (used by CertificateVerify).
                 if mt == HS_CERTIFICATE { th_cert = transcript_hash_algo(tr, hash_algo) }
                 p = p + total
@@ -1772,7 +1772,7 @@ conn_send(conn: ptr, data: byte[]) -> string {
     if rec == null { return "send: the record could not be sealed" }
     n = cli_send_view(c.sock, bytes.view(rec))
     tot = bytes.length(rec)
-    bytes.free(rec)
+    bytes.wipe_free(rec)
     if n != tot { return "send failed" }
     return ""
 }
@@ -1812,11 +1812,11 @@ fn send_alert_conn(c: *ClientConn, level: int, desc: int) -> string {
     bytes.set(body, 0, level & 0xFF)
     bytes.set(body, 1, desc & 0xFF)
     rec = tls13_record.seal_record(c.app_send as ptr, tls13_record.CONTENT_ALERT, bytes.view(body)[0..2])
-    bytes.free(body)
+    bytes.wipe_free(body)
     // A context at its sequence limit seals nothing (#3380).
     if rec == null { return "alert: the record could not be sealed" }
     cli_send_view(c.sock, bytes.view(rec))
-    bytes.free(rec)
+    bytes.wipe_free(rec)
     return ""
 }
 
@@ -1833,7 +1833,7 @@ fn send_plain_alert(sock: ptr, desc: int) {
     bytes.set(b, 5, ALERT_LEVEL_FATAL)
     bytes.set(b, 6, desc & 0xFF)
     cli_send_view(sock, bytes.view(b)[0..7])
-    bytes.free(b)
+    bytes.wipe_free(b)
 }
 
 // Read the server's encrypted flight (EncryptedExtensions through Finished)
@@ -1864,23 +1864,23 @@ fn read_flight(rio: *RecordIO, srv_ctx: ptr, fl: ptr) -> (int, string, int) {
             // One in the whole handshake: one before the ServerHello counts
             // (recio_next_hs, #3379).
             if rlen == 6 && (bytes.get(rec, 5) & 0xFF) == 1 && rio.ccs == 0 && fllen == 0 { ok = 1 }
-            bytes.free(rec)
+            bytes.wipe_free(rec)
             if ok == 0 { return 0, "record: a change_cipher_spec other than the one compatibility mode allows", ALERT_UNEXPECTED_MESSAGE }
             rio.ccs = 1
         } else if ct != 0x17 {
-            bytes.free(rec)
+            bytes.wipe_free(rec)
             return 0, "record: a plaintext record of type ${ct} inside the encrypted flight", ALERT_UNEXPECTED_MESSAGE
         } else {
             opened = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0, alert: 0 }
             oerr = tls13_record.open_record(srv_ctx, bytes.view(rec)[0..rlen], &opened)
-            bytes.free(rec)
+            bytes.wipe_free(rec)
             if string.equals(oerr, "") != 1 { return 0, oerr, opened.alert }
             t = opened.content_type
             n = opened.plaintext_len
             if t == tls13_record.CONTENT_HANDSHAKE && n > 0 {
                 bytes.copy_from_bytes(fl, fllen, opened.plaintext, 0, n)
                 fllen = fllen + n
-                bytes.free(opened.plaintext)
+                bytes.wipe_free(opened.plaintext)
                 if fllen > MAX_FLIGHT_BYTES { return 0, "handshake: the server's flight is over ${MAX_FLIGHT_BYTES} bytes", ALERT_UNEXPECTED_MESSAGE }
                 fin_end, salert, swhy = flight_scan(fl, fllen)
                 if salert != 0 { return 0, swhy, salert }
@@ -1898,7 +1898,7 @@ fn read_flight(rio: *RecordIO, srv_ctx: ptr, fl: ptr) -> (int, string, int) {
                     level = bytes.get(opened.plaintext, 0) & 0xFF
                     d = bytes.get(opened.plaintext, 1) & 0xFF
                 }
-                if opened.plaintext != null { bytes.free(opened.plaintext) }
+                if opened.plaintext != null { bytes.wipe_free(opened.plaintext) }
                 if level < 0 { return 0, "alert: a record that is not two bytes", ALERT_DECODE_ERROR }
                 aev, aal, awhy = alert_event(level, d, warnings)
                 if aev == EV_CLOSED { return 0, "the server closed the connection during the handshake", 0 }
@@ -1908,7 +1908,7 @@ fn read_flight(rio: *RecordIO, srv_ctx: ptr, fl: ptr) -> (int, string, int) {
                 }
                 warnings = warnings + 1
             } else {
-                if opened.plaintext != null { bytes.free(opened.plaintext) }
+                if opened.plaintext != null { bytes.wipe_free(opened.plaintext) }
                 return 0, "handshake: a record of type ${t} (or an empty one) inside the server's flight", ALERT_UNEXPECTED_MESSAGE
             }
         }
@@ -2041,11 +2041,11 @@ fn send_alert_hs(sock: ptr, hs_ctx: ptr, level: int, desc: int) {
     bytes.set(body, 0, level & 0xFF)
     bytes.set(body, 1, desc & 0xFF)
     rec = tls13_record.seal_record(hs_ctx, tls13_record.CONTENT_ALERT, bytes.view(body)[0..2])
-    bytes.free(body)
+    bytes.wipe_free(body)
     // A context at its sequence limit seals nothing (#3380).
     if rec == null { return }
     cli_send_view(sock, bytes.view(rec))
-    bytes.free(rec)
+    bytes.wipe_free(rec)
 }
 
 // Choose the fatal AlertDescription that best fits a server-authentication
@@ -2157,19 +2157,19 @@ fn conn_next(c: *ClientConn) -> (int, ptr, int, string) {
     }
     ct = bytes.get(rec, 0) & 0xFF
     if ct != 0x17 {
-        bytes.free(rec)
+        bytes.wipe_free(rec)
         return conn_fail(c, ALERT_UNEXPECTED_MESSAGE, "record: a plaintext record of type ${ct} after the handshake")
     }
     opened = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0, alert: 0 }
     oerr = tls13_record.open_record(c.app_recv as ptr, bytes.view(rec)[0..rlen], &opened)
-    bytes.free(rec)
+    bytes.wipe_free(rec)
     if string.equals(oerr, "") != 1 {
         return conn_fail(c, opened.alert, oerr)
     }
     t = opened.content_type
     n = opened.plaintext_len
     if t != tls13_record.CONTENT_HANDSHAKE && c.hs_pend_len > 0 {
-        if opened.plaintext != null { bytes.free(opened.plaintext) }
+        if opened.plaintext != null { bytes.wipe_free(opened.plaintext) }
         return conn_fail(c, ALERT_UNEXPECTED_MESSAGE, "record: a record of type ${t} inside a handshake message")
     }
     if t == tls13_record.CONTENT_APPLICATION_DATA {
@@ -2179,7 +2179,7 @@ fn conn_next(c: *ClientConn) -> (int, ptr, int, string) {
             c.warnings = 0
             return EV_DATA, opened.plaintext, n, ""
         }
-        if opened.plaintext != null { bytes.free(opened.plaintext) }
+        if opened.plaintext != null { bytes.wipe_free(opened.plaintext) }
         c.empties = c.empties + 1
         if c.empties > MAX_EMPTY_RECORDS {
             return conn_fail(c, ALERT_UNEXPECTED_MESSAGE, "record: more than ${MAX_EMPTY_RECORDS} empty records in a row")
@@ -2193,7 +2193,7 @@ fn conn_next(c: *ClientConn) -> (int, ptr, int, string) {
             level = bytes.get(opened.plaintext, 0) & 0xFF
             desc = bytes.get(opened.plaintext, 1) & 0xFF
         }
-        if opened.plaintext != null { bytes.free(opened.plaintext) }
+        if opened.plaintext != null { bytes.wipe_free(opened.plaintext) }
         if level < 0 { return conn_fail(c, ALERT_DECODE_ERROR, "alert: a record that is not two bytes") }
         ev, a, why = alert_event(level, desc, c.warnings)
         if ev == EV_NONE { c.warnings = c.warnings + 1 }
@@ -2202,7 +2202,7 @@ fn conn_next(c: *ClientConn) -> (int, ptr, int, string) {
     }
     // A handshake record: an empty one is no message at all.
     if n == 0 {
-        if opened.plaintext != null { bytes.free(opened.plaintext) }
+        if opened.plaintext != null { bytes.wipe_free(opened.plaintext) }
         return conn_fail(c, ALERT_UNEXPECTED_MESSAGE, "record: an empty handshake record after the handshake")
     }
     if c.hs_pend == null {
@@ -2211,7 +2211,7 @@ fn conn_next(c: *ClientConn) -> (int, ptr, int, string) {
     }
     bytes.copy_from_bytes(c.hs_pend, c.hs_pend_len, opened.plaintext, 0, n)
     c.hs_pend_len = c.hs_pend_len + n
-    bytes.free(opened.plaintext)
+    bytes.wipe_free(opened.plaintext)
     return conn_handshake(c)
 }
 
@@ -2219,14 +2219,14 @@ fn conn_next(c: *ClientConn) -> (int, ptr, int, string) {
 fn hs_pend_consume(c: *ClientConn, k: int) {
     rest = c.hs_pend_len - k
     if rest <= 0 {
-        bytes.free(c.hs_pend)
+        bytes.wipe_free(c.hs_pend)
         c.hs_pend = null
         c.hs_pend_len = 0
         return
     }
     nb = bytes.new(rest)
     bytes.copy_from_bytes(nb, 0, c.hs_pend, k, rest)
-    bytes.free(c.hs_pend)
+    bytes.wipe_free(c.hs_pend)
     c.hs_pend = nb
     c.hs_pend_len = rest
 }
@@ -2278,11 +2278,11 @@ fn conn_handshake(c: *ClientConn) -> (int, ptr, int, string) {
 fn send_key_update(c: *ClientConn, request: int) -> string {
     m = tls13_hs.key_update_msg(request)
     rec = tls13_record.seal_record(c.app_send as ptr, tls13_record.CONTENT_HANDSHAKE, bytes.view(m)[0..5])
-    bytes.free(m)
+    bytes.wipe_free(m)
     if rec == null { return "key update: the record could not be sealed" }
     n = cli_send_view(c.sock, bytes.view(rec))
     tot = bytes.length(rec)
-    bytes.free(rec)
+    bytes.wipe_free(rec)
     if n != tot { return "key update: send failed" }
     _a, _k, algo, _h, _e = suite_params(c.suite)
     c.send_secret = tls13_ks.key_update(algo, c.app_send, c.send_secret)
@@ -2345,9 +2345,9 @@ close_conn(conn: ptr) {
     tls13_ks.free_secret(c.send_secret)
     tls13_ks.free_secret(c.recv_secret)
     if c.res_master != null { tls13_ks.free_secret(c.res_master) }
-    if c.res_hash_algo != null { bytes.free(c.res_hash_algo) }
-    if c.hs_pend != null { bytes.free(c.hs_pend) }
-    if c.held != null { bytes.free(c.held) }
+    if c.res_hash_algo != null { bytes.wipe_free(c.res_hash_algo) }
+    if c.hs_pend != null { bytes.wipe_free(c.hs_pend) }
+    if c.held != null { bytes.wipe_free(c.held) }
     if c.ticket != null { free_ticket(c.ticket) }
     recio_free(c.rio as *RecordIO)
     tcp.close(c.sock)
@@ -2407,7 +2407,7 @@ conn_get_ticket(conn: ptr) -> (ptr, string) {
             } else {
                 bytes.copy_from_bytes(c.held, c.held_len, data, 0, n)
                 c.held_len = c.held_len + n
-                bytes.free(data)
+                bytes.wipe_free(data)
             }
             // A server that streams this much first is not sending a
             // ticket now; keeping more would grow without bound.
@@ -2543,9 +2543,9 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
     rnd = rand_into(32)
     sid = rand_into(32)
     if rnd == null || sid == null {
-        if rnd != null { bytes.free(rnd) }
-        if sid != null { bytes.free(sid) }
-        bytes.free(pub); tls13_ks.free_secret(psk); tcp.close(sock)
+        if rnd != null { bytes.wipe_free(rnd) }
+        if sid != null { bytes.wipe_free(sid) }
+        bytes.wipe_free(pub); tls13_ks.free_secret(psk); tcp.close(sock)
         return null, "no randomness available for the handshake"
     }
 
@@ -2590,7 +2590,7 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
         // The early data in as many records as it takes (#3380); a short
         // send ends the attempt before the ServerHello is read.
         ed_sent = cli_send_sealed(sock, ed_ctx, tls13_record.CONTENT_APPLICATION_DATA, early_data)
-        bytes.free(ch_hash); tls13_ks.free_secret(ets); tls13_ks.free_secret(ek); tls13_ks.free_secret(eiv)
+        bytes.wipe_free(ch_hash); tls13_ks.free_secret(ets); tls13_ks.free_secret(ek); tls13_ks.free_secret(eiv)
         if ed_sent == 0 {
             tls13_record.free_ctx(ed_ctx)
             tls13_ks.free_secret(early); tls13_ks.free_secret(psk); cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); tcp.close(sock)
@@ -2652,12 +2652,12 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
                     if parsed.group == tls13_hs.GROUP_SECP256R1 {
                         p256_priv = fresh_p256_priv()
                         if p256_priv != null {
-                            bytes.free(share)
+                            bytes.wipe_free(share)
                             share, share_len = keyshare_for_group(tls13_hs.GROUP_SECP256R1, p256_priv)
                         }
                     }
                     if parsed.group == tls13_hs.GROUP_SECP256R1 && p256_priv == null {
-                        bytes.free(share)
+                        bytes.wipe_free(share)
                         err = "no randomness available for the handshake"
                         alert = ALERT_INTERNAL_ERROR
                         reading = 0
@@ -2665,8 +2665,8 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
                         tr = transcript_retry(tr, bytes.view(ch)[0..ch_len], bytes.view(sh)[0..sh_msg_len], algo)
                         pch2 = tls13_hs.PskCh { buf: null, buf_len: 0, binder_off: 0, truncated_len: 0 }
                         tls13_hs.client_hello_retry(bytes.view(ch)[0..ch_len], parsed.group, bytes.view(share)[0..share_len], bytes.view(sh)[parsed.cookie_off..parsed.cookie_off + parsed.cookie_len], &pch2)
-                        bytes.free(share)
-                        bytes.free(ch)
+                        bytes.wipe_free(share)
+                        bytes.wipe_free(ch)
                         ch = pch2.buf
                         ch_len = pch2.buf_len
                         patch_binder(ch, pch2.binder_off, pch2.truncated_len, early, algo, hl, tr)
@@ -2676,7 +2676,7 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
                             ccs_sent = 1
                         }
                         serr2 = send_plaintext_handshake_v(sock, bytes.view(ch)[0..ch_len], 0x03)
-                        bytes.free(sh); bytes.free(shrec)
+                        bytes.wipe_free(sh); bytes.wipe_free(shrec)
                         sh = null
                         shrec = null
                         if string.equals(serr2, "") != 1 {
@@ -2733,14 +2733,14 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
             alert = ALERT_ILLEGAL_PARAMETER
         }
     }
-    if p256_priv != null { bytes.free(p256_priv) }
+    if p256_priv != null { bytes.wipe_free(p256_priv) }
     if err != "" {
         if alert != 0 { send_plain_alert(sock, alert) }
         if ed_ctx != null { tls13_record.free_ctx(ed_ctx) }
-        if shared != null { bytes.free(shared) }
-        if parsed.key_share != null { bytes.free(parsed.key_share) }
-        if sh != null { bytes.free(sh) }
-        if shrec != null { bytes.free(shrec) }
+        if shared != null { bytes.wipe_free(shared) }
+        if parsed.key_share != null { bytes.wipe_free(parsed.key_share) }
+        if sh != null { bytes.wipe_free(sh) }
+        if shrec != null { bytes.wipe_free(shrec) }
         tls13_ks.free_secret(psk)
         cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); close_drained(sock)
         return null, err
@@ -2830,17 +2830,17 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
                 eoed = build_end_of_early_data()
                 sent = sent & cli_send_sealed(sock, ed_ctx, tls13_record.CONTENT_HANDSHAKE, bytes.view(eoed))
                 transcript_add(tr, bytes.view(eoed))
-                bytes.free(eoed)
+                bytes.wipe_free(eoed)
             }
             th_cv = transcript_hash_algo(tr, hash_algo)
             cvd = finished_verify_data_algo(hs_client_secret(keys), bytes.view(th_cv)[0..hash_len], hash_algo, hash_len)
-            bytes.free(th_cv)
+            bytes.wipe_free(th_cv)
             cfin = build_finished_msg(cvd)
             sent = sent & cli_send_sealed(sock, cli_hs_ctx, tls13_record.CONTENT_HANDSHAKE, bytes.view(cfin))
             transcript_add(tr, bytes.view(cfin))
             th_cf = transcript_hash_algo(tr, hash_algo)
             res_master2 = tls13_kdf.derive_secret(hash_algo, bytes.view(ms)[0..hash_len], "res master", bytes.view(th_cf)[0..hash_len])
-            bytes.free(th_cf)
+            bytes.wipe_free(th_cf)
             // The connection keeps c_ap and s_ap for KeyUpdate (#3320).
             if sent == 1 {
                 result = new_client_conn(sock, rio as ptr, parsed.cipher_suite, c_ap, s_ap, res_master2, parsed.group)
@@ -2850,23 +2850,23 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
                 tls13_ks.free_secret(c_ap); tls13_ks.free_secret(s_ap); tls13_ks.free_secret(res_master2)
                 result_err = "resume: the client's flight could not be sent"
             }
-            bytes.free(cvd); bytes.free(cfin)
+            bytes.wipe_free(cvd); bytes.wipe_free(cfin)
             tls13_record.free_ctx(cli_hs_ctx)
-            tls13_ks.free_secret(ms); bytes.free(th_sf)
+            tls13_ks.free_secret(ms); bytes.wipe_free(th_sf)
         }
-        bytes.free(expected)
-        if th_through_cert != null { bytes.free(th_through_cert) }
-        if th_before_finished != null { bytes.free(th_before_finished) }
-        if server_verify_data != null { bytes.free(server_verify_data) }
+        bytes.wipe_free(expected)
+        if th_through_cert != null { bytes.wipe_free(th_through_cert) }
+        if th_before_finished != null { bytes.wipe_free(th_before_finished) }
+        if server_verify_data != null { bytes.wipe_free(server_verify_data) }
     }
 
     if ed_ctx != null { tls13_record.free_ctx(ed_ctx) }
-    bytes.free(fl)
+    bytes.wipe_free(fl)
     tls13_record.free_ctx(srv_ctx)
     free_hs_keys(keys)
-    bytes.free(th_chsh); bytes.free(shared); tls13_ks.free_secret(psk)
-    if parsed.key_share != null { bytes.free(parsed.key_share) }
-    bytes.free(sh); bytes.free(shrec)
+    bytes.wipe_free(th_chsh); bytes.wipe_free(shared); tls13_ks.free_secret(psk)
+    if parsed.key_share != null { bytes.wipe_free(parsed.key_share) }
+    bytes.wipe_free(sh); bytes.wipe_free(shrec)
     cleanup_hello(pub, rnd, sid, ch); transcript_free(tr)
     if result == null {
         recio_free(rio); close_drained(sock)
@@ -2894,7 +2894,7 @@ fn patch_binder(ch: ptr, binder_off: int, truncated_len: int, early: ptr, algo: 
         bytes.set(ch, binder_off + bp, bytes.get(binder, bp) & 0xFF)
         bp = bp + 1
     }
-    tls13_ks.free_secret(bkey); tls13_ks.free_secret(bfk); bytes.free(th); tls13_ks.free_secret(binder)
+    tls13_ks.free_secret(bkey); tls13_ks.free_secret(bfk); bytes.wipe_free(th); tls13_ks.free_secret(binder)
 }
 
 // SHA-256/384 of a bytes buffer prefix (fresh Hash.len buffer).
@@ -2908,10 +2908,10 @@ fn hash_bytes_algo(data: byte[], algo: string) -> ptr {
 free_ticket(t: ptr) {
     if t == null { return }
     st = t as *SessionTicket
-    if st.ticket != null { bytes.free(st.ticket) }
-    if st.nonce != null { bytes.free(st.nonce) }
-    if st.res_master != null { bytes.free(st.res_master) }
-    if st.hash_algo != null { bytes.free(st.hash_algo) }
+    if st.ticket != null { bytes.wipe_free(st.ticket) }
+    if st.nonce != null { bytes.wipe_free(st.nonce) }
+    if st.res_master != null { bytes.wipe_free(st.res_master) }
+    if st.hash_algo != null { bytes.wipe_free(st.hash_algo) }
     libc_free(t)
 }
 
@@ -3212,7 +3212,7 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host:
                         } else {
                             have_leaf = 1
                         }
-                        bytes.free(der)
+                        bytes.wipe_free(der)
                         // Parse the remaining certs into `intermediates`.
                         parse_intermediates(bytes.view(cbody)[0..ml], intermediates)
                         // Revocation: stash any stapled OCSP response for the
@@ -3226,11 +3226,11 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host:
                                 ocsp_staple_len = ocsp_len
                                 ocsp_status = tls13_cert.parse_ocsp_status(bytes.view(ocsp)[0..ocsp_len])
                             } else {
-                                bytes.free(ocsp)
+                                bytes.wipe_free(ocsp)
                             }
                         }
                     }
-                    bytes.free(cbody)
+                    bytes.wipe_free(cbody)
                 }
                 if mt == HS_CERTIFICATE_VERIFY {
                     vbody = bytes.new(ml)
@@ -3244,7 +3244,7 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host:
                         cv_sig = sig
                         cv_sig_len = slen
                     }
-                    bytes.free(vbody)
+                    bytes.wipe_free(vbody)
                 }
                 p = p + total
             }
@@ -3314,10 +3314,10 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host:
             }
         }
     }
-    if ocsp_staple != null { bytes.free(ocsp_staple) }
+    if ocsp_staple != null { bytes.wipe_free(ocsp_staple) }
     if have_leaf == 1 { tls13_cert.free_leaf(&leaf) }
     free_intermediates(intermediates)
-    if cv_sig != null { bytes.free(cv_sig) }
+    if cv_sig != null { bytes.wipe_free(cv_sig) }
     if string.equals(err, "") != 1 && alert == 0 { alert = alert_for_auth_error(err) }
     return alert, err
 }
@@ -3357,7 +3357,7 @@ fn parse_intermediates(body: byte[], out: ptr) {
                     tls13_cert.free_leaf(mc)
                     libc_free(mc)
                 }
-                bytes.free(der)
+                bytes.wipe_free(der)
             }
             p = p + cert_len
             // Skip the entry's extensions<2>.
@@ -3467,7 +3467,7 @@ pure_tls_client_connect(fd: int, host: string, verify_mode: int, cafile: string)
     ca = ""
     if cafile != null { ca = cafile }
     conn, err = connect_full(host, 443, priv, null, 0, null, sock, verify_mode, ca)
-    bytes.free(priv)
+    bytes.wipe_free(priv)
     if string.equals(err, "") != 1 {
         aether_pure_tls_client_set_error(err)
         return null
@@ -3498,7 +3498,7 @@ pure_tls_client_send(pcp: ptr, buf: ptr, len: int) -> int {
     bytes.set(b, len - 1, 0)
     copy(bytes.data(b), buf, len as long)
     err = conn_send(pc.conn, bytes.view(b)[0..len])
-    bytes.free(b)
+    bytes.wipe_free(b)
     if string.equals(err, "") != 1 { return -1 }
     return len
 }
@@ -3520,7 +3520,7 @@ pure_tls_client_recv(pcp: ptr, buf: ptr, len: int) -> int {
         copy(buf, src, take as long)
         pc.pending_off = pc.pending_off + take
         if pc.pending_off >= pc.pending_len {
-            bytes.free(pc.pending)
+            bytes.wipe_free(pc.pending)
             pc.pending = null
             pc.pending_len = 0
             pc.pending_off = 0
@@ -3530,12 +3530,12 @@ pure_tls_client_recv(pcp: ptr, buf: ptr, len: int) -> int {
 
     p, n, err = conn_recv(pc.conn)
     if string.equals(err, "") != 1 {
-        if p != null { bytes.free(p) }
+        if p != null { bytes.wipe_free(p) }
         return -1
     }
     // A clean close_notify is EOF, which recv() reports as 0 -- not an error.
     if n <= 0 {
-        if p != null { bytes.free(p) }
+        if p != null { bytes.wipe_free(p) }
         return 0
     }
 
@@ -3547,7 +3547,7 @@ pure_tls_client_recv(pcp: ptr, buf: ptr, len: int) -> int {
         pc.pending_len = n
         pc.pending_off = take
     } else {
-        bytes.free(p)
+        bytes.wipe_free(p)
     }
     return take
 }
@@ -3556,7 +3556,7 @@ pure_tls_client_recv(pcp: ptr, buf: ptr, len: int) -> int {
 pure_tls_client_close(pcp: ptr) {
     if pcp == null { return }
     pc = pcp as *PureClientConn
-    if pc.pending != null { bytes.free(pc.pending) }
+    if pc.pending != null { bytes.wipe_free(pc.pending) }
     if pc.conn != null { close_conn(pc.conn) }
     libc_free(pcp)
 }

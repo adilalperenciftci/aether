@@ -9,6 +9,7 @@
 
 import std.bits
 import std.bytes
+import std.mem
 
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
@@ -204,7 +205,7 @@ finalize_to_bytes(c: *Md4Ctx) -> ptr {
 
 free_internals(c: *Md4Ctx) {
     if c.block != null {
-        bytes.free(c.block)
+        bytes.wipe_free(c.block)
         c.block = null
     }
 }
@@ -214,6 +215,7 @@ final_bytes(ctx: ptr) -> ptr {
     out = finalize_to_bytes(c)
     s = bytes.finish(out, 16)
     free_internals(c)
+    mem.wipe(ctx, sizeof(Md4Ctx))
     free(ctx)
     res = bytes.new(16)
     bytes.copy_from_string(res, 0, s, 16)
@@ -241,9 +243,10 @@ final_hex(ctx: ptr) -> string {
         bytes.set(hexbuf, i * 2 + 1, c_lo)
         i = i + 1
     }
-    bytes.free(out)
+    bytes.wipe_free(out)
     s = bytes.finish(hexbuf, 32)
     free_internals(c)
+    mem.wipe(ctx, sizeof(Md4Ctx))
     free(ctx)
     return s
 }
@@ -254,6 +257,7 @@ free_ctx(ctx: ptr) {
     }
     c = ctx as *Md4Ctx
     free_internals(c)
+    mem.wipe(ctx, sizeof(Md4Ctx))
     free(ctx)
 }
 

@@ -9,6 +9,7 @@
 
 import std.bits
 import std.bytes
+import std.mem
 
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
@@ -162,7 +163,7 @@ squeeze_bytes(c: *AsconXofCtx, out_len: int) -> ptr {
 
 free_internals(c: *AsconXofCtx) {
     if c.block != null {
-        bytes.free(c.block)
+        bytes.wipe_free(c.block)
         c.block = null
     }
 }
@@ -176,6 +177,7 @@ final_bytes(ctx: ptr, out_len: int) -> ptr {
     out = squeeze_bytes(c, n)
     s = bytes.finish(out, n)
     free_internals(c)
+    mem.wipe(ctx, sizeof(AsconXofCtx))
     free(ctx)
     res = bytes.new(n)
     bytes.copy_from_string(res, 0, s, n)
@@ -207,9 +209,10 @@ final_hex(ctx: ptr, out_len: int) -> string {
         bytes.set(hexbuf, i * 2 + 1, c_lo)
         i = i + 1
     }
-    bytes.free(out)
+    bytes.wipe_free(out)
     s = bytes.finish(hexbuf, n * 2)
     free_internals(c)
+    mem.wipe(ctx, sizeof(AsconXofCtx))
     free(ctx)
     return s
 }
@@ -220,6 +223,7 @@ free_ctx(ctx: ptr) {
     }
     c = ctx as *AsconXofCtx
     free_internals(c)
+    mem.wipe(ctx, sizeof(AsconXofCtx))
     free(ctx)
 }
 

@@ -1391,8 +1391,8 @@ ecdsa_verify(curve: int, pubx: ptr, puby: ptr, hash: ptr, r: ptr, s: ptr) -> int
     base_point(&c, &g)
     rp = Pt {}
     pt_mul2_vt(&c, &rp, u1, &g, u2, &pub, nb)
-    bytes.free(u1)
-    bytes.free(u2)
+    bytes.wipe_free(u1)
+    bytes.wipe_free(u2)
     x = Fe {}
     y = Fe {}
     if pt_affine(&c, &x, &y, &rp) == 0 {
@@ -1847,6 +1847,6 @@ ed_verify(curve: int, pub: ptr, r_enc: ptr, s: ptr, k: ptr) -> int {
         }
         i = i + 1
     }
-    bytes.free(enc)
+    bytes.wipe_free(enc)
     return ok
 }

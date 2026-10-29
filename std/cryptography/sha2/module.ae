@@ -379,6 +379,7 @@ new(algo: string) -> {
         ctx.h7 = 0x0eb72ddc81c52ca2
         ctx.digest_len = 32
     } else {
+        mem.wipe(ctx, sizeof(Sha2Ctx))
         free(ctx)
         return null, "unknown algorithm"
     }

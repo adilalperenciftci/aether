@@ -33,6 +33,7 @@
 
 import std.bits
 import std.bytes
+import std.mem
 
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
@@ -120,7 +121,7 @@ build_tables(c: *WpCtx) {
         c.c0[i] = word
         i = i + 1
     }
-    bytes.free(scratch)
+    bytes.wipe_free(scratch)
 
     // rc[0] = 0; rc[r] gathers byte 8*(r-1) from each C table, masked.
     c.rc[0] = 0
@@ -332,7 +333,7 @@ finalize_to_bytes(c: *WpCtx) -> ptr {
         bytes.set(c.buf, 32 + j, bytes.get(bitlen, j))
         j = j + 1
     }
-    bytes.free(bitlen)
+    bytes.wipe_free(bitlen)
     process_filled_buffer(c)
 
     out = bytes.new(64)
@@ -346,11 +347,11 @@ finalize_to_bytes(c: *WpCtx) -> ptr {
 
 free_internals(c: *WpCtx) {
     if c.buf != null {
-        bytes.free(c.buf)
+        bytes.wipe_free(c.buf)
         c.buf = null
     }
     if c.bitcount != null {
-        bytes.free(c.bitcount)
+        bytes.wipe_free(c.bitcount)
         c.bitcount = null
     }
 }
@@ -362,6 +363,7 @@ final_bytes(ctx: ptr) -> ptr {
     out = finalize_to_bytes(c)
     s = bytes.finish(out, 64)
     free_internals(c)
+    mem.wipe(ctx, sizeof(WpCtx))
     free(ctx)
     res = bytes.new(64)
     bytes.copy_from_string(res, 0, s, 64)
@@ -391,9 +393,10 @@ final_hex(ctx: ptr) -> string {
         bytes.set(hexbuf, i * 2 + 1, c_lo)
         i = i + 1
     }
-    bytes.free(out)
+    bytes.wipe_free(out)
     s = bytes.finish(hexbuf, 128)
     free_internals(c)
+    mem.wipe(ctx, sizeof(WpCtx))
     free(ctx)
     return s
 }
@@ -407,6 +410,7 @@ free_ctx(ctx: ptr) {
     }
     c = ctx as *WpCtx
     free_internals(c)
+    mem.wipe(ctx, sizeof(WpCtx))
     free(ctx)
 }
 

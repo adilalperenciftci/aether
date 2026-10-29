@@ -30,6 +30,7 @@
 
 import std.bits
 import std.bytes
+import std.mem
 
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
@@ -292,7 +293,7 @@ create_initial_state(c: *SkeinCtx, out_bits: long) {
     // output length bits, LE 64-bit at offset 8
     bytes.set_le64(cfg, 8, out_bits)
     ubi_complete(c, PARAM_TYPE_CONFIG, bytes.view(cfg)[0..32])
-    bytes.free(cfg)
+    bytes.wipe_free(cfg)
 
     // save initial state
     i = 0
@@ -353,7 +354,7 @@ finalize_to_bytes(c: *SkeinCtx) -> ptr {
         cb = bytes.new(8)
         bytes.set_le64(cb, 0, seq)
         ubi_complete(c, PARAM_TYPE_OUTPUT, bytes.view(cb)[0..8])
-        bytes.free(cb)
+        bytes.wipe_free(cb)
 
         // emit up to NBYTES of the resulting chain (LE words)
         base = seq * NBYTES
@@ -381,7 +382,7 @@ finalize_to_bytes(c: *SkeinCtx) -> ptr {
 
 free_internals(c: *SkeinCtx) {
     if c.block != null {
-        bytes.free(c.block)
+        bytes.wipe_free(c.block)
         c.block = null
     }
 }
@@ -394,6 +395,7 @@ final_bytes(ctx: ptr) -> ptr {
     out = finalize_to_bytes(c)
     s = bytes.finish(out, n)
     free_internals(c)
+    mem.wipe(ctx, sizeof(SkeinCtx))
     free(ctx)
     res = bytes.new(n)
     bytes.copy_from_string(res, 0, s, n)
@@ -424,9 +426,10 @@ final_hex(ctx: ptr) -> string {
         bytes.set(hexbuf, i * 2 + 1, c_lo)
         i = i + 1
     }
-    bytes.free(out)
+    bytes.wipe_free(out)
     s = bytes.finish(hexbuf, n * 2)
     free_internals(c)
+    mem.wipe(ctx, sizeof(SkeinCtx))
     free(ctx)
     return s
 }
@@ -440,6 +443,7 @@ free_ctx(ctx: ptr) {
     }
     c = ctx as *SkeinCtx
     free_internals(c)
+    mem.wipe(ctx, sizeof(SkeinCtx))
     free(ctx)
 }
 

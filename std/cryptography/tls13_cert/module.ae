@@ -126,7 +126,7 @@ client_cert_verify_content(transcript_hash: byte[]) -> (ptr, int) {
 sign_client_cert_verify_ecdsa_p256(priv: ptr, transcript_hash: byte[]) -> ptr {
     content, clen = client_cert_verify_content(transcript_hash)
     sig = sign_content_ecdsa_p256(priv, content, clen)
-    bytes.free(content)
+    bytes.wipe_free(content)
     return sig
 }
 
@@ -139,7 +139,7 @@ sign_client_cert_verify_ecdsa_p256(priv: ptr, transcript_hash: byte[]) -> ptr {
 sign_server_cert_verify_ecdsa_p256(priv: ptr, transcript_hash: byte[]) -> ptr {
     content, clen = cert_verify_content(transcript_hash)
     sig = sign_content_ecdsa_p256(priv, content, clen)
-    bytes.free(content)
+    bytes.wipe_free(content)
     return sig
 }
 
@@ -153,7 +153,7 @@ sign_server_cert_verify_ecdsa_p256(priv: ptr, transcript_hash: byte[]) -> ptr {
 sign_server_cert_verify_ecdsa(kind: int, priv: ptr, transcript_hash: byte[]) -> ptr {
     content, clen = cert_verify_content(transcript_hash)
     sig = sign_content_ecdsa(kind, priv, content, clen)
-    bytes.free(content)
+    bytes.wipe_free(content)
     return sig
 }
 
@@ -169,7 +169,7 @@ sign_server_cert_verify_ed25519(seed: ptr, transcript_hash: byte[]) -> ptr {
     content, clen = cert_verify_content(transcript_hash)
     sig = ed25519.sign_hedged(seed, bytes.view(content)[0..clen], extra)
     bytes.wipe_free(extra)
-    bytes.free(content)
+    bytes.wipe_free(content)
     return sig
 }
 
@@ -207,10 +207,10 @@ sign_server_cert_verify_rsa_pss_scheme(key: ptr, scheme: int, transcript_hash: b
         sha2.update(ctx, bytes.view(content)[0..clen])
         digest = sha2.final_bytes(ctx)
         sig = rsa.sign_pss_hash(key, algo, digest, bytes.view(salt)[0..hl])
-        bytes.free(digest)
+        bytes.wipe_free(digest)
     }
-    bytes.free(content)
-    bytes.free(salt)
+    bytes.wipe_free(content)
+    bytes.wipe_free(salt)
     return sig
 }
 
@@ -241,9 +241,9 @@ fn sign_content_ecdsa(kind: int, priv: ptr, content: ptr, clen: int) -> ptr {
     if kind == KEY_P384 { r32, s32 = p384.ecdsa_sign_hedged(priv, digest, extra) }
     if kind == KEY_P521 { r32, s32 = p521.ecdsa_sign_hedged(priv, digest, extra) }
     bytes.wipe_free(extra)
-    bytes.free(digest)
+    bytes.wipe_free(digest)
     if r32 == null {
-        if s32 != null { bytes.free(s32) }
+        if s32 != null { bytes.wipe_free(s32) }
         return null
     }
     // DER-encode as SEQUENCE { INTEGER r, INTEGER s }.
@@ -258,9 +258,9 @@ fn sign_content_ecdsa(kind: int, priv: ptr, content: ptr, clen: int) -> ptr {
     // NOTE: asn1.encode_sequence -> wrap_tlv CONSUMES (frees) `body`, so we must
     // NOT free it again here (double-free). rder/sder are our own copies.
     sig = asn1.encode_sequence(body)
-    bytes.free(r32); bytes.free(s32)
+    bytes.wipe_free(r32); bytes.wipe_free(s32)
     bignum.free(rbn); bignum.free(sbn)
-    bytes.free(rder); bytes.free(sder)
+    bytes.wipe_free(rder); bytes.wipe_free(sder)
     return sig
 }
 
@@ -312,19 +312,19 @@ split_ecdsa_sig(sig: byte[], coord: int) -> (ptr, ptr, string) {
     sub, body, serr = asn1.read_sequence(rdr)
     if string.equals(serr, "") != 1 {
         asn1.reader_free(rdr)
-        bytes.free(view)
+        bytes.wipe_free(view)
         return null, null, serr
     }
     // read_integer returns a std.bignum handle (NOT a std.bytes buffer).
     rint, rerr = asn1.read_integer(sub)
     if string.equals(rerr, "") != 1 {
-        asn1.reader_free(sub); asn1.reader_free(rdr); bytes.free(view); bytes.free(body)
+        asn1.reader_free(sub); asn1.reader_free(rdr); bytes.wipe_free(view); bytes.wipe_free(body)
         return null, null, rerr
     }
     sint, serr2 = asn1.read_integer(sub)
     if string.equals(serr2, "") != 1 {
         bignum.free(rint)
-        asn1.reader_free(sub); asn1.reader_free(rdr); bytes.free(view); bytes.free(body)
+        asn1.reader_free(sub); asn1.reader_free(rdr); bytes.wipe_free(view); bytes.wipe_free(body)
         return null, null, serr2
     }
 
@@ -347,8 +347,8 @@ split_ecdsa_sig(sig: byte[], coord: int) -> (ptr, ptr, string) {
         smag = bignum.to_bytes_unsigned(sint)
         if bytes.length(rmag) > coord { strict = 0 }
         if bytes.length(smag) > coord { strict = 0 }
-        bytes.free(rmag)
-        bytes.free(smag)
+        bytes.wipe_free(rmag)
+        bytes.wipe_free(smag)
     }
     if strict == 1 {
         ri = asn1.encode_integer(rint)
@@ -373,14 +373,14 @@ split_ecdsa_sig(sig: byte[], coord: int) -> (ptr, ptr, string) {
                 j = j + 1
             }
         }
-        bytes.free(ri)
-        bytes.free(si)
-        bytes.free(reenc)
+        bytes.wipe_free(ri)
+        bytes.wipe_free(si)
+        bytes.wipe_free(reenc)
     }
     if strict != 1 {
         bignum.free(rint)
         bignum.free(sint)
-        asn1.reader_free(sub); asn1.reader_free(rdr); bytes.free(view); bytes.free(body)
+        asn1.reader_free(sub); asn1.reader_free(rdr); bytes.wipe_free(view); bytes.wipe_free(body)
         return null, null, "ecdsa-sig: not strict minimal DER, or scalar out of range"
     }
 
@@ -390,8 +390,8 @@ split_ecdsa_sig(sig: byte[], coord: int) -> (ptr, ptr, string) {
     bignum.free(sint)
     asn1.reader_free(sub)
     asn1.reader_free(rdr)
-    bytes.free(view)
-    bytes.free(body)
+    bytes.wipe_free(view)
+    bytes.wipe_free(body)
     return r, s, ""
 }
 
@@ -420,7 +420,7 @@ fn bn_to_fixed(v: ptr, width: int) -> ptr {
         bytes.set(out, dst + k, bytes.get(be, src_start + k) & 0xFF)
         k = k + 1
     }
-    bytes.free(be)
+    bytes.wipe_free(be)
     return out
 }
 
@@ -453,10 +453,10 @@ verify_cert_verify(scheme: int, pubx: ptr, puby: ptr, transcript_hash: byte[], s
         r32, s32, serr = split_ecdsa_sig(sig, 32)
         if string.equals(serr, "") == 1 {
             result = p256.ecdsa_verify(pubx, puby, digest, r32, s32)
-            bytes.free(r32)
-            bytes.free(s32)
+            bytes.wipe_free(r32)
+            bytes.wipe_free(s32)
         }
-        bytes.free(digest)
+        bytes.wipe_free(digest)
     }
     if scheme == SCHEME_ECDSA_P384_SHA384 {
         // ECDSA over SHA-384(content) on a P-384 leaf key; pubx/puby are the
@@ -465,10 +465,10 @@ verify_cert_verify(scheme: int, pubx: ptr, puby: ptr, transcript_hash: byte[], s
         r48, s48, serr = split_ecdsa_sig(sig, 48)
         if string.equals(serr, "") == 1 {
             result = p384.ecdsa_verify(pubx, puby, digest, r48, s48)
-            bytes.free(r48)
-            bytes.free(s48)
+            bytes.wipe_free(r48)
+            bytes.wipe_free(s48)
         }
-        bytes.free(digest)
+        bytes.wipe_free(digest)
     }
     if scheme == SCHEME_ECDSA_P521_SHA512 {
         // ECDSA over SHA-512(content) on a P-521 leaf key; pubx/puby are the
@@ -477,17 +477,17 @@ verify_cert_verify(scheme: int, pubx: ptr, puby: ptr, transcript_hash: byte[], s
         r66, s66, serr = split_ecdsa_sig(sig, 66)
         if string.equals(serr, "") == 1 {
             result = p521.ecdsa_verify(pubx, puby, digest, r66, s66)
-            bytes.free(r66)
-            bytes.free(s66)
+            bytes.wipe_free(r66)
+            bytes.wipe_free(s66)
         }
-        bytes.free(digest)
+        bytes.wipe_free(digest)
     }
     if scheme == SCHEME_ED25519 {
         // Ed25519 signs the raw content (hashes internally). pubx = 32-byte key.
         result = ed25519.verify(pubx, bytes.view(content)[0..clen], sig)
     }
 
-    bytes.free(content)
+    bytes.wipe_free(content)
     return result
 }
 
@@ -530,8 +530,8 @@ verify_cert_verify_rsa_pss_scheme(spki_key: byte[], scheme: int, transcript_hash
     result = 0
     if digest != null { result = rsa.verify_pss_hash(k, algo, digest, sig, hl) }
     rsa.key_free(k) // frees n, e
-    bytes.free(content)
-    bytes.free(digest)
+    bytes.wipe_free(content)
+    bytes.wipe_free(digest)
     return result
 }
 
@@ -569,8 +569,8 @@ leaf_signature_holds(leaf: *LeafCert, scheme: int, transcript_hash: byte[], sig:
     bytes.copy_from_bytes(px, 0, leaf.spki_key, 1, w)
     bytes.copy_from_bytes(py, 0, leaf.spki_key, 1 + w, w)
     ok = verify_cert_verify(scheme, px, py, transcript_hash, sig)
-    bytes.free(px)
-    bytes.free(py)
+    bytes.wipe_free(px)
+    bytes.wipe_free(py)
     return ok
 }
 
@@ -585,7 +585,7 @@ client_cert_verify_holds(leaf: *LeafCert, transcript_hash: byte[], sig: byte[]) 
     if leaf.key_kind != KEY_P256 { return 0 }
     content, clen = client_cert_verify_content(transcript_hash)
     digest = sha256_of_bytes(bytes.view(content)[0..clen])
-    bytes.free(content)
+    bytes.wipe_free(content)
     px = bytes.new(32)
     py = bytes.new(32)
     bytes.copy_from_bytes(px, 0, leaf.spki_key, 1, 32)
@@ -594,12 +594,12 @@ client_cert_verify_holds(leaf: *LeafCert, transcript_hash: byte[], sig: byte[]) 
     r32, s32, serr = split_ecdsa_sig(sig, 32)
     if string.equals(serr, "") == 1 {
         ok = p256.ecdsa_verify(px, py, digest, r32, s32)
-        bytes.free(r32)
-        bytes.free(s32)
+        bytes.wipe_free(r32)
+        bytes.wipe_free(s32)
     }
-    bytes.free(px)
-    bytes.free(py)
-    bytes.free(digest)
+    bytes.wipe_free(px)
+    bytes.wipe_free(py)
+    bytes.wipe_free(digest)
     return ok
 }
 
@@ -763,13 +763,13 @@ parse_certificate(der: byte[], out: *LeafCert) -> string {
     // Certificate is a SEQUENCE; step into it, then the first element is TBS.
     cert, cert_body, cerr = asn1.read_sequence(top)
     if string.equals(cerr, "") != 1 {
-        asn1.reader_free(top); bytes.free(view)
+        asn1.reader_free(top); bytes.wipe_free(view)
         return cerr
     }
     tbs_start = asn1.reader_pos(cert)
     tbs_content, terr = asn1.read_tlv(cert)
     if string.equals(terr, "") != 1 {
-        asn1.reader_free(cert); asn1.reader_free(top); bytes.free(view); bytes.free(cert_body)
+        asn1.reader_free(cert); asn1.reader_free(top); bytes.wipe_free(view); bytes.wipe_free(cert_body)
         return terr
     }
     tbs_end = asn1.reader_pos(cert)
@@ -787,7 +787,7 @@ parse_certificate(der: byte[], out: *LeafCert) -> string {
         soid, soerr = asn1.read_oid(salg_body)
         if string.equals(soerr, "") == 1 { out.sig_alg_oid = oid_to_bytes(soid); string.release(soid) }
         asn1.reader_free(salg_body)
-        bytes.free(salg_full)
+        bytes.wipe_free(salg_full)
     }
     sigbits, _snbits, sberr = asn1.read_bit_string(cert)
     if string.equals(sberr, "") == 1 {
@@ -800,11 +800,11 @@ parse_certificate(der: byte[], out: *LeafCert) -> string {
     perr = parse_tbs_fields(tbsr, out)
     asn1.reader_free(tbsr)
 
-    bytes.free(tbs_content)
+    bytes.wipe_free(tbs_content)
     asn1.reader_free(cert)
     asn1.reader_free(top)
-    bytes.free(view)
-    bytes.free(cert_body)
+    bytes.wipe_free(view)
+    bytes.wipe_free(cert_body)
     return perr
 }
 
@@ -826,11 +826,11 @@ fn parse_tbs_fields(tbsr: ptr, out: *LeafCert) -> string {
         } else {
             out.version = -1
         }
-        if vi != null { bytes.free(vi) }
+        if vi != null { bytes.wipe_free(vi) }
         asn1.reader_free(vr0)
     }
     if string.equals(verr, "") == 1 && vtag == 0x02 { serial_check(v, out) }
-    bytes.free(v)
+    bytes.wipe_free(v)
     // Every read below used to drop its error, so a truncated or malformed
     // certificate parsed "successfully" into a LeafCert whose fields came
     // from reads that failed -- an issuer, subject, validity or SPKI the
@@ -849,40 +849,40 @@ fn parse_tbs_fields(tbsr: ptr, out: *LeafCert) -> string {
         sn, snerr = asn1.read_tlv(tbsr)
         if string.equals(snerr, "") != 1 { return snerr }
         serial_check(sn, out)
-        bytes.free(sn)
+        bytes.wipe_free(sn)
     }
 
     // signature AlgorithmIdentifier (SEQUENCE) — skip.
     sa, saerr = asn1.read_tlv(tbsr)
-    bytes.free(sa)
+    bytes.wipe_free(sa)
     if string.equals(saerr, "") != 1 { return saerr }
 
     // issuer Name (SEQUENCE) — capture raw DER (tag+len+content).
     iss, ierr = read_tlv_full(tbsr)
-    if string.equals(ierr, "") != 1 { bytes.free(iss); return ierr }
+    if string.equals(ierr, "") != 1 { bytes.wipe_free(iss); return ierr }
     out.issuer = iss
     out.issuer_len = bytes.length(iss)
 
     // validity SEQUENCE { notBefore, notAfter }.
     val_content, valerr = asn1.read_tlv(tbsr)
-    if string.equals(valerr, "") != 1 { bytes.free(val_content); return valerr }
+    if string.equals(valerr, "") != 1 { bytes.wipe_free(val_content); return valerr }
     vr = asn1.reader_new(val_content)
     nb, nberr = asn1.read_tlv(vr)
     if string.equals(nberr, "") == 1 { out.not_before = nb; out.not_before_len = bytes.length(nb) }
     na, naerr = asn1.read_tlv(vr)
     if string.equals(naerr, "") == 1 { out.not_after = na; out.not_after_len = bytes.length(na) }
     asn1.reader_free(vr)
-    bytes.free(val_content)
+    bytes.wipe_free(val_content)
 
     // subject Name (SEQUENCE) — capture raw DER.
     subj, suberr = read_tlv_full(tbsr)
-    if string.equals(suberr, "") != 1 { bytes.free(subj); return suberr }
+    if string.equals(suberr, "") != 1 { bytes.wipe_free(subj); return suberr }
     out.subject = subj
     out.subject_len = bytes.length(subj)
 
     // subjectPublicKeyInfo SEQUENCE { algorithm AlgId, subjectPublicKey BIT }.
     spki_content, spkierr = asn1.read_tlv(tbsr)
-    if string.equals(spkierr, "") != 1 { bytes.free(spki_content); return spkierr }
+    if string.equals(spkierr, "") != 1 { bytes.wipe_free(spki_content); return spkierr }
     sr = asn1.reader_new(spki_content)
     algo_body, algo_full, ae = asn1.read_sequence(sr)
     kind = KEY_NONE
@@ -894,7 +894,7 @@ fn parse_tbs_fields(tbsr: ptr, out: *LeafCert) -> string {
             string.release(oid)
         }
         asn1.reader_free(algo_body)
-        bytes.free(algo_full)
+        bytes.wipe_free(algo_full)
     }
     bitkey, _nbits, berr = asn1.read_bit_string(sr)
     if string.equals(berr, "") == 1 {
@@ -905,7 +905,7 @@ fn parse_tbs_fields(tbsr: ptr, out: *LeafCert) -> string {
         out.key_bits = kb
     }
     asn1.reader_free(sr)
-    bytes.free(spki_content)
+    bytes.wipe_free(spki_content)
 
     // Remaining: optional [1]/[2] unique IDs and [3] extensions. Scan for the
     // [3] EXPLICIT extensions wrapper (tag 0xA3) and parse SAN out of it.
@@ -920,7 +920,7 @@ fn parse_tbs_fields(tbsr: ptr, out: *LeafCert) -> string {
             // "v2" certificate carrying extensions is bound by them.
             parse_extensions(ext_content, out)
         }
-        bytes.free(ext_content)
+        bytes.wipe_free(ext_content)
     }
 
     self_signed_check(out)
@@ -945,7 +945,7 @@ fn read_tlv_full(r: ptr) -> (ptr, string) {
     start = asn1.reader_pos(r)
     content, err = asn1.read_tlv(r)
     if string.equals(err, "") != 1 { return null, err }
-    bytes.free(content)
+    bytes.wipe_free(content)
     end = asn1.reader_pos(r)
     // The reader's buffer holds the bytes; re-read the span. We need access to
     // the buffer — read_tlv already advanced it. Reconstruct by re-reading the
@@ -1100,7 +1100,7 @@ fn parse_extensions(ext_wrapper: @keep ptr, out: *LeafCert) {
     asn1.reader_free(wr)
     if string.equals(serr, "") != 1 || seq_tag != 0x30 {
         out.ext_bits = out.ext_bits | EXT_MALFORMED
-        if seq_content != null { bytes.free(seq_content) }
+        if seq_content != null { bytes.wipe_free(seq_content) }
         return
     }
     seen = list_new()
@@ -1117,7 +1117,7 @@ fn parse_extensions(ext_wrapper: @keep ptr, out: *LeafCert) {
             ob = oid_to_bytes(oid)
             if bytes_list_has(seen, ob) == 1 {
                 out.ext_bits = out.ext_bits | EXT_DUPLICATE
-                bytes.free(ob)
+                bytes.wipe_free(ob)
             } else {
                 list.add(seen, ob)
             }
@@ -1126,17 +1126,17 @@ fn parse_extensions(ext_wrapper: @keep ptr, out: *LeafCert) {
                 out.ext_bits = out.ext_bits | EXT_MALFORMED
             } else {
                 parse_one_extension(oid, critical, value, out)
-                bytes.free(value)
+                bytes.wipe_free(value)
             }
             string.release(oid)
         } else {
             out.ext_bits = out.ext_bits | EXT_MALFORMED
         }
         asn1.reader_free(xr)
-        bytes.free(one)
+        bytes.wipe_free(one)
     }
     asn1.reader_free(er)
-    bytes.free(seq_content)
+    bytes.wipe_free(seq_content)
     free_bytes_list(seen)
 }
 
@@ -1290,7 +1290,7 @@ fn bytes_same(a: ptr, b: ptr) -> int {
 
 // bytes.free on a buffer that may be null.
 fn free_opt(b: @frees ptr) {
-    if b != null { bytes.free(b) }
+    if b != null { bytes.wipe_free(b) }
 }
 
 // OpenSSL's "self-signed" (ossl_x509v3_cache_extensions): the issuer is the
@@ -1334,7 +1334,7 @@ fn parse_ext_key_usage(value: @keep ptr, out: *LeafCert) {
     asn1.reader_free(r)
     if string.equals(berr, "") != 1 || btag != 0x30 {
         out.ext_bits = out.ext_bits | EXT_MALFORMED
-        if body != null { bytes.free(body) }
+        if body != null { bytes.wipe_free(body) }
         return
     }
     br = asn1.reader_new(body)
@@ -1359,7 +1359,7 @@ fn parse_ext_key_usage(value: @keep ptr, out: *LeafCert) {
     }
     if count == 0 { out.ext_bits = out.ext_bits | EXT_MALFORMED }
     asn1.reader_free(br)
-    bytes.free(body)
+    bytes.wipe_free(body)
 }
 
 // NameConstraints ::= SEQUENCE { permittedSubtrees [0] GeneralSubtrees OPTIONAL,
@@ -1381,7 +1381,7 @@ fn parse_name_constraints(value: @keep ptr, out: *LeafCert) {
     asn1.reader_free(r)
     if string.equals(berr, "") != 1 || btag != 0x30 {
         out.ext_bits = out.ext_bits | EXT_MALFORMED
-        if body != null { bytes.free(body) }
+        if body != null { bytes.wipe_free(body) }
         return
     }
     br = asn1.reader_new(body)
@@ -1399,7 +1399,7 @@ fn parse_name_constraints(value: @keep ptr, out: *LeafCert) {
                 sub, suberr = asn1.read_tlv(tr)
                 if string.equals(suberr, "") != 1 || asn1.last_tag(tr) != 0x30 {
                     out.ext_bits = out.ext_bits | EXT_MALFORMED
-                    if sub != null { bytes.free(sub) }
+                    if sub != null { bytes.wipe_free(sub) }
                     break
                 }
                 sr = asn1.reader_new(sub)
@@ -1412,7 +1412,7 @@ fn parse_name_constraints(value: @keep ptr, out: *LeafCert) {
                     bytes.set(e, 0, btag2)
                     if bl > 0 { bytes.copy_from_bytes(e, 1, base, 0, bl) }
                     list.add(dest, e)
-                    bytes.free(base)
+                    bytes.wipe_free(base)
                     out.nc_forms = out.nc_forms | (1 << (btag2 & 0x1F))
                     if constraint_ok(e) == 0 { out.ext_bits = out.ext_bits | EXT_MALFORMED }
                     if asn1.reader_eof(sr) != 1 { out.ext_bits = out.ext_bits | EXT_MALFORMED }
@@ -1420,7 +1420,7 @@ fn parse_name_constraints(value: @keep ptr, out: *LeafCert) {
                     out.ext_bits = out.ext_bits | EXT_MALFORMED
                 }
                 asn1.reader_free(sr)
-                bytes.free(sub)
+                bytes.wipe_free(sub)
             }
             asn1.reader_free(tr)
             if ttag == 0xA0 && list_size(dest) == 0 { out.ext_bits = out.ext_bits | EXT_MALFORMED }
@@ -1434,10 +1434,10 @@ fn parse_name_constraints(value: @keep ptr, out: *LeafCert) {
         } else {
             out.ext_bits = out.ext_bits | EXT_MALFORMED
         }
-        bytes.free(trees)
+        bytes.wipe_free(trees)
     }
     asn1.reader_free(br)
-    bytes.free(body)
+    bytes.wipe_free(body)
 }
 
 // Is the subtree base `e` (tag byte, then content) a well-formed constraint?
@@ -1545,7 +1545,7 @@ fn read_extn_value(xr: ptr) -> (ptr, int) {
     if string.equals(nxerr, "") != 1 { return null, 0 }
     if asn1.last_tag(xr) != 0x01 {
         if asn1.last_tag(xr) != 0x04 || asn1.reader_eof(xr) != 1 {
-            bytes.free(nx)
+            bytes.wipe_free(nx)
             return null, 0
         }
         return nx, 0
@@ -1553,12 +1553,12 @@ fn read_extn_value(xr: ptr) -> (ptr, int) {
     critical = -1
     if bytes.length(nx) == 1 && (bytes.get(nx, 0) & 0xFF) == 0xFF { critical = 1 }
     if bytes.length(nx) == 1 && (bytes.get(nx, 0) & 0xFF) == 0 { critical = 0 }
-    bytes.free(nx)
+    bytes.wipe_free(nx)
     if critical < 0 { return null, 0 }
     os2, os2e = asn1.read_tlv(xr)
     if string.equals(os2e, "") != 1 { return null, 0 }
     if asn1.last_tag(xr) != 0x04 || asn1.reader_eof(xr) != 1 {
-        bytes.free(os2)
+        bytes.wipe_free(os2)
         return null, 0
     }
     return os2, critical
@@ -1578,7 +1578,7 @@ fn decode_basic_constraints(octet_content: @keep ptr, out: *LeafCert) {
     asn1.reader_free(r)
     if string.equals(berr, "") != 1 || btag != 0x30 {
         out.ext_bits = out.ext_bits | EXT_MALFORMED
-        if body != null { bytes.free(body) }
+        if body != null { bytes.wipe_free(body) }
         return
     }
     br = asn1.reader_new(body)
@@ -1612,10 +1612,10 @@ fn decode_basic_constraints(octet_content: @keep ptr, out: *LeafCert) {
         } else {
             out.ext_bits = out.ext_bits | EXT_MALFORMED
         }
-        bytes.free(f)
+        bytes.wipe_free(f)
     }
     asn1.reader_free(br)
-    bytes.free(body)
+    bytes.wipe_free(body)
 }
 
 // keyUsage ::= BIT STRING. The extension sets out.has_key_usage; bit i
@@ -1641,7 +1641,7 @@ fn decode_key_usage(octet_content: @keep ptr, out: *LeafCert) {
     }
     out.key_usage = ku
     if (ku & KU_KEY_CERT_SIGN) != 0 { out.key_cert_sign = 1 }
-    bytes.free(bits)
+    bytes.wipe_free(bits)
 }
 
 // The SAN extnValue OCTET STRING wraps GeneralNames ::= SEQUENCE OF GeneralName.
@@ -1659,7 +1659,7 @@ fn decode_san_dnsnames(octet_content: @keep ptr, out: *LeafCert) -> int {
     asn1.reader_free(or)
     if string.equals(gerr, "") != 1 || gtag != 0x30 || trailing {
         out.ext_bits = out.ext_bits | EXT_MALFORMED
-        if gn_content != null { bytes.free(gn_content) }
+        if gn_content != null { bytes.wipe_free(gn_content) }
         return 0
     }
     int count = 0
@@ -1708,10 +1708,10 @@ fn decode_san_dnsnames(octet_content: @keep ptr, out: *LeafCert) -> int {
             if nlen > 0 { bytes.copy_from_bytes(e, 1, name_content, 0, nlen) }
             list.add(out.san_other, e)
         }
-        bytes.free(name_content)
+        bytes.wipe_free(name_content)
     }
     asn1.reader_free(gr)
-    bytes.free(gn_content)
+    bytes.wipe_free(gn_content)
     return count
 }
 
@@ -1756,21 +1756,21 @@ leaf_dns_name(c: *LeafCert, i: int) -> ptr {
 
 // Free every owned buffer/string in a parsed LeafCert.
 free_leaf(c: *LeafCert) {
-    if c.tbs != null { bytes.free(c.tbs) }
-    if c.signature != null { bytes.free(c.signature) }
-    if c.spki_key != null { bytes.free(c.spki_key) }
-    if c.issuer != null { bytes.free(c.issuer) }
-    if c.subject != null { bytes.free(c.subject) }
-    if c.sig_alg_oid != null { bytes.free(c.sig_alg_oid) }
-    if c.spki_algo_oid != null { bytes.free(c.spki_algo_oid) }
-    if c.not_before != null { bytes.free(c.not_before) }
-    if c.not_after != null { bytes.free(c.not_after) }
+    if c.tbs != null { bytes.wipe_free(c.tbs) }
+    if c.signature != null { bytes.wipe_free(c.signature) }
+    if c.spki_key != null { bytes.wipe_free(c.spki_key) }
+    if c.issuer != null { bytes.wipe_free(c.issuer) }
+    if c.subject != null { bytes.wipe_free(c.subject) }
+    if c.sig_alg_oid != null { bytes.wipe_free(c.sig_alg_oid) }
+    if c.spki_algo_oid != null { bytes.wipe_free(c.spki_algo_oid) }
+    if c.not_before != null { bytes.wipe_free(c.not_before) }
+    if c.not_after != null { bytes.wipe_free(c.not_after) }
     if c.dns_names != null {
         n = list_size(c.dns_names)
         i = 0
         while i < n {
             e = list.at(c.dns_names, i) as ptr
-            bytes.free(e)
+            bytes.wipe_free(e)
             i = i + 1
         }
         list_free(c.dns_names)
@@ -1780,7 +1780,7 @@ free_leaf(c: *LeafCert) {
         j = 0
         while j < m {
             a = list.at(c.ip_addrs, j) as ptr
-            bytes.free(a)
+            bytes.wipe_free(a)
             j = j + 1
         }
         list_free(c.ip_addrs)
@@ -1810,7 +1810,7 @@ fn free_bytes_list(l: @frees ptr) {
     i = 0
     while i < n {
         e = list.at(l, i) as ptr
-        if e != null { bytes.free(e) }
+        if e != null { bytes.wipe_free(e) }
         i = i + 1
     }
     list_free(l)
@@ -1845,15 +1845,15 @@ fn time_to_key(t: ptr, tlen: int) -> string {
         k = 0
         while k < 12 { bytes.set(out, 2 + k, bytes.get(digits, k)); k = k + 1 }
         r = bytes.to_string(out, 14)
-        bytes.free(out); bytes.free(digits)
+        bytes.wipe_free(out); bytes.wipe_free(digits)
         return r
     }
     if dn == 14 {
         r = bytes.to_string(digits, 14)
-        bytes.free(digits)
+        bytes.wipe_free(digits)
         return r
     }
-    bytes.free(digits)
+    bytes.wipe_free(digits)
     return ""
 }
 
@@ -1873,7 +1873,7 @@ fn now_key() -> string {
         i = i + 1
     }
     r = bytes.to_string(out, 14)
-    bytes.free(out)
+    bytes.wipe_free(out)
     return r
 }
 
@@ -1997,7 +1997,7 @@ fn parse_ipv4(host: string, hlen: int) -> ptr {
     if digits == 0 { bad = 1 }
     if idx != 3 { bad = 1 }
     if bad == 1 {
-        bytes.free(out)
+        bytes.wipe_free(out)
         return null
     }
     bytes.set(out, 3, octet)
@@ -2073,7 +2073,7 @@ fn parse_ipv6(host: string, hlen: int) -> ptr {
     if gap < 0 && nw != 8 { bad = 1 }
     if gap >= 0 && nw > 7 { bad = 1 }
     if bad == 1 {
-        bytes.free(words)
+        bytes.wipe_free(words)
         return null
     }
     // bytes.new does not zero: every byte of `out` is written below.
@@ -2096,7 +2096,7 @@ fn parse_ipv6(host: string, hlen: int) -> ptr {
         bytes.set(out, 16 - 2 * tail + k, bytes.get(words, 2 * head + k) & 0xFF)
         k = k + 1
     }
-    bytes.free(words)
+    bytes.wipe_free(words)
     return out
 }
 
@@ -2137,11 +2137,11 @@ check_hostname(c: *LeafCert, host: string) -> string {
     ipv4 = parse_ipv4(host, hlen0)
     if ipv4 != null {
         if c.ip_addrs == null {
-            bytes.free(ipv4)
+            bytes.wipe_free(ipv4)
             return "certificate has no iPAddress SAN for this address"
         }
         hit4 = ip_san_matches(c, ipv4)
-        bytes.free(ipv4)
+        bytes.wipe_free(ipv4)
         if hit4 == 1 { return "" }
         return "certificate is not valid for the requested address"
     }
@@ -2152,11 +2152,11 @@ check_hostname(c: *LeafCert, host: string) -> string {
         ipv6 = parse_ipv6(host, hlen0)
         if ipv6 == null { return "not a valid IPv6 address" }
         if c.ip_addrs == null {
-            bytes.free(ipv6)
+            bytes.wipe_free(ipv6)
             return "certificate has no iPAddress SAN for this address"
         }
         hit6 = ip_san_matches(c, ipv6)
-        bytes.free(ipv6)
+        bytes.wipe_free(ipv6)
         if hit6 == 1 { return "" }
         return "certificate is not valid for the requested address"
     }
@@ -2366,15 +2366,15 @@ verify_ocsp_signature(der: byte[], issuer: *LeafCert) -> int {
 
     // signatureAlgorithm ::= SEQUENCE { algorithm OID, ... }
     ta, ca, la, na = der_tlv_slice(der, nt, bend)
-    if ta != 0x30 { bytes.free(tbs); return 0 }
+    if ta != 0x30 { bytes.wipe_free(tbs); return 0 }
     toi, coi, loi, _noi = der_tlv_slice(der, ca, ca + la)
-    if toi != 0x06 { bytes.free(tbs); return 0 }
+    if toi != 0x06 { bytes.wipe_free(tbs); return 0 }
     sig_alg_oid = oid_der_to_dotted_bytes_slice(der, coi, loi)
 
     // signature BIT STRING — strip the leading "unused bits" octet (0x00).
     tsg, csg, lsg, nsg = der_tlv_slice(der, na, bend)
-    if tsg != 0x03 { bytes.free(tbs); bytes.free(sig_alg_oid); return 0 }
-    if lsg < 1 { bytes.free(tbs); bytes.free(sig_alg_oid); return 0 }
+    if tsg != 0x03 { bytes.wipe_free(tbs); bytes.wipe_free(sig_alg_oid); return 0 }
+    if lsg < 1 { bytes.wipe_free(tbs); bytes.wipe_free(sig_alg_oid); return 0 }
     sig_len = lsg - 1
     sig = bytes.new(sig_len)
     if sig_len > 0 { bytes.set(sig, sig_len - 1, 0) }
@@ -2405,7 +2405,7 @@ verify_ocsp_signature(der: byte[], issuer: *LeafCert) -> int {
                 d = malloc(LEAFCERT_SIZE) as *LeafCert
                 init_leaf(d)
                 perr = parse_certificate(bytes.view(cert_der)[0..cert_der_len], d)
-                bytes.free(cert_der)
+                bytes.wipe_free(cert_der)
                 if string.equals(perr, "") == 1 {
                     // The delegated responder cert must be signed by `issuer`
                     // and carry the OCSPSigning EKU. If either fails, the staple
@@ -2437,9 +2437,9 @@ verify_ocsp_signature(der: byte[], issuer: *LeafCert) -> int {
         free_leaf(delegated)
         free(delegated)
     }
-    bytes.free(tbs)
-    bytes.free(sig_alg_oid)
-    bytes.free(sig)
+    bytes.wipe_free(tbs)
+    bytes.wipe_free(sig_alg_oid)
+    bytes.wipe_free(sig)
     return result
 }
 
@@ -2460,11 +2460,11 @@ fn oid_der_to_dotted_bytes_slice(buf: byte[], coff: int, clen: int) -> ptr {
     bytes.set(tlv, 0, 0x06)
     bytes.copy_from_bytes(tlv, 1, lenoct, 0, ll)
     bytes.copy_from_slice(tlv, 1 + ll, buf[coff..coff + clen])
-    bytes.free(lenoct)
+    bytes.wipe_free(lenoct)
     r = asn1.reader_new(tlv)
     dotted, oerr = asn1.read_oid(r)
     asn1.reader_free(r)
-    bytes.free(tlv)
+    bytes.wipe_free(tlv)
     if string.equals(oerr, "") != 1 { return bytes.new(0) }
     out = oid_to_bytes(dotted)
     string.release(dotted)
@@ -2511,7 +2511,7 @@ fn cert_has_ocsp_signing_eku(c: *LeafCert) -> int {
                 if toid == 0x06 {
                     oid_b = oid_der_to_dotted_bytes(buf, coid, loid)
                     is_eku = oid_is(oid_b, "2.5.29.37")
-                    bytes.free(oid_b)
+                    bytes.wipe_free(oid_b)
                     if is_eku == 1 {
                         // Skip optional critical BOOL, reach extnValue OCTET STRING.
                         tv, cv, lv, nv = der_tlv(buf, noid, ext_inner_end)
@@ -2544,7 +2544,7 @@ fn eku_octets_have_ocsp_signing(buf: ptr, start: int, end: int) -> int {
             if to == 0x06 {
                 oid_b = oid_der_to_dotted_bytes(buf, co, lo)
                 hit = oid_is(oid_b, "1.3.6.1.5.5.7.3.9")
-                bytes.free(oid_b)
+                bytes.wipe_free(oid_b)
                 if hit == 1 { return 1 }
             }
             p = no
@@ -2614,21 +2614,21 @@ fn parse_rsa_spki(spki_key: byte[]) -> (ptr, ptr, string) {
     r = asn1.reader_new(view)
     sub, body, serr = asn1.read_sequence(r)
     if string.equals(serr, "") != 1 {
-        asn1.reader_free(r); bytes.free(view)
+        asn1.reader_free(r); bytes.wipe_free(view)
         return null, null, serr
     }
     n, nerr = asn1.read_integer(sub)
     if string.equals(nerr, "") != 1 {
-        asn1.reader_free(sub); asn1.reader_free(r); bytes.free(view); bytes.free(body)
+        asn1.reader_free(sub); asn1.reader_free(r); bytes.wipe_free(view); bytes.wipe_free(body)
         return null, null, nerr
     }
     e, eerr = asn1.read_integer(sub)
     if string.equals(eerr, "") != 1 {
         bignum.free(n)
-        asn1.reader_free(sub); asn1.reader_free(r); bytes.free(view); bytes.free(body)
+        asn1.reader_free(sub); asn1.reader_free(r); bytes.wipe_free(view); bytes.wipe_free(body)
         return null, null, eerr
     }
-    asn1.reader_free(sub); asn1.reader_free(r); bytes.free(view); bytes.free(body)
+    asn1.reader_free(sub); asn1.reader_free(r); bytes.wipe_free(view); bytes.wipe_free(body)
     return n, e, ""
 }
 
@@ -2677,7 +2677,7 @@ fn verify_sig_over_bytes(msg: byte[], sig_alg_oid: ptr, sig: byte[], key_algo_oi
         if oid_is(key_algo_oid, "1.3.101.112") != 1 || key_len != 32 { return 0 }
         pub = bytes.from_slice(key)
         ok = ed25519.verify(pub, msg, sig)
-        bytes.free(pub)
+        bytes.wipe_free(pub)
         return ok
     }
     if hid == 0 { return 0 }
@@ -2690,10 +2690,10 @@ fn verify_sig_over_bytes(msg: byte[], sig_alg_oid: ptr, sig: byte[], key_algo_oi
             k = rsa.key_from_components(n, e, null)
             di = digest_info(hash, hid)
             result = rsa.verify_pkcs1(k, di, sig)
-            bytes.free(di)
+            bytes.wipe_free(di)
             rsa.key_free(k) // frees n, e too
         }
-        bytes.free(hash)
+        bytes.wipe_free(hash)
     }
     if ec_sig == 1 && oid_is(key_algo_oid, "1.2.840.10045.2.1") == 1 {
         coord = 0
@@ -2709,11 +2709,11 @@ fn verify_sig_over_bytes(msg: byte[], sig_alg_oid: ptr, sig: byte[], key_algo_oi
                     if coord == 32 { result = p256.ecdsa_verify(px, py, hash, rr, ss) }
                     if coord == 48 { result = p384.ecdsa_verify(px, py, hash, rr, ss) }
                     if coord == 66 { result = p521.ecdsa_verify(px, py, hash, rr, ss) }
-                    bytes.free(rr); bytes.free(ss)
+                    bytes.wipe_free(rr); bytes.wipe_free(ss)
                 }
-                bytes.free(px); bytes.free(py)
+                bytes.wipe_free(px); bytes.wipe_free(py)
             }
-            bytes.free(hash)
+            bytes.wipe_free(hash)
         }
     }
     return result
@@ -3208,7 +3208,7 @@ fn name_allowed(cx: *ChainCtx, ca: *LeafCert, tag: int, name: ptr, off: int) -> 
         r = subtrees_match(cx, ca.nc_permitted, tag, subject, soff, 0)
         if r == 1 || r == 3 { ok = 0 }
     }
-    if tag == 0x86 { bytes.free(subject) }
+    if tag == 0x86 { bytes.wipe_free(subject) }
     return ok
 }
 
@@ -3553,7 +3553,7 @@ fn add_pem_text(anchors: ptr, text: string) -> int {
                     free(leaf)
                 }
             }
-            bytes.free(der)
+            bytes.wipe_free(der)
         }
         pos = block_end
     }

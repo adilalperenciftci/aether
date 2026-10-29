@@ -96,7 +96,7 @@ fn build_hkdf_label(label: string, context: byte[], out_len: int) -> (ptr, int) 
 expand_label(algo: string, secret: byte[], label: string, context: byte[], out_len: int) -> ptr {
     hl, hl_len = build_hkdf_label(label, context, out_len)
     okm = hkdf.expand(algo, secret, bytes.view(hl)[0..hl_len], out_len)
-    bytes.free(hl)
+    bytes.wipe_free(hl)
     return okm
 }
 

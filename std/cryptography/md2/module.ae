@@ -18,6 +18,7 @@
 //               ONLY to abandon a ctx before finalizing (never after).
 
 import std.bytes
+import std.mem
 
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
@@ -90,7 +91,7 @@ transform(c: *Md2Ctx, block: ptr) {
 
     // Save new state
     bytes.copy_from_bytes(c.state, 0, x, 0, 16)
-    bytes.free(x)
+    bytes.wipe_free(x)
 
     // Update checksum
     t_chk = bytes.get(c.checksum, 15)
@@ -176,15 +177,15 @@ finalize_to_bytes(c: *Md2Ctx) -> ptr {
 
 free_internals(c: *Md2Ctx) {
     if c.state != null {
-        bytes.free(c.state)
+        bytes.wipe_free(c.state)
         c.state = null
     }
     if c.checksum != null {
-        bytes.free(c.checksum)
+        bytes.wipe_free(c.checksum)
         c.checksum = null
     }
     if c.buffer != null {
-        bytes.free(c.buffer)
+        bytes.wipe_free(c.buffer)
         c.buffer = null
     }
 }
@@ -196,6 +197,7 @@ final_bytes(ctx: ptr) -> ptr {
     out = finalize_to_bytes(c)
     s = bytes.finish(out, 16)
     free_internals(c)
+    mem.wipe(ctx, sizeof(Md2Ctx))
     free(ctx)
     res = bytes.new(16)
     bytes.copy_from_string(res, 0, s, 16)
@@ -225,9 +227,10 @@ final_hex(ctx: ptr) -> string {
         bytes.set(hexbuf, i * 2 + 1, c_lo)
         i = i + 1
     }
-    bytes.free(out)
+    bytes.wipe_free(out)
     s = bytes.finish(hexbuf, 32)
     free_internals(c)
+    mem.wipe(ctx, sizeof(Md2Ctx))
     free(ctx)
     return s
 }
@@ -241,6 +244,7 @@ free_ctx(ctx: ptr) {
     }
     c = ctx as *Md2Ctx
     free_internals(c)
+    mem.wipe(ctx, sizeof(Md2Ctx))
     free(ctx)
 }
 

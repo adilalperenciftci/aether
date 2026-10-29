@@ -42,6 +42,7 @@
 import std.string
 import std.bignum
 import std.bytes
+import std.mem
 import std.cryptography
 import std.cryptography.sha2
 import std.cryptography.asn1
@@ -101,10 +102,10 @@ key_from_bytes(n: byte[], e: byte[], d: byte[]) -> ptr {
     }
     nb = bytes.from_slice(n)
     nn = bignum.from_bytes_unsigned(nb, n.len)
-    bytes.free(nb)
+    bytes.wipe_free(nb)
     eb = bytes.from_slice(e)
     ee = bignum.from_bytes_unsigned(eb, e.len)
-    bytes.free(eb)
+    bytes.wipe_free(eb)
     int klen = (bignum.bit_length(nn) + 7) / 8
     if d.len > klen {
         // A longer d must be leading zeros; check them, publicly.
@@ -190,8 +191,8 @@ key_from_pkcs1_der(der: @keep ptr) -> (ptr, string) {
         k = key_from_bytes(bytes.view(nb)[0..bytes.length(nb)], bytes.view(eb)[0..bytes.length(eb)], bytes.view(db)[0..bytes.length(db)])
         if k == null { err = "rsa: not an RSA private key (n, e or d)" }
     }
-    if nb != null { bytes.free(nb) }
-    if eb != null { bytes.free(eb) }
+    if nb != null { bytes.wipe_free(nb) }
+    if eb != null { bytes.wipe_free(eb) }
     if db != null { wipe_free(db) }
     return k, err
 }
@@ -234,7 +235,7 @@ fn raw_encrypt_slice(k: ptr, m_bytes: byte[]) -> ptr {
     klen = modulus_bytes(k)
     owned = bytes.from_slice(m_bytes)
     m = bignum.from_bytes_unsigned(owned, m_bytes.len)
-    bytes.free(owned)
+    bytes.wipe_free(owned)
     c = bignum.mod_pow(m, kk.e, kk.n)
     out = to_fixed(c, klen)
     bignum.free(m); bignum.free(c)
@@ -291,13 +292,10 @@ fn limbs_new(nl: int) -> ptr {
     return p
 }
 
+// The limbs zeroed with mem.wipe, then freed: a zeroing loop before the free
+// is a dead store the compiler may drop (#3414).
 fn limbs_wipe_free(p: @frees ptr, nl: int) {
-    v = p as uint32[]
-    int i = 0
-    while i < nl {
-        v[i] = 0
-        i = i + 1
-    }
+    mem.wipe(p, (nl * 4) as long)
     libc_free(p)
 }
 
@@ -630,10 +628,10 @@ fn private_op(kk: *RsaKey, c: byte[]) -> ptr {
     nbe = bignum.to_bytes_unsigned(kk.n)
     ebe = bignum.to_bytes_unsigned(kk.e)
     M = mont_new(bytes.view(nbe))
-    bytes.free(nbe)
+    bytes.wipe_free(nbe)
     int nl = M.nl
     am, im = blinding(M, kk, ebe, klen)
-    bytes.free(ebe)
+    bytes.wipe_free(ebe)
     if am == null {
         mont_free(M)
         return null
@@ -700,7 +698,7 @@ encrypt_pkcs1(k: ptr, msg: ptr) -> (ptr, string) {
     while filled < pslen {
         rnd, rerr = cryptography.random_buffer(pslen - filled + 16)
         if rerr != "" {
-            bytes.free(block)
+            bytes.wipe_free(block)
             return null, rerr
         }
         rn = bytes.length(rnd)
@@ -783,7 +781,7 @@ sign_pkcs1(k: ptr, di: ptr) -> (ptr, string) {
     }
     block = build_emsa(di, klen)
     s = raw_decrypt(k, block) // signing = private-key op (c^d mod n)
-    bytes.free(block)
+    bytes.wipe_free(block)
     if s == null {
         return null, "rsa: not a private key, or no randomness for blinding"
     }
@@ -806,7 +804,7 @@ fn sig_in_range_slice(k: ptr, sig: byte[]) -> int {
     if sig.len != modulus_bytes(k) { return 0 }
     owned = bytes.from_slice(sig)
     s = bignum.from_bytes_unsigned(owned, sig.len)
-    bytes.free(owned)
+    bytes.wipe_free(owned)
     ok = 1
     if bignum.compare(s, kk.n) >= 0 { ok = 0 }
     bignum.free(s)
@@ -829,7 +827,7 @@ verify_pkcs1(k: ptr, di: ptr, sig: byte[]) -> int {
             i = i + 1
         }
     }
-    bytes.free(recovered); bytes.free(expected)
+    bytes.wipe_free(recovered); bytes.wipe_free(expected)
     return ok
 }
 
@@ -891,7 +889,7 @@ encrypt_oaep(k: ptr, msg: byte[], seed: ptr) -> ptr {
     // lHash = SHA256("")  (empty label)
     empty = bytes.new(0)
     lhash = sha256b(bytes.view(empty)[0..0])
-    bytes.free(empty)
+    bytes.wipe_free(empty)
 
     // DB = lHash || PS(0x00..) || 0x01 || M   (length k - hLen - 1)
     dblen = klen - hlen - 1
@@ -902,29 +900,29 @@ encrypt_oaep(k: ptr, msg: byte[], seed: ptr) -> ptr {
     ps_end = dblen - mlen - 1 // index of the 0x01 separator
     bytes.set(db, ps_end, 0x01)
     if mlen > 0 { bytes.copy_from_slice(db, ps_end + 1, msg[0..mlen]) }
-    bytes.free(lhash)
+    bytes.wipe_free(lhash)
 
     // dbMask = MGF1(seed, dblen); maskedDB = DB ^ dbMask
     dbmask = mgf1(bytes.view(seed)[0..hlen], dblen)
     xor_into(db, bytes.view(dbmask)[0..dblen])
-    bytes.free(dbmask)
+    bytes.wipe_free(dbmask)
 
     // seedMask = MGF1(maskedDB, hLen); maskedSeed = seed ^ seedMask
     seedmask = mgf1(bytes.view(db)[0..dblen], hlen)
     mseed = bytes.new(hlen)
     bytes.copy_from_bytes(mseed, 0, seed, 0, hlen)
     xor_into(mseed, bytes.view(seedmask)[0..hlen])
-    bytes.free(seedmask)
+    bytes.wipe_free(seedmask)
 
     // EM = 0x00 || maskedSeed || maskedDB
     em = bytes.new(klen)
     bytes.set(em, 0, 0)
     bytes.copy_from_bytes(em, 1, mseed, 0, hlen)
     bytes.copy_from_bytes(em, 1 + hlen, db, 0, dblen)
-    bytes.free(mseed); bytes.free(db)
+    bytes.wipe_free(mseed); bytes.wipe_free(db)
 
     ct = raw_encrypt(k, em)
-    bytes.free(em)
+    bytes.wipe_free(em)
     return ct
 }
 
@@ -952,7 +950,7 @@ decrypt_oaep(k: ptr, ct_bytes: ptr) -> {
 
     empty = bytes.new(0)
     lhash = sha256b(bytes.view(empty)[0..0])
-    bytes.free(empty)
+    bytes.wipe_free(empty)
 
     int good = ct.eq(bytes.get(em, 0) & 0xFF, 0) // leading byte must be 0x00
 
@@ -966,7 +964,7 @@ decrypt_oaep(k: ptr, ct_bytes: ptr) -> {
     // seed = maskedSeed ^ MGF1(maskedDB, hLen)
     seedmask = mgf1(bytes.view(db)[0..dblen], hlen)
     xor_into(mseed, bytes.view(seedmask)[0..hlen])
-    bytes.free(seedmask)
+    bytes.wipe_free(seedmask)
     // DB = maskedDB ^ MGF1(seed, dblen)
     dbmask = mgf1(bytes.view(mseed)[0..hlen], dblen)
     xor_into(db, bytes.view(dbmask)[0..dblen])
@@ -979,7 +977,7 @@ decrypt_oaep(k: ptr, ct_bytes: ptr) -> {
         diff = diff | ((bytes.get(db, i) ^ bytes.get(lhash, i)) & 0xFF)
         i = i + 1
     }
-    bytes.free(lhash)
+    bytes.wipe_free(lhash)
     good = good & ct.eq(diff, 0)
 
     // the 0x01 separator after zero padding: any other byte before it is bad
@@ -1055,11 +1053,11 @@ fn mgf1_hash(algo: string, seed: byte[], mask_len: int) -> ptr {
         bytes.set(inb, seed_len + 2, (counter >> 8) & 0xFF)
         bytes.set(inb, seed_len + 3, counter & 0xFF)
         h = hashb(algo, bytes.view(inb)[0..seed_len + 4])
-        bytes.free(inb)
+        bytes.wipe_free(inb)
         take = bytes.length(h)
         if mask_len - produced < take { take = mask_len - produced }
         bytes.copy_from_bytes(out, produced, h, 0, take)
-        bytes.free(h)
+        bytes.wipe_free(h)
         produced = produced + take
         counter = counter + 1
     }
@@ -1088,7 +1086,7 @@ sign_pss_hash(k: ptr, algo: string, mhash: ptr, salt: byte[]) -> ptr {
     bytes.copy_from_bytes(mp, 8, mhash, 0, hlen)
     if slen > 0 { bytes.copy_from_slice(mp, 8 + hlen, salt[0..slen]) }
     h = hashb(algo, bytes.view(mp)[0..mp_len])
-    bytes.free(mp)
+    bytes.wipe_free(mp)
 
     // DB = PS(0x00) || 0x01 || salt   (length emLen - hLen - 1)
     dblen = emlen - hlen - 1
@@ -1101,7 +1099,7 @@ sign_pss_hash(k: ptr, algo: string, mhash: ptr, salt: byte[]) -> ptr {
     // maskedDB = DB ^ MGF1(H, dblen)
     dbmask = mgf1_hash(algo, bytes.view(h)[0..hlen], dblen)
     xor_into(db, bytes.view(dbmask)[0..dblen])
-    bytes.free(dbmask)
+    bytes.wipe_free(dbmask)
     // clear the leftmost (8*emLen - embits) bits of maskedDB
     clear_bits = 8 * emlen - embits
     if clear_bits > 0 {
@@ -1114,16 +1112,16 @@ sign_pss_hash(k: ptr, algo: string, mhash: ptr, salt: byte[]) -> ptr {
     bytes.copy_from_bytes(em, 0, db, 0, dblen)
     bytes.copy_from_bytes(em, dblen, h, 0, hlen)
     bytes.set(em, emlen - 1, 0xbc)
-    bytes.free(db); bytes.free(h)
+    bytes.wipe_free(db); bytes.wipe_free(h)
 
     // sig = raw_decrypt(EM as integer) — but emLen may be < klen; left-pad.
     emfull = bytes.new(klen)
     z = 0
     while z < klen { bytes.set(emfull, z, 0); z = z + 1 }
     bytes.copy_from_bytes(emfull, klen - emlen, em, 0, emlen)
-    bytes.free(em)
+    bytes.wipe_free(em)
     sig = raw_decrypt(k, emfull)
-    bytes.free(emfull)
+    bytes.wipe_free(emfull)
     return sig
 }
 
@@ -1145,7 +1143,7 @@ verify_pss_hash(k: ptr, algo: string, mhash: ptr, sig: byte[], slen: int) -> int
     // take the low emLen bytes as EM
     em = bytes.new(emlen)
     bytes.copy_from_bytes(em, 0, emfull, klen - emlen, emlen)
-    bytes.free(emfull)
+    bytes.wipe_free(emfull)
 
     ok = 1
     if (bytes.get(em, emlen - 1) & 0xFF) != 0xbc { ok = 0 }
@@ -1166,7 +1164,7 @@ verify_pss_hash(k: ptr, algo: string, mhash: ptr, sig: byte[], slen: int) -> int
     // DB = maskedDB ^ MGF1(H, dblen)
     dbmask = mgf1_hash(algo, bytes.view(h)[0..hlen], dblen)
     xor_into(maskeddb, bytes.view(dbmask)[0..dblen])
-    bytes.free(dbmask)
+    bytes.wipe_free(dbmask)
     if clear_bits > 0 {
         mask = (0xFF >> clear_bits) & 0xFF
         bytes.set(maskeddb, 0, bytes.get(maskeddb, 0) & mask)
@@ -1188,12 +1186,12 @@ verify_pss_hash(k: ptr, algo: string, mhash: ptr, sig: byte[], slen: int) -> int
     bytes.copy_from_bytes(mp, 8, mhash, 0, hlen)
     if slen > 0 { bytes.copy_from_bytes(mp, 8 + hlen, maskeddb, dblen - slen, slen) }
     hp = hashb(algo, bytes.view(mp)[0..mp_len])
-    bytes.free(mp)
+    bytes.wipe_free(mp)
     i = 0
     while i < hlen {
         if (bytes.get(hp, i) & 0xFF) != (bytes.get(h, i) & 0xFF) { ok = 0 }
         i = i + 1
     }
-    bytes.free(hp); bytes.free(h); bytes.free(maskeddb); bytes.free(em)
+    bytes.wipe_free(hp); bytes.wipe_free(h); bytes.wipe_free(maskeddb); bytes.wipe_free(em)
     return ok
 }

@@ -71,7 +71,7 @@ derive_block(algo: string, password: byte[], salt: byte[], iterations: int, i: i
     bytes.set(sin, salt_len + 3, i & 0xFF)
 
     u = hmac.bytes(algo, password, bytes.view(sin)[0..sin_len])
-    bytes.free(sin)
+    bytes.wipe_free(sin)
     if u == null {
         return 0
     }
@@ -84,9 +84,9 @@ derive_block(algo: string, password: byte[], salt: byte[], iterations: int, i: i
     j = 1
     while j < iterations {
         next = hmac.bytes(algo, password, bytes.view(u)[0..hl])
-        bytes.free(u)
+        bytes.wipe_free(u)
         if next == null {
-            bytes.free(acc)
+            bytes.wipe_free(acc)
             return 0
         }
         u = next
@@ -97,10 +97,10 @@ derive_block(algo: string, password: byte[], salt: byte[], iterations: int, i: i
         }
         j = j + 1
     }
-    bytes.free(u)
+    bytes.wipe_free(u)
 
     bytes.copy_from_bytes(out, out_off, acc, 0, take)
-    bytes.free(acc)
+    bytes.wipe_free(acc)
     return 1
 }
 
@@ -128,7 +128,7 @@ pbkdf2(algo: string, password: byte[], salt: byte[], iterations: int, dk_len: in
         }
         ok = derive_block(algo, password, salt, iterations, i, out, produced, take)
         if ok == 0 {
-            bytes.free(out)
+            bytes.wipe_free(out)
             return null
         }
         produced = produced + take

@@ -417,6 +417,7 @@ adjust_stack(c: *Blake3Ctx) {
             i = i + 1
         }
 
+        mem.wipe(myLeft, 8 * 8)
         free(myLeft)
 
         init_parent_block(c)
@@ -447,6 +448,7 @@ process_stack(c: *Blake3Ctx) {
             i = i + 1
         }
 
+        mem.wipe(myLeft, 8 * 8)
         free(myLeft)
 
         init_parent_block(c)
@@ -588,6 +590,7 @@ final_bytes(ctx: ptr) -> ptr {
         bytes.set(res, i, mem.get_byte(out_raw, i))
         i = i + 1
     }
+    mem.wipe(out_raw, n)
     free(out_raw)
 
     reset_ctx(c)
@@ -619,6 +622,7 @@ final_hex(ctx: ptr) -> string {
         bytes.set(hexbuf, i * 2 + 1, c_lo)
         i = i + 1
     }
+    mem.wipe(out_raw, n)
     free(out_raw)
 
     reset_ctx(c)
@@ -628,26 +632,32 @@ final_hex(ctx: ptr) -> string {
 
 free_ctx_internals(c: *Blake3Ctx) {
     if c.theBuffer != null {
+        mem.wipe(c.theBuffer, BLOCKLEN)
         free(c.theBuffer)
         c.theBuffer = null
     }
     if c.theK != null {
+        mem.wipe(c.theK, NUMWORDS * 8)
         free(c.theK)
         c.theK = null
     }
     if c.theChaining != null {
+        mem.wipe(c.theChaining, NUMWORDS * 8)
         free(c.theChaining)
         c.theChaining = null
     }
     if c.theV != null {
+        mem.wipe(c.theV, 16 * 8)
         free(c.theV)
         c.theV = null
     }
     if c.theM != null {
+        mem.wipe(c.theM, 16 * 8)
         free(c.theM)
         c.theM = null
     }
     if c.theIndices != null {
+        mem.wipe(c.theIndices, 16 * 8)
         free(c.theIndices)
         c.theIndices = null
     }
@@ -656,10 +666,12 @@ free_ctx_internals(c: *Blake3Ctx) {
         while i < c.stack_count {
             node = mem.get_ptr(c.stack, i * 8)
             if node != null {
+                mem.wipe(node, 8 * 8)
                 free(node)
             }
             i = i + 1
         }
+        mem.wipe(c.stack, 64 * 8)
         free(c.stack)
         c.stack = null
     }
@@ -671,6 +683,7 @@ free_ctx(ctx: ptr) {
     }
     c = ctx as *Blake3Ctx
     free_ctx_internals(c)
+    mem.wipe(ctx, sizeof(Blake3Ctx))
     free(ctx)
 }
 
@@ -739,6 +752,7 @@ copy_state(dst_ptr: ptr, src_ptr: ptr) {
     while i < dst.stack_count {
         node = mem.get_ptr(dst.stack, i * 8)
         if node != null {
+            mem.wipe(node, 8 * 8)
             free(node)
         }
         i = i + 1

@@ -9,6 +9,7 @@
 
 import std.bits
 import std.bytes
+import std.mem
 
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
@@ -780,15 +781,15 @@ finalize_to_bytes(c: *GostCtx) -> ptr {
 }
 
 free_internals(c: *GostCtx) {
-    if c.IV != null { bytes.free(c.IV); c.IV = null }
-    if c.N != null { bytes.free(c.N); c.N = null }
-    if c.Sigma != null { bytes.free(c.Sigma); c.Sigma = null }
-    if c.Ki != null { bytes.free(c.Ki); c.Ki = null }
-    if c.m != null { bytes.free(c.m); c.m = null }
-    if c.h != null { bytes.free(c.h); c.h = null }
-    if c.tmp != null { bytes.free(c.tmp); c.tmp = null }
-    if c.block != null { bytes.free(c.block); c.block = null }
-    if c.zero != null { bytes.free(c.zero); c.zero = null }
+    if c.IV != null { bytes.wipe_free(c.IV); c.IV = null }
+    if c.N != null { bytes.wipe_free(c.N); c.N = null }
+    if c.Sigma != null { bytes.wipe_free(c.Sigma); c.Sigma = null }
+    if c.Ki != null { bytes.wipe_free(c.Ki); c.Ki = null }
+    if c.m != null { bytes.wipe_free(c.m); c.m = null }
+    if c.h != null { bytes.wipe_free(c.h); c.h = null }
+    if c.tmp != null { bytes.wipe_free(c.tmp); c.tmp = null }
+    if c.block != null { bytes.wipe_free(c.block); c.block = null }
+    if c.zero != null { bytes.wipe_free(c.zero); c.zero = null }
 }
 
 final_bytes(ctx: ptr) -> ptr {
@@ -798,9 +799,10 @@ final_bytes(ctx: ptr) -> ptr {
     if c.variant == "gost3411_2012_256" {
         res = bytes.new(32)
         bytes.copy_from_bytes(res, 0, out, 32, 32)
-        bytes.free(out)
+        bytes.wipe_free(out)
         s = bytes.finish(res, 32)
         free_internals(c)
+        mem.wipe(ctx, sizeof(GostCtx))
         free(ctx)
 
         ret = bytes.new(32)
@@ -809,6 +811,7 @@ final_bytes(ctx: ptr) -> ptr {
     } else {
         s = bytes.finish(out, 64)
         free_internals(c)
+        mem.wipe(ctx, sizeof(GostCtx))
         free(ctx)
 
         ret = bytes.new(64)
@@ -846,9 +849,10 @@ final_hex(ctx: ptr) -> string {
         bytes.set(hexbuf, i * 2 + 1, c_lo)
         i = i + 1
     }
-    bytes.free(out)
+    bytes.wipe_free(out)
     s = bytes.finish(hexbuf, len * 2)
     free_internals(c)
+    mem.wipe(ctx, sizeof(GostCtx))
     free(ctx)
     return s
 }
@@ -859,6 +863,7 @@ free_ctx(ctx: ptr) {
     }
     c = ctx as *GostCtx
     free_internals(c)
+    mem.wipe(ctx, sizeof(GostCtx))
     free(ctx)
 }
 

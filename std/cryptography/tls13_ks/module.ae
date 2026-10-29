@@ -83,8 +83,8 @@ early_secret(algo: string) -> ptr {
     salt = zeros(hl)
     ikm = zeros(hl)
     prk = hkdf.extract(algo, bytes.view(salt)[0..hl], bytes.view(ikm)[0..hl])
-    bytes.free(salt)
-    bytes.free(ikm)
+    bytes.wipe_free(salt)
+    bytes.wipe_free(ikm)
     return prk
 }
 
@@ -94,7 +94,7 @@ early_secret_psk(algo: string, psk: byte[]) -> ptr {
     hl = hlen(algo)
     salt = zeros(hl)
     prk = hkdf.extract(algo, bytes.view(salt)[0..hl], psk)
-    bytes.free(salt)
+    bytes.wipe_free(salt)
     return prk
 }
 
@@ -113,7 +113,7 @@ binder_key(algo: string, early: ptr) -> ptr {
     hl = hlen(algo)
     empty_th = empty_transcript_hash(algo)
     bk = tls13_kdf.derive_secret(algo, bytes.view(early)[0..hl], "res binder", bytes.view(empty_th)[0..hl])
-    bytes.free(empty_th)
+    bytes.wipe_free(empty_th)
     return bk
 }
 
@@ -143,8 +143,8 @@ handshake_secret(algo: string, early: ptr, ecdhe: byte[]) -> ptr {
     // salt = Derive-Secret(Early, "derived", Hash(""))
     salt = tls13_kdf.derive_secret(algo, bytes.view(early)[0..hl], "derived", bytes.view(empty_th)[0..hl])
     prk = hkdf.extract(algo, bytes.view(salt)[0..hl], ecdhe)
-    bytes.free(empty_th)
-    bytes.free(salt)
+    bytes.wipe_free(empty_th)
+    bytes.wipe_free(salt)
     return prk
 }
 
@@ -156,9 +156,9 @@ master_secret(algo: string, handshake: ptr) -> ptr {
     salt = tls13_kdf.derive_secret(algo, bytes.view(handshake)[0..hl], "derived", bytes.view(empty_th)[0..hl])
     ikm = zeros(hl)
     prk = hkdf.extract(algo, bytes.view(salt)[0..hl], bytes.view(ikm)[0..hl])
-    bytes.free(empty_th)
-    bytes.free(salt)
-    bytes.free(ikm)
+    bytes.wipe_free(empty_th)
+    bytes.wipe_free(salt)
+    bytes.wipe_free(ikm)
     return prk
 }
 
@@ -178,7 +178,7 @@ write_key(algo: string, secret: byte[], key_len: int) -> ptr {
     hl = hlen(algo)
     empty = zeros(0)
     k = tls13_kdf.expand_label(algo, secret[0..hl], "key", bytes.view(empty)[0..0], key_len)
-    bytes.free(empty)
+    bytes.wipe_free(empty)
     return k
 }
 
@@ -190,7 +190,7 @@ next_traffic_secret(algo: string, secret: @frees ptr) -> ptr {
     hl = hlen(algo)
     empty = zeros(0)
     nxt = tls13_kdf.expand_label(algo, bytes.view(secret)[0..hl], "traffic upd", bytes.view(empty)[0..0], hl)
-    bytes.free(empty)
+    bytes.wipe_free(empty)
     free_secret(secret)
     return nxt
 }
@@ -212,16 +212,11 @@ key_update(algo: string, ctx: ptr, secret: @frees ptr) -> ptr {
     return nxt
 }
 
-// Zero a secret, then free it (null is ignored).
+// Zero a secret, then free it (null is ignored): bytes.wipe_free, whose
+// zeroing the compiler cannot drop, where a loop of bytes.set before the
+// free was a dead store (#3414).
 free_secret(secret: @frees ptr) {
-    if secret == null { return }
-    int n = bytes.length(secret)
-    int i = 0
-    while i < n {
-        bytes.set(secret, i, 0)
-        i = i + 1
-    }
-    bytes.free(secret)
+    bytes.wipe_free(secret)
 }
 
 // Record write iv = HKDF-Expand-Label(traffic_secret, "iv", "", 12).
@@ -229,7 +224,7 @@ write_iv(algo: string, secret: ptr) -> ptr {
     hl = hlen(algo)
     empty = zeros(0)
     iv = tls13_kdf.expand_label(algo, bytes.view(secret)[0..hl], "iv", bytes.view(empty)[0..0], IV_LEN)
-    bytes.free(empty)
+    bytes.wipe_free(empty)
     return iv
 }
 

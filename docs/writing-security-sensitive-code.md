@@ -171,12 +171,16 @@ fault makes it compute (#3376).
   hash, MAC or cipher that used it frees its state as it was: SHA-512's
   last block held an Ed25519 seed, HMAC's padded key is the key, and a
   SHA-2 context holds the digest that the shield uses as its AEAD key.
-  The hash, MAC and cipher modules (`sha2`, `sha3`, `hmac`, `hkdf`, `aes`,
-  `chacha20poly1305`) free every buffer with `bytes.wipe_free`, and wipe
-  their context structs with `mem.wipe` (the raw-memory form) before they
-  free them (#3402). A new primitive follows the same rule. The
-  freed-memory probe (`tests/integration/crypto_key_wipe`) checks signing
-  with each key type, an HMAC and a shield wrap and unwrap.
+  So the rule is the whole tree's, not a choice per call, which missed one
+  module after another: every module under `std/cryptography` frees every
+  `bytes` buffer with `bytes.wipe_free` (`make check-crypto-wipe` fails on
+  a plain `bytes.free` there, and `make ci` runs it), and wipes a context
+  struct, a working matrix or an array of secret coefficients with
+  `mem.wipe` (the raw-memory form) before it frees it (#3402, #3414). A
+  public buffer pays a memset, which is nothing next to the cryptography
+  that made it. The freed-memory probe (`tests/integration/crypto_key_wipe`)
+  checks key loading, signing with each key type, an HMAC, a shield wrap
+  and unwrap, an X25519 exchange and the TLS key schedule.
 - **Verify a signature before it leaves the process.** One faulty RSA-CRT
   signature factors the modulus (Boneh, DeMillo and Lipton), and a fault in
   one of two signatures of the same message under a deterministic nonce

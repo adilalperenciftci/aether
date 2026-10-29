@@ -62,6 +62,7 @@ import std.bits
 import std.bytes
 import std.cryptography
 import std.cryptography.sha3
+import std.mem
 
 exports(
     mlkem512_keygen, mlkem512_encaps, mlkem512_decaps,
@@ -243,6 +244,8 @@ poly_new() -> int[] {
     return make([]int, N)
 }
 poly_free(p: @frees int[]) {
+    // A poly may be a secret (s, e): wiped before it is freed (#3414).
+    mem.wipe(p as ptr, (p.len * 4) as long)
     free(p)
 }
 pg(p: int[], i: int) -> int {
@@ -257,6 +260,7 @@ polyvec_new(k: int) -> int[] {
     return make([]int, N * k)
 }
 polyvec_free(p: @frees int[]) {
+    mem.wipe(p as ptr, (p.len * 4) as long)
     free(p)
 }
 // Coefficient i of poly j in a flat polyvec.
@@ -824,13 +828,13 @@ get_noise(pv: int[], j: int, seed: ptr, seed_off: int, nonce: int, eta: int) {
         out_len = 192
     }
     out = sha3.shake256_bytes(bytes.view(in_buf)[0..SYM + 1], out_len)
-    bytes.free(in_buf)
+    bytes.wipe_free(in_buf)
     if eta == 2 {
         cbd_eta2(pv, j, out)
     } else {
         cbd_eta3(pv, j, out)
     }
-    bytes.free(out)
+    bytes.wipe_free(out)
 }
 
 // ---- Matrix A generation via SHAKE128 rejection sampling ----
@@ -850,7 +854,7 @@ gen_matrix_poly(dest: int[], dj: int, seed: ptr, x: int, y: int) {
     // 3 blocks = 504 bytes gives ~336 candidates; pull extra to be safe.
     squeeze_len = 504 + 168 * 4
     buf = sha3.shake128_bytes(bytes.view(in_buf)[0..SYM + 2], squeeze_len)
-    bytes.free(in_buf)
+    bytes.wipe_free(in_buf)
 
     base = dj * N
     ctr = 0
@@ -859,7 +863,7 @@ gen_matrix_poly(dest: int[], dj: int, seed: ptr, x: int, y: int) {
         if pos + 3 > squeeze_len {
             // Astronomically unlikely with this much output (≈784 candidates
             // for 256 needed). Stop; remaining coeffs stay zero.
-            bytes.free(buf)
+            bytes.wipe_free(buf)
             return
         }
         b0 = bytes.get(buf, pos + 0) & 0xFF
@@ -882,7 +886,7 @@ gen_matrix_poly(dest: int[], dj: int, seed: ptr, x: int, y: int) {
             }
         }
     }
-    bytes.free(buf)
+    bytes.wipe_free(buf)
 }
 
 // Generate the k*k matrix into `mat` (a flat int[] of N*k*k).
@@ -919,7 +923,7 @@ indcpa_keygen(p: *MlkemParams, d: ptr, kp: ptr) {
     }
     bytes.set(g_in, SYM, k & 0xFF)
     gbuf = sha3.sha3_512_bytes(bytes.view(g_in)[0..SYM + 1]) // 64 bytes; frees own ctx
-    bytes.free(g_in)
+    bytes.wipe_free(g_in)
 
     // rho = gbuf[0..32], sigma = gbuf[32..64]
     rho = bytes.new(SYM)
@@ -930,7 +934,7 @@ indcpa_keygen(p: *MlkemParams, d: ptr, kp: ptr) {
         bytes.set(sigma, i, bytes.get(gbuf, SYM + i) & 0xFF)
         i = i + 1
     }
-    bytes.free(gbuf)
+    bytes.wipe_free(gbuf)
 
     // Matrix A (non-transposed)
     mat = make([]int, N * k * k)
@@ -989,8 +993,8 @@ indcpa_keygen(p: *MlkemParams, d: ptr, kp: ptr) {
         i = i + 1
     }
 
-    bytes.free(rho)
-    bytes.free(sigma)
+    bytes.wipe_free(rho)
+    bytes.wipe_free(sigma)
     free(mat)
     polyvec_free(skpv)
     polyvec_free(e)
@@ -1102,7 +1106,7 @@ indcpa_encrypt(p: *MlkemParams, pk: ptr, pk_off: int, msg: ptr, msg_off: int, co
         compress_poly_128(v_pv, 0, out, out_off + p.polyvec_compressed)
     }
 
-    bytes.free(rho)
+    bytes.wipe_free(rho)
     free(mat)
     polyvec_free(pkpv)
     polyvec_free(kp_pv)
@@ -1185,7 +1189,7 @@ keygen_internal(p: *MlkemParams, d: ptr, z: ptr) -> (ptr, ptr) {
         bytes.set(dk, hoff + i, bytes.get(hbuf, i) & 0xFF)
         i = i + 1
     }
-    bytes.free(hbuf)
+    bytes.wipe_free(hbuf)
     // z at the very end
     zoff = p.dk_bytes - SYM
     i = 0
@@ -1213,7 +1217,7 @@ encaps_internal(p: *MlkemParams, ek: ptr, m: ptr) -> (ptr, ptr) {
         bytes.set(buf, SYM + i, bytes.get(hbuf, i) & 0xFF)
         i = i + 1
     }
-    bytes.free(hbuf)
+    bytes.wipe_free(hbuf)
 
     // (K, r) = G(buf)
     kr = sha3.sha3_512_bytes(bytes.view(buf)[0..2 * SYM]) // 64 bytes
@@ -1236,9 +1240,9 @@ encaps_internal(p: *MlkemParams, ek: ptr, m: ptr) -> (ptr, ptr) {
         i = i + 1
     }
 
-    bytes.free(buf)
-    bytes.free(kr)
-    bytes.free(coins)
+    bytes.wipe_free(buf)
+    bytes.wipe_free(kr)
+    bytes.wipe_free(coins)
     return ct, key
 }
 
@@ -1312,13 +1316,13 @@ decaps_internal(p: *MlkemParams, dk: ptr, ct: ptr) -> ptr {
         i = i + 1
     }
 
-    bytes.free(mprime)
-    bytes.free(buf)
-    bytes.free(kr)
-    bytes.free(coins)
-    bytes.free(cmp)
-    bytes.free(j_in)
-    bytes.free(reject)
+    bytes.wipe_free(mprime)
+    bytes.wipe_free(buf)
+    bytes.wipe_free(kr)
+    bytes.wipe_free(coins)
+    bytes.wipe_free(cmp)
+    bytes.wipe_free(j_in)
+    bytes.wipe_free(reject)
     return key
 }
 
@@ -1373,7 +1377,7 @@ decaps_check(p: *MlkemParams, dk: ptr, ct: ptr) -> string {
         diff = diff | (bytes.get(h, i) ^ bytes.get(dk, hoff + i))
         i = i + 1
     }
-    bytes.free(h)
+    bytes.wipe_free(h)
     if diff != 0 {
         return "mlkem: decapsulation key fails the hash check"
     }
@@ -1399,13 +1403,13 @@ keygen_k(k: int) -> (ptr, ptr, string) {
     }
     z, zerr = rand32()
     if zerr != "" {
-        bytes.free(d)
+        bytes.wipe_free(d)
         return null, null, zerr
     }
     p = params(k)
     ek, dk = keygen_internal(&p, d, z)
-    bytes.free(d)
-    bytes.free(z)
+    bytes.wipe_free(d)
+    bytes.wipe_free(z)
     return ek, dk, ""
 }
 
@@ -1433,7 +1437,7 @@ encaps_k(k: int, ek: ptr) -> (ptr, ptr, string) {
         return null, null, merr
     }
     ct, key = encaps_internal(&p, ek, m)
-    bytes.free(m)
+    bytes.wipe_free(m)
     return ct, key, ""
 }
 

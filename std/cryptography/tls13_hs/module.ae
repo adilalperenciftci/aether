@@ -389,7 +389,7 @@ client_hello_offer(random: ptr, session_id: byte[], group: int, pubkey: byte[], 
     out = bytes.new(off)
     if off > 0 { bytes.set(out, off - 1, 0) }
     put_bytes(out, 0, bytes.view(buf)[0..off])
-    bytes.free(buf)
+    bytes.wipe_free(buf)
     return out
 }
 
@@ -470,7 +470,7 @@ client_hello_pq(random: ptr, session_id: byte[], hybrid_share: ptr, hybrid_len: 
     out = bytes.new(off)
     if off > 0 { bytes.set(out, off - 1, 0) }
     put_bytes(out, 0, bytes.view(buf)[0..off])
-    bytes.free(buf)
+    bytes.wipe_free(buf)
     return out
 }
 
@@ -600,7 +600,7 @@ client_hello_psk(random: ptr, session_id: byte[], x25519_pub: ptr, host: string,
     out = bytes.new(off)
     if off > 0 { bytes.set(out, off - 1, 0) }
     put_bytes(out, 0, bytes.view(buf)[0..off])
-    bytes.free(buf)
+    bytes.wipe_free(buf)
     out_ch.buf = out
     out_ch.buf_len = off
     out_ch.binder_off = binder_off
@@ -672,7 +672,7 @@ server_hello(random: ptr, session_id: byte[], cipher_suite: int, group: int, pub
 
     out = bytes.new(off)
     bytes.copy_from_bytes(out, 0, buf, 0, off)
-    bytes.free(buf)
+    bytes.wipe_free(buf)
     return out
 }
 
@@ -716,9 +716,9 @@ const GROUPBIT_SECP256R1 = 4
 
 // Free the buffers a ChParsed owns. Idempotent.
 free_ch(c: *ChParsed) {
-    if c.random != null { bytes.free(c.random) c.random = null }
-    if c.session_id != null { bytes.free(c.session_id) c.session_id = null }
-    if c.key_share != null { bytes.free(c.key_share) c.key_share = null }
+    if c.random != null { bytes.wipe_free(c.random) c.random = null }
+    if c.session_id != null { bytes.wipe_free(c.session_id) c.session_id = null }
+    if c.key_share != null { bytes.wipe_free(c.key_share) c.key_share = null }
 }
 
 // Parse a ClientHello handshake message. Returns "" on success.
@@ -860,8 +860,8 @@ parse_client_hello(msg: byte[], out: *ChParsed) -> string {
             p = d + ext_len
         }
     }
-    bytes.free(seen)
-    bytes.free(share_groups)
+    bytes.wipe_free(seen)
+    bytes.wipe_free(share_groups)
     if err != "" { return err }
 
     // What every TLS 1.3 ClientHello carries (RFC 8446 4.1.2, 9.2).
@@ -1033,7 +1033,7 @@ fn ch_extension(msg: byte[], t: int, d: int, n: int, out: *ChParsed, share_group
             }
             if rank > best {
                 best = rank
-                if out.key_share != null { bytes.free(out.key_share) }
+                if out.key_share != null { bytes.wipe_free(out.key_share) }
                 kb = bytes.new(klen)
                 bytes.copy_from_slice(kb, 0, msg[kstart..kstart + klen])
                 out.group = g
@@ -1264,20 +1264,20 @@ fn extensions_framed(kind: int, exts: byte[]) -> (int, string) {
     p = 0
     while p < n {
         if p + 4 > n {
-            bytes.free(seen)
+            bytes.wipe_free(seen)
             return ALERT_DECODE_ERROR, "extensions: truncated"
         }
         t = get16(exts, p)
         el = get16(exts, p + 2)
         if p + 4 + el > n {
-            bytes.free(seen)
+            bytes.wipe_free(seen)
             return ALERT_DECODE_ERROR, "extensions: extension ${t} overruns its block"
         }
         // The types seen so far, two bytes each.
         k = 0
         while k + 1 < bytes.length(seen) {
             if (((bytes.get(seen, k) & 0xFF) << 8) | (bytes.get(seen, k + 1) & 0xFF)) == t {
-                bytes.free(seen)
+                bytes.wipe_free(seen)
                 if kind == MSG_ENCRYPTED_EXTENSIONS { return ALERT_DECODE_ERROR, "extensions: extension ${t} appears twice" }
                 return ALERT_ILLEGAL_PARAMETER, "extensions: extension ${t} appears twice"
             }
@@ -1288,7 +1288,7 @@ fn extensions_framed(kind: int, exts: byte[]) -> (int, string) {
         bytes.set(seen, sl + 1, t & 0xFF)
         p = p + 4 + el
     }
-    bytes.free(seen)
+    bytes.wipe_free(seen)
     return 0, ""
 }
 
@@ -1511,7 +1511,7 @@ fn is_hrr_random(msg: byte[], off: int) -> int {
         if (msg[off + i] & 0xFF) != (bytes.get(hrr, i) & 0xFF) { same = 0 }
         i = i + 1
     }
-    bytes.free(hrr)
+    bytes.wipe_free(hrr)
     return same
 }
 
@@ -1532,7 +1532,7 @@ fn hrr_random() -> ptr {
     }
     ctx, _err = sha2.new("sha256")
     sha2.update(ctx, bytes.view(t)[0..n])
-    bytes.free(t)
+    bytes.wipe_free(t)
     return sha2.final_bytes(ctx)
 }
 
@@ -1722,7 +1722,7 @@ hello_retry_request(session_id: byte[], cipher_suite: int, group: int) -> ptr {
     off = put16(m, 4, 0x0303)
     hrr = hrr_random()
     off = put_bytes(m, off, bytes.view(hrr)[0..32])
-    bytes.free(hrr)
+    bytes.wipe_free(hrr)
     off = put8(m, off, sid_len)
     off = put_bytes(m, off, session_id)
     off = put16(m, off, cipher_suite)
@@ -1820,7 +1820,7 @@ client_hello_retry(ch1: byte[], group: int, share: byte[], cookie: byte[], out: 
     put24(buf, 1, off - 4)
     m = bytes.new(off)
     bytes.copy_from_bytes(m, 0, buf, 0, off)
-    bytes.free(buf)
+    bytes.wipe_free(buf)
     out.buf = m
     out.buf_len = off
 }

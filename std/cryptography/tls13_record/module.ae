@@ -35,6 +35,7 @@
 // AEAD is ChaCha20-Poly1305 (16-byte tag). AES-GCM support is a later add.
 
 import std.bytes
+import std.mem
 import std.string
 import std.bits
 import std.cryptography.chacha20poly1305
@@ -149,6 +150,7 @@ free_ctx(ctx: ptr) {
     wipe_free(c.key)
     wipe_free(c.iv)
     if c.aes_ctx != null { aes.free(c.aes_ctx) }
+    mem.wipe(ctx, sizeof(RecordCtx))
     libc_free(ctx)
 }
 
@@ -233,10 +235,10 @@ seal_record(ctx: ptr, content_type: int, plaintext: byte[]) -> ptr {
     bytes.set(rec, 4, ct_len & 0xFF)
     bytes.copy_from_bytes(rec, RECORD_HEADER_LEN, enc, 0, ct_len)
 
-    bytes.free(inner)
-    bytes.free(aad)
-    bytes.free(nonce)
-    bytes.free(enc)
+    bytes.wipe_free(inner)
+    bytes.wipe_free(aad)
+    bytes.wipe_free(nonce)
+    bytes.wipe_free(enc)
     c.seq = c.seq + 1
     return rec
 }
@@ -259,19 +261,19 @@ seal_records(ctx: ptr, content_type: int, plaintext: byte[]) -> ptr {
         if m > CONTENT_MAX_PLAIN_LEN { m = CONTENT_MAX_PLAIN_LEN }
         rec = seal_record(ctx, content_type, plaintext[off..off + m])
         if rec == null {
-            bytes.free(out)
+            bytes.wipe_free(out)
             return null
         }
         rl = bytes.length(rec)
         bytes.copy_from_bytes(out, olen, rec, 0, rl)
         olen = olen + rl
-        bytes.free(rec)
+        bytes.wipe_free(rec)
         off = off + m
     }
     res = bytes.new(olen)
     bytes.set(res, olen - 1, 0)
     bytes.copy_from_bytes(res, 0, out, 0, olen)
-    bytes.free(out)
+    bytes.wipe_free(out)
     return res
 }
 
@@ -377,9 +379,9 @@ open_record(ctx: ptr, record: byte[], out: *OpenedRecord) -> string {
     nonce = nonce_for(c.iv, c.seq)
     inner, err = aead_open_dispatch(c, nonce, aad, bytes.view(ctbuf)[0..ct_len])
 
-    bytes.free(aad)
-    bytes.free(ctbuf)
-    bytes.free(nonce)
+    bytes.wipe_free(aad)
+    bytes.wipe_free(ctbuf)
+    bytes.wipe_free(nonce)
 
     if string.equals(err, "") != 1 {
         out.alert = ALERT_BAD_RECORD_MAC
@@ -402,7 +404,7 @@ open_record(ctx: ptr, record: byte[], out: *OpenedRecord) -> string {
     }
     if ct_idx < 0 {
         // all-zero inner plaintext: no content type -> illegal
-        bytes.free(inner)
+        bytes.wipe_free(inner)
         c.seq = c.seq + 1
         out.alert = ALERT_UNEXPECTED_MESSAGE
         return "record: no content type (all-zero inner plaintext)"
@@ -412,13 +414,13 @@ open_record(ctx: ptr, record: byte[], out: *OpenedRecord) -> string {
     // type and padding), and 5: a record type TLS 1.3 does not know is
     // unexpected_message (#3317).
     if inner_len > CONTENT_MAX_PLAIN_LEN + 1 {
-        bytes.free(inner)
+        bytes.wipe_free(inner)
         c.seq = c.seq + 1
         out.alert = ALERT_RECORD_OVERFLOW
         return "record: inner plaintext over 2^14 + 1 bytes"
     }
     if out.content_type != 21 && out.content_type != 22 && out.content_type != 23 {
-        bytes.free(inner)
+        bytes.wipe_free(inner)
         c.seq = c.seq + 1
         out.alert = ALERT_UNEXPECTED_MESSAGE
         return "record: protected record of unknown type ${out.content_type}"
@@ -433,7 +435,7 @@ open_record(ctx: ptr, record: byte[], out: *OpenedRecord) -> string {
     out.plaintext_len = content_len
     out.alert = 0
 
-    bytes.free(inner)
+    bytes.wipe_free(inner)
     c.seq = c.seq + 1
     return ""
 }

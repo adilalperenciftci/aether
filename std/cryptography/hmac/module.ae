@@ -28,6 +28,7 @@
 
 import std.bits
 import std.bytes
+import std.mem
 import std.cryptography.sha2
 
 extern malloc(size: int) -> ptr
@@ -126,6 +127,7 @@ new(algo: string, key: byte[]) -> {
     }
     k0 = make_k0(algo, key, bs)
     if k0 == null {
+        mem.wipe(ctx, sizeof(HmacCtx))
         free(ctx)
         return null, "unknown algorithm"
     }
@@ -147,6 +149,7 @@ new(algo: string, key: byte[]) -> {
     if ierr != "" {
         bytes.wipe_free(ipad)
         bytes.wipe_free(opad)
+        mem.wipe(ctx, sizeof(HmacCtx))
         free(ctx)
         return null, ierr
     }
@@ -182,6 +185,7 @@ final_bytes(ctx: ptr) -> ptr {
     if oerr != "" {
         bytes.wipe_free(inner_digest)
         bytes.wipe_free(c.opad)
+        mem.wipe(ctx, sizeof(HmacCtx))
         free(ctx)
         return null
     }
@@ -192,6 +196,7 @@ final_bytes(ctx: ptr) -> ptr {
 
     bytes.wipe_free(c.opad)
     c.opad = null
+    mem.wipe(ctx, sizeof(HmacCtx))
     free(ctx)
     return result
 }
@@ -221,6 +226,7 @@ free_ctx(ctx: ptr) {
         bytes.wipe_free(c.opad)
         c.opad = null
     }
+    mem.wipe(ctx, sizeof(HmacCtx))
     free(ctx)
 }
 
