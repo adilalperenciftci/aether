@@ -62,7 +62,8 @@ static void* (*real_dlopen)(const char*, int) = NULL;
 // Check the in-process Aether sandbox checker first (embedded mode),
 // then fall back to file-based grants (LD_PRELOAD mode)
 typedef int (*aether_sandbox_check_fn)(const char*, const char*);
-extern aether_sandbox_check_fn _aether_sandbox_checker __attribute__((weak));
+extern aether_sandbox_check_fn aether_sandbox_get_checker(void)
+    __attribute__((weak));
 
 static void log_deny(const char* category, const char* resource) {
     if (log_mode == LOG_NONE) return;
@@ -81,6 +82,9 @@ static void log_deny(const char* category, const char* resource) {
 }
 
 static int check_grant(const char* category, const char* resource) {
+    aether_sandbox_check_fn checker =
+        aether_sandbox_get_checker ? aether_sandbox_get_checker() : NULL;
+
     // For fs_* categories, resolve the path BEFORE matching so a grant
     // for `/tmp/*` can't be subverted with `/tmp/../etc/shadow` or a
     // symlink under /tmp. tcp/env/exec resources stay as-is — realpath
@@ -89,7 +93,7 @@ static int check_grant(const char* category, const char* resource) {
     const char* match_target = resource;
     if (category && strncmp(category, "fs_", 3) == 0 && resource) {
         if (!aether_sandbox_canon_path(resource, resolved, sizeof(resolved))) {
-            if ((&_aether_sandbox_checker && _aether_sandbox_checker) || sandbox_active) {
+            if (checker || sandbox_active) {
                 log_deny(category, resource);
                 return 0;
             }
@@ -99,8 +103,8 @@ static int check_grant(const char* category, const char* resource) {
     }
 
     // In-process checker takes priority (embedded Python mode)
-    if (&_aether_sandbox_checker && _aether_sandbox_checker) {
-        int result = _aether_sandbox_checker(category, match_target);
+    if (checker) {
+        int result = checker(category, match_target);
         if (!result) log_deny(category, match_target);
         return result;
     }

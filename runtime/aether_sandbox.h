@@ -11,6 +11,7 @@
 #define AETHER_SANDBOX_H
 
 #include "aether_sandbox_match.h"   /* aether_net_resource, the shared matcher */
+#include "utils/aether_compiler.h"
 
 #ifdef AETHER_HAS_SANDBOX
 
@@ -20,8 +21,9 @@
 // Returns: 1 = allowed, 0 = denied
 typedef int (*aether_sandbox_check_fn)(const char* category, const char* resource);
 
-// Global: set by compiler-generated code when inside a sandbox block
-extern aether_sandbox_check_fn _aether_sandbox_checker;
+// Per-thread: set by compiler-generated code when inside a sandbox block
+extern AETHER_TLS_SHARED aether_sandbox_check_fn _aether_sandbox_checker;
+aether_sandbox_check_fn aether_sandbox_get_checker(void);
 
 // The checker, with an fs path resolved to where it leads first (".." and
 // symlinks), so a grant for "/box/*" cannot be left through "/box/../x" or a

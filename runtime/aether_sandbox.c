@@ -6,8 +6,12 @@
 #include <string.h>
 #include "aether_sandbox_path.h"
 
-// Default: no sandbox checker installed = everything allowed
-aether_sandbox_check_fn _aether_sandbox_checker = 0;
+// Default: no sandbox checker installed in this thread = everything allowed
+AETHER_TLS_SHARED aether_sandbox_check_fn _aether_sandbox_checker = 0;
+
+aether_sandbox_check_fn aether_sandbox_get_checker(void) {
+    return _aether_sandbox_checker;
+}
 
 // The checker sees an fs path where it leads (aether_sandbox_path.h). A path
 // that cannot be resolved is refused, not matched as written.

@@ -9570,7 +9570,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     if (has_sandbox) {
         // Sandbox bridge: connects compiler-generated context stack to runtime checks.
         print_line(gen, "typedef int (*aether_sandbox_check_fn)(const char*, const char*);");
-        print_line(gen, "extern aether_sandbox_check_fn _aether_sandbox_checker;");
+        print_line(gen, "extern AETHER_TLS_SHARED aether_sandbox_check_fn _aether_sandbox_checker;");
         print_line(gen, "extern int list_size(void*);");
         print_line(gen, "extern void* list_get_raw(void*, int);");
         print_line(gen, "#include \"aether_sandbox_match.h\"");
