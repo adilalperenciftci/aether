@@ -10,6 +10,7 @@ import std.strbuilder
 import std.bytes
 import std.mem
 import std.encoding
+import std.map(map_new, map_put_raw, map_has, map_free)
 
 exports(
     CBOR_INT, CBOR_BYTES, CBOR_TEXT, CBOR_ARRAY, CBOR_MAP, CBOR_TAG, CBOR_SIMPLE, CBOR_FLOAT,
@@ -30,9 +31,14 @@ const CBOR_TAG = 5
 const CBOR_SIMPLE = 6
 const CBOR_FLOAT = 7
 
-// Deepest nesting parse accepts by default, the same bound as std.json.
+// Deepest nesting parse accepts by default, the same bound as std.json. The
+// decoder recurses once per level, so without a bound a few hundred kilobytes
+// of one-element arrays overflow the stack.
 const CBOR_MAX_DEPTH = 256
 
+// What parse_with accepts. default_decode_options() is what parse uses: safe
+// for input from an untrusted peer. The element and pair defaults are
+// fxamacker/cbor's.
 struct CborDecodeOptions {
     max_depth: int
     max_array_elements: int
@@ -400,17 +406,29 @@ fn rd_byte(b: ptr, off: int) -> int {
     return bytes.get(b, off) & 255
 }
 
-fn map_has_duplicate_key(cv: *CborValue, key_cv: ptr) -> bool {
-    n = list.size(cv.map_keys)
-    i = 0
-    while i < n {
-        k = list.get_raw(cv.map_keys, i)
-        if equal_val(k, key_cv) {
-            return true
-        }
-        i = i + 1
+// Duplicate map keys (RFC 8949 §5.6) are found through a set of the keys
+// seen so far in this map, keyed by the hex of each key's deterministic
+// encoding: two keys are the same value exactly when those encodings match,
+// whether either was written definite or indefinite. Hex, because a set key
+// is a C string and an encoding can hold a zero byte. A pairwise scan was
+// quadratic: 131072 small keys in about 400 KB cost billions of comparisons.
+// Returns "" when key_cv is new (and records it), else the error.
+fn seen_key_check(seen: ptr, key_cv: ptr) -> string {
+    enc, eerr = encode_deterministic(key_cv)
+    if eerr != "" { return eerr }
+    hx = encoding.hex_encode(string.bytes(enc))
+    string.release(enc)
+    if map_has(seen, hx) == 1 {
+        string.release(hx)
+        return duplicate_key_error(key_cv)
     }
-    return false
+    _ = map_put_raw(seen, hx, hx)
+    string.release(hx)
+    return ""
+}
+
+fn free_seen(seen: ptr) {
+    if seen != null { map_free(seen) }
 }
 
 fn duplicate_key_error(key_cv: ptr) -> string {
@@ -566,6 +584,8 @@ parse_item(r: ptr, depth: int) -> (ptr, string) {
         len_val, err = read_value(r, ai)
         if err != "" { return null, err }
         string.release(err)
+        // Compared in long against what is left: narrowing a length of 2^31
+        // or more to int first made it negative and passed it as empty.
         rem = (reader.len - reader.offset) as long
         if len_val < 0 || len_val > rem { return null, "cbor: unexpected EOF" }
         if mt == 3 && !valid_utf8(reader.buf, reader.offset, len_val as int) {
@@ -625,6 +645,9 @@ parse_item(r: ptr, depth: int) -> (ptr, string) {
         }
         string.release(err)
         cv.ind = ind_of(ai)
+        // Every element takes at least one byte, so a count beyond what is
+        // left is truncated input, refused before the loop rather than
+        // narrowed to int (2^32 became 0 elements).
         rem = (reader.len - reader.offset) as long
         if len_val < 0 || len_val > rem {
             free_value(cv)
@@ -655,6 +678,9 @@ parse_item(r: ptr, depth: int) -> (ptr, string) {
         cv.type = CBOR_MAP
         cv.map_keys = list.new()
         cv.map_values = list.new()
+        seen = null
+        if reader.allow_duplicate_keys == 0 { seen = map_new() }
+        defer free_seen(seen)
         if ai == 31 {
             if reader.allow_indefinite == 0 {
                 free_value(cv)
@@ -683,14 +709,16 @@ parse_item(r: ptr, depth: int) -> (ptr, string) {
                 }
                 string.release(err)
 
-                if reader.allow_duplicate_keys == 0 {
-                    if map_has_duplicate_key(cv as *CborValue, key_cv) {
-                        dup_err = duplicate_key_error(key_cv)
+                if seen != null {
+                    dup_err = seen_key_check(seen, key_cv)
+                    if dup_err != "" {
                         free_value(key_cv)
                         free_value(cv)
                         return null, dup_err
                     }
                 }
+                // A break here, where the value belongs, is not the end of
+                // the map: parse_item refuses it as an unexpected break.
 
                 val_cv, err2 = parse_item(r, depth + 1)
                 if err2 != "" {
@@ -712,6 +740,7 @@ parse_item(r: ptr, depth: int) -> (ptr, string) {
         }
         string.release(err)
         cv.ind = ind_of(ai)
+        // Every entry is a key and a value, at least two bytes.
         rem = (reader.len - reader.offset) as long
         if len_val < 0 || len_val > rem / 2 {
             free_value(cv)
@@ -731,9 +760,9 @@ parse_item(r: ptr, depth: int) -> (ptr, string) {
             }
             string.release(err)
 
-            if reader.allow_duplicate_keys == 0 {
-                if map_has_duplicate_key(cv as *CborValue, key_cv) {
-                    dup_err = duplicate_key_error(key_cv)
+            if seen != null {
+                dup_err = seen_key_check(seen, key_cv)
+                if dup_err != "" {
                     free_value(key_cv)
                     free_value(cv)
                     return null, dup_err
@@ -806,7 +835,10 @@ parse_item(r: ptr, depth: int) -> (ptr, string) {
     return null, "cbor: invalid additional information"
 }
 
-// Parse one CBOR data item that is the whole of `cbor_data` with options.
+// Parse one CBOR data item that is the whole of `cbor_data`, under `opts`.
+// Returns (value_ptr, "") on success, (null, error) on failure. Caller owns
+// the returned value and must free with cbor.free. Bytes left after the item
+// are an error (#2470): `0102` used to parse as 1.
 parse_with(cbor_data: string, opts: CborDecodeOptions) -> ptr! {
     ok = ""
     dlen = string.length(cbor_data)
@@ -844,7 +876,8 @@ parse_with(cbor_data: string, opts: CborDecodeOptions) -> ptr! {
     return res, ok
 }
 
-// Parse one CBOR data item using safe default options.
+// parse_with under default_decode_options(): duplicate map keys refused,
+// 131072 elements or pairs per container, nesting to 256.
 parse(cbor_data: string) -> ptr! {
     return parse_with(cbor_data, default_decode_options())
 }
@@ -1196,6 +1229,66 @@ fn bytes_lex_cmp(s1: string, s2: string) -> int {
     return 0
 }
 
+// Sort *MapPair entries by the bytes of their encoded keys (RFC 8949
+// §4.2.1). A merge sort: an insertion sort was quadratic in the pair count.
+// Encodings are prefix-free, so bytewise order needs no tie-break.
+fn sort_pairs(pairs: ptr, n: int) {
+    tmp = list.new()
+    i = 0
+    while i < n {
+        _ = list.add(tmp, list.get_raw(pairs, i))
+        i = i + 1
+    }
+    src = pairs
+    dst = tmp
+    width = 1
+    while width < n {
+        lo = 0
+        while lo < n {
+            mid = lo + width
+            if mid > n { mid = n }
+            hi = lo + 2 * width
+            if hi > n { hi = n }
+            a = lo
+            b = mid
+            k = lo
+            while k < hi {
+                take_a = 0
+                if a < mid {
+                    if b >= hi {
+                        take_a = 1
+                    } else {
+                        pa = list.get_raw(src, a) as *MapPair
+                        pb = list.get_raw(src, b) as *MapPair
+                        if bytes_lex_cmp(pa.enc_k, pb.enc_k) <= 0 { take_a = 1 }
+                    }
+                }
+                if take_a == 1 {
+                    list.set(dst, k, list.get_raw(src, a))
+                    a = a + 1
+                } else {
+                    list.set(dst, k, list.get_raw(src, b))
+                    b = b + 1
+                }
+                k = k + 1
+            }
+            lo = hi
+        }
+        t = src
+        src = dst
+        dst = t
+        width = width * 2
+    }
+    if src != pairs {
+        i = 0
+        while i < n {
+            list.set(pairs, i, list.get_raw(src, i))
+            i = i + 1
+        }
+    }
+    list.free(tmp)
+}
+
 encode_deterministic_item(w: ptr, cv: ptr) -> string {
     if cv == null {
         write_byte(w, 246)
@@ -1288,26 +1381,7 @@ encode_deterministic_item(w: ptr, cv: ptr) -> string {
             return map_err
         }
 
-        // Insertion sort on pairs
-        var sort_i = 1
-        while sort_i < n {
-            p_i_ptr, _ = list.get(pairs, sort_i)
-            p_i = p_i_ptr as *MapPair
-            var sort_j = sort_i - 1
-            while sort_j >= 0 {
-                p_j_ptr, _ = list.get(pairs, sort_j)
-                p_j = p_j_ptr as *MapPair
-                cmp = bytes_lex_cmp(p_j.enc_k, p_i.enc_k)
-                if cmp > 0 {
-                    list.set(pairs, sort_j + 1, p_j as ptr)
-                    sort_j = sort_j - 1
-                } else {
-                    break
-                }
-            }
-            list.set(pairs, sort_j + 1, p_i as ptr)
-            sort_i = sort_i + 1
-        }
+        sort_pairs(pairs, n)
 
         // Check for duplicate key encodings
         var check_i = 0

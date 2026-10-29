@@ -307,6 +307,54 @@ fn test_deterministic_encoding() -> int {
     return f
 }
 
+// Duplicate detection and key sorting at the default pair limit. A pairwise
+// duplicate scan or an insertion sort is quadratic here: 131072 keys made
+// billions of comparisons, so either regression shows as this test hanging.
+fn test_large_maps() -> int {
+    f = 0
+    n = 131072
+    m = cbor.obj()
+    i = 0
+    while i < n {
+        // descending, so a sort has work to do
+        _ = cbor.map_push(m, cbor.from_int((n - i) as long), cbor.from_int(0 as long))
+        i = i + 1
+    }
+    enc, eerr = cbor.encode(m)
+    cbor.free(m)
+    if eerr != "" {
+        println("  FAIL large map encode: ${eerr}")
+        return 1
+    }
+    back, perr = cbor.parse(enc)
+    if perr != "" {
+        println("  FAIL large map with ${n} distinct keys refused: ${perr}")
+        return 1
+    }
+    det, derr = cbor.encode_deterministic(back)
+    cbor.free(back)
+    if derr != "" {
+        println("  FAIL large map deterministic encode: ${derr}")
+        return 1
+    }
+    sorted, serr = cbor.parse(det)
+    if serr != "" {
+        println("  FAIL large map re-parse: ${serr}")
+        return 1
+    }
+    k0, _v0, _e0 = cbor.object_entry(sorted, 0)
+    kl, _vl, _el = cbor.object_entry(sorted, n - 1)
+    first = cbor.get_long(k0)
+    last = cbor.get_long(kl)
+    if first != 1 || last != (n as long) {
+        println("  FAIL large map keys not sorted: first ${first}, last ${last}")
+        f = f + 1
+    }
+    cbor.free(sorted)
+    if f == 0 { println("  PASS: ${n}-key map parses and sorts") }
+    return f
+}
+
 main() {
     println("=== test_cbor_hardening ===")
     fails = 0
@@ -315,6 +363,7 @@ main() {
     fails = fails + test_length_bombs()
     fails = fails + test_option_boundaries()
     fails = fails + test_deterministic_encoding()
+    fails = fails + test_large_maps()
 
     if fails != 0 {
         println("CBOR HARDENING: ${fails} failure(s)")

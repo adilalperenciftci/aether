@@ -203,6 +203,7 @@
     <div class="function" id="CborDecodeOptions" data-name="CborDecodeOptions">
       <h3 class="function-name">CborDecodeOptions <span class="kind">struct</span></h3>
       <pre class="usage"><code>struct CborDecodeOptions</code></pre>
+      <p class="doc">What parse_with accepts. default_decode_options() is what parse uses: safe for input from an untrusted peer. The element and pair defaults are fxamacker/cbor's.</p>
     </div>
     <div class="function" id="default_decode_options" data-name="default_decode_options">
       <h3 class="function-name">default_decode_options <span class="kind">fn</span></h3>
@@ -212,13 +213,13 @@
       <h3 class="function-name">parse <span class="kind">fn</span></h3>
       <pre class="usage"><code>parse(cbor_data) <span class="arrow">-&gt;</span> ptr!</code></pre>
       <p class="signature"><span class="sig-params">cbor_data: string</span></p>
-      <p class="doc">Parse one CBOR data item using safe default options.</p>
+      <p class="doc">parse_with under default_decode_options(): duplicate map keys refused, 131072 elements or pairs per container, nesting to 256.</p>
     </div>
     <div class="function" id="parse_with" data-name="parse_with">
       <h3 class="function-name">parse_with <span class="kind">fn</span></h3>
       <pre class="usage"><code>parse_with(cbor_data, opts) <span class="arrow">-&gt;</span> ptr!</code></pre>
       <p class="signature"><span class="sig-params">cbor_data: string, opts: CborDecodeOptions</span></p>
-      <p class="doc">Parse one CBOR data item that is the whole of `cbor_data` with options.</p>
+      <p class="doc">Parse one CBOR data item that is the whole of `cbor_data`, under `opts`. Returns (value_ptr, &quot;&quot;) on success, (null, error) on failure. Caller owns the returned value and must free with cbor.free. Bytes left after the item are an error (#2470): `0102` used to parse as 1.</p>
     </div>
     <div class="function" id="encode" data-name="encode">
       <h3 class="function-name">encode <span class="kind">fn</span></h3>
