@@ -110,20 +110,35 @@ case "$OUT" in *"has no OpenSSL"*) ;; *) BACKENDS="aether openssl" ;; esac
 
 # Start the pure server with certificate $1 and key $2; READY -> S_PORT,
 # else the server's output in $OUT and S_PORT empty.
+#
+# One server at a time: each is used until the next starts, which stops it
+# first (#3459). Left running, every server of the test was still alive at
+# its end, a dozen of them, each with its scheduler's threads, and the RSA
+# server of section 3, which loads the slowest key, did not print READY
+# within the 30 s on a two-core Linux runner; it also shared its log file
+# with section 1's RSA server, still writing to it. Each start has a log of
+# its own, and a server that never says READY or FAIL is reported with
+# whether it still runs.
+SRV_N=0
 start_server() {
+    [ -n "${spid:-}" ] && stop_server "$spid"
     S_PORT=""
-    CERT_PATH="$TMP/$1.pem" KEY_PATH="$TMP/$2.key" "$TMP/server" >"$TMP/srv_$1_$2.log" 2>&1 &
+    SRV_N=$((SRV_N + 1))
+    slog="$TMP/srv_${SRV_N}_$1_$2.log"
+    CERT_PATH="$TMP/$1.pem" KEY_PATH="$TMP/$2.key" "$TMP/server" >"$slog" 2>&1 &
     spid=$!
     PIDS="$PIDS $spid"
     i=0
     while [ "$i" -lt 300 ]; do
-        grep -q 'READY\|FAIL' "$TMP/srv_$1_$2.log" 2>/dev/null && break
+        grep -q 'READY\|FAIL' "$slog" 2>/dev/null && break
         sleep 0.1
         i=$((i + 1))
     done
-    OUT=$(cat "$TMP/srv_$1_$2.log")
+    OUT=$(cat "$slog")
     case "$OUT" in
-        *"READY "*) S_PORT=$(sed -n 's/^READY \([0-9]*\).*/\1/p' "$TMP/srv_$1_$2.log" | head -1) ;;
+        *"READY "*) S_PORT=$(sed -n 's/^READY \([0-9]*\).*/\1/p' "$slog" | head -1) ;;
+        "") if server_alive "$spid"; then OUT="(no output after 30 s; the server still runs)"
+            else OUT="(no output; the server exited)"; fi ;;
     esac
 }
 
@@ -194,7 +209,7 @@ sent_chain combo 1
 refused_at_setup badcert badcert "certificate 2 of the chain does not parse" "a CERTIFICATE block that does not parse"
 
 
-# 5. Records: a chain over 16 KiB (the leaf, then 50 copies of another
+# 5. Records: a chain over 16 KiB (the leaf, then 70 copies of another
 #    certificate) goes out in several records and verifies, the server
 #    lives on to serve the next connection, and a 40000-byte response
 #    crosses two record boundaries (#3380).
@@ -207,7 +222,7 @@ for b in $BACKENDS; do
         *) echo "    got: $OUT"; fail "a 40000-byte response, client \"$b\": not whole" ;;
     esac
 done
-{ cat "$TMP/p256.pem"; i=0; while [ "$i" -lt 50 ]; do cat "$TMP/p384.pem"; i=$((i + 1)); done; } > "$TMP/bigchain.pem"
+{ cat "$TMP/p256.pem"; i=0; while [ "$i" -lt 70 ]; do cat "$TMP/p384.pem"; i=$((i + 1)); done; } > "$TMP/bigchain.pem"
 cp "$TMP/p256.key" "$TMP/bigchain.key"
 [ "$(wc -c < "$TMP/bigchain.pem")" -gt 30000 ] || fail "the big chain is not over 16 KiB of DER"
 start_server bigchain bigchain
