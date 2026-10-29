@@ -14,6 +14,93 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.857.0]
+
+### Added
+
+- **An if-expression chains `else if`.** `s = if n < 0 { "neg" } else if
+  n == 0 { "zero" } else { "pos" }` was "Expected LEFT_BRACE, got IF": the
+  else arm had to be braced, so a chain was spelled `else { if ... }`. A
+  chain of any length now parses, as an initializer, a return value, an
+  argument or an operand, and is the nested form it stands for, so its arms
+  type as nested if-expressions do. The final `else` is still required.
+
+- **`T[][]` (and `T[][][]`) can now be written as a type.** `make([]int[], n)` already built a slice of slices, but `f() -> int[][]` stopped at the second `[` ("Expected LEFT_BRACE"). Each further `[]` now wraps the type once more wherever a type is written: return types, parameters, struct fields, typed locals, function types.
+
+- **A `const` may be a struct literal of constants, or an array of them.** `const PTS[] = [XY { x: 1, y: 2 }, XY { x: 3, y: 4 }]` and `const ORIGIN = XY { x: 0, y: 0 }` were refused with E0200, so a table of records had to be parallel arrays. Fields may be other consts, negatives, strings or nested constant literals; a field that is a call is still rejected. Each lowers to a `static const` initializer list.
+
+- **`for x in xs { ... }` iterates the elements of a slice or fixed array.**
+  Only a range (`for i in a..b`) parsed after `in`; an element loop was a
+  parse error ("Expected DOTDOT, got LEFT_BRACE"). `xs` can be any `T[]` or
+  `T[N]` expression (an `int[]`, a `string[]`, a slice of structs, a call, a
+  sub-slice); it is evaluated once, `x` is bound by value with the element's
+  type, and `break` / `continue` work as in any loop. It lowers in the parser to
+  the existing index loop, so the range form is unchanged.
+
+- **`append(xs, v)` grows a slice.** `xs = append(xs, v)` gives a `T[]` one
+  element longer with `v` at its end, growing the buffer in place with its
+  capacity doubling, so building a list of n elements costs O(n) where a
+  program used to copy every element into a buffer one longer on each push
+  (O(n^2), and the old buffer leaked unless it was freed by hand). It grows
+  the empty slice (`[]`, `null`), a `make([]T, n)` buffer or one an earlier
+  `append` gave; its elements are places, as a `make` buffer's are (a string,
+  a closure or a struct that holds one is taken, and `free` releases each).
+  Appending to a view (a sub-slice, an array, `string.bytes(s)`, C memory)
+  is refused where the checker sees it (E0200) and a named panic elsewhere,
+  as `free` of one is. The slice keeps its shape: a grown buffer is marked,
+  and its capacity is the power of two that holds its length.
+
+- **A slice's buffer is released when the local that owns it goes out of
+  scope, and `xs.push(v)` grows a slice in place.** A buffer `make([]T, n)`
+  hands out, or `append` or `push` grows, has one owner: the local holding
+  it releases it, and what its elements hold, on every exit of its scope (the
+  end of the block, `return`, `break`, `continue`, a caught panic), so a
+  program writes no `free` for it. Before, every such buffer leaked unless
+  the program freed it by hand. A buffer moves: `ys = xs`, returning it,
+  storing it in a field, a `var`, an element, a struct, a tuple or a message,
+  and giving it to a parameter declared `xs: @keep T[]` leave `xs` empty, and
+  using `xs` after a move, `free(xs)` or `append(xs, v)` is a compile error
+  (E0906, new); `v = xs[..]` is a view that leaves it in place. A parameter
+  borrows: `free`, `append` and `push` on one that is not `@keep` are E0901
+  (functions that freed or grew a slice parameter now declare it `@keep`),
+  and a copy read out of a parameter, a field, an element or a `var` is
+  marked a view, so nothing frees through it. A slice of slices owns its
+  rows: a store into a row releases the one it replaces, and `free` of the
+  outer slice releases every row. A buffer a view of which may outlive its
+  local (returned, stored, kept by a callee, bound in an outer scope) is not
+  released, as before ownership. `free(xs)` and `defer free(xs)` still work
+  and leave the place empty. Buffers held by fields, `var`s, tuples and
+  messages, and slice locals a closure captures, are still freed by hand.
+
+### Fixed
+
+- **A glob import binds every export of a wide module.** The table that maps
+  each bare name an import binds to the qualified name its calls are
+  rewritten to held 512 entries and dropped the rest without a word. A glob
+  import of a module with more exports (aether-ui's `ui` has about 700) left
+  the dropped names bound for the checker but not rewritten, so the program
+  type-checked and its C called `window(...)`, `vstack(...)` and `text(...)`
+  bare and undeclared, where importing the same names selectively built. The
+  table now grows as needed.
+
+- **`[10, 20, 30][i]` indexes an array literal in place.** The literal was
+  emitted as the bare initializer `{10, 20, 30}[...]`, which C refuses, so
+  indexing a literal as an initializer, argument, return value or operand
+  failed to build. The literal is now the statement's temporary, as one
+  passed as an argument is (a string or struct literal's elements are owned
+  and dropped with its block), or a compound literal where no temporary can
+  be declared. The index is bounds-checked as any array index is, and
+  `[..].len` on a literal is its element count.
+
+- **A float or a bool passed to a `ptr` parameter is now a type error, not a C compiler failure.** `f(p: ptr)` called as `f(0.1)` passed `ae check` and died in the C compiler ("passing 'double' to parameter of incompatible type 'void *'"). It bit aether-ui's DSL: `text_color(_ctx, r, g, b)` called with four floats in a trailing block fills every parameter, so no `_ctx` is injected. A builder's `_ctx` also refuses an int (other than 0) or a string, with the hint "too many arguments? `_ctx` is supplied by the enclosing block". Ints, strings, `null`, other pointers and closures still go to an ordinary `ptr` parameter.
+
+- **A `@quotable` function that calls itself, directly or through another,
+  no longer crashes the compiler.** `aetherc` printed the E0804 "reaches
+  itself" error and then overflowed its stack collecting the quote's helpers,
+  so it exited with a signal instead of 1. It now stops at the cycle and
+  exits 1. The `quote_errors` test also fails on a compiler crash, which
+  `ae build` reports as an ordinary failed build.
+
 ## [0.856.0]
 
 ### Security
