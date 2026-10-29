@@ -774,10 +774,11 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
 
     // c. CertificateVerify, with the scheme of the server's key when the
     // client's signature_algorithms offers it (RFC 8446 4.4.3, #3326). An
-    // ECDSA nonce is RFC 6979's (no randomness to fail, none to leak the
-    // key); an RSA-PSS signature is constant time and blinded. The
-    // signature is checked against the leaf's key before it is sent
-    // (#3376).
+    // ECDSA nonce is RFC 6979's hedged with 32 fresh random bytes (section
+    // 3.6), and an Ed25519 r is hedged the same way, so the handshake needs
+    // randomness, as its key share does; an RSA-PSS signature is constant
+    // time and blinded. The signature is checked against the leaf's key
+    // before it is sent (#3376).
     skey = priv_key as *ServerKey
     scheme = key_scheme(skey, ch_parsed.sig_algs)
     th_cert = transcript_hash_algo(tr, hash_algo)
