@@ -148,8 +148,10 @@ static void send_down(ActorBase* to, ActorBase* dead, const char* reason, int id
  *
  * A panic can leave the drain. Ending an actor drops what waits for it, and
  * a dropped message runs its release, which is the program's own code for a
- * field of an owned type (its drop function, #3142) and may panic. The jump
- * goes to the nearest frame below (the step barrier of the handler whose
+ * field of an owned type (its drop function, #3142) and may panic. That
+ * panic is caught at the drop and reported through the death hook (#3401),
+ * but the hook is a C host's code and runs in the drain too. A jump out of
+ * it goes to the nearest frame below (the step barrier of the handler whose
  * kill started the chain, or a `try`), past the drain, and the thread would
  * keep `t_link_ending` set: every later end a link passed on there would be
  * queued and never made. So the outermost end journals the queue with the

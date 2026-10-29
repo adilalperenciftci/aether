@@ -638,7 +638,8 @@ static void coop_finalize(ActorBase* actor) {
         coop_refill(actor);
         if (!mailbox_receive(&actor->mailbox, &discard)) break;
         aether_mailbox_untake(actor, discard.type);
-        aether_message_drop(actor, &discard);
+        // A panic in its release is reported, and the end goes on (#3401).
+        aether_message_drop_at_end(actor, &discard);
         if (discard._reply_slot) ((ActorReplySlot*)discard._reply_slot)->failed = AETHER_ASK_DEAD;
         drained++;
     }

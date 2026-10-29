@@ -86,6 +86,7 @@ extern AETHER_TLS int current_core_id;
 static void reply_slot_decref(ActorReplySlot* slot);
 static void reply_slot_fail(ActorReplySlot* slot, int why);
 static void release_undelivered(ActorBase* actor, Message* msg);
+static void release_undelivered_at_end(ActorBase* actor, Message* msg);
 /* An ended actor's death, on its own thread while it steps nothing
  * (#2974): defined with the lifecycle below. */
 static void actor_finalize(ActorBase* actor);
@@ -170,7 +171,7 @@ static int actor_overflow_drain(ActorBase* actor) {
     Message spill[AETHER_INBOX_RING];
     int got;
     while ((got = actor_inbox_take(ib, spill, AETHER_INBOX_RING)) > 0) {
-        for (int k = 0; k < got; k++) release_undelivered(actor, &spill[k]);
+        for (int k = 0; k < got; k++) release_undelivered_at_end(actor, &spill[k]);
         drained += got;
     }
     return drained;
@@ -619,7 +620,7 @@ static void actor_finalize(ActorBase* actor) {
     int drained = 0;
     Message discard;
     while (mailbox_receive(&actor->mailbox, &discard)) {
-        release_undelivered(actor, &discard);
+        release_undelivered_at_end(actor, &discard);
         drained++;
     }
     // Its overflow (#3241), or an actor thread's inbox (#3298).
@@ -1558,6 +1559,15 @@ uint64_t scheduler_released_sends(void) {
 static void release_undelivered(ActorBase* actor, Message* msg) {
     aether_mailbox_untake(actor, msg->type);   // its place under a bound (#2974)
     aether_message_drop(actor, msg);
+    if (msg->_reply_slot) reply_slot_fail((ActorReplySlot*)msg->_reply_slot, AETHER_ASK_DEAD);
+}
+
+/* As release_undelivered, for what an ended actor leaves undelivered as its
+ * death is finalized (#3401): a panic in the release is reported and the
+ * drain goes on (aether_message_drop_at_end). */
+static void release_undelivered_at_end(ActorBase* actor, Message* msg) {
+    aether_mailbox_untake(actor, msg->type);
+    aether_message_drop_at_end(actor, msg);
     if (msg->_reply_slot) reply_slot_fail((ActorReplySlot*)msg->_reply_slot, AETHER_ASK_DEAD);
 }
 

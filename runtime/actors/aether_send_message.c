@@ -55,6 +55,48 @@ void aether_message_drop(ActorBase* target, Message* msg) {
     }
 }
 
+/* #3401: the drop of a message an ending actor leaves undelivered. Its
+ * release is the program's code for a field of an owned type (a drop
+ * function, #3142), which may panic, and the finalize that drains the
+ * actor ran it bare: a panic there jumped out of the finalize (to the
+ * nearest frame below, or ended the program without one), so the messages
+ * after it were not released and the actor's watchers and links were never
+ * told. The release runs in a frame of its own instead, the frame a step
+ * runs in: a panic in it is caught here, the unwind journal giving back what
+ * the release held at its depth, and reported as the step barrier reports a
+ * panic in the release that follows a handler, through the death hook with
+ * the actor's id and the panic's reason, which is then released. The
+ * actor's end has its reason already and keeps it. What the release did not
+ * get to free (the payload, an owned zero-copy buffer) goes here, and the
+ * finalize goes on with the next message. A message whose release is not
+ * the program's (no release_message, a runtime Down) needs no frame. */
+void aether_message_drop_at_end(ActorBase* target, Message* msg) {
+    if (!target || !target->release_message || !msg->payload_ptr || msg->type == AETHER_MSG_DOWN) {
+        aether_message_drop(target, msg);
+        return;
+    }
+    AetherJmpFrame* f = aether_try_push();
+    if (AETHER_SIGSETJMP(f->buf, 1) == 0) {
+        aether_message_drop(target, msg);
+        aether_try_pop();
+        return;
+    }
+    const char* reason = f->reason;
+    void (*reason_release)(const void*) = f->reason_release;
+    aether_try_pop();
+    if (msg->payload_ptr) {
+        aether_free_message(msg->payload_ptr);
+        msg->payload_ptr = NULL;
+    }
+    if (msg->zerocopy.owned && msg->zerocopy.data) {
+        free(msg->zerocopy.data);
+        msg->zerocopy.data = NULL;
+        msg->zerocopy.owned = 0;
+    }
+    aether_fire_death_hook(target->id, reason);
+    if (reason_release) reason_release(reason);
+}
+
 // The heap copy of a typed message's payload, or NULL when there was no
 // memory for it.
 // Always use heap allocation for type-safe messages.

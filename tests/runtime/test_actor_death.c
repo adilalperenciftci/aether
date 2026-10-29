@@ -281,16 +281,19 @@ static void test_kill_before_start(void) {
     ASSERT_TRUE(strcmp(reason, "killed") == 0);
 }
 
-/* #3394 follow-up: a panic that leaves a link's drain leaves the thread's
- * later links working. Ending an actor drops what waits for it, and a
- * dropped message's release is the program's code for a field of an owned
- * type (its drop function), which may panic: the jump went past the drain
- * and left the thread marked as ending, so every end a link passed on
- * there afterwards was queued and never made. The threaded scheduler,
- * stopped, finalizes a death where it is seen, as the cooperative one
- * does: a kills b's link, b's kills c's, and c holds a message whose
- * release panics; then x's death must still end y. */
+/* #3400: a panic that leaves a link's drain leaves the thread's later
+ * links working. Where a death is finalized as soon as it is seen (here the
+ * threaded scheduler, stopped), the ends links pass on are made from a
+ * queue; a panic that jumped past it left the thread marked as ending, so
+ * every end a link passed on there afterwards was queued and never made. A
+ * dropped message's release panics no more out of an end (it is caught and
+ * reported through the death hook, #3401), but the hook is the host's code
+ * and runs in the drain: here it panics in turn. a's death ends b through
+ * b's link and b's ends c; c holds a message whose release panics, and the
+ * hook that reports it panics out of the drain; then x's death must still
+ * end y. */
 static int g_release_panics = 0;
+static int g_hook_panics = 0;
 
 static void release_that_panics(int type, void* payload) {
     (void)type;
@@ -298,6 +301,15 @@ static void release_that_panics(int type, void* payload) {
     if (g_release_panics) {
         g_release_panics = 0;
         aether_panic("a release panicked");
+    }
+}
+
+static void hook_that_panics(int actor_id, const char* reason) {
+    (void)actor_id;
+    (void)reason;
+    if (g_hook_panics) {
+        g_hook_panics = 0;
+        aether_panic("the death hook panicked");
     }
 }
 
@@ -323,14 +335,18 @@ static void test_link_end_after_panic(void) {
     m.payload_ptr = malloc(16);
     int queued = mailbox_send(&c->mailbox, m);
     g_release_panics = 1;
-    int caught = 0;
+    g_hook_panics = 1;
+    aether_set_on_actor_death(hook_that_panics);
+    const char* volatile caught = NULL;
     AetherJmpFrame* f = aether_try_push();
     if (AETHER_SIGSETJMP(f->buf, 1) == 0) {
         aether_actor_kill(a);
     } else {
-        caught = 1;
+        caught = f->reason;
     }
     aether_try_pop();
+    aether_set_on_actor_death(NULL);
+    int hook_panicked = caught && strcmp(aether_panic_reason_text(caught), "the death hook panicked") == 0;
     int b_ended = (atomic_load(&b->dead) & AETHER_ACTOR_KILLED) != 0;
     aether_actor_kill(x);
     int y_ended = (atomic_load(&y->dead) & AETHER_ACTOR_KILLED) &&
@@ -338,7 +354,7 @@ static void test_link_end_after_panic(void) {
     scheduler_cleanup();
 
     ASSERT_TRUE(queued);
-    ASSERT_TRUE(caught);
+    ASSERT_TRUE(hook_panicked);
     ASSERT_TRUE(b_ended);
     ASSERT_TRUE(y_ended);
 }
@@ -380,6 +396,6 @@ void register_actor_death_tests(void) {
         test_actor_thread_panic_drains_inbox, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Death: a kill before scheduler_start is finalized at once (#3399)",
         test_kill_before_start, TEST_CATEGORY_RUNTIME);
-    register_test_with_category("Death: a panic out of a link's end leaves later links working (#3394)",
+    register_test_with_category("Death: a panic out of a link's end leaves later links working (#3400)",
         test_link_end_after_panic, TEST_CATEGORY_RUNTIME);
 }

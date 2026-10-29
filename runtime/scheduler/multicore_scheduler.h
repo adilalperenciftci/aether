@@ -654,6 +654,12 @@ void scheduler_send_ref(AetherActorRef ref, Message msg);
 // NULL (a reference whose block is another actor's now): the payload alone
 // is freed.
 void aether_message_drop(ActorBase* target, Message* msg);
+/* #3401: aether_message_drop of a message an ending actor leaves
+ * undelivered, as its finalize drains it on either scheduler: the release
+ * runs in a frame of its own, so a panic in it (a field's drop function is
+ * the program's code) is reported through the death hook, as the step
+ * barrier reports one in a release after a handler, and the end goes on. */
+void aether_message_drop_at_end(ActorBase* target, Message* msg);
 /* A thread that steps actors without being a core's scheduler thread
  * (aether_actor_thread, which inlines sends to actors of its core) takes
  * part in reclamation like a core (#2517): it registers before its first
