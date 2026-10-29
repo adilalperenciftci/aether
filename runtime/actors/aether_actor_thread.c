@@ -102,7 +102,9 @@ void* aether_actor_thread(void* arg) {
         if (actor->timeout_ns > 0 && actor->last_activity_ns > 0 && actor->step &&
             aether_now_ns() - actor->last_activity_ns >= actor->timeout_ns) {
             idle = 0;
+            scheduler_countdown_enter();   // until its arm returns (#3443)
             scheduler_step_actor(actor);
+            scheduler_countdown_leave();
             continue;
         }
 

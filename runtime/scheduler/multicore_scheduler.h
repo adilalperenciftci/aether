@@ -690,6 +690,11 @@ int scheduler_actor_thread_park(ActorBase* actor);
  * actor's thread steps it with. The caller holds what a core holds to step
  * it. */
 void scheduler_step_actor(ActorBase* actor);
+/* Around a step that fires a receive timeout (#3443): counted until its arm
+ * returns, so wait_for_idle() waits for the arm, which runs after the step
+ * disarmed the countdown. */
+void scheduler_countdown_enter(void);
+void scheduler_countdown_leave(void);
 /* Puts `msg` in an auto_process actor's inbox and wakes its thread if it
  * sleeps (#2598, #2592). From any thread; the message is counted as sent by
  * the caller. Every send to such an actor ends here. */

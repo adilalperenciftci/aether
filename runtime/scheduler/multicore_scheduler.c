@@ -2255,8 +2255,11 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                     !actor->step) continue;
                 if (aether_now_ns() - actor->last_activity_ns < actor->timeout_ns) continue;
                 if (!atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire)) {
-                    if (atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == sched->core_id)
+                    if (atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == sched->core_id) {
+                        scheduler_countdown_enter();   // until its arm returns (#3443)
                         aether_step_safe(actor);
+                        scheduler_countdown_leave();
+                    }
                     atomic_flag_clear_explicit(&actor->step_lock, memory_order_release);
                 }
                 work_done = 1;
@@ -2707,6 +2710,21 @@ static inline int count_pending_messages(void) {
 // process new messages sent after this function returns.
 // Safe to call multiple times in a program (e.g. between test phases).
 // Check if any actor has a pending timeout
+/* Receive timeouts firing now (#3443): the generated step disarms its
+ * countdown before the arm runs (codegen_actor.c, #3162), so from then on
+ * the actor looks idle while its arm still runs, and may still send. A step
+ * that fires a countdown is counted from before it starts until it returns,
+ * and wait_for_idle() waits for it as for a message. */
+static _Atomic int g_countdowns_firing = 0;
+
+void scheduler_countdown_enter(void) {
+    atomic_fetch_add_explicit(&g_countdowns_firing, 1, memory_order_seq_cst);
+}
+
+void scheduler_countdown_leave(void) {
+    atomic_fetch_sub_explicit(&g_countdowns_firing, 1, memory_order_release);
+}
+
 static int has_pending_actor_timeout(void) {
     int found = 0;
     int slot = reclaim_reader_enter();  // #2509
@@ -2726,6 +2744,10 @@ static int has_pending_actor_timeout(void) {
         }
     }
     reclaim_reader_exit(slot);
+    /* A countdown seen disarmed above may be firing: its step counted itself
+     * (a full barrier) before it disarmed. */
+    atomic_thread_fence(memory_order_acquire);
+    if (atomic_load_explicit(&g_countdowns_firing, memory_order_relaxed) > 0) found = 1;
     return found;
 }
 

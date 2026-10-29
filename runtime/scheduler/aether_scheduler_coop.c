@@ -699,6 +699,12 @@ void scheduler_step_actor(ActorBase* actor) {
     (void)coop_step(actor);
 }
 
+/* A firing countdown is counted for wait_for_idle() on the multicore
+ * scheduler (#3443). Here the thread that waits is the one that steps, so a
+ * wait never returns while an arm runs: nothing to count. */
+void scheduler_countdown_enter(void) {}
+void scheduler_countdown_leave(void) {}
+
 int aether_scheduler_poll(int max_per_actor) {
     int total = 0;
     int limit = (max_per_actor <= 0) ? 1024 : max_per_actor;

@@ -1,0 +1,43 @@
+// Test: wait_for_idle() waits for a receive timeout's arm to end, not only
+// for its countdown to fire (#3443).
+//
+// The step that fires a countdown disarms it before the arm runs (#3162), and
+// wait_for_idle() saw a timeout only while it was armed: once it fired and
+// nothing was queued, the wait returned while the arm still ran, so main read
+// the arm's state before the arm wrote it (test_actor_timeout_multiple failed
+// on a loaded macOS runner: "fired 0 and 0" printed after both arms' lines).
+// A step that fires a countdown is now counted until its arm returns.
+
+message Ping {}
+
+extern exit(code: int)
+
+actor Slow {
+    state fired = 0
+
+    receive {
+        Ping -> {}
+    } after 20 -> {
+        sleep(300)
+        fired = 1
+    }
+}
+
+actor Idle {
+    state n = 0
+
+    receive {
+        Ping -> { n = n + 1 }
+    }
+}
+
+main() {
+    s = spawn(Slow())
+    _i = spawn(Idle()) // two actors: the cores step them, not main
+    wait_for_idle()
+    if s.fired != 1 {
+        println("FAIL: wait_for_idle returned while the arm ran (fired ${s.fired})")
+        exit(1)
+    }
+    println("PASS: wait_for_idle waited for the timeout arm")
+}
