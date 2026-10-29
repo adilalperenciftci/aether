@@ -1221,9 +1221,11 @@ compiler: $(BUILD_DIR)/aetherc$(EXE_EXT) $(BUILD_TARGET_STAMP)
 # the binary other tests were executing at that moment: macOS kills a process
 # whose text file changed under it, which is a SIGKILL in a test that never
 # went near the build system.
-# The runtime pieces aetherc links, for this rule and compiler-fast alike:
-# compiler-fast kept a list of its own, which lost aether_spawn.c and
-# aether_sandbox.c and could not link (#3351).
+# The runtime pieces aetherc links, for this rule, compiler-fast and the
+# release compiler alike: compiler-fast kept a list of its own, which lost
+# aether_spawn.c and aether_sandbox.c and could not link (#3351), and so
+# did the release compiler's, which lost aether_unwind.c once the caps code
+# read the execution frames, so `make install` could not link.
 AETHERC_RUNTIME_SRC = runtime/utils/aether_spawn.c runtime/aether_sandbox.c runtime/sandbox/aether_audit.c runtime/actors/aether_panic.c runtime/actors/aether_unwind.c runtime/aether_resource_caps.c runtime/aether_locale_num.c runtime/aether_callbacks.c
 AETHERC_RUNTIME_OBJS = $(patsubst %.c,$(OBJ_DIR)/%.o,$(AETHERC_RUNTIME_SRC))
 
@@ -2316,7 +2318,7 @@ release-build: $(BUILD_DIR)/aetherc-release$(EXE_EXT)
 
 # A file target as well, so `make install` on a current tree does not spend a
 # minute recompiling the whole compiler in one LTO link before copying.
-$(BUILD_DIR)/aetherc-release$(EXE_EXT): $(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) runtime/aether_resource_caps.c runtime/aether_locale_num.c runtime/aether_callbacks.c $(STDLIB_SYMS_HEADER) $(FRONTEND_ID_HEADER) $(VERSION_HEADER) $(MANIFEST_OBJ) Makefile
+$(BUILD_DIR)/aetherc-release$(EXE_EXT): $(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) $(AETHERC_RUNTIME_SRC) $(STDLIB_SYMS_HEADER) $(FRONTEND_ID_HEADER) $(VERSION_HEADER) $(MANIFEST_OBJ) Makefile
 	@echo "==================================="
 	@echo "Building Optimized Release"
 	@echo "==================================="
@@ -2340,8 +2342,7 @@ $(BUILD_DIR)/aetherc-release$(EXE_EXT): $(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS
 	@$(CC) -O3 -DNDEBUG $(LTO_FLAG) -Werror -Icompiler -Iruntime -Istd -Istd/collections \
 		-DAETHER_VERSION=\"$(VERSION)\" \
 		$(OPENSSL_CFLAGS) $(ZLIB_CFLAGS) $(NGHTTP2_CFLAGS) $(PCRE2_CFLAGS) $(YAML_CFLAGS) $(BROTLI_CFLAGS) $(ZSTD_CFLAGS) \
-		$(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) runtime/aether_resource_caps.c \
-		runtime/aether_locale_num.c runtime/aether_callbacks.c $(MANIFEST_OBJ) \
+		$(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) $(AETHERC_RUNTIME_SRC) $(MANIFEST_OBJ) \
 		-o $(BUILD_DIR)/aetherc-release$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 ifeq ($(DETECTED_OS),Linux)
 	@echo "Stripping debug symbols..."
