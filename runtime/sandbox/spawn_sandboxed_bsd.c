@@ -40,6 +40,7 @@ extern const char* aether_string_data(const void*);
 
 // The preload library's lookup, shared with the contrib process hosts.
 #include "aether_sandbox_preload_path.h"
+#include "aether_sandbox_shm.h"
 // The close-on-exec pipe, the fork, and what a child execs with.
 #include "../utils/aether_spawn.h"
 
@@ -84,9 +85,7 @@ static int sandbox_report(int errfd) {
 
 // Serialize grants from a list to shared memory
 // Format: "category:pattern\n" lines, null-terminated
-static char shm_name[64];
-
-static int serialize_grants(void* grant_list) {
+static int serialize_grants(void* grant_list, char* shm_name, size_t shm_name_size) {
     int n = list_size(grant_list);
     if (n <= 0 || n % 2 != 0) return -1;
 
@@ -100,24 +99,8 @@ static int serialize_grants(void* grant_list) {
         pos += snprintf(buf + pos, sizeof(buf) - pos, "%s:%s\n", cat, pat);
     }
 
-    // Write to shared memory
-    snprintf(shm_name, sizeof(shm_name), "/aether_sandbox_%d", getpid());
-    int fd = shm_open(shm_name, O_CREAT | O_RDWR, 0600);
-    if (fd < 0) return -1;
-
-    if (ftruncate(fd, pos + 1) != 0) {
-        close(fd);
-        shm_unlink(shm_name);
-        return -1;
-    }
-    void* mem = mmap(NULL, pos + 1, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (mem == MAP_FAILED) { close(fd); return -1; }
-
-    memcpy(mem, buf, pos + 1);
-    munmap(mem, pos + 1);
-    close(fd);
-
-    return 0;
+    return aether_sandbox_shm_write(
+        shm_name, shm_name_size, buf, (size_t)pos + 1);
 }
 
 // Spawn a sandboxed child process
@@ -132,7 +115,8 @@ int aether_spawn_sandboxed(void* grant_list, const char* program, const char* ar
     }
 
     // Serialize grants to shared memory
-    if (serialize_grants(grant_list) < 0) {
+    char shm_name[AETHER_SANDBOX_SHM_NAME_SIZE];
+    if (serialize_grants(grant_list, shm_name, sizeof shm_name) < 0) {
         fprintf(stderr, "[aether] cannot create shared memory for grants\n");
         return -1;
     }
