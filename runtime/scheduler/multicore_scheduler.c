@@ -2684,19 +2684,28 @@ void scheduler_stop(void) {
 static inline int count_pending_messages(void) {
     int total = 0;
     uint64_t total_sent = 0, total_proc = 0;
+    /* Every core's handled count first, then every core's sent count: a
+     * message is counted sent before its receiver can count it handled (the
+     * count comes before the enqueue the receiver takes it from), so one
+     * counted handled here is counted sent too, and one pending all along
+     * counts. Read one core at a time, the two counts let a message sent on
+     * a core already read and handled on one read after cancel the reply it
+     * sent, which was still pending: the wait returned with it in flight
+     * (std.stream's credits under UBSan). */
     for (int i = 0; i < num_cores; i++) {
         Scheduler* core = &schedulers[i];
+        total_proc += atomic_load_explicit(&core->messages_processed, memory_order_seq_cst);
         for (int q = 0; q <= MAX_CORES; q++) {
             total += queue_size(&core->from_queues[q]);
         }
-        total_sent += core->messages_sent;
-        total_proc += core->messages_processed;
         // A death still to be finalized here (#2974): its Downs are not
         // sent yet.
         total += atomic_load_explicit(&core->control_pending, memory_order_acquire);
     }
+    for (int i = 0; i < num_cores; i++)
+        total_sent += atomic_load_explicit(&schedulers[i].messages_sent, memory_order_seq_cst);
     // Include main thread sends
-    total_sent += atomic_load_explicit(&main_thread_sent, memory_order_relaxed);
+    total_sent += atomic_load_explicit(&main_thread_sent, memory_order_seq_cst);
     // Include messages deferred in scheduler threads' TLS overflow buffers.
     int overflow = atomic_load_explicit(&g_overflow_total, memory_order_relaxed);
     if (overflow > 0) total += overflow;
@@ -3612,12 +3621,14 @@ void scheduler_send_many(ActorBase* actor, const Message* msgs, int n) {
         }
         void* actors[SEND_MANY_CHUNK];
         for (int j = 0; j < k; j++) actors[j] = actor;
+        // Counted before the receiver can take them, as a single send counts
+        // (count_pending_messages relies on it).
+        schedulers[me].messages_sent += k;
         int enq = queue_enqueue_batch(&schedulers[tc].from_queues[me], actors,
                                       (Message*)(msgs + i), k);
         // What the queue had no room for waits in this thread's deferred
         // sends, in order and still counted, as a single send's would.
         for (int j = enq; j < k; j++) overflow_append(tc, actor, msgs[i + j]);
-        schedulers[me].messages_sent += k;
         if (enq > 0) {
             atomic_fetch_add_explicit(&schedulers[tc].work_count, enq, memory_order_relaxed);
             sched_wake(&schedulers[tc]);
