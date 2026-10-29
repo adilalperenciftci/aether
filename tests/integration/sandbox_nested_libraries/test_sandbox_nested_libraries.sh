@@ -18,6 +18,8 @@
 #    one copy: the same answers, no message);
 #    2c. the outer library linked into a program with a runtime of its own
 #    that exports nothing and looks first (#3445);
+#    2d. a program with the panic and no sandbox, -rdynamic on Linux, and a
+#    library whose block catches a panic from a nested block (#3438);
 # 3. both built with --shared-runtime (skipped where build/shared has none).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -131,6 +133,32 @@ if [ "$got" != "$want" ]; then
     fail=1
 fi
 
+# 2d. a program with the panic of a runtime of its own and no sandbox,
+# linked -rdynamic on Linux as `ae build` links one, loading a library with a
+# runtime of its own whose enforce block catches a panic raised in a nested
+# block (#3438): under ELF interposition the library runs the program's panic
+# and try frames, so its sandbox must set the program's pointers. With them
+# each copy's own, the catch left the nested level in force (PATH 0) and the
+# block's end the outer one (probe 0 after it).
+rdyn=""
+[ "$(uname -s 2>/dev/null)" = Linux ] && rdyn="-rdynamic"
+# shellcheck disable=SC2046,SC2086
+if ! "$CC" -O1 "$SCRIPT_DIR/host_caught.c" -o "$TMP/host_caught" $("$AE" cflags --libs) $rdyn $dl \
+        > "$TMP/cc_caught.log" 2>&1 ||
+   ! (cd "$TMP/static" && "$AE" build --emit=lib --with=os,extern "$SCRIPT_DIR/caught.ae" \
+        --extra "$SCRIPT_DIR/hooks.c" -o "$TMP/static/libcaught.$ext" > "$TMP/static/caught.log" 2>&1); then
+    echo "  [FAIL] sandbox_nested_libraries: the panic-only host or the catching library did not build"
+    head -10 "$TMP/cc_caught.log" "$TMP/static/caught.log" 2>/dev/null | sed 's/^/        /'
+    exit 1
+fi
+got="$("$TMP/host_caught" "$TMP/static/libcaught.$ext" 2>"$TMP/caught.err" | tr -d '\r')"
+want_caught="after the catch PATH 1 probe 0; after the block probe 1"
+if [ "$got" != "$want_caught" ]; then
+    echo "  [FAIL] sandbox_nested_libraries: a panic caught inside the library's block, the program's panic: got '$got', want '$want_caught'"
+    head -5 "$TMP/caught.err" | sed 's/^/        /'
+    fail=1
+fi
+
 # 3. one shared runtime
 if ls "$ROOT/build/shared/" 2>/dev/null | grep -q "aether"; then
     if ! build_pair shared "--shared-runtime"; then
@@ -157,6 +185,6 @@ else
 fi
 
 if [ "$fail" = 0 ]; then
-    echo "  [PASS] sandbox_nested_libraries: an inner library's export inside an outer enforce is held to it, its own grant_all narrows nothing, and the outer block stays checked: one runtime, a runtime per library (refused where the copies stay apart), a program whose copy looked first and exports nothing$shared_note"
+    echo "  [PASS] sandbox_nested_libraries: an inner library's export inside an outer enforce is held to it, its own grant_all narrows nothing, and the outer block stays checked: one runtime, a runtime per library (refused where the copies stay apart), a program whose copy looked first and exports nothing, a panic caught inside the block of a library that runs the program's panic$shared_note"
 fi
 exit $fail
