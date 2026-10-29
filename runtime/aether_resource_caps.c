@@ -30,6 +30,7 @@
 
 #ifdef _WIN32
 #  include <windows.h>
+#  include <tlhelp32.h>   /* the module list, under the loader's lock (#3445) */
 #endif
 #if !defined(_WIN32) && !defined(AETHER_NO_THREADING)
 #  include <sched.h>
@@ -1196,15 +1197,17 @@ AETHER_CAPS_API AetherExecAccount* aether_exec_account_make(uint64_t memory_byte
  * question, so they agree, whatever the images export (#3445). A record
  * counts only when the function it names lies inside its image.
  *
- * The walk stops at the first record, and the asking copy's own image has
- * one, so it reads no image loaded after that one. Those before it are
- * loaded whole, relocated: the loader loads one library at a time (glibc's
- * and musl's load lock, dyld's, the Windows loader lock), adds each at the
- * end of the list, and relocates what one load brings before any of its
- * constructors runs. So no copy waits for a load or tests an image by name,
- * and every copy answers alike at any moment. An image is held, or read
- * under the loader's lock, while it is read; the copy that owns the state
- * must stay loaded while another uses it.
+ * The walk stops at the first record, and at the asking copy's own image
+ * whether its record is read or not, so it reads no image loaded after that
+ * one. Those before it are loaded whole, relocated: the loader loads one
+ * library at a time (glibc's and musl's load lock, dyld's, the Windows
+ * loader lock), adds each at the end of the list, and relocates what one
+ * load brings before any of its constructors runs. So no copy waits for a
+ * load or tests an image by name, and every copy answers alike at any
+ * moment. An image is held, or read under the loader's lock, while it is
+ * read; the copy that owns the state must stay loaded while another uses
+ * it. A namespace of its own (glibc's dlmopen) is a process of its own here:
+ * its copies find none outside it.
  * ------------------------------------------------------------------ */
 
 #if AETHER_RV_MARKS
@@ -1216,28 +1219,22 @@ AETHER_CAPS_API AetherExecAccount* aether_exec_account_make(uint64_t memory_byte
 #    define RV_DESC_SIZE sizeof(aether_rv_fn)
 #  endif
 
-/* The record of `kind` among the notes in [p, p + size), aligned to `align`
- * (4 or 8) as ELF notes are (aether_rv_mark.h), or NULL. Sizes past what is
- * left end the walk, so a malformed note never wraps it around. */
-static const AetherRvMark* rv_mark_in(const unsigned char* p, size_t size, size_t align,
-                                      uint32_t kind) {
-    if (align != 8) align = 4;
-    size_t at = 0;
-    while (p && size - at >= 12) {
-        uint32_t namesz, descsz, type;
-        memcpy(&namesz, p + at, 4);
-        memcpy(&descsz, p + at + 4, 4);
-        memcpy(&type, p + at + 8, 4);
-        size_t left = size - at - 12;
-        if ((size_t)namesz > left || (size_t)descsz > left) break;
-        size_t desc = (12 + (size_t)namesz + align - 1) & ~(align - 1);
-        size_t next = (desc + (size_t)descsz + align - 1) & ~(align - 1);
-        if (next > size - at) break;
-        if (type == kind && namesz == sizeof AETHER_RV_NAME && descsz == RV_DESC_SIZE &&
-            desc == RV_DESC_AT && memcmp(p + at + 12, AETHER_RV_NAME, sizeof AETHER_RV_NAME) == 0)
-            return (const AetherRvMark*)(const void*)(p + at);
-        at += next;
-    }
+/* The record of `kind` in [p, p + size), or NULL: its 24-byte head (the note
+ * header and the name, aether_rv_mark.h) at any 4-aligned place. Not by
+ * walking the notes: a linker that puts notes of both alignments in one
+ * PT_NOTE (gold), or starts it 4 past an 8-aligned place (after .interp),
+ * leaves a walk by the segment's alignment out of step with the record. The
+ * head is 24 exact bytes, and what it names must lie inside its image, which
+ * the callers check. */
+static const AetherRvMark* rv_mark_in(const unsigned char* p, size_t size, uint32_t kind) {
+    unsigned char head[RV_DESC_AT];
+    uint32_t words[3] = { (uint32_t)sizeof AETHER_RV_NAME, (uint32_t)RV_DESC_SIZE, kind };
+    memcpy(head, words, sizeof words);
+    memset(head + sizeof words, 0, sizeof head - sizeof words);
+    memcpy(head + sizeof words, AETHER_RV_NAME, sizeof AETHER_RV_NAME);
+    if (!p || size < sizeof(AetherRvMark)) return NULL;
+    for (size_t at = 0; at <= size - sizeof(AetherRvMark); at += 4)
+        if (memcmp(p + at, head, sizeof head) == 0) return (const AetherRvMark*)(const void*)(p + at);
     return NULL;
 }
 
@@ -1277,7 +1274,7 @@ static void* rv_pe_mark(HMODULE listed, uint32_t kind) {
             for (WORD i = 0; i < nt->FileHeader.NumberOfSections; i++) {
                 if (memcmp(s[i].Name, AETHER_RV_SECTION "\0\0\0", IMAGE_SIZEOF_SHORT_NAME) != 0) continue;
                 const AetherRvMark* mark =
-                    rv_mark_in(base + s[i].VirtualAddress, (size_t)s[i].Misc.VirtualSize, sizeof(void*), kind);
+                    rv_mark_in(base + s[i].VirtualAddress, (size_t)s[i].Misc.VirtualSize, kind);
                 if (mark) {
                     uintptr_t a = (uintptr_t)rv_mark_fn(mark), lo = (uintptr_t)base;
                     if (a >= lo && a - lo < (uintptr_t)nt->OptionalHeader.SizeOfImage) f = rv_mark_fn(mark);
@@ -1297,9 +1294,7 @@ static void* rv_pe_mark(HMODULE listed, uint32_t kind) {
  * image but the program is held while it is read (a dlopen of the path the
  * loader gives for its header, without loading), and read only while that
  * header is still an image's. */
-static void* rv_macho_mark(uint32_t i, uint32_t kind) {
-    const struct mach_header* h = _dyld_get_image_header(i);
-    if (!h) return NULL;
+static void* rv_macho_mark(uint32_t i, const struct mach_header* h, uint32_t kind) {
     void* held = NULL;
     if (i > 0) {
         Dl_info di;
@@ -1319,7 +1314,7 @@ static void* rv_macho_mark(uint32_t i, uint32_t kind) {
 #  else
     const uint8_t* sec = getsectiondata(h, AETHER_RV_SEGMENT, AETHER_RV_SECTNAME, &size);
 #  endif
-    const AetherRvMark* mark = sec ? rv_mark_in(sec, (size_t)size, sizeof(void*), kind) : NULL;
+    const AetherRvMark* mark = sec ? rv_mark_in(sec, (size_t)size, kind) : NULL;
     if (mark) {
         void* q = rv_mark_fn(mark);
         Dl_info di;
@@ -1332,9 +1327,13 @@ static void* rv_macho_mark(uint32_t i, uint32_t kind) {
 
 #if defined(AETHER_RV_PHDR) && AETHER_RV_ELF
 /* The function the first object with a record of `kind` names, read while
- * dl_iterate_phdr holds the loader's lock: its notes, each inside the
- * object's loaded segments, and the function inside them too (#3442). */
-typedef struct { uint32_t kind; void* fn; } RvWalk;
+ * dl_iterate_phdr holds the loader's lock (glibc, musl, FreeBSD; NetBSD's
+ * lets go around each call, so an object another thread unloads then may be
+ * read as it goes): its notes, each inside the object's loaded segments, and
+ * the function inside them too (#3442). The walk ends at the asking copy's
+ * own object: none loaded after it is read, so none another thread is still
+ * relocating. */
+typedef struct { uint32_t kind; const void* self; void* fn; } RvWalk;
 
 static int rv_collect(struct dl_phdr_info* info, size_t size, void* data) {
     (void)size;
@@ -1352,8 +1351,7 @@ static int rv_collect(struct dl_phdr_info* info, size_t size, void* data) {
         uintptr_t a = (uintptr_t)info->dlpi_addr + (uintptr_t)info->dlpi_phdr[k].p_vaddr;
         size_t n = (size_t)info->dlpi_phdr[k].p_memsz;
         if (a < lo || a >= hi || n > hi - a) continue;
-        const AetherRvMark* m =
-            rv_mark_in((const unsigned char*)a, n, (size_t)info->dlpi_phdr[k].p_align, w->kind);
+        const AetherRvMark* m = rv_mark_in((const unsigned char*)a, n, w->kind);
         if (!m) continue;
         uintptr_t f = (uintptr_t)rv_mark_fn(m);
         if (f >= lo && f < hi) {
@@ -1361,7 +1359,8 @@ static int rv_collect(struct dl_phdr_info* info, size_t size, void* data) {
             return 1;   /* the first: the walk ends */
         }
     }
-    return 0;
+    uintptr_t s = (uintptr_t)w->self;
+    return (w->self && s >= lo && s < hi) ? 1 : 0;   /* the asking copy's own: no further */
 }
 #endif
 
@@ -1372,30 +1371,48 @@ void* aether_rendezvous_find(const char* symbol, uint32_t kind, const AetherRvMa
     (void)self;
 #if defined(_WIN32) && AETHER_RV_MARKS
     /* The modules in load order, the program first: the first with a
-     * record. */
-    typedef BOOL (WINAPI *enum_modules_fn)(HANDLE, HMODULE*, DWORD, LPDWORD);
-    HMODULE k32 = GetModuleHandleA("kernel32.dll");
-    enum_modules_fn enum_modules = NULL;
-    if (k32) {
-        FARPROC fp = GetProcAddress(k32, "K32EnumProcessModules");
-        if (fp) memcpy(&enum_modules, &fp, sizeof(enum_modules));
+     * record, up to the asking copy's own. A snapshot of the list taken
+     * under the loader's lock (a walk of the list without it fails or skips
+     * while another thread loads or unloads one), retried while it says the
+     * list changed under it, with no bound on the modules it holds. */
+    HMODULE self_mod = NULL;
+    if (self) GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                 (LPCWSTR)(const void*)self, &self_mod);
+    HANDLE snap = INVALID_HANDLE_VALUE;
+    for (int tries = 0; tries < 1000 && snap == INVALID_HANDLE_VALUE; tries++) {
+        snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, 0);
+        if (snap == INVALID_HANDLE_VALUE && GetLastError() != ERROR_BAD_LENGTH) break;
     }
-    if (!enum_modules) return NULL;
-    HMODULE mods[512];
-    DWORD need = 0;
-    if (!enum_modules(GetCurrentProcess(), mods, (DWORD)sizeof(mods), &need)) return NULL;
-    DWORD n = need / (DWORD)sizeof(HMODULE);
-    if (n > 512) n = 512;
-    for (DWORD i = 0; i < n && !p; i++) p = rv_pe_mark(mods[i], kind);
+    if (snap == INVALID_HANDLE_VALUE) return NULL;
+    MODULEENTRY32W me;
+    me.dwSize = sizeof(me);
+    for (BOOL ok = Module32FirstW(snap, &me); ok && !p; ok = Module32NextW(snap, &me)) {
+        p = rv_pe_mark(me.hModule, kind);
+        if (self_mod && me.hModule == self_mod) break;   /* the asking copy's own: no further */
+    }
+    CloseHandle(snap);
 #elif defined(__APPLE__) && AETHER_RV_MARKS && defined(RTLD_NOLOAD)
     /* The images in load order, the program first: the first with a
-     * record. */
-    uint32_t n = _dyld_image_count();
-    for (uint32_t i = 0; i < n && !p; i++) p = rv_macho_mark(i, kind);
+     * record, up to the asking copy's own. dyld's list is read by index
+     * without its lock, so an image unloaded meanwhile shifts the rest: the
+     * walk is made again while the count it read changes under it. */
+    Dl_info sd;
+    const void* self_hdr = (self && dladdr(self, &sd)) ? sd.dli_fbase : NULL;
+    for (int tries = 0; tries < 8; tries++) {
+        uint32_t n = _dyld_image_count();
+        p = NULL;
+        for (uint32_t i = 0; i < n && !p; i++) {
+            const struct mach_header* h = _dyld_get_image_header(i);
+            if (!h) continue;
+            p = rv_macho_mark(i, h, kind);
+            if (self_hdr && (const void*)h == self_hdr) break;   /* the asking copy's own */
+        }
+        if (_dyld_image_count() == n) break;
+    }
 #elif defined(AETHER_RV_PHDR) && AETHER_RV_ELF
     /* The loaded objects in load order, the program first: the first with a
-     * record. */
-    RvWalk w = { kind, NULL };
+     * record, up to the asking copy's own. */
+    RvWalk w = { kind, self, NULL };
     dl_iterate_phdr(rv_collect, &w);
     p = w.fn;
 #elif (defined(__unix__) || defined(__APPLE__)) && defined(RTLD_DEFAULT)
