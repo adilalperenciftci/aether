@@ -1,0 +1,96 @@
+// Feature test: `for x in xs { ... }` iterates the elements of a slice or a
+// fixed array. Before it, only a range (`for i in a..b`) parsed after `in`, and
+// an element loop was "Expected DOTDOT, got LEFT_BRACE".
+//
+// `x` is bound by value with the element's inferred type, `xs` is evaluated
+// once (a call is not repeated), break / continue behave as in any loop, and
+// the range form is unchanged.
+import std.string
+
+extern exit(code: int)
+
+var bad = 0
+var calls = 0
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("FAIL ${label}: got ${got}, want ${want}")
+        bad = bad + 1
+    }
+}
+
+struct P { a: int, b: string }
+struct Box { items: int[] }
+
+mk() -> int[] { return make([]int, 0) }
+
+three() -> int[] {
+    calls = calls + 1
+    return make([]int, 3)
+}
+
+main() {
+    xs = [3, 4, 5]
+    t = 0
+    for x in xs { t = t + x }
+    check("int array sum", t, 12)
+
+    sl = xs[0..2]
+    t = 0
+    for x in sl { t = t + x }
+    check("slice sum", t, 7)
+
+    names = ["a", "bb", "ccc"]
+    n = 0
+    for s in names { n = n + string.length(s) }
+    check("string[] lengths", n, 6)
+
+    ps = [P { a: 1, b: "x" }, P { a: 2, b: "y" }]
+    t = 0
+    for p in ps { t = t + p.a + string.length(p.b) }
+    check("struct elements", t, 5)
+
+    c = 0
+    for _z in mk() { c = c + 1 }
+    check("empty", c, 0)
+
+    for _z in three() { c = c + 1 }
+    check("call evaluated once", calls, 1)
+    check("call iterated 3 times", c, 3)
+
+    bx = Box { items: [7, 8] }
+    t = 0
+    for v in bx.items { t = t + v }
+    check("field path", t, 15)
+
+    for v in xs[1..3] { c = c + v }
+    check("sub-slice expression", c, 12)
+
+    r = 0
+    for x in xs {
+        if x == 4 { continue }
+        r = r + x
+    }
+    check("continue", r, 8)
+
+    r = 0
+    for x in xs {
+        if x == 4 { break }
+        r = r + x
+    }
+    check("break", r, 3)
+
+    c = 0
+    for a in xs { for b in xs { if a < b { c = c + 1 } } }
+    check("nested", c, 3)
+
+    t = 0
+    for i in 0..4 { t = t + i }
+    check("range unchanged", t, 6)
+
+    if bad != 0 {
+        println("${bad} check(s) failed")
+        exit(1)
+    }
+    println("for-in over slices: ok")
+}

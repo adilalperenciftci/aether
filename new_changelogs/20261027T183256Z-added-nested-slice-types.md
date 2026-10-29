@@ -1,0 +1,1 @@
+- **`T[][]` (and `T[][][]`) can now be written as a type.** `make([]int[], n)` already built a slice of slices, but `f() -> int[][]` stopped at the second `[` ("Expected LEFT_BRACE"). Each further `[]` now wraps the type once more wherever a type is written: return types, parameters, struct fields, typed locals, function types.

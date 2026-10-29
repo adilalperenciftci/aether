@@ -22,6 +22,7 @@ codegen so they inline correctly and run once, not per use. It is a
 | `string.from_float(<num const>)` | `"3.14"` | `%g` formatting. |
 | `string.concat(<str const>, <str const>)` | `"ab"` | Both operands must be string literals (or fold to them). |
 | `const A: int[3] = [1, 2, 3]` / `const A[] = [...]` | `static const int A[] = {1, 2, 3}` | Const array literal. Every element must itself be a compile-time constant. |
+| `const PTS[] = [XY { x: 1, y: 2 }, ...]` / `const ORIGIN = XY { x: 0, y: 0 }` | `static const XY PTS[] = { { .x = 1, .y = 2 }, ... }` | A struct literal whose every field is a compile-time constant (a literal, a negative, a string, another const, or a nested such literal) is a constant, so a `const` of one, or an array of them, is a lookup table of records. One non-constant field (a call) is still the E0200 error. |
 | `var g: Pair = Pair { a: 0, b: 0 }` (a module-level `var`) | `static Pair g = { .a = 0, .b = 0 }` | A struct literal whose every field is a compile-time constant or such a literal itself, nested ones included (#2590). Only a `var`: a `const` is substituted at each use. |
 
 Folds compose: `string.concat(string.from_int(1), "x")` folds to `"1x"`
@@ -53,8 +54,9 @@ is itself a const.
   `string.concat(...)` instead. `const G = "a" + "b"` does **not** work
   by design; `const G = string.concat("a", "b")` does.
 
-- **Struct literals**, **member access**, and **non-constant array
-  elements**, rejected; each would either allocate fresh per use or is
+- **Struct literals with a non-constant field**, **member access**, and
+  **non-constant array elements**, rejected (a struct literal of constants is
+  accepted, above); each would either allocate fresh per use or is
   not a value the substitution model can inline.
 
 - **Out-of-range / undefined folds**, a `string.from_int` argument that

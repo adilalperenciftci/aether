@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "slice_escape.h"
+#include "slice_own.h"
 #include "../aether_error.h"
 #include "../aether_strmap.h"
 
@@ -305,7 +306,8 @@ static int frame_storage(Frame* f, ASTNode* e) {
     if (!e) return 0;
     if (e->type == AST_ARRAY_LITERAL) return e->child_count > 0;
     if (e->type == AST_IDENTIFIER && e->value)
-        return strmap_has(&f->arrays, e->value) || (g_with_outer && outer_array(f, e->value));
+        return strmap_has(&f->arrays, e->value) || (g_with_outer && outer_array(f, e->value)) ||
+               slice_own_owner_ident(e);
     return 0;
 }
 
@@ -408,6 +410,13 @@ static int frame_view(Frame* f, const Views* v, ASTNode* e) {
         case AST_EXPRESSION_STATEMENT:
             return e->child_count > 0 && frame_view(f, v, e->children[0]);
         case AST_FUNCTION_CALL:
+            /* Slice ownership's intrinsics (slice_own.c) give the slice
+             * they are handed: a move, a loan, a store. */
+            if (e->value && (strcmp(e->value, "__slice_take") == 0 ||
+                             strcmp(e->value, "__slice_lend") == 0 ||
+                             strcmp(e->value, "__slice_set") == 0) &&
+                e->child_count > 0)
+                return frame_view(f, v, e->children[e->child_count - 1]);
             return closure_call_view(f, v, e);
         case AST_IF_EXPRESSION:
             return (e->child_count > 1 && frame_view(f, v, e->children[1])) ||
@@ -451,6 +460,11 @@ static int frame_view(Frame* f, const Views* v, ASTNode* e) {
 /* What the value that leaves is, for the message. */
 static void describe(Frame* f, ASTNode* e, char* out, size_t cap) {
     if (!e) { snprintf(out, cap, "a slice of it"); return; }
+    /* Slice ownership's move, loan and store give what they are handed. */
+    while (e->type == AST_FUNCTION_CALL && e->value && e->child_count > 0 &&
+           (strcmp(e->value, "__slice_take") == 0 || strcmp(e->value, "__slice_lend") == 0 ||
+            strcmp(e->value, "__slice_set") == 0))
+        e = e->children[e->child_count - 1];
     switch (e->type) {
         case AST_SLICE_FROM_ARRAY:
         case AST_SLICE_EXPR: {
@@ -462,6 +476,9 @@ static void describe(Frame* f, ASTNode* e, char* out, size_t cap) {
             else if (c && c->type == AST_IDENTIFIER && c->value &&
                      (strmap_has(&f->arrays, c->value) || outer_array(f, c->value)))
                 snprintf(out, cap, "the array `%s`", c->value);
+            else if (slice_own_owner_ident(c))
+                snprintf(out, cap, "the buffer `%s` owns, released when it goes out of scope",
+                         c->value);
             else
                 describe(f, c, out, cap);
             return;

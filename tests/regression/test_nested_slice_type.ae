@@ -1,0 +1,143 @@
+// `T[][]`, a slice of slices, could not be written as a type, though
+// `make([]int[], n)` builds one: `f() -> int[][] {` stopped at the second
+// `[` ("Expected LEFT_BRACE, got LEFT_BRACKET"), and the workaround was a
+// one-field struct around the row (`struct Cells { v: int[] }`, then
+// `Cells[]`). Each further `[]` after a type now wraps it once more, so
+// `int[][]` is a slice of `int[]` and `int[][][]` a slice of those, written
+// wherever a type is: a return type, a parameter, a struct field, a typed
+// local, a function type. Before the fix none of this compiled.
+//
+// The outer slice owns its rows (slice ownership): a store into a row drops
+// the row it replaces, and `free` of the outer slice, or its scope exit,
+// releases every row. `free` of a row leaves it empty, so the outer one does
+// not release it again.
+
+struct Grid {
+    rows: int[][]
+    name: string
+}
+
+make_grid(n: int) -> int[][] {
+    g = make([]int[], n)
+    for i in 0..n {
+        r = make([]int, i + 1)
+        for j in 0..r.len {
+            r[j] = i * 10 + j
+        }
+        g[i] = r
+    }
+    return g
+}
+
+total(g: int[][]) -> int {
+    t = 0
+    for i in 0..g.len {
+        for j in 0..g[i].len {
+            t = t + g[i][j]
+        }
+    }
+    return t
+}
+
+free_grid(g: @keep int[][]) {
+    for i in 0..g.len {
+        free(g[i])
+    }
+    free(g)
+}
+
+words() -> string[][] {
+    w = make([]string[], 2)
+    a = make([]string, 2)
+    a[0] = "ab"
+    a[1] = "cd"
+    b = make([]string, 1)
+    b[0] = "ef"
+    w[0] = a
+    w[1] = b
+    return w
+}
+
+join(w: string[][]) -> string {
+    out = ""
+    for i in 0..w.len {
+        for j in 0..w[i].len {
+            out = "${out}${w[i][j]}"
+        }
+    }
+    return out
+}
+
+grid_total(g: Grid) -> int {
+    return total(g.rows)
+}
+
+apply(f: fn(int[][]) -> int, g: int[][]) -> int {
+    return f(g)
+}
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    // ---- a return type and a parameter ----
+    g = make_grid(3)
+    check(g.len == 3, "outer .len")
+    check(g[0].len == 1 && g[2].len == 3, "inner .len")
+    check(g[2][1] == 21, "a[i][j]")
+    check(total(g) == 0 + 10 + 11 + 20 + 21 + 22, "an int[][] parameter")
+
+    // ---- a store through both indexes, and a row replaced ----
+    g[1][0] = 5
+    check(g[1][0] == 5, "a[i][j] = v")
+    g[0] = make([]int, 2)
+    g[0][1] = 7
+    check(g[0].len == 2 && g[0][1] == 7, "a[i] = a new row")
+
+    // ---- a struct field ----
+    grid = Grid { rows: g[..], name: "g" }
+    check(grid.rows.len == 3 && grid.rows[2][2] == 22, "an int[][] field")
+    check(grid_total(grid) == total(g), "a struct holding one, passed by value")
+
+    // ---- typed locals ----
+    int[][] local = make([]int[], 2)
+    local[0] = make([]int, 3)
+    local[1] = make([]int, 1)
+    local[0][2] = 4
+    local[1][0] = 6
+    check(local[0][2] == 4 && local[1][0] == 6 && total(local) == 10, "a typed local")
+    int[][] empty = []
+    check(empty.len == 0 && total(empty) == 0, "the empty int[][]")
+    free_grid(local)
+
+    // ---- string[][] ----
+    w = words()
+    check(w.len == 2 && w[0].len == 2 && w[1].len == 1, "string[][] lengths")
+    check(w[0][1] == "cd" && w[1][0] == "ef", "string[][] elements")
+    check(join(w) == "abcdef", "a string[][] parameter")
+    for i in 0..w.len {
+        free(w[i])
+    }
+    free(w)
+
+    // ---- a function type over one ----
+    check(apply(total, g) == total(g), "fn(int[][]) -> int")
+
+    // ---- deeper: int[][][] ----
+    int[][][] cube = make([]int[][], 2)
+    cube[0] = make_grid(2)
+    cube[1] = make_grid(3)
+    check(cube.len == 2 && cube[1][2][1] == 21, "int[][][] indexing")
+    check(total(cube[0]) + total(cube[1]) == 10 + 11 + 84, "a row of int[][][] as int[][]")
+    for i in 0..cube.len {
+        free_grid(cube[i])
+    }
+    free(cube)
+
+    free_grid(g)
+    println("OK")
+}

@@ -1296,6 +1296,16 @@ static Type* parse_type_unsuffixed(Parser* parser) {
         if (match_token(parser, TOKEN_RIGHT_BRACKET)) {
             // Dynamic array
             type = create_array_type(type, -1);
+            /* A slice of slices: each further `[]` wraps once more, so
+             * `int[][]` is a slice whose elements are `int[]` -- the type
+             * `make([]int[], n)` already builds. Only the empty form
+             * repeats; a fixed length after a slice has no C shape. */
+            while (peek_token(parser) && peek_token(parser)->type == TOKEN_LEFT_BRACKET &&
+                   peek_ahead(parser, 1) && peek_ahead(parser, 1)->type == TOKEN_RIGHT_BRACKET) {
+                advance_token(parser);
+                advance_token(parser);
+                type = create_array_type(type, -1);
+            }
         } else {
             // Fixed-size array: the length is an integer constant
             // expression (#3115), reported here when it is not one.
@@ -1827,7 +1837,11 @@ static ASTNode* parse_primary_expression_inner(Parser* parser) {
         }
 
         case TOKEN_IF: {
-            // If-expression: if COND { EXPR } else { EXPR }
+            // If-expression: if COND { EXPR } else { EXPR }, or
+            // `else if COND { EXPR } ... else { EXPR }`: an `else if` is
+            // sugar for an else arm that is itself an if-expression, so a
+            // chain of any length is nested two-armed if-expressions and
+            // types as they do, the last `else` still required.
             Token* t = advance_token(parser); // consume 'if'
             ASTNode* cond = parse_expression(parser);
             if (!cond) return NULL;
@@ -1836,10 +1850,17 @@ static ASTNode* parse_primary_expression_inner(Parser* parser) {
             if (!then_expr) return NULL;
             if (!expect_token(parser, TOKEN_RIGHT_BRACE)) return NULL;
             if (!expect_token(parser, TOKEN_ELSE)) return NULL;
-            if (!expect_token(parser, TOKEN_LEFT_BRACE)) return NULL;
-            ASTNode* else_expr = parse_expression(parser);
-            if (!else_expr) return NULL;
-            if (!expect_token(parser, TOKEN_RIGHT_BRACE)) return NULL;
+            ASTNode* else_expr = NULL;
+            Token* after_else = peek_token(parser);
+            if (after_else && after_else->type == TOKEN_IF) {
+                else_expr = parse_primary_expression(parser);
+                if (!else_expr) return NULL;
+            } else {
+                if (!expect_token(parser, TOKEN_LEFT_BRACE)) return NULL;
+                else_expr = parse_expression(parser);
+                if (!else_expr) return NULL;
+                if (!expect_token(parser, TOKEN_RIGHT_BRACE)) return NULL;
+            }
 
             ASTNode* if_expr = create_ast_node(AST_IF_EXPRESSION, NULL, t->line, t->column);
             if_expr->node_type = create_type(TYPE_UNKNOWN);
@@ -3491,7 +3512,13 @@ static ASTNode* parse_statement_inner(Parser* parser) {
                 if (elem_type) {
                     node->node_type = create_array_type(clone_type(elem_type), cval->child_count);
                 } else {
-                    node->node_type = create_array_type(create_type(TYPE_PTR), cval->child_count);
+                    /* Unknown, not `ptr`, as at module level: an element with
+                     * no type yet (a struct literal, `-1`) is typed by
+                     * inference, and the declaration takes the literal's
+                     * type once it is (its array_fix). As `ptr`, `[XY {...}]`
+                     * was refused as structs in an array of pointers. */
+                    node->node_type = create_array_type(create_type(TYPE_UNKNOWN), cval->child_count);
+                    node->type_inferred = 1;
                 }
             } else {
                 if (cval->node_type) {
@@ -4222,8 +4249,106 @@ ASTNode* parse_for_loop(Parser* parser) {
         // Range-based for loop
         Token* var_name = advance_token(parser); // consume identifier
         advance_token(parser); // consume 'in'
+        // `{` ends this expression when it is a collection (`for x in xs {`),
+        // the same trailing-block ambiguity if/while have; a range's start
+        // (`0..n`) is unaffected.
+        int saved_in_cond_start = parser->in_condition;
+        parser->in_condition = 1;
         ASTNode* start_expr = parse_expression(parser);
+        parser->in_condition = saved_in_cond_start;
         if (!start_expr) return NULL;
+        Token* after_start = peek_token(parser);
+        if (after_start && after_start->type != TOKEN_DOTDOT) {
+            // Element loop: for x in xs { body }. Lowered to the index loop
+            //   { _fi_xs = xs; _fi_n = _fi_xs.len
+            //     for (_fi_i = 0; _fi_i < _fi_n; _fi_i++) { x = _fi_xs[_fi_i]; body } }
+            // so `xs` is evaluated once, `x` is bound by value, its type is
+            // inferred from the element, and break/continue are the plain
+            // loop's. Works for any slice or fixed array. A bare name or a
+            // field path is indexed in place: binding a named fixed array to
+            // a new name decays it to a `ptr`, which has no length, and
+            // reading a name twice has no side effect to repeat.
+            ASTNode* body = parse_statement(parser);
+            if (!body) return NULL;
+            static int for_in_counter = 0;
+            char xs_name[48], idx_name[48], n_name[48];
+            int id = for_in_counter++;
+            snprintf(xs_name, sizeof xs_name, "_fi_xs_%d", id);
+            snprintf(idx_name, sizeof idx_name, "_fi_i_%d", id);
+            snprintf(n_name, sizeof n_name, "_fi_n_%d", id);
+            int ln = var_name->line, col = var_name->column;
+
+            int in_place = 1;
+            for (ASTNode* e = start_expr; e; e = e->child_count ? e->children[0] : NULL) {
+                if (e->type == AST_IDENTIFIER) break;
+                if (e->type != AST_MEMBER_ACCESS || e->child_count != 1) { in_place = 0; break; }
+            }
+            #define FI_XS() (in_place ? clone_ast_node(start_expr) \
+                                      : create_ast_node(AST_IDENTIFIER, xs_name, ln, col))
+
+            ASTNode* wrap = create_ast_node(AST_BLOCK, NULL, ln, col);
+            if (!in_place) {
+                ASTNode* xs_decl = create_ast_node(AST_VARIABLE_DECLARATION, xs_name, ln, col);
+                xs_decl->node_type = create_type(TYPE_UNKNOWN);
+                xs_decl->type_inferred = 1;
+                add_child(xs_decl, start_expr);
+                add_child(wrap, xs_decl);
+            }
+            ASTNode* n_decl = create_ast_node(AST_VARIABLE_DECLARATION, n_name, ln, col);
+            n_decl->node_type = create_type(TYPE_UNKNOWN);
+            n_decl->type_inferred = 1;
+            ASTNode* len = create_ast_node(AST_MEMBER_ACCESS, "len", ln, col);
+            add_child(len, FI_XS());
+            add_child(n_decl, len);
+            add_child(wrap, n_decl);
+
+            ASTNode* init = create_ast_node(AST_VARIABLE_DECLARATION, idx_name, ln, col);
+            init->node_type = create_type(TYPE_UNKNOWN);
+            ASTNode* zero = create_ast_node(AST_LITERAL, "0", ln, col);
+            zero->node_type = create_type(TYPE_INT);
+            add_child(init, zero);
+
+            Token lt_op = { .type = TOKEN_LESS, .value = "<", .line = ln, .column = col };
+            ASTNode* condition = create_binary_expression(
+                create_ast_node(AST_IDENTIFIER, idx_name, ln, col),
+                create_ast_node(AST_IDENTIFIER, n_name, ln, col), &lt_op);
+
+            Token inc_op = { .type = TOKEN_INCREMENT, .value = "++", .line = ln, .column = col };
+            ASTNode* increment = create_unary_expression(
+                create_ast_node(AST_IDENTIFIER, idx_name, ln, col), &inc_op);
+
+            ASTNode* elem = create_ast_node(AST_VARIABLE_DECLARATION, var_name->value, ln, col);
+            elem->node_type = create_type(TYPE_UNKNOWN);
+            ASTNode* at = create_ast_node(AST_ARRAY_ACCESS, NULL, ln, col);
+            add_child(at, FI_XS());
+            add_child(at, create_ast_node(AST_IDENTIFIER, idx_name, ln, col));
+            #undef FI_XS
+            add_child(elem, at);
+
+            // Element binding goes first in the body block.
+            ASTNode* loop_body = body;
+            if (body->type != AST_BLOCK) {
+                loop_body = create_ast_node(AST_BLOCK, NULL, ln, col);
+                add_child(loop_body, body);
+            }
+            add_child(loop_body, elem);
+            for (int k = loop_body->child_count - 1; k > 0; k--)
+                loop_body->children[k] = loop_body->children[k - 1];
+            loop_body->children[0] = elem;
+
+            ASTNode* for_loop = create_ast_node(AST_FOR_LOOP, NULL, ln, col);
+            for_loop->children = malloc(4 * sizeof(ASTNode*));
+            for_loop->child_capacity = 0;
+            if (!for_loop->children) { free_ast_node(for_loop); return NULL; }
+            for_loop->child_count = 4;
+            for_loop->children[0] = init;
+            for_loop->children[1] = condition;
+            for_loop->children[2] = increment;
+            for_loop->children[3] = loop_body;
+
+            add_child(wrap, for_loop);
+            return wrap;
+        }
         if (!expect_token(parser, TOKEN_DOTDOT)) return NULL;
         // end_expr is terminated by `{` (the loop body) — the same
         // trailing-block ambiguity if/while have. See parse_if_statement

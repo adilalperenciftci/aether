@@ -222,10 +222,13 @@ view_again() -> int {
     return x
 }
 
+// An owned slice's own `.len` after `free` is E0906 (slice ownership: the
+// free consumes it); a view's `.len` is its own, and stays readable.
 slice_len() -> int {
     buf = make([]int, 4)
+    s = buf[1..3]
     free(buf)
-    return buf.len
+    return s.len
 }
 
 // A view passed beside the buffer it views is read as the call is made,
@@ -261,7 +264,7 @@ main() {
 AE
 expect_count fine.ae E0903 0 "a near miss was reported"
 got="$(cd "$tmp" && AETHER_HOME="$ROOT" "$AE" run fine.ae 2>&1 | tr -d '\r' | tr '\n' ' ')"
-if [ "$got" != "2 0 7 4 4 " ]; then
+if [ "$got" != "2 0 7 2 4 " ]; then
     echo "  [FAIL] use_after_free: the near misses did not run as written (got '$got')"
     fail=1
 fi

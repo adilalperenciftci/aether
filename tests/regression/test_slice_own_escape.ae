@@ -1,0 +1,121 @@
+// Slice ownership keeps a buffer as long as a view of it may be used.
+//
+// Before ownership nothing released a `make` buffer, so a program could keep
+// a view of one anywhere. A local that owns a buffer is released at its
+// scope's exit, and these programs, valid before, then read freed memory:
+//
+//   - a parameter put in a struct the function returns (`push_cells(l, v)`
+//     returns `Cells { v: v }`), given a buffer the caller owns in a loop's
+//     body: the caller's buffer was released at the end of each pass, and
+//     the struct in the outer list viewed it (lisp.ae in the board game);
+//   - structs that hold a slice copied out of a borrowed list into a new
+//     one (`n[i] = l[i]`), the list re-bound each pass: the old and the new
+//     list share the slices, and neither may release them twice (the old
+//     list's buffer is released, the slices are not);
+//   - a slice a closure re-binds, returned;
+//   - a row replaced and only then a view of its slice taken, which must
+//     still release the replaced row.
+//
+// Each buffer is filled with a known pattern and checked after other
+// buffers of the same size were made and filled, which reuse freed memory:
+// a released buffer reads back wrong (and ASan or valgrind name the use).
+// The program frees what it is left to free (the cells' slices), so the
+// leak gate holds it to releasing everything else. Views that keep a buffer
+// for good (a view kept in an outer local, held across a re-bind) leak by
+// design, as before ownership, and are checked in
+// tests/integration/slice_own instead.
+
+extern exit(code: int)
+
+struct Cells {
+    v: int[]
+}
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+push_cells(l: Cells[], v: int[]) -> Cells[] {
+    n = make([]Cells, l.len + 1)
+    for i in 0..l.len {
+        n[i] = l[i]
+    }
+    n[l.len] = Cells { v: v }
+    return n
+}
+
+around(k: int) -> int[] {
+    out = make([]int, 4)
+    for i in 0..4 {
+        out[i] = k * 10 + i
+    }
+    return out
+}
+
+// Overwrite what was freed: buffers of the same size, filled, kept.
+churn(rounds: int) -> int[][] {
+    keep = make([]int[], rounds)
+    for r in 0..rounds {
+        b = make([]int, 4)
+        for i in 0..4 {
+            b[i] = -7
+        }
+        keep[r] = b
+    }
+    return keep
+}
+
+grid(n: int) -> Cells[] {
+    a = make([]Cells, 0)
+    for k in 0..n {
+        neighbors = around(k)
+        a = push_cells(a, neighbors)
+    }
+    return a
+}
+
+// A row replaced before any view of its slice is taken releases the row it
+// replaces (the leak gate sees the old one otherwise); the view taken after
+// sees the new row.
+replaced_then_viewed() -> int {
+    g = make([]int[], 2)
+    g[0] = around(1)
+    g[1] = around(2)
+    g[0] = around(3)
+    v = g[..]
+    return v[0][0] + v[1][0]
+}
+
+pick() -> int[] {
+    int[] v = []
+    reset = || {
+        v = around(9)
+    }
+    reset()
+    return v
+}
+
+main() {
+    a = grid(6)
+    noise = churn(64)
+    check(noise.len == 64, "churn")
+    check(a.len == 6, "six cells")
+    for k in 0..a.len {
+        check(a[k].v.len == 4, "cell ${k} keeps its length")
+        for i in 0..4 {
+            check(a[k].v[i] == k * 10 + i, "cell ${k} element ${i} kept (${a[k].v[i]})")
+        }
+    }
+    // A field holds what it is given, and the program frees it.
+    for k in 0..a.len {
+        free(a[k].v)
+    }
+    check(replaced_then_viewed() == 30 + 20, "a row replaced, then a view taken")
+    p = pick()
+    check(p.len == 4 && p[3] == 93, "a slice a closure re-binds, returned")
+    free(p)
+    println("OK")
+}
