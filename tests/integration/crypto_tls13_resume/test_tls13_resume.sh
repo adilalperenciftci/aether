@@ -197,7 +197,9 @@ if command -v openssl >/dev/null 2>&1 && openssl s_server -help 2>&1 | grep -q -
     while server_alive "$spid" && [ "$n" -lt 100 ]; do sleep 0.1; n=$((n + 1)); done
     stop_server "$spid"
     hellos=$(grep -c '>>> TLS 1.3, Handshake .*ClientHello' "$TMP/c.log" || :)
-    if [ "$hellos" = 2 ] && grep -q 'Peer Temp Key: X25519' "$TMP/c.log" && grep -q ACCEPTED "$TMP/server.out"; then
+    # 'Peer Temp Key' from OpenSSL 3.2 on, 'Server Temp Key' before (Ubuntu's
+    # 3.0, macOS's LibreSSL).
+    if [ "$hellos" = 2 ] && grep -Eq '(Peer|Server) Temp Key: X25519' "$TMP/c.log" && grep -q ACCEPTED "$TMP/server.out"; then
         echo "    ok: openssl s_client -groups P-384:X25519: the pure server's HelloRetryRequest"
     else
         echo "    FAIL: openssl s_client -groups P-384:X25519: $hellos ClientHellos, server said [$(tr '\n' '|' <"$TMP/server.out")]"
@@ -211,12 +213,19 @@ if command -v openssl >/dev/null 2>&1 && openssl s_server -help 2>&1 | grep -q -
     MSYS2_ARG_CONV_EXCL='/CN=' openssl req -x509 -newkey rsa:2048 -keyout "$TMP/rk.pem" -out "$TMP/rc.pem" -days 2 -nodes \
         -subj "/CN=peer.example" -addext "subjectAltName=DNS:peer.example" >"$TMP/ssl.log" 2>&1 \
         || { sed -n '1,12p' "$TMP/ssl.log"; fail "openssl could not make the RSA certificate"; }
-    # s_client_case <name> <want in s_client's output> <s_client flags...>;
-    # SCERT/SKEY name the server's PEM files.
+    # s_client_case <name> <want> <want too> <s_client flags...>: both
+    # extended regular expressions must match s_client's output (#3429).
+    # OpenSSL 3.2 and later name the scheme and the group ("Peer signature
+    # type: rsa_pss_rsae_sha384", "Temp Key: ECDH, prime256v1"); 3.0 and
+    # LibreSSL name the signature's type and digest on two lines ("RSA-PSS",
+    # "Peer signing digest: SHA384") and the curve "P-256". With the flags
+    # naming one scheme or group, a completed handshake that matches both is
+    # that one. SCERT/SKEY name the server's PEM files.
     s_client_case() {
         sc_name="$1"
         sc_want="$2"
-        shift 2
+        sc_want2="$3"
+        shift 3
         rm -f "$TMP/port" "$TMP/server.out"
         SERVER_CERT="$SCERT" SERVER_KEY="$SKEY" PEER_PORT_OUT="$TMP/port" "$TMP/server" >"$TMP/server.out" 2>&1 &
         spid=$!
@@ -228,16 +237,22 @@ if command -v openssl >/dev/null 2>&1 && openssl s_server -help 2>&1 | grep -q -
         n=0
         while server_alive "$spid" && [ "$n" -lt 100 ]; do sleep 0.1; n=$((n + 1)); done
         stop_server "$spid"
-        if grep -q "$sc_want" "$TMP/c.log" && grep -q ACCEPTED "$TMP/server.out"; then
+        if grep -Eq "$sc_want" "$TMP/c.log" && grep -Eq "$sc_want2" "$TMP/c.log" &&
+           grep -q ACCEPTED "$TMP/server.out"; then
             echo "    ok: $sc_name"
         else
             echo "    FAIL: $sc_name: server said [$(tr '\n' '|' <"$TMP/server.out")], s_client [$(grep -i 'peer sig\|temp key\|alert\|error' "$TMP/c.log" | tr '\n' '|')]"
             fails=$((fails + 1))
         fi
     }
-    SCERT="$TMP/rc.pem" SKEY="$TMP/rk.pem" s_client_case "openssl s_client -sigalgs rsa_pss_rsae_sha384" "Peer signature type: rsa_pss_rsae_sha384" -sigalgs rsa_pss_rsae_sha384
-    SCERT="$TMP/rc.pem" SKEY="$TMP/rk.pem" s_client_case "openssl s_client -sigalgs rsa_pss_rsae_sha512" "Peer signature type: rsa_pss_rsae_sha512" -sigalgs rsa_pss_rsae_sha512
-    SCERT="" SKEY="" s_client_case "openssl s_client -groups P-256" "Temp Key: ECDH, prime256v1" -groups P-256
+    SCERT="$TMP/rc.pem" SKEY="$TMP/rk.pem" s_client_case "openssl s_client -sigalgs rsa_pss_rsae_sha384" \
+        "Peer signature type: (rsa_pss_rsae_sha384|RSA-PSS)" \
+        "Peer signature type: rsa_pss_rsae_sha384|Peer signing digest: SHA384" -sigalgs rsa_pss_rsae_sha384
+    SCERT="$TMP/rc.pem" SKEY="$TMP/rk.pem" s_client_case "openssl s_client -sigalgs rsa_pss_rsae_sha512" \
+        "Peer signature type: (rsa_pss_rsae_sha512|RSA-PSS)" \
+        "Peer signature type: rsa_pss_rsae_sha512|Peer signing digest: SHA512" -sigalgs rsa_pss_rsae_sha512
+    SCERT="" SKEY="" s_client_case "openssl s_client -groups P-256" \
+        "Temp Key: ECDH, (prime256v1|P-256)" "Temp Key: ECDH, (prime256v1|P-256)" -groups P-256
 else
     echo "    skip: openssl s_server -early_data (no openssl, or no -early_data)"
 fi
