@@ -14,7 +14,8 @@ exports(
     tcp_send_bytes_raw, tcp_receive_into_raw,
     connect, connect_buffered, write, write_n, write_slice, write_all, read, read_n, read_into,
     listen, listen_on, accept, fd, server_fd,
-    server_port, server_poll, set_nodelay, set_read_buffer, available, poll, poll2
+    server_port, server_poll, set_nodelay, set_read_buffer, available, poll, poll2,
+    close_drained
 )
 
 // Raw externs - escape hatch
@@ -235,6 +236,34 @@ poll2(a: ptr, b: ptr, timeout_ms: int) -> {
     a_ready = (rc & 1) != 0
     b_ready = (rc & 2) != 0
     return a_ready, b_ready, ""
+}
+
+// Close `sock` once what the peer has already sent is read and dropped. A
+// socket closed with bytes unread ends with a reset, and a peer that gets
+// one may discard what it had not read yet: an alert just sent, which the
+// peer then sees as a bare close. Bounded: at most 256 KiB, and 5 ms for
+// each more to arrive. For the close after an error the peer must still
+// read (the pure TLS stack's, #3368); a plain close is tcp.close.
+close_drained(sock: ptr) {
+    if sock == null {
+        return
+    }
+    buf = make([]byte, 16384)
+    total = 0
+    going = 1
+    while going == 1 && total < 262144 {
+        if tcp_poll_raw(sock, 5) != 1 {
+            going = 0
+        } else {
+            got = tcp_receive_into_raw(sock, buf, 16384)
+            if got <= 0 {
+                going = 0
+            } else {
+                total = total + got
+            }
+        }
+    }
+    tcp_close(sock)
 }
 
 // Listen on a port. Returns (server, "") on success, (null, error) on

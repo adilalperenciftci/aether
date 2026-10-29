@@ -57,6 +57,7 @@
     <li><a href="#available">available</a></li>
     <li><a href="#poll">poll</a></li>
     <li><a href="#poll2">poll2</a></li>
+    <li><a href="#close_drained">close_drained</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -392,6 +393,12 @@
       <pre class="usage"><code>poll2(a, b, timeout_ms) <span class="arrow">-&gt;</span> (_0, _1, string)</code></pre>
       <p class="signature"><span class="sig-params">a: ptr, b: ptr, timeout_ms: int</span></p>
       <p class="doc">Wait on two sockets at once — the full-duplex relay primitive. Returns (a_ready, b_ready, &quot;&quot;) where each flag is true when that side is readable (both may be true); (false, false, &quot;&quot;) on timeout; (false, false, error) if both handles are closed or poll failed. Service whichever side is ready with read_n, then re-poll.</p>
+    </div>
+    <div class="function" id="close_drained" data-name="close_drained">
+      <h3 class="function-name">close_drained <span class="kind">fn</span></h3>
+      <pre class="usage"><code>close_drained(sock)</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr</span></p>
+      <p class="doc">Close `sock` once what the peer has already sent is read and dropped. A socket closed with bytes unread ends with a reset, and a peer that gets one may discard what it had not read yet: an alert just sent, which the peer then sees as a bare close. Bounded: at most 256 KiB, and 5 ms for each more to arrive. For the close after an error the peer must still read (the pure TLS stack's, #3368); a plain close is tcp.close.</p>
     </div>
   </div>
 </main>

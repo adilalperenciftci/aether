@@ -804,33 +804,11 @@ fn free_hello_keys(dk: @frees ptr, p256_priv: @frees ptr, p384_priv: @frees ptr)
 }
 
 // Close the socket of a handshake that failed once what the server has
-// already sent is read and dropped (#3368). Closing a socket that holds
-// unread bytes sends a TCP reset, and a peer that gets one may discard the
-// alert just sent before reading it (Windows does). Bounded: at most
-// DRAIN_MAX_BYTES, and DRAIN_WAIT_MS for each more to arrive.
-const DRAIN_MAX_BYTES = 262144
-const DRAIN_WAIT_MS = 5
-
+// already sent is read and dropped (#3368, tcp.close_drained): closing a
+// socket that holds unread bytes sends a TCP reset, and a peer that gets
+// one may discard the alert just sent before reading it.
 fn close_drained(sock: ptr) {
-    buf = bytes.new(16384)
-    bytes.set(buf, 16383, 0)
-    total = 0
-    going = 1
-    while going == 1 && total < DRAIN_MAX_BYTES {
-        ready, perr = tcp.poll(sock, DRAIN_WAIT_MS)
-        if perr != "" || ready == false {
-            going = 0
-        } else {
-            got, rerr = tcp.read_into(sock, bytes.view(buf)[0..16384])
-            if rerr != "" || got <= 0 {
-                going = 0
-            } else {
-                total = total + got
-            }
-        }
-    }
-    bytes.wipe_free(buf)
-    tcp.close(sock)
+    tcp.close_drained(sock)
 }
 
 fn cleanup_hello(pub: ptr, rnd: ptr, sid: ptr, ch: ptr) {
@@ -2350,7 +2328,14 @@ close_conn(conn: ptr) {
     if c.held != null { bytes.wipe_free(c.held) }
     if c.ticket != null { free_ticket(c.ticket) }
     recio_free(c.rio as *RecordIO)
-    tcp.close(c.sock)
+    // A connection that failed sent its alert (EV_ERROR), and may hold what
+    // the server sent after (a record too long to read): drained first, so
+    // the alert is not lost to a reset, as a failed handshake's is not.
+    if c.closed == 2 {
+        tcp.close_drained(c.sock)
+    } else {
+        tcp.close(c.sock)
+    }
     libc_free(conn)
 }
 

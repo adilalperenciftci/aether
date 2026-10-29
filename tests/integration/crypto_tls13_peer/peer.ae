@@ -411,6 +411,11 @@ fn post_handshake(sock: ptr, app: ptr, what: string, r: *Reader, capp: ptr) {
         rec = buf_take(w)
         send_raw(sock, rec)
         bytes.free(rec)
+        // The client reads the header, refuses the record and closes with
+        // the rest unread: read only after its close, the alert is lost to
+        // the reset that close sends unless the client drained the socket
+        // first, whatever the timing.
+        sleep(100)
     } else if string.starts_with(what, "empty") == 1 && what != "emptyhs" {
         count, _cerr = string.to_int(string.substring(what, 5, string.length(what)))
         k = 0

@@ -1256,7 +1256,14 @@ close_conn(conn: ptr) {
     if c.hs_pend != null { bytes.wipe_free(c.hs_pend) }
     if c.recv_pend != null { bytes.wipe_free(c.recv_pend) }
     recio_free(c.rio as *RecordIO)
-    tcp.close(c.sock)
+    // A connection that failed sent its alert, and may hold what the client
+    // sent after: drained first, so the alert is not lost to the reset a
+    // close with bytes unread sends (tcp.close_drained).
+    if c.closed == 2 {
+        tcp.close_drained(c.sock)
+    } else {
+        tcp.close(c.sock)
+    }
     libc_free(conn)
 }
 
@@ -1851,7 +1858,15 @@ pure_tls_server_accept_creds(fd: int, creds: ptr) -> ptr {
     bytes.wipe_free(x25519_priv)
 
     if err != "" {
-        if sconn != null { close_conn(sconn) } else { tcp.close(sock) }
+        // A handshake that failed sent its alert: the socket is drained
+        // before it closes, so the client reads the alert, not a reset.
+        if sconn != null {
+            failed = sconn as *ServerConn
+            failed.closed = 2
+            close_conn(sconn)
+        } else {
+            tcp.close_drained(sock)
+        }
         return null
     }
     return sconn
