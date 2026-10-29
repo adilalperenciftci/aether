@@ -7,6 +7,7 @@
 
 #include "aether_aes.h"
 #include "../../../runtime/aether_resource_caps.h"
+#include "../../../runtime/utils/aether_wipe.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -471,8 +472,8 @@ static void expand_key(AeAes* c, const uint8_t* key, int keylen) {
         c->sk[v + 2] = (x2 << 4) - x2;
         c->sk[v + 3] = (x3 << 4) - x3;
     }
-    memset(skey, 0, sizeof skey);
-    memset(comp, 0, sizeof comp);
+    aether_wipe(skey, sizeof skey);
+    aether_wipe(comp, sizeof comp);
 }
 
 /* Run 1 to 4 blocks (16 * nb bytes at in) through the cipher into out;
@@ -489,8 +490,8 @@ static void run_blocks(const AeAes* c, int encrypt, const uint8_t* in, uint8_t* 
     ortho(q);
     for (int i = 0; i < 4; i++) interleave_out(w + (i << 2), q[i], q[i + 4]);
     for (int i = 0; i < 4 * nb; i++) enc32le(out + 4 * i, w[i]);
-    memset(w, 0, sizeof w);
-    memset(q, 0, sizeof q);
+    aether_wipe(w, sizeof w);
+    aether_wipe(q, sizeof q);
 }
 
 int aether_aes_available(void) { return 1; }
@@ -508,8 +509,9 @@ void* aether_aes_new(const void* key, int keylen, int encrypt) {
 
 void aether_aes_free(void* ctx) {
     if (!ctx) return;
-    /* Key material must not outlive the context. */
-    memset(ctx, 0, sizeof(AeAes));
+    /* Key material must not outlive the context: aether_wipe, as a memset
+     * before a free is a dead store the compiler may drop (#3402). */
+    aether_wipe(ctx, sizeof(AeAes));
     aether_caps_free(ctx, sizeof(AeAes));
 }
 
@@ -584,6 +586,6 @@ int aether_aes_ctr_xor(void* ctx, const void* iv, const void* in,
         int chunk = left < 64 ? left : 64;
         for (int i = 0; i < chunk; i++) op[off + i] = (uint8_t)(ip[off + i] ^ blocks[i]);
     }
-    memset(blocks, 0, sizeof blocks);
+    aether_wipe(blocks, sizeof blocks);
     return 1;
 }

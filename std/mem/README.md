@@ -122,6 +122,19 @@ because none exists in the offset-less forms.
 within its own buffer is an overlapping interior copy; `copy_at` is `memcpy`
 and is undefined there, exactly as in C.
 
+## Wiping a secret before a free
+
+`mem.wipe(dst, n)` zeroes `n` bytes in a way the C compiler cannot drop.
+`mem.set(dst, 0, n)` right before the memory is freed is a dead store, which
+an optimizing compiler removes, leaving the secret in freed memory. It is
+the raw-memory form of `bytes.wipe`, for a struct a module allocates and
+frees itself, such as a hash context that held a key's digest (#3402):
+
+```aether,fragment
+mem.wipe(ctx, sizeof(Sha2Ctx))
+free(ctx)
+```
+
 ## How much the heap holds
 
 `mem.heap_in_use()` is the bytes the C allocator has handed out and not taken

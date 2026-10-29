@@ -35,6 +35,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "../../runtime/utils/aether_wipe.h"
 
 /* Read unsigned byte at offset i. Returns 0..255. Returns -1 if
  * `p` is NULL — sole defensive check, since a NULL deref would
@@ -444,6 +445,14 @@ int aether_mem_compare(const void* a, const void* b, int64_t n) {
 void* aether_mem_set_bulk(void* dst, int value, int64_t n) {
     if (!dst) return dst;
     return __builtin_memset(dst, value, (size_t)n);
+}
+
+/* Zero n bytes at dst so the writes happen even right before a free: the
+ * raw-memory counterpart of bytes.wipe, for a struct the program frees
+ * itself (a hash context, say, #3402). */
+void aether_mem_wipe(void* dst, int64_t n) {
+    if (!dst || n <= 0) return;
+    aether_wipe(dst, (size_t)n);
 }
 
 /* Offset forms of the three bulk writers (#1733 ask 2).

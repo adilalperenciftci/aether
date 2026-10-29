@@ -47,7 +47,7 @@ exports(
     udiv64_32,
     call_fn3_int, call_fn3_void, call_fn2_void,
     ptr_to_long, long_to_ptr,
-    copy, move, compare, set,
+    copy, move, compare, set, wipe,
     copy_at, move_at, fill_at, compare_at,
     get_u16_le, get_u16_be, set_u16_le, set_u16_be,
     get_u32_le, get_u32_be, set_u32_le, set_u32_be,
@@ -248,6 +248,7 @@ extern aether_mem_copy(dst: ptr, src: ptr, n: long) -> ptr
 extern aether_mem_move(dst: ptr, src: ptr, n: long) -> ptr
 extern aether_mem_compare(a: ptr, b: ptr, n: long) -> int
 extern aether_mem_set_bulk(dst: ptr, value: int, n: long) -> ptr
+extern aether_mem_wipe(dst: ptr, n: long)
 extern aether_mem_copy_at(dst: ptr, dst_off: long, src: ptr, src_off: long, n: long) -> ptr
 extern aether_mem_move_at(dst: ptr, dst_off: long, src: ptr, src_off: long, n: long) -> ptr
 extern aether_mem_fill_at(dst: ptr, off: long, value: int, n: long) -> ptr
@@ -320,6 +321,12 @@ copy(dst: ptr, src: ptr, n: long) -> ptr { return aether_mem_copy(dst, src, n) }
 move(dst: ptr, src: ptr, n: long) -> ptr { return aether_mem_move(dst, src, n) }
 compare(a: ptr, b: ptr, n: long) -> int { return aether_mem_compare(a, b, n) }
 set(dst: ptr, value: int, n: long) -> ptr { return aether_mem_set_bulk(dst, value, n) }
+
+// Zero `n` bytes at `dst` so the writes happen even right before a free,
+// where a plain set is a dead store the C compiler may drop. The raw-memory
+// counterpart of bytes.wipe, for a struct a module frees itself, such as a
+// hash context holding secret state (#3402).
+wipe(dst: ptr, n: long) { aether_mem_wipe(dst, n) }
 
 // Offset forms of the bulk operations (#1733).
 //

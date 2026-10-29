@@ -131,7 +131,7 @@ ecb_run(ctx: ptr, data: ptr) -> ptr {
         eb = process_block(ctx, blk)
         k = 0
         while k < 16 { bytes.set(out, off + k, bytes.get(eb, k)); k = k + 1 }
-        bytes.free(blk); bytes.free(eb)
+        bytes.wipe_free(blk); bytes.wipe_free(eb)
         off = off + 16
     }
     return out
@@ -256,7 +256,7 @@ pkcs7_unpad(data: ptr) -> {
 cbc_encrypt_pkcs7(ctx: ptr, iv: ptr, data: ptr) -> ptr {
     padded = pkcs7_pad(data)
     out = cbc_encrypt(ctx, iv, padded)
-    bytes.free(padded)
+    bytes.wipe_free(padded)
     return out
 }
 
@@ -272,7 +272,7 @@ cbc_decrypt_pkcs7(ctx: ptr, iv: ptr, data: ptr) -> {
     }
     raw = cbc_decrypt(ctx, iv, data)
     out, err = pkcs7_unpad(raw)
-    bytes.free(raw)
+    bytes.wipe_free(raw)
     return out, err
 }
 
@@ -295,11 +295,11 @@ cmac(key: byte[], data: byte[]) -> ptr {
     z = 0
     while z < 16 { bytes.set(zero, z, 0); z = z + 1 }
     L = process_block(enc, zero)
-    bytes.free(zero)
+    bytes.wipe_free(zero)
 
     k1 = cmac_dbl(L)
     k2 = cmac_dbl(k1)
-    bytes.free(L)
+    bytes.wipe_free(L)
 
     // Number of 16-byte blocks; whether the last is complete.
     n = (len + 15) / 16
@@ -333,8 +333,8 @@ cmac(key: byte[], data: byte[]) -> ptr {
             j = j + 1
         }
     }
-    bytes.free(k1)
-    bytes.free(k2)
+    bytes.wipe_free(k1)
+    bytes.wipe_free(k2)
 
     // CBC-MAC: X = 0; for each block except the last, X = E(X XOR M_i);
     // then tag = E(X XOR M_last).
@@ -352,8 +352,8 @@ cmac(key: byte[], data: byte[]) -> ptr {
             j = j + 1
         }
         eb = process_block(enc, blk)
-        bytes.free(blk)
-        bytes.free(x)
+        bytes.wipe_free(blk)
+        bytes.wipe_free(x)
         x = eb
         i = i + 1
     }
@@ -365,10 +365,10 @@ cmac(key: byte[], data: byte[]) -> ptr {
         bytes.set(fin, j, (bytes.get(x, j) ^ bytes.get(last, j)) & 0xFF)
         j = j + 1
     }
-    bytes.free(x)
-    bytes.free(last)
+    bytes.wipe_free(x)
+    bytes.wipe_free(last)
     tag = process_block(enc, fin)
-    bytes.free(fin)
+    bytes.wipe_free(fin)
     free(enc)
     return tag
 }
@@ -435,18 +435,18 @@ key_wrap(key: byte[], data: byte[]) -> ptr {
             // R[i] = LSB64(B)
             k = 0
             while k < 8 { bytes.set(r, i * 8 + k, bytes.get(b, 8 + k)); k = k + 1 }
-            bytes.free(b)
+            bytes.wipe_free(b)
             i = i + 1
         }
         j = j + 1
     }
-    bytes.free(blk)
+    bytes.wipe_free(blk)
 
     out = bytes.new(len + 8)
     bytes.copy_from_bytes(out, 0, a, 0, 8)
     bytes.copy_from_bytes(out, 8, r, 0, len)
-    bytes.free(a)
-    bytes.free(r)
+    bytes.wipe_free(a)
+    bytes.wipe_free(r)
     free(enc)
     return out
 }
@@ -489,12 +489,12 @@ key_unwrap(key: byte[], data: byte[]) -> {
             while k < 8 { bytes.set(a, k, bytes.get(b, k)); k = k + 1 }
             k = 0
             while k < 8 { bytes.set(r, i * 8 + k, bytes.get(b, 8 + k)); k = k + 1 }
-            bytes.free(b)
+            bytes.wipe_free(b)
             i = i - 1
         }
         j = j - 1
     }
-    bytes.free(blk)
+    bytes.wipe_free(blk)
     free(dec)
 
     // Integrity: A must equal the default IV A6A6A6A6A6A6A6A6.
@@ -504,9 +504,9 @@ key_unwrap(key: byte[], data: byte[]) -> {
         ok = ok & ctime.eq(bytes.get(a, k) & 0xFF, 0xA6)
         k = k + 1
     }
-    bytes.free(a)
+    bytes.wipe_free(a)
     if ctime.declassify(ok) == 0 {
-        bytes.free(r)
+        bytes.wipe_free(r)
         return null, "integrity check failed"
     }
     return r, ""
@@ -601,7 +601,7 @@ ghash_update(acc: ptr, h: ptr, data: byte[]) -> ptr {
             j = j + 1
         }
         nxt = gf_mul(cur, h)
-        bytes.free(cur)
+        bytes.wipe_free(cur)
         cur = nxt
         off = off + 16
     }
@@ -642,10 +642,10 @@ gctr(ctx: ptr, ctr0: ptr, data: byte[]) -> ptr {
             }
             j = j + 1
         }
-        bytes.free(ks)
+        bytes.wipe_free(ks)
         off = off + 16
     }
-    bytes.free(ctr)
+    bytes.wipe_free(ctr)
     return out
 }
 
@@ -660,21 +660,21 @@ gcm_tag(ctx: ptr, h: ptr, j0: ptr, aad: byte[], ct: byte[]) -> ptr {
     z = 0
     while z < 16 { bytes.set(acc, z, 0); z = z + 1 }
     a1 = ghash_update(acc, h, aad)
-    bytes.free(acc)
+    bytes.wipe_free(acc)
     a2 = ghash_update(a1, h, ct)
-    bytes.free(a1)
+    bytes.wipe_free(a1)
     // length block: [len(AAD) in bits | len(C) in bits], each 64-bit BE
     lb = bytes.new(16)
     set_be64_bits(lb, 0, aad_len)
     set_be64_bits(lb, 8, ct_len)
     a3 = ghash_update(a2, h, bytes.view(lb)[0..16])
-    bytes.free(a2); bytes.free(lb)
+    bytes.wipe_free(a2); bytes.wipe_free(lb)
     // S = E(J0); tag = a3 XOR S
     s = process_block(ctx, j0)
     tag = bytes.new(16)
     k = 0
     while k < 16 { bytes.set(tag, k, (bytes.get(a3, k) ^ bytes.get(s, k)) & 0xFF); k = k + 1 }
-    bytes.free(a3); bytes.free(s)
+    bytes.wipe_free(a3); bytes.wipe_free(s)
     return tag
 }
 // Write (byte_len * 8) as a 64-bit big-endian value at offset off.
@@ -707,7 +707,7 @@ gcm_seal(ctx: ptr, iv: ptr, aad: byte[], pt: byte[]) -> ptr {
     z = 0
     while z < 16 { bytes.set(zero, z, 0); z = z + 1 }
     h = process_block(ctx, zero)
-    bytes.free(zero)
+    bytes.wipe_free(zero)
 
     j0 = gcm_j0(iv)
     ct = gctr(ctx, j0, pt)
@@ -716,7 +716,7 @@ gcm_seal(ctx: ptr, iv: ptr, aad: byte[], pt: byte[]) -> ptr {
     out = bytes.new(pt_len + 16)
     bytes.copy_from_bytes(out, 0, ct, 0, pt_len)
     bytes.copy_from_bytes(out, pt_len, tag, 0, 16)
-    bytes.free(h); bytes.free(j0); bytes.free(ct); bytes.free(tag)
+    bytes.wipe_free(h); bytes.wipe_free(j0); bytes.wipe_free(ct); bytes.wipe_free(tag)
     return out
 }
 
@@ -734,7 +734,7 @@ gcm_open(ctx: ptr, iv: ptr, aad: byte[], ct_with_tag: byte[]) -> {
     z = 0
     while z < 16 { bytes.set(zero, z, 0); z = z + 1 }
     h = process_block(ctx, zero)
-    bytes.free(zero)
+    bytes.wipe_free(zero)
     j0 = gcm_j0(iv)
 
     want = gcm_tag(ctx, h, j0, aad, ct_with_tag[0..body_len])
@@ -745,13 +745,13 @@ gcm_open(ctx: ptr, iv: ptr, aad: byte[], ct_with_tag: byte[]) -> {
         diff = diff | ((bytes.get(want, i) ^ ct_with_tag[body_len + i]) & 0xFF)
         i = i + 1
     }
-    bytes.free(want)
+    bytes.wipe_free(want)
     if ctime.declassify(ctime.eq(diff, 0)) == 0 {
-        bytes.free(h); bytes.free(j0)
+        bytes.wipe_free(h); bytes.wipe_free(j0)
         return null, "authentication failed"
     }
     pt = gctr(ctx, j0, ct_with_tag[0..body_len])
-    bytes.free(h); bytes.free(j0)
+    bytes.wipe_free(h); bytes.wipe_free(j0)
     return pt, ""
 }
 
@@ -816,7 +816,7 @@ ccm_cbc_mac(enc: ptr, nonce: byte[], aad: byte[], data: byte[], taglen: int) -> 
     z = 0
     while z < 16 { bytes.set(x, z, 0); z = z + 1 }
     x = ccm_mac_block(enc, x, b0)
-    bytes.free(b0)
+    bytes.wipe_free(b0)
 
     // AAD: length-prefix then AAD bytes, zero-padded to a block boundary.
     if aadlen > 0 {
@@ -846,18 +846,18 @@ ccm_cbc_mac(enc: ptr, nonce: byte[], aad: byte[], data: byte[], taglen: int) -> 
         while k < aadlen { bytes.set(ablk, hdr_extra + k, aad[k]); k = k + 1 }
         k = total
         while k < padded { bytes.set(ablk, k, 0); k = k + 1 }
-        bytes.free(prefix)
+        bytes.wipe_free(prefix)
         off = 0
         while off < padded {
             blk = bytes.new(16)
             j = 0
             while j < 16 { bytes.set(blk, j, bytes.get(ablk, off + j)); j = j + 1 }
             nx = ccm_mac_block(enc, x, blk)
-            bytes.free(x); bytes.free(blk)
+            bytes.wipe_free(x); bytes.wipe_free(blk)
             x = nx
             off = off + 16
         }
-        bytes.free(ablk)
+        bytes.wipe_free(ablk)
     }
 
     // plaintext, zero-padded to a block boundary.
@@ -872,7 +872,7 @@ ccm_cbc_mac(enc: ptr, nonce: byte[], aad: byte[], data: byte[], taglen: int) -> 
             j = j + 1
         }
         nx = ccm_mac_block(enc, x, blk)
-        bytes.free(x); bytes.free(blk)
+        bytes.wipe_free(x); bytes.wipe_free(blk)
         x = nx
         off = off + 16
     }
@@ -884,7 +884,7 @@ ccm_mac_block(enc: ptr, x: ptr, blk: ptr) -> ptr {
     j = 0
     while j < 16 { bytes.set(t, j, (bytes.get(x, j) ^ bytes.get(blk, j)) & 0xFF); j = j + 1 }
     eb = process_block(enc, t)
-    bytes.free(t)
+    bytes.wipe_free(t)
     return eb
 }
 
@@ -900,14 +900,14 @@ ccm_seal(key: byte[], nonce: byte[], aad: byte[], pt: byte[], taglen: int) -> {
     tag = bytes.new(taglen)
     i = 0
     while i < taglen { bytes.set(tag, i, (bytes.get(mac, i) ^ bytes.get(s0, i)) & 0xFF); i = i + 1 }
-    bytes.free(s0); bytes.free(mac)
+    bytes.wipe_free(s0); bytes.wipe_free(mac)
 
     // S1.. encrypt the plaintext (ctr0 incremented before first data block).
     ct = bytes.new(ptlen)
     ctr = bytes.new(16)
     i = 0
     while i < 16 { bytes.set(ctr, i, bytes.get(ctr0, i)); i = i + 1 }
-    bytes.free(ctr0)
+    bytes.wipe_free(ctr0)
     off = 0
     while off < ptlen {
         ctr_increment(ctr)
@@ -919,16 +919,16 @@ ccm_seal(key: byte[], nonce: byte[], aad: byte[], pt: byte[], taglen: int) -> {
             }
             j = j + 1
         }
-        bytes.free(ks)
+        bytes.wipe_free(ks)
         off = off + 16
     }
-    bytes.free(ctr)
+    bytes.wipe_free(ctr)
     free(enc)
 
     out = bytes.new(ptlen + taglen)
     bytes.copy_from_bytes(out, 0, ct, 0, ptlen)
     bytes.copy_from_bytes(out, ptlen, tag, 0, taglen)
-    bytes.free(ct); bytes.free(tag)
+    bytes.wipe_free(ct); bytes.wipe_free(tag)
     return out, ptlen + taglen
 }
 
@@ -956,14 +956,14 @@ ccm_open(key: byte[], nonce: byte[], aad: byte[], ct: byte[], taglen: int) -> {
             }
             j = j + 1
         }
-        bytes.free(ks)
+        bytes.wipe_free(ks)
         off = off + 16
     }
-    bytes.free(ctr)
+    bytes.wipe_free(ctr)
 
     mac = ccm_cbc_mac(enc, nonce, aad, bytes.view(pt)[0..ptlen], taglen)
     s0 = process_block(enc, ctr0)
-    bytes.free(ctr0)
+    bytes.wipe_free(ctr0)
     // expected tag = (mac XOR S0) truncated; compare const-time to supplied.
     diff = 0
     i = 0
@@ -972,10 +972,10 @@ ccm_open(key: byte[], nonce: byte[], aad: byte[], ct: byte[], taglen: int) -> {
         diff = diff | (want ^ (ct[ptlen + i] & 0xFF))
         i = i + 1
     }
-    bytes.free(mac); bytes.free(s0)
+    bytes.wipe_free(mac); bytes.wipe_free(s0)
     free(enc)
     if ctime.declassify(ctime.eq(diff, 0)) == 0 {
-        bytes.free(pt)
+        bytes.wipe_free(pt)
         return null, -1
     }
     return pt, ptlen
@@ -1004,7 +1004,7 @@ eax_omac(key: byte[], t: int, data: byte[]) -> ptr {
     i = 0
     while i < dlen { bytes.set(buf, 16 + i, data[i]); i = i + 1 }
     tag = cmac(key, bytes.view(buf)[0..16 + dlen])
-    bytes.free(buf)
+    bytes.wipe_free(buf)
     return tag
 }
 
@@ -1029,7 +1029,7 @@ eax_seal(key: byte[], nonce: byte[], aad: byte[], pt: byte[], taglen: int) -> {
         bytes.set(out, ptlen + i, v)
         i = i + 1
     }
-    bytes.free(n_mac); bytes.free(h_mac); bytes.free(c_mac); bytes.free(ct)
+    bytes.wipe_free(n_mac); bytes.wipe_free(h_mac); bytes.wipe_free(c_mac); bytes.wipe_free(ct)
     return out, ptlen + taglen
 }
 
@@ -1054,16 +1054,16 @@ eax_open(key: byte[], nonce: byte[], aad: byte[], ct: byte[], taglen: int) -> {
         diff = diff | (want ^ (ct[ptlen + i] & 0xFF))
         i = i + 1
     }
-    bytes.free(h_mac); bytes.free(c_mac)
+    bytes.wipe_free(h_mac); bytes.wipe_free(c_mac)
     if ctime.declassify(ctime.eq(diff, 0)) == 0 {
-        bytes.free(n_mac); bytes.free(body)
+        bytes.wipe_free(n_mac); bytes.wipe_free(body)
         return null, -1
     }
 
     enc = new_encryptor(key)
     pt = ctr_xor(enc, n_mac, body)
     free(enc)
-    bytes.free(n_mac); bytes.free(body)
+    bytes.wipe_free(n_mac); bytes.wipe_free(body)
     return pt, ptlen
 }
 
@@ -1129,7 +1129,7 @@ ocb_build_l(l0: ptr) -> ptr {
     while n < entries {
         d = ocb_double_at(tab, (n - 1) * 16)
         bytes.copy_from_bytes(tab, n * 16, d, 0, 16)
-        bytes.free(d)
+        bytes.wipe_free(d)
         n = n + 1
     }
     return tab
@@ -1176,7 +1176,7 @@ ocb_init_offset(enc: ptr, nonce: byte[], taglen: int) -> ptr {
     bytes.set(nb, 15, bytes.get(nb, 15) & 0xC0)
 
     ktop = process_block(enc, nb)
-    bytes.free(nb)
+    bytes.wipe_free(nb)
 
     // Stretch = Ktop ‖ (Ktop[0..7] XOR Ktop[1..8])  (24 bytes)
     stretch = bytes.new(24)
@@ -1187,7 +1187,7 @@ ocb_init_offset(enc: ptr, nonce: byte[], taglen: int) -> ptr {
         bytes.set(stretch, 16 + i, (bytes.get(ktop, i) ^ bytes.get(ktop, i + 1)) & 0xFF)
         i = i + 1
     }
-    bytes.free(ktop)
+    bytes.wipe_free(ktop)
 
     // OffsetMAIN_0 = (Stretch << bottom)[0..15]  (bit shift)
     bits_sh = bottom % 8
@@ -1206,7 +1206,7 @@ ocb_init_offset(enc: ptr, nonce: byte[], taglen: int) -> ptr {
             i = i + 1
         }
     }
-    bytes.free(stretch)
+    bytes.wipe_free(stretch)
     return off
 }
 
@@ -1229,7 +1229,7 @@ ocb_hash_aad(enc: ptr, ltab: ptr, l_star: ptr, aad: byte[]) -> ptr {
         while j < 16 { bytes.set(blk, j, (aad[off + j] ^ bytes.get(offh, j)) & 0xFF); j = j + 1 }
         eb = process_block(enc, blk)
         ocb_xor(sum, eb)
-        bytes.free(blk); bytes.free(eb)
+        bytes.wipe_free(blk); bytes.wipe_free(eb)
         blkidx = blkidx + 1
         off = off + 16
     }
@@ -1248,9 +1248,9 @@ ocb_hash_aad(enc: ptr, ltab: ptr, l_star: ptr, aad: byte[]) -> ptr {
         }
         eb = process_block(enc, blk)
         ocb_xor(sum, eb)
-        bytes.free(blk); bytes.free(eb)
+        bytes.wipe_free(blk); bytes.wipe_free(eb)
     }
-    bytes.free(offh)
+    bytes.wipe_free(offh)
     return sum
 }
 
@@ -1262,11 +1262,11 @@ ocb_seal(key: byte[], nonce: byte[], aad: byte[], pt: byte[], taglen: int) -> {
     z = 0
     while z < 16 { bytes.set(zero, z, 0); z = z + 1 }
     l_star = process_block(enc, zero)
-    bytes.free(zero)
+    bytes.wipe_free(zero)
     l_dollar = ocb_double(l_star)
     l0 = ocb_double(l_dollar)
     ltab = ocb_build_l(l0)
-    bytes.free(l0)
+    bytes.wipe_free(l0)
 
     sum = ocb_hash_aad(enc, ltab, l_star, aad)
     offm = ocb_init_offset(enc, nonce, taglen)
@@ -1289,7 +1289,7 @@ ocb_seal(key: byte[], nonce: byte[], aad: byte[], pt: byte[], taglen: int) -> {
         ocb_xor(eb, offm)
         j = 0
         while j < 16 { bytes.set(ct, off + j, bytes.get(eb, j)); j = j + 1 }
-        bytes.free(blk); bytes.free(eb)
+        bytes.wipe_free(blk); bytes.wipe_free(eb)
         blkidx = blkidx + 1
         off = off + 16
     }
@@ -1306,12 +1306,12 @@ ocb_seal(key: byte[], nonce: byte[], aad: byte[], pt: byte[], taglen: int) -> {
             j = j + 1
         }
         ocb_xor(checksum, pad_in)
-        bytes.free(pad_in)
+        bytes.wipe_free(pad_in)
         ocb_xor(offm, l_star)
         pad = process_block(enc, offm)
         j = 0
         while j < rem { bytes.set(ct, off + j, (pt[off + j] ^ bytes.get(pad, j)) & 0xFF); j = j + 1 }
-        bytes.free(pad)
+        bytes.wipe_free(pad)
     }
 
     // tag = E(Checksum XOR OffsetMAIN XOR L_$) XOR Sum
@@ -1325,8 +1325,8 @@ ocb_seal(key: byte[], nonce: byte[], aad: byte[], pt: byte[], taglen: int) -> {
     i = 0
     while i < taglen { bytes.set(out, ptlen + i, bytes.get(tagfull, i)); i = i + 1 }
 
-    bytes.free(ct); bytes.free(tagfull); bytes.free(checksum); bytes.free(sum)
-    bytes.free(offm); bytes.free(l_star); bytes.free(l_dollar); bytes.free(ltab)
+    bytes.wipe_free(ct); bytes.wipe_free(tagfull); bytes.wipe_free(checksum); bytes.wipe_free(sum)
+    bytes.wipe_free(offm); bytes.wipe_free(l_star); bytes.wipe_free(l_dollar); bytes.wipe_free(ltab)
     free(enc)
     return out, ptlen + taglen
 }
@@ -1343,11 +1343,11 @@ ocb_open(key: byte[], nonce: byte[], aad: byte[], ct: byte[], taglen: int) -> {
     z = 0
     while z < 16 { bytes.set(zero, z, 0); z = z + 1 }
     l_star = process_block(enc, zero)
-    bytes.free(zero)
+    bytes.wipe_free(zero)
     l_dollar = ocb_double(l_star)
     l0 = ocb_double(l_dollar)
     ltab = ocb_build_l(l0)
-    bytes.free(l0)
+    bytes.wipe_free(l0)
 
     sum = ocb_hash_aad(enc, ltab, l_star, aad)
     offm = ocb_init_offset(enc, nonce, taglen)
@@ -1370,7 +1370,7 @@ ocb_open(key: byte[], nonce: byte[], aad: byte[], ct: byte[], taglen: int) -> {
         ocb_xor(checksum, db)
         j = 0
         while j < 16 { bytes.set(pt, off + j, bytes.get(db, j)); j = j + 1 }
-        bytes.free(blk); bytes.free(db)
+        bytes.wipe_free(blk); bytes.wipe_free(db)
         blkidx = blkidx + 1
         off = off + 16
     }
@@ -1391,7 +1391,7 @@ ocb_open(key: byte[], nonce: byte[], aad: byte[], ct: byte[], taglen: int) -> {
         ocb_xor(checksum, recovered)
         j = 0
         while j < rem { bytes.set(pt, off + j, bytes.get(recovered, j)); j = j + 1 }
-        bytes.free(pad); bytes.free(recovered)
+        bytes.wipe_free(pad); bytes.wipe_free(recovered)
     }
 
     ocb_xor(checksum, offm)
@@ -1405,11 +1405,11 @@ ocb_open(key: byte[], nonce: byte[], aad: byte[], ct: byte[], taglen: int) -> {
         diff = diff | ((bytes.get(tagfull, i) ^ ct[ptlen + i]) & 0xFF)
         i = i + 1
     }
-    bytes.free(tagfull); bytes.free(checksum); bytes.free(sum)
-    bytes.free(offm); bytes.free(l_star); bytes.free(l_dollar); bytes.free(ltab)
+    bytes.wipe_free(tagfull); bytes.wipe_free(checksum); bytes.wipe_free(sum)
+    bytes.wipe_free(offm); bytes.wipe_free(l_star); bytes.wipe_free(l_dollar); bytes.wipe_free(ltab)
     free(enc); free(dec)
     if ctime.declassify(ctime.eq(diff, 0)) == 0 {
-        bytes.free(pt)
+        bytes.wipe_free(pt)
         return null, -1
     }
     return pt, ptlen

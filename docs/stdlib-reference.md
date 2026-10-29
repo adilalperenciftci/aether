@@ -55,7 +55,7 @@ header comment is the authoritative description.
 | `std.lzf` | One-shot LZF compression and decompression. | 9 | [guide](../std/lzf/README.md) · [source](../std/lzf/module.ae) |
 | `std.map` | Hash map, re-exported from `std.collections`, with readable key snapshots. | 20 | [guide](../std/map/README.md) · [source](../std/map/module.ae) |
 | `std.math` | Arithmetic, trigonometry, rounding and floating-point helpers. | 45 | [full section](#math-stdmath) |
-| `std.mem` | Byte-level reads and writes over caller-allocated raw pointers. | 98 | [guide](../std/mem/README.md) · [source](../std/mem/module.ae) |
+| `std.mem` | Byte-level reads and writes over caller-allocated raw pointers. | 99 | [guide](../std/mem/README.md) · [source](../std/mem/module.ae) |
 | `std.message` | ICU MessageFormat formatting and message catalogues. | 8 | [guide](../std/message/README.md) · [source](../std/message/module.ae) |
 | `std.msgpack` | MessagePack serialisation and deserialisation. | 39 | [guide](../std/msgpack/README.md) · [source](../std/msgpack/module.ae) |
 | `std.mutation` | Text-based mutation-testing driver for `std.spec` suites. | 1 | [guide](../std/mutation/README.md) · [source](../std/mutation/module.ae) |
@@ -4028,6 +4028,7 @@ byte 255
 - `mem.get_int` / `get_long` / `get_ptr` / `get_float32` / `get_float64`, and their `set_` twins
 - `mem.get_u16_le` / `get_u16_be` / `get_u32_le` / `get_u32_be` / `get_u64_le` / `get_u64_be`, and their `set_` twins - Explicit byte order, for wire formats
 - `mem.copy(dst, src, n)` / `move(dst, src, n)` / `compare(a, b, n)` / `set(dst, value, n)` - `memcpy`, `memmove`, `memcmp`, `memset`
+- `mem.wipe(dst, n)` - Zero `n` bytes so the writes happen even right before a free, where `set` is a dead store the C compiler may drop: the raw-memory form of `bytes.wipe`, for a struct a module frees itself, such as a hash context holding secret state (#3402)
 - `mem.copy_at` / `move_at` / `fill_at` / `compare_at` - The same with a byte offset on each buffer
 - `mem.bits_of_float` / `float_from_bits`, `mem.clz32` / `clz64`, `mem.udiv64_32` - Bit-level helpers
 - `mem.ptr_to_long(p)` / `long_to_ptr(addr)` - A pointer as a 64-bit address and back, for tagged-pointer arithmetic or storing an integer in a pointer slot

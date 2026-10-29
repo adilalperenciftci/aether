@@ -26,6 +26,7 @@
 
 import std.bits
 import std.bytes
+import std.mem
 
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
@@ -548,8 +549,7 @@ final_bytes(ctx: ptr) -> ptr {
     out = finalize_to_bytes(c)
     // SHA-512/224 serializes four whole 64-bit words: keep digest_len.
     bytes.set_length(out, c.digest_len)
-    free_internals(c)
-    free(ctx)
+    wipe_ctx_free(ctx)
     return out
 }
 
@@ -576,18 +576,29 @@ final_hex(ctx: ptr) -> string {
         bytes.set(hexbuf, i * 2 + 1, c_lo)
         i = i + 1
     }
-    bytes.free(out)
+    bytes.wipe_free(out)
     s = bytes.finish(hexbuf, dl * 2)
-    free_internals(c)
-    free(ctx)
+    wipe_ctx_free(ctx)
     return s
 }
 
 free_internals(c: *Sha2Ctx) {
     if c.block != null {
-        bytes.free(c.block)
+        bytes.wipe_free(c.block)
         c.block = null
     }
+}
+
+// Free a context, wiped first (#3402): its hash words and schedule are a
+// digest and the last block of whatever it hashed, its buffer the block in
+// progress, and an HMAC key, a private key's seed or a DRBG's state among
+// what it hashed. mem.wipe, as a zeroing before a free is otherwise a dead
+// store the C compiler may drop.
+fn wipe_ctx_free(ctx: ptr) {
+    c = ctx as *Sha2Ctx
+    free_internals(c)
+    mem.wipe(ctx, sizeof(Sha2Ctx))
+    free(ctx)
 }
 
 // Abandon a context without finalizing — the bail-out cleanup path.
@@ -596,9 +607,7 @@ free_ctx(ctx: ptr) {
     if ctx == null {
         return
     }
-    c = ctx as *Sha2Ctx
-    free_internals(c)
-    free(ctx)
+    wipe_ctx_free(ctx)
 }
 
 // ---- One-shot convenience wrappers ----

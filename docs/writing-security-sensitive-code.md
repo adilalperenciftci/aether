@@ -167,6 +167,16 @@ fault makes it compute (#3376).
   wiped, so a secret that must be wiped lives in a `bytes` buffer, sized
   for its final length, because a buffer that grows leaves its old contents
   in the memory it moved out of.
+- **A primitive wipes its own state.** Wiping the key is not enough if the
+  hash, MAC or cipher that used it frees its state as it was: SHA-512's
+  last block held an Ed25519 seed, HMAC's padded key is the key, and a
+  SHA-2 context holds the digest that the shield uses as its AEAD key.
+  The hash, MAC and cipher modules (`sha2`, `sha3`, `hmac`, `hkdf`, `aes`,
+  `chacha20poly1305`) free every buffer with `bytes.wipe_free`, and wipe
+  their context structs with `mem.wipe` (the raw-memory form) before they
+  free them (#3402). A new primitive follows the same rule. The
+  freed-memory probe (`tests/integration/crypto_key_wipe`) checks signing
+  with each key type, an HMAC and a shield wrap and unwrap.
 - **Verify a signature before it leaves the process.** One faulty RSA-CRT
   signature factors the modulus (Boneh, DeMillo and Lipton), and a fault in
   one of two signatures of the same message under a deterministic nonce

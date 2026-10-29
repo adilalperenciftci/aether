@@ -65,3 +65,41 @@ int key_probe_scan(const unsigned char* pattern, int lo, int hi, int blocks) {
     free(held);
     return hits;
 }
+
+/* The same over every size from `lo` to `hi` in steps of `step` bytes, for
+ * a block the program frees with the C allocator directly (a hash context
+ * is a struct of its own size, not a std.bytes buffer, #3402). */
+int key_probe_scan_step(const unsigned char* pattern, int lo, int hi, int step, int blocks) {
+    int hits = 0;
+    int sizes = (hi - lo) / step + 1;
+    size_t count = (size_t)sizes * (size_t)blocks;
+    void** held = (void**)calloc(count, sizeof(void*));
+    if (!held) return -1;
+    size_t at = 0;
+    for (int size = hi; size >= lo; size -= step) {
+        for (int k = 0; k < blocks; k++) {
+            unsigned char* p = (unsigned char*)malloc((size_t)size);
+            held[at++] = p;
+            if (!p) continue;
+            for (int i = 0; i + 16 <= size; i++) {
+                if (p[i] == pattern[0] && memcmp(p + i, pattern, 16) == 0) hits++;
+            }
+        }
+    }
+    for (size_t j = 0; j < at; j++) free(held[j]);
+    free(held);
+    return hits;
+}
+
+/* The control for that scan: `size` bytes from malloc with the 16 bytes at
+ * `pattern` in their middle, freed as they are. The writes go through a
+ * volatile pointer: before a free they are dead stores the compiler could
+ * drop, which would make the control prove nothing. */
+void key_probe_free_raw(const unsigned char* pattern, int size) {
+    unsigned char* p = (unsigned char*)malloc((size_t)size);
+    if (!p) return;
+    volatile unsigned char* v = p;
+    for (int i = 0; i < size; i++) v[i] = 0;
+    for (int i = 0; i < 16; i++) v[size / 2 + i] = pattern[i];
+    free(p);
+}

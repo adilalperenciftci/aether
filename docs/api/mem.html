@@ -78,6 +78,7 @@
     <li><a href="#move">move</a></li>
     <li><a href="#compare">compare</a></li>
     <li><a href="#set">set</a></li>
+    <li><a href="#wipe">wipe</a></li>
     <li><a href="#copy_at">copy_at</a></li>
     <li><a href="#move_at">move_at</a></li>
     <li><a href="#fill_at">fill_at</a></li>
@@ -532,6 +533,12 @@
       <h3 class="function-name">set <span class="kind">fn</span></h3>
       <pre class="usage"><code>set(dst, value, n) <span class="arrow">-&gt;</span> ptr</code></pre>
       <p class="signature"><span class="sig-params">dst: ptr, value: int, n: long</span></p>
+    </div>
+    <div class="function" id="wipe" data-name="wipe">
+      <h3 class="function-name">wipe <span class="kind">fn</span></h3>
+      <pre class="usage"><code>wipe(dst, n)</code></pre>
+      <p class="signature"><span class="sig-params">dst: ptr, n: long</span></p>
+      <p class="doc">Zero `n` bytes at `dst` so the writes happen even right before a free, where a plain set is a dead store the C compiler may drop. The raw-memory counterpart of bytes.wipe, for a struct a module frees itself, such as a hash context holding secret state (#3402).</p>
     </div>
     <div class="function" id="copy_at" data-name="copy_at">
       <h3 class="function-name">copy_at <span class="kind">fn</span></h3>

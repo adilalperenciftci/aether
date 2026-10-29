@@ -1,5 +1,5 @@
-// The freed-memory probe of test_key_wipe.sh (#3382). Each test key below
-// (RSA-2048 as PKCS#8 and PKCS#1, P-256 as PKCS#8 and SEC1; made for this
+// The freed-memory probe of test_key_wipe.sh (#3382, #3402). Each test key
+// below (RSA-2048 as PKCS#8 and PKCS#1, P-256 as PKCS#8 and SEC1; made for this
 // test only) is loaded with tls13_server.load_private_key and freed with
 // free_private_key, which wipes the key itself. Then probe_shim.c asks the
 // C allocator for blocks of every size the loading's buffers had, reads them
@@ -13,13 +13,25 @@
 // freed block back as it was, or one the probe must not read under), the
 // probe proves nothing and prints "SKIP: <why>". Otherwise one line per
 // key, "ok   <key>" or "FAIL <key>: <n> copies", and exits 1 on a FAIL.
+//
+// Then the same after signing with P-256, Ed25519 and RSA, an HMAC, and a
+// shield wrap and unwrap (#3402): the hash, MAC and cipher state those use
+// held the secret, so it must be wiped too.
 
 import std.bytes
 import std.string
 import std.cryptography.tls13_server
+import std.cryptography.tls13_cert
+import std.cryptography.hmac
+import std.cryptography.sha2
+import std.cryptography.rsa
+import std.cryptography.pem
+import std.cryptography.shield
 
 extern key_probe_supported() -> int
 extern key_probe_scan(pattern: ptr, lo: int, hi: int, blocks: int) -> int
+extern key_probe_scan_step(pattern: ptr, lo: int, hi: int, step: int, blocks: int) -> int
+extern key_probe_free_raw(pattern: ptr, size: int)
 extern exit(code: int)
 extern string_char_at(str: string, index: int) -> int
 
@@ -78,6 +90,160 @@ fn check(name: string, pem_text: string, hex: string) -> int {
     return 0
 }
 
+// `n` bytes from `hex`, a buffer of exactly that size.
+fn hexbytes(hex: string, n: int) -> ptr {
+    b = bytes.new(n)
+    bytes.set(b, n - 1, 0)
+    i = 0
+    while i < n {
+        bytes.set(b, i, hexval(string_char_at(hex, 2 * i)) * 16 + hexval(string_char_at(hex, 2 * i + 1)))
+        i = i + 1
+    }
+    return b
+}
+
+fn th32() -> ptr {
+    b = bytes.new(32)
+    i = 0
+    while i < 32 {
+        bytes.set(b, i, i)
+        i = i + 1
+    }
+    return b
+}
+
+// Scan for the window `w` (consumed: wiped) after an operation (#3402).
+fn scan_after(name: string, w: ptr) -> int {
+    hits = key_probe_scan(bytes.data(w), LO, HI, BLOCKS)
+    bytes.wipe_free(w)
+    if hits != 0 {
+        println("FAIL ${name}: ${hits} copies of the secret in freed memory")
+        return 1
+    }
+    println("ok   ${name}: no copy of the secret in freed memory")
+    return 0
+}
+
+// A P-256 CertificateVerify signature: the scalar goes through RFC 6979's
+// HMAC-DRBG, so the hash and MAC state held it.
+fn sign_p256() -> int {
+    w = window("a282997f3517fd44cd8e2c35c0ef513b")
+    scalar = tls13_server.parse_ec_private_key_pem(ec_pkcs8())
+    th = th32()
+    sig = tls13_cert.sign_server_cert_verify_ecdsa(tls13_cert.KEY_P256, scalar, bytes.view(th))
+    bytes.wipe_free(scalar)
+    bytes.free(th)
+    if sig == null {
+        println("FAIL P-256 signing: did not sign")
+        bytes.wipe_free(w)
+        return 1
+    }
+    bytes.free(sig)
+    return scan_after("P-256 signing", w)
+}
+
+// An Ed25519 CertificateVerify signature (RFC 8032 test 1's seed): the seed
+// is hashed with SHA-512.
+fn sign_ed25519() -> int {
+    w = window("ba844af492ec2cc44449c5697b326919")
+    seed = hexbytes("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60", 32)
+    th = th32()
+    sig = tls13_cert.sign_server_cert_verify_ed25519(seed, bytes.view(th))
+    bytes.wipe_free(seed)
+    bytes.free(th)
+    if sig == null {
+        println("FAIL Ed25519 signing: did not sign")
+        bytes.wipe_free(w)
+        return 1
+    }
+    bytes.free(sig)
+    return scan_after("Ed25519 signing", w)
+}
+
+// An RSA-2048 rsa_pss_rsae_sha256 signature with the PKCS#1 test key.
+fn sign_rsa() -> int {
+    w = window("26409a4310a03aecd9175eb011bab400")
+    der, _label, perr = pem.parse_at(rsa_pkcs1(), 0)
+    if der == null {
+        println("FAIL RSA signing: the key does not decode: ${perr}")
+        bytes.wipe_free(w)
+        return 1
+    }
+    k, _kerr = rsa.key_from_pkcs1_der(der)
+    bytes.wipe_free(der)
+    th = th32()
+    sig = tls13_cert.sign_server_cert_verify_rsa_pss_scheme(k, tls13_cert.SCHEME_RSA_PSS_RSAE_SHA256, bytes.view(th))
+    rsa.key_free(k)
+    bytes.free(th)
+    if sig == null {
+        println("FAIL RSA signing: did not sign")
+        bytes.wipe_free(w)
+        return 1
+    }
+    bytes.free(sig)
+    return scan_after("RSA signing", w)
+}
+
+// HMAC-SHA-256 with a 32-byte key: the key is padded into K0, then the pads.
+fn mac() -> int {
+    w = window("0f1e2d3c4b5a69788796a5b4c3d2e1f0")
+    key = hexbytes("0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0", 32)
+    m = th32()
+    out = hmac.bytes("sha256", bytes.view(key), bytes.view(m))
+    bytes.wipe_free(key)
+    bytes.free(m)
+    bytes.free(out)
+    return scan_after("HMAC-SHA-256", w)
+}
+
+// A shield wrap and unwrap: SHA-512 of the pre-key is the AEAD key, so its
+// first 16 bytes must not be left anywhere. A SHA-2 context holds its digest
+// as 64-bit words in the machine's order (little-endian on every target the
+// tests run on), so the window is the first two words as they lie in a
+// context: each 8 bytes reversed.
+fn shielded() -> int {
+    h, herr = shield.wrap(hexbytes("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", 32))
+    if h == null {
+        println("FAIL shield: ${herr}")
+        return 1
+    }
+    s = h as *shield.Shielded
+    kh = sha2.sha512_bytes(bytes.view(s.prekey))
+    w = bytes.new(16)
+    bytes.set(w, 15, 0)
+    i = 0
+    while i < 8 {
+        bytes.set(w, i, bytes.get(kh, 7 - i))
+        bytes.set(w, 8 + i, bytes.get(kh, 15 - i))
+        i = i + 1
+    }
+    bytes.wipe_free(kh)
+    // The context is a struct the C allocator hands out at its own size, so
+    // this scan steps through the sizes a context can have, with a control
+    // of its own: a raw block of about a context's size, freed unwiped, must
+    // be found first.
+    cw = window("c0ffee00c0ffee00c0ffee00c0ffee00")
+    key_probe_free_raw(bytes.data(cw), 752)
+    ctl = key_probe_scan_step(bytes.data(cw), 512, 1024, 16, 64)
+    bytes.free(cw)
+    got, _uerr = shield.unwrap(h)
+    bytes.wipe_free(got)
+    shield.free(h)
+    if ctl == 0 {
+        bytes.wipe_free(w)
+        println("ok   shield wrap and unwrap: not checked here (the raw control was not found)")
+        return 0
+    }
+    hits = key_probe_scan_step(bytes.data(w), 512, 1024, 16, 64)
+    bytes.wipe_free(w)
+    if hits != 0 {
+        println("FAIL shield wrap and unwrap: ${hits} copies of the AEAD key in freed memory")
+        return 1
+    }
+    println("ok   shield wrap and unwrap: no copy of the AEAD key in freed memory")
+    return 0
+}
+
 main() {
     if key_probe_supported() == 0 {
         println("SKIP: freed memory must not be read here (a sanitizer or Valgrind)")
@@ -96,8 +262,14 @@ main() {
     fails = fails + check("RSA-2048, PKCS#1", rsa_pkcs1(), "26409a4310a03aecd9175eb011bab400")
     fails = fails + check("P-256, PKCS#8", ec_pkcs8(), "a282997f3517fd44cd8e2c35c0ef513b")
     fails = fails + check("P-256, SEC1", ec_sec1(), "a282997f3517fd44cd8e2c35c0ef513b")
+    // Signing, MACs and the shield (#3402).
+    fails = fails + sign_p256()
+    fails = fails + sign_ed25519()
+    fails = fails + sign_rsa()
+    fails = fails + mac()
+    fails = fails + shielded()
     if fails != 0 { exit(1) }
-    println("key loading: no copy left in freed memory (control found ${c1}, ${c2})")
+    println("key loading, signing, HMAC and the shield: no copy left in freed memory (control found ${c1}, ${c2})")
 }
 
 // The test keys (made with openssl genpkey for this test only), and 16

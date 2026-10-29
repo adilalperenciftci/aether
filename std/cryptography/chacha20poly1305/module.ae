@@ -363,13 +363,13 @@ aead_seal(key: ptr, nonce: ptr, aad: byte[], plaintext: byte[]) -> ptr {
     md = mac_data(aad, bytes.view(ct)[0..pt_len])
     tag = poly1305_mac(pk, bytes.view(md))
     bytes.wipe_free(pk)
-    bytes.free(md)
+    bytes.wipe_free(md)
 
     out = bytes.new(pt_len + 16)
     bytes.copy_from_bytes(out, 0, ct, 0, pt_len)
     bytes.copy_from_bytes(out, pt_len, tag, 0, 16)
-    bytes.free(ct)
-    bytes.free(tag)
+    bytes.wipe_free(ct)
+    bytes.wipe_free(tag)
     return out
 }
 
@@ -387,7 +387,7 @@ aead_open(key: ptr, nonce: ptr, aad: byte[], ct_with_tag: byte[]) -> {
     md = mac_data(aad, ct_with_tag[0..body_len])
     want = poly1305_mac(pk, bytes.view(md))
     bytes.wipe_free(pk)
-    bytes.free(md)
+    bytes.wipe_free(md)
 
     // Constant-time compare against the supplied tag at offset body_len.
     diff = 0
@@ -396,7 +396,7 @@ aead_open(key: ptr, nonce: ptr, aad: byte[], ct_with_tag: byte[]) -> {
         diff = diff | ((bytes.get(want, i) ^ ct_with_tag[body_len + i]) & 0xFF)
         i = i + 1
     }
-    bytes.free(want)
+    bytes.wipe_free(want)
     if ctime.declassify(ctime.eq(diff, 0)) == 0 {
         return null, "authentication failed"
     }

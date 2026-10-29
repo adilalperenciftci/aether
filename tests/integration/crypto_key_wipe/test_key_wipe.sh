@@ -1,7 +1,8 @@
 #!/bin/sh
-# The pure TLS server's key loading leaves no copy of a private key in freed
-# memory (#3382): probe.ae (with probe_shim.c, aether.toml) loads and frees
-# four test keys and looks for their secrets in the blocks the C allocator
+# The pure TLS server's key loading (#3382), and signing, HMAC and the shield
+# (#3402), leave no copy of a secret in freed memory: probe.ae (with
+# probe_shim.c, aether.toml) loads and frees four test keys, signs with three
+# kinds, and looks for their secrets in the blocks the C allocator
 # hands out next. Its control, a freed buffer that was not wiped, must be
 # found first; where it is not, the probe proves nothing and the test is a
 # skip. Windows (the UCRT heap) and glibc hand freed blocks back as they
