@@ -27,6 +27,7 @@
 
 // Grant storage
 #define MAX_GRANTS 256
+#define MAX_GRANT_SOURCE_SIZE 8192
 static struct { char cat[64]; char pat[256]; } grants[MAX_GRANTS];
 static int grant_count = 0;
 static int sandbox_active = 0;
@@ -121,7 +122,8 @@ static void parse_grants(const char* data, int len) {
     char line[320];
     int lpos = 0;
     for (int i = 0; i <= len && grant_count < MAX_GRANTS; i++) {
-        if (i == len || data[i] == '\n' || data[i] == '\0') {
+        int at_end = i == len;
+        if (at_end || data[i] == '\n' || data[i] == '\0') {
             line[lpos] = '\0';
             if (lpos > 0 && line[0] != '#') {
                 char* colon = strchr(line, ':');
@@ -135,7 +137,7 @@ static void parse_grants(const char* data, int len) {
                 }
             }
             lpos = 0;
-            if (data[i] == '\0') break;
+            if (at_end || data[i] == '\0') break;
         } else if (lpos < 319) {
             line[lpos++] = data[i];
         }
@@ -164,37 +166,58 @@ static void __attribute__((constructor)) sandbox_init(void) {
     // Legacy: AETHER_SANDBOX_VERBOSE=1 sets stderr mode
     if (real_getenv("AETHER_SANDBOX_VERBOSE")) log_mode = LOG_STDERR;
 
-    // Try shared memory first (set by aether_spawn_sandboxed)
+    // An explicitly configured source is a containment request. If every
+    // configured source fails to load, leave the sandbox active with zero
+    // grants so intercepted operations are denied rather than running
+    // unrestricted. With no source configured at all, preload stays inert.
+    int source_requested = 0;
+    int source_loaded = 0;
+
+    // Try shared memory first (set by aether_spawn_sandboxed).
     const char* shm_name = real_getenv("AETHER_SANDBOX_SHM");
     if (shm_name) {
+        source_requested = 1;
         int fd = shm_open(shm_name, O_RDONLY, 0);
         if (fd >= 0) {
             struct stat st;
-            fstat(fd, &st);
-            char* data = mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
-            if (data != MAP_FAILED) {
-                parse_grants(data, st.st_size);
-                munmap(data, st.st_size);
-                sandbox_active = 1;
+            if (fstat(fd, &st) == 0 && st.st_size >= 0 &&
+                st.st_size <= MAX_GRANT_SOURCE_SIZE) {
+                if (st.st_size == 0) {
+                    source_loaded = 1;
+                } else {
+                    char* data = mmap(NULL, (size_t)st.st_size, PROT_READ,
+                                      MAP_SHARED, fd, 0);
+                    if (data != MAP_FAILED) {
+                        parse_grants(data, (int)st.st_size);
+                        munmap(data, (size_t)st.st_size);
+                        source_loaded = 1;
+                    }
+                }
             }
             close(fd);
         }
     }
 
     // Fall back to grant file (manual LD_PRELOAD usage)
-    if (!sandbox_active) {
+    if (!source_loaded) {
         const char* grant_file = real_getenv("AETHER_SANDBOX_GRANTS");
-        if (!grant_file) return;
-        FILE* f = real_fopen(grant_file, "r");
-        if (!f) return;
-        // Read entire file
-        char buf[8192];
-        int n = fread(buf, 1, sizeof(buf) - 1, f);
-        buf[n] = '\0';
-        fclose(f);
-        parse_grants(buf, n);
-        sandbox_active = 1;
+        if (grant_file) {
+            source_requested = 1;
+            FILE* f = real_fopen(grant_file, "r");
+            if (f) {
+                char buf[MAX_GRANT_SOURCE_SIZE];
+                size_t n = fread(buf, 1, sizeof(buf), f);
+                int extra = fgetc(f);
+                int read_failed = ferror(f) || extra != EOF;
+                fclose(f);
+                if (!read_failed) {
+                    parse_grants(buf, (int)n);
+                    source_loaded = 1;
+                }
+            }
+        }
     }
+    sandbox_active = source_requested;
 
     if (log_mode == LOG_STDERR && sandbox_active) {
         fprintf(stderr, "AETHER_SANDBOX: active with %d grants\n", grant_count);
