@@ -696,8 +696,8 @@ int scheduler_actor_thread_park(ActorBase* actor);
  * step context of its own (the ask it handles, answered or failed when the
  * step ends), and the caller's given back after. What an auto_process
  * actor's thread steps it with. The caller holds what a core holds to step
- * it. */
-void scheduler_step_actor(ActorBase* actor);
+ * it. 1 when the step took a message, which the caller counts handled (#3464). */
+int scheduler_step_actor(ActorBase* actor);
 /* Around a step that fires a receive timeout (#3443): counted until its arm
  * returns, so wait_for_idle() waits for the arm, which runs after the step
  * disarmed the countdown. */

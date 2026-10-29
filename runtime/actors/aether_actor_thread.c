@@ -70,15 +70,18 @@ void* aether_actor_thread(void* arg) {
                 // As a core steps an actor: an ask its handler leaves
                 // unanswered fails then, and a panic ends the actor, not
                 // the process.
-                scheduler_step_actor(actor);
                 // A step takes one message, as on a core. The send was
                 // counted when it was made, so without the credit
                 // scheduler_wait (and with it scheduler_shutdown) waits
-                // forever on a message an actor thread handled.
+                // forever on a message an actor thread handled; and only a
+                // step that took one (not a dead actor's) is credited, or the
+                // handled count passes the sent count (#3464). Release, as
+                // the wait's reading of it is acquire.
+                int took = scheduler_step_actor(actor);
                 int core = actor->assigned_core;
-                if (core >= 0 && core < num_cores) {
+                if (took && core >= 0 && core < num_cores) {
                     atomic_fetch_add_explicit(&schedulers[core].messages_processed, 1,
-                                              memory_order_relaxed);
+                                              memory_order_release);
                 }
             }
             continue;

@@ -709,8 +709,8 @@ static int coop_step(ActorBase* actor) {
     return 1;
 }
 
-void scheduler_step_actor(ActorBase* actor) {
-    (void)coop_step(actor);
+int scheduler_step_actor(ActorBase* actor) {
+    return coop_step(actor);
 }
 
 /* A firing countdown is counted for wait_for_idle() on the multicore

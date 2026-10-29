@@ -211,14 +211,25 @@ static void step_after(ActorBase* actor) {
     }
 }
 
-static inline void aether_step_safe(ActorBase* actor) {
-    if (!actor || !actor->step) return;
-    if (atomic_load_explicit(&actor->dead, memory_order_acquire)) return;
+/* 1 when the step took a message, which its caller counts handled; 0 when it
+ * took none: a dead actor is not stepped (its finalize credits what waits),
+ * and a step of an empty mailbox fires a timeout's arm or nothing. Every
+ * caller holds the step lock, so no other step takes a message meanwhile,
+ * and a step of a mailbox with one takes it. Counted by the step call, a
+ * call that took nothing (an actor killed mid-drain, one stolen between a
+ * caller's look and its lock) credited a message never handled, and the
+ * handled count passed the sent count for good, hiding as many pending
+ * messages from wait_for_idle() (#3464). */
+static inline int aether_step_safe(ActorBase* actor) {
+    if (!actor || !actor->step) return 0;
+    if (atomic_load_explicit(&actor->dead, memory_order_acquire)) return 0;
+    int took = atomic_load_explicit(&actor->mailbox.count, memory_order_acquire) > 0;
     aether_step_barrier(actor, actor_finalize, step_fail_slot, step_after);
+    return took;
 }
 
-void scheduler_step_actor(ActorBase* actor) {
-    aether_step_safe(actor);
+int scheduler_step_actor(ActorBase* actor) {
+    return aether_step_safe(actor);
 }
 
 /* Layout assertions to catch struct padding/size mismatches between
@@ -563,7 +574,7 @@ void scheduler_actor_thread_deliver(ActorBase* actor, Message msg) {
         fprintf(stderr, "aether: out of memory queueing a message for actor %d; "
                         "it is dropped\n", actor->id);
         release_undelivered(actor, &msg);
-        atomic_fetch_add_explicit(&schedulers[0].messages_processed, 1, memory_order_relaxed);
+        atomic_fetch_add_explicit(&schedulers[0].messages_processed, 1, memory_order_release);
         return;
     }
     atomic_store_explicit(&actor->active, 1, memory_order_relaxed);
@@ -579,7 +590,7 @@ void scheduler_actor_thread_deliver(ActorBase* actor, Message msg) {
         int dropped = actor_overflow_drain(actor);
         if (dropped > 0) {
             atomic_fetch_add_explicit(&schedulers[0].messages_processed, (uint64_t)dropped,
-                                      memory_order_relaxed);
+                                      memory_order_release);
             scheduler_count_dead_sends(dropped);
         }
     }
@@ -631,7 +642,7 @@ static void actor_finalize(ActorBase* actor) {
         int c = current_core_id;
         Scheduler* credit = (c >= 0 && c < num_cores) ? &schedulers[c] : &schedulers[0];
         atomic_fetch_add_explicit(&credit->messages_processed, (uint64_t)drained,
-                                  memory_order_relaxed);
+                                  memory_order_release);
         scheduler_count_dead_sends(drained);
     }
     const char* reason = aether_actor_death_reason(actor);
@@ -824,7 +835,7 @@ static void overflow_release(Scheduler* sched) {
             if (actor && !actor->auto_process) inflight_leave(actor, 1);
             // Not a death's drop: the cores are stopping.
             release_undelivered(actor, &b->msgs[i]);
-            atomic_fetch_add_explicit(&sched->messages_processed, 1, memory_order_relaxed);
+            atomic_fetch_add_explicit(&sched->messages_processed, 1, memory_order_release);
             dropped++;
         }
         free(b->actors);
@@ -921,15 +932,15 @@ static void overflow_flush_ex(int from_core, int own) {
                         // Immediately process if step_lock available
                         if (actor->step &&
                             !atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire)) {
-                            int p = 0;
+                            int p = 0, took = 0;
                             while (atomic_load_explicit(&actor->mailbox.count, memory_order_relaxed) > 0 &&
                                    p < 16 &&
                                    atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == from_core) {
-                                aether_step_safe(actor);
+                                took += aether_step_safe(actor);
                                 p++;
                             }
                             atomic_flag_clear_explicit(&actor->step_lock, memory_order_release);
-                            direct_processed += p;
+                            direct_processed += took;
                         }
                     } else {
                         // Mailbox full — keep in overflow
@@ -1693,7 +1704,7 @@ static void actor_free_now(ActorBase* actor) {
     }
     if (drained > 0) {
         atomic_fetch_add_explicit(&schedulers[0].messages_processed,
-                                  (uint64_t)drained, memory_order_relaxed);
+                                  (uint64_t)drained, memory_order_release);
     }
     // So is whatever still waits in an actor thread's inbox (#2598): it was
     // counted as sent and is released and credited the same way. The inbox
@@ -1710,7 +1721,7 @@ static void actor_free_now(ActorBase* actor) {
         }
         if (left > 0) {
             atomic_fetch_add_explicit(&schedulers[0].messages_processed,
-                                      (uint64_t)left, memory_order_relaxed);
+                                      (uint64_t)left, memory_order_release);
         }
         free(ib);
     }
@@ -1854,7 +1865,7 @@ static inline int has_pending_cross_core(Scheduler* sched) {
  * and parks wait_for_idle. */
 static void scheduler_drop_dead_message(Scheduler* sched, ActorBase* actor, Message* msg) {
     release_undelivered(actor, msg);
-    atomic_fetch_add_explicit(&sched->messages_processed, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&sched->messages_processed, 1, memory_order_release);
     // On its way when its target died (#2974); a released target's are its
     // own count's. Counted by the caller's finding, the target dead: a
     // restart in place may have cleared the bit since.
@@ -1963,8 +1974,7 @@ static int make_room(Scheduler* sched, ActorBase* actor) {
         int stepped = 0;
         while (atomic_load_explicit(&actor->mailbox.count, memory_order_acquire) > MAILBOX_SIZE / 2 &&
                !atomic_load_explicit(&actor->dead, memory_order_acquire)) {
-            aether_step_safe(actor);
-            stepped++;
+            stepped += aether_step_safe(actor);
         }
         sched->messages_processed += stepped;
         atomic_flag_clear_explicit(&actor->step_lock, memory_order_release);
@@ -2157,7 +2167,7 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                     scheduler_drop_dead_message(sched, actor, &sched->coalesce_buffer.messages[k]);
                 } else {
                     release_undelivered(actor, &sched->coalesce_buffer.messages[k]);
-                    atomic_fetch_add_explicit(&sched->messages_processed, 1, memory_order_relaxed);
+                    atomic_fetch_add_explicit(&sched->messages_processed, 1, memory_order_release);
                 }
             }
             int delivered = placed - i;
@@ -2185,19 +2195,21 @@ void* AETHER_HOT scheduler_thread(void* arg) {
             if (likely(actor->step) &&
                 atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == sched->core_id &&
                 !atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire)) {
-                int processed = 0;
+                int processed = 0, steps = 0;
                 while (atomic_load_explicit(&actor->mailbox.count, memory_order_relaxed) > 0 &&
-                       processed < 64 &&
+                       steps < 64 &&
                        atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == sched->core_id) {
-                    aether_step_safe(actor);
-                    processed++;
+                    int took = aether_step_safe(actor);
+                    processed += took;
+                    steps++;
+                    if (!took) break;   // dead: its finalize credits what waits
                     // Yield to outer loop if cross-core messages arrived
                     // (e.g. StopAnimation sent from main while actor sleeps).
                     if (has_pending_cross_core(sched)) break;
                 }
                 atomic_flag_clear_explicit(&actor->step_lock, memory_order_release);
                 sched->messages_processed += processed;
-                if (processed > 0 &&
+                if (steps > 0 &&
                     atomic_load_explicit(&actor->mailbox.count, memory_order_relaxed) == 0) {
                     atomic_store_explicit(&actor->active, 0, memory_order_relaxed);
                 }
@@ -2258,7 +2270,8 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                 if (!atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire)) {
                     if (atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == sched->core_id) {
                         scheduler_countdown_enter();   // until its arm returns (#3443)
-                        aether_step_safe(actor);
+                        /* A message that came first is what it takes: counted (#3464). */
+                        sched->messages_processed += aether_step_safe(actor);
                         scheduler_countdown_leave();
                     }
                     atomic_flag_clear_explicit(&actor->step_lock, memory_order_release);
@@ -2272,13 +2285,15 @@ void* AETHER_HOT scheduler_thread(void* arg) {
             }
 
             if (likely(actor->step)) {
-                int processed = 0;
+                int processed = 0, steps = 0;
                 if (!atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire)) {
                     while (atomic_load_explicit(&actor->mailbox.count, memory_order_relaxed) > 0 &&
-                           processed < 64 &&
+                           steps < 64 &&
                            atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == sched->core_id) {
-                        aether_step_safe(actor);
-                        processed++;
+                        int took = aether_step_safe(actor);
+                        processed += took;
+                        steps++;
+                        if (!took) break;   // dead: its finalize credits what waits
                         // Yield to outer loop if cross-core messages arrived
                         // (e.g. StopAnimation sent from main while actor sleeps).
                         if (has_pending_cross_core(sched)) break;
@@ -2286,7 +2301,7 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                     atomic_flag_clear_explicit(&actor->step_lock, memory_order_release);
                 }
                 sched->messages_processed += processed;
-                if (processed > 0 &&
+                if (steps > 0 &&
                     atomic_load_explicit(&actor->mailbox.count, memory_order_relaxed) == 0 &&
                     atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == sched->core_id) {
                     atomic_store_explicit(&actor->active, 0, memory_order_relaxed);
@@ -3404,8 +3419,7 @@ static void send_local_admitted(ActorBase* actor, Message msg) {
         atomic_load_explicit(&actor->mailbox.count, memory_order_relaxed) == 1 &&
         !atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire)) {
         inline_depth++;
-        aether_step_safe(actor);
-        schedulers[current_core_id].messages_processed++;
+        schedulers[current_core_id].messages_processed += aether_step_safe(actor);
         if (atomic_load_explicit(&actor->mailbox.count, memory_order_relaxed) == 0) {
             atomic_store_explicit(&actor->active, 0, memory_order_relaxed);
         }
@@ -3505,7 +3519,7 @@ static void send_through_core(ActorBase* actor, Message msg, int from_core) {
             inflight_leave(actor, 1);
             send_to_dead_actor(actor, &msg);
             Scheduler* credit = current_core_id >= 0 ? &schedulers[current_core_id] : &schedulers[0];
-            atomic_fetch_add_explicit(&credit->messages_processed, 1, memory_order_relaxed);
+            atomic_fetch_add_explicit(&credit->messages_processed, 1, memory_order_release);
             return;
         }
         target_core = atomic_load_explicit(&actor->assigned_core, memory_order_acquire);
@@ -3824,11 +3838,16 @@ void scheduler_send_batch_flush(void) {
     memset(g_batch_buffer->by_core, 0, sizeof(g_batch_buffer->by_core));
 
     // === PHASE 4: Batch enqueue to each core (ONE atomic per core!) ===
-    uint64_t total_sent = 0;
     for (int c = 0; c < num_cores; c++) {
         int start = offsets[c];
         int cnt = by_core[c];
         if (cnt == 0) continue;
+
+        // Counted before the core can take them, as every send is
+        // (count_pending_messages relies on it, #3464): counted after, a
+        // core that handled the batch while this thread waited on another
+        // core's lock made the handled count pass the sent count.
+        atomic_fetch_add_explicit(&main_thread_sent, (uint64_t)cnt, memory_order_relaxed);
 
         // Batch send is always called from main thread (current_core_id = -1),
         // so use the non-scheduler SPSC channel (from_queues[MAX_CORES]) —
@@ -3844,14 +3863,13 @@ void scheduler_send_batch_flush(void) {
         pthread_mutex_unlock(&schedulers[c].foreign_lock);
 
         // Fallback for overflow (rare) - scheduler_send_remote handles its own counting,
-        // the message in flight included, so this batch's count is given back first.
+        // the message in flight included, so this batch's counts are given back first.
         for (int j = enqueued; j < cnt; j++) {
             inflight_leave((ActorBase*)sorted_actors[start + j], 1);
+            atomic_fetch_sub_explicit(&main_thread_sent, 1, memory_order_relaxed);
             send_remote_admitted(sorted_actors[start + j], sorted_msgs[start + j], -1);
         }
 
-        // Only count batch-enqueued messages here (fallback already counted by send_remote)
-        total_sent += enqueued;
         atomic_fetch_add_explicit(&schedulers[c].work_count, enqueued, memory_order_relaxed);
         // A core that went idle and parked between two batches is told, as
         // every other enqueue tells it (#3087). It was not: it slept on the
@@ -3861,8 +3879,6 @@ void scheduler_send_batch_flush(void) {
         if (enqueued > 0) sched_wake(&schedulers[c]);
     }
 
-    // Single atomic update for batch-sent messages
-    atomic_fetch_add_explicit(&main_thread_sent, total_sent, memory_order_relaxed);
     foreign_send_leave();
 
     // Reset buffer
@@ -4371,9 +4387,9 @@ void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg
             !atomic_flag_test_and_set_explicit(&target->step_lock, memory_order_acquire)) {
             pthread_mutex_unlock(&slot->mutex);   /* the reply takes it */
             ask_help_depth++;
-            aether_step_safe(target);
+            int took = aether_step_safe(target);
             ask_help_depth--;
-            asking_core->messages_processed++;
+            asking_core->messages_processed += took;
             if (atomic_load_explicit(&target->mailbox.count, memory_order_relaxed) == 0)
                 atomic_store_explicit(&target->active, 0, memory_order_relaxed);
             atomic_flag_clear_explicit(&target->step_lock, memory_order_release);
