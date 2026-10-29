@@ -7,8 +7,8 @@
 #
 # Asserts:
 #   1. `ae lib-info` exits 0
-#   2. Header reports schema 1.10 (every catalog has the outcome slot,
-#      #2956), and an export returns a string, given back
+#   2. Header reports schema 1.11 (every catalog has the outcome slot,
+#      #2956, and the ABI fields, #2957), and an export returns a string, given back
 #      through the release the catalog names (#2931)
 #   3. Header names the source file
 #   4. Function count is 3
@@ -76,7 +76,7 @@ fi
 fail() { echo "  [FAIL] $1"; echo "--- output:"; echo "$OUT"; exit 1; }
 
 echo "$OUT" | grep -q "Aether Library:" || fail "missing 'Aether Library:' header"
-echo "$OUT" | grep -q "Schema:[[:space:]]*1\\.10" || fail "schema not 1.10"
+echo "$OUT" | grep -q "Schema:[[:space:]]*1\\.11" || fail "schema not 1.11"
 echo "$OUT" | grep -q "String release:[[:space:]]*aether_script_string_release" || fail "no string release named"
 echo "$OUT" | grep -q "Source:" || fail "missing 'Source:' line"
 echo "$OUT" | grep -q "Functions:[[:space:]]*3" || fail "function count not 3"

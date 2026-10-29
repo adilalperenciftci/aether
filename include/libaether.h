@@ -5,6 +5,14 @@
  * plugin systems, language gateways) link against to drive
  * Aether-generated `.so` / `.a` artifacts.
  *
+ * Compatibility (#2957, docs/abi-policy.md): this surface is versioned by
+ * AETHER_HOST_ABI below. Within a level it only grows: new functions,
+ * new constants, new outcomes; a removal, a layout change of a struct
+ * here or a change of meaning bumps the level. A library records the
+ * level it was built at in its catalog (aether_lib_meta, host_abi; none
+ * is level 0, Aether 0.856 and before). A deprecated name stays, accepted
+ * and documented as such, until the next level removes it.
+ *
  * Today this surface exposes the per-call resource caps from issue
  * #343 (memory ceiling + wall-clock deadline). Future additions
  * land as additive symbols — never break the existing names.
@@ -19,6 +27,9 @@
 #define LIBAETHER_H
 
 #include <stdint.h>
+
+/* The host ABI level of this header (#2957). */
+#define AETHER_HOST_ABI 1
 
 #ifdef __cplusplus
 extern "C" {
@@ -91,6 +102,14 @@ AETHER_API int aether_deadline_tripped(void);
  * a panic. The library is usable again at once; nothing done before the
  * failure is rolled back.
  *
+ * New outcomes may be added within a host ABI level: a host treats any
+ * outcome it does not know as a failure, as it does AETHER_PANICKED.
+ * AETHER_INCOMPATIBLE (#2957) means the library was made for another
+ * runtime than the one it found (a --shared-runtime library, or generated C
+ * compiled into a host, against a runtime of another version): none of its
+ * code ran, every call returns its zero value with it, and
+ * aether_last_outcome_text() names both runtimes.
+ *
  * Nested calls (an export calls a host service, which calls an export)
  * each have their own outcome, and the outer call's caller info,
  * deadline and sandbox grants are back when the inner one returns, on
@@ -105,6 +124,7 @@ AETHER_API int aether_deadline_tripped(void);
 #define AETHER_CANCELLED      3   /* cancelled from another thread */
 #define AETHER_MEMORY_CAP     4   /* an allocation went past the memory cap */
 #define AETHER_OUT_OF_MEMORY  5   /* the allocator could not satisfy one */
+#define AETHER_INCOMPATIBLE   6   /* the library cannot run on the runtime it found (#2957) */
 #endif
 AETHER_API int aether_last_outcome(void);
 

@@ -140,6 +140,9 @@ content-addressable. Fields:
 | `closures[]` | Closure surface reachable from exports: `name`, `role` (`builder` / `param` / `literal`), `enclosing_export`, `signature`, `captures[]` (`name` + `type`), `source_file`, `source_line` |
 | `constants[]` | Exported scalar/string consts: `name`, `type`, `value` |
 | `structs[]` | Schema 1.3: the structs the exports use, `name`, `kind` (`""`, `"extern"`, `"extern_packed"`), `fields[]` (`name`, `type` as Aether source, `flags`), `source_file`, `source_line` |
+| `host_abi` | Schema 1.11: the host ABI level of `libaether.h` the library was built at ([abi-policy.md](abi-policy.md)) |
+| `runtime_abi` | Schema 1.11: the runtime ABI it was compiled for (`AETHER_RUNTIME_ABI_ID`, such as `"0.856.0/abi1"`) |
+| `requires[]` | Schema 1.11: what its importer must do (`outcome_check`, `string_release`, `shared_runtime`, `runtime_abi`, `actors`); an importer that does not know one refuses the library |
 
 ```json
 {
@@ -764,6 +767,9 @@ aether_exec_account_free(script);
   this thread while it is in use (a send's inline step, a cooperative ask's
   poll), the drops its step runs after its handler included (#3416): a step
   runs in its own context (actor-concurrency.md, "The delivery contract").
+  The refusal on another thread is a threaded build's: a cooperative build
+  (`AETHER_NO_THREADING`) runs one thread per program by contract, so there
+  is no other thread to refuse.
 - **Ownership.** The account is the host's from `aether_exec_account_new`
   to `aether_exec_account_free`; the runtime keeps nothing of `limits` past
   the call, writes `previous` and keeps nothing of it. Freeing an account
@@ -910,6 +916,17 @@ case AETHER_DEADLINE:  /* cut by its deadline: r is not a result */ break;
   nor call anything (scalar parameters and locals, `+ - *`, comparisons,
   if/else, return) gets no frame and records its OK outcome only: 0.57 ns
   against 0.19 ns.
+- **A library made for another runtime runs nothing** (#2957). A
+  `--shared-runtime` library on a runtime of another ABI than the one it
+  was compiled for (a shared runtime replaced in place), or `--emit=csrc`
+  code linked against another Aether's runtime, finds out at its first
+  call: every export returns its zero value with `AETHER_INCOMPATIBLE`
+  (6), none of its code runs, and the reason, naming both runtimes, is
+  printed once and in `aether_last_outcome_text()`. A host asks first with
+  `aether_<lib>_check(const char** why)`: 0, or -1 with the reason. The
+  same C compiled against another Aether's headers does not compile. A
+  host treats an outcome it does not know as a failure.
+  [abi-policy.md](abi-policy.md) has what is supported across versions.
 - **The host API is in every library.** A library built with its own
   runtime carries `aether_set_call_deadline`, `aether_deadline_tripped`,
   `aether_set_memory_cap`, `aether_set_caller`, `aether_clear_caller`,
@@ -1063,8 +1080,13 @@ present, "1.2" once exported-constant records
 and "1.3" once struct records or source signatures are (below), and so on
 up to "1.9" (runtime/aether_lib_meta.h lists them). Since "1.10" every
 catalog has `outcome`, the library's outcome accessor
-([above](#failures-and-nested-calls-at-the-boundary)), so every library
-built now is "1.10". A reader
+([above](#failures-and-nested-calls-at-the-boundary)). Since "1.11"
+(#2957) every catalog also has `host_abi`, the host ABI level it was built
+at, `runtime_abi`, the runtime ABI it was compiled for, and `requires`, a
+comma-separated list of what its importer must do; every library built now
+is "1.11". An importer reads any minor of schema 1 and refuses another
+major, and refuses a library that requires something it does not know,
+naming it and the fix ([abi-policy.md](abi-policy.md)). A reader
 touches a field only when the artifact's minor version is at least the one
 that appended it: an older artifact's struct ends before the newer slots.
 The function table includes every

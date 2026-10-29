@@ -1,0 +1,14 @@
+// A library whose generated C a C host compiles for another runtime ABI
+// than the runtime it links (#2957): none of its code may run. Each export
+// tells the host it ran.
+extern host_ran()
+
+bump(n: int) -> int {
+    host_ran()
+    return n + 1
+}
+
+greet() -> string {
+    host_ran()
+    return "hello"
+}

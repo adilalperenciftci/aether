@@ -62,10 +62,14 @@ extern void aether_sandbox_audit(const char* category, const char* resource, int
 // and refuses (aether_sandbox_check_slow). On one runtime image all of this
 // is one copy, and the count is its own.
 
-#define AETHER_SANDBOX_RV_VERSION 1
+/* The rendezvous's layout (#2957): its version and its size come first, so
+ * a copy reads nothing else of one laid out otherwise. Version 1 had no
+ * size. */
+#define AETHER_SANDBOX_RV_VERSION 2
 
 typedef struct AetherSandboxRendezvous {
-    int version;
+    uint32_t version;
+    uint32_t size;                // sizeof(AetherSandboxRendezvous)
     atomic_int* threads;          // threads with a level in force, in any copy
     int (*levels)(int delta);     // this thread's levels in every copy: adds delta, returns the total
 } AetherSandboxRendezvous;
@@ -86,7 +90,9 @@ static int rv_levels(int delta) {
     return after;
 }
 
-static const AetherSandboxRendezvous g_own_rv = { AETHER_SANDBOX_RV_VERSION, &g_threads, rv_levels };
+static const AetherSandboxRendezvous g_own_rv = {
+    AETHER_SANDBOX_RV_VERSION, (uint32_t)sizeof(AetherSandboxRendezvous), &g_threads, rv_levels
+};
 
 /* Looked up by name in the other copies, so exported from each. */
 #if defined(__GNUC__) || defined(__clang__)
@@ -139,7 +145,22 @@ static const AetherSandboxRendezvous* rv(void) {
     atomic_store_explicit(&aether_step_sandbox_hide, sandbox_step_hide, memory_order_relaxed);
     atomic_store_explicit(&aether_step_sandbox_show, sandbox_step_show, memory_order_relaxed);
     const AetherSandboxRendezvous* found = find_rendezvous();
-    if (!found || found->version != AETHER_SANDBOX_RV_VERSION) found = &g_own_rv;
+    if (found && found != &g_own_rv &&
+        (found->version != AETHER_SANDBOX_RV_VERSION ||
+         found->size != (uint32_t)sizeof(AetherSandboxRendezvous))) {
+        /* Another layout (another Aether): only its version and size were
+         * read. This copy counts its own levels apart, as copies that never
+         * found each other do, and says so once. */
+        fprintf(stderr,
+                "aether: sandbox: this runtime copy cannot share sandbox levels with the one "
+                "loaded first (levels version %u, %u bytes, against %u, %u): the levels that "
+                "copy enforces are not seen here; build the libraries with one Aether "
+                "version, or with --shared-runtime\n",
+                (unsigned)AETHER_SANDBOX_RV_VERSION, (unsigned)sizeof(AetherSandboxRendezvous),
+                (unsigned)found->version, (unsigned)found->size);
+        found = NULL;
+    }
+    if (!found) found = &g_own_rv;
     const AetherSandboxRendezvous* expected = NULL;
     atomic_compare_exchange_strong_explicit(&g_rv, &expected, found,
                                             memory_order_acq_rel, memory_order_acquire);

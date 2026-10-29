@@ -96,7 +96,18 @@
  * export runs in an execution frame, so a panic ends the call with
  * AETHER_PANICKED instead of the process; an Aether importer reads the
  * outcome after each call and raises a failure again as a panic in its own
- * runtime. Every library has it, so every catalog is "1.10".
+ * runtime. Every library has it, so every catalog was "1.10" until v12.
+ *
+ * v12 (schema "1.11", #2957) appends `host_abi`, the AETHER_HOST_ABI level
+ * of libaether.h it was built at (none recorded is level 0, Aether 0.856
+ * and before); `runtime_abi`, the AETHER_RUNTIME_ABI_ID (aether_abi.h) of
+ * the runtime headers it was compiled against, which its stubs check
+ * against the runtime they run on before the first call; and `requires`,
+ * the duties its importer must perform, by name, comma-separated:
+ * outcome_check (1.10), string_release (1.9), shared_runtime (1.5),
+ * runtime_abi (1.11), actors (1.7). An importer refuses a catalog that
+ * requires a duty it does not know, and reads one whose newer fields it
+ * only does not know (docs/abi-policy.md). Every catalog is "1.11".
  *
  * Schema versioning: `schema_version` is "1.0" for function-only
  * artifacts, "1.1" once closure records are present, "1.2" once
@@ -239,6 +250,12 @@ typedef struct {
     const char*               outcome;           /* schema >= 1.10: the symbol
                                                     of the library's outcome
                                                     accessor (#2956)        */
+    int                       host_abi;          /* schema >= 1.11: the host
+                                                    ABI level (#2957)        */
+    const char*               runtime_abi;       /* schema >= 1.11: the runtime
+                                                    ABI it was compiled for */
+    const char*               requires;          /* schema >= 1.11: its
+                                                    importer's duties       */
 } AetherLibMeta;
 
 /* The single entry point. Every `--emit=lib` artifact exports this

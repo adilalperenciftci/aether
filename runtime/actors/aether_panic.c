@@ -481,6 +481,7 @@ const char* aether_exec_reason(int outcome) {
     case AETHER_CANCELLED:     return "the call was cancelled";
     case AETHER_MEMORY_CAP:    return "the call went past the memory cap";
     case AETHER_OUT_OF_MEMORY: return "the call ran out of memory";
+    case AETHER_INCOMPATIBLE:  return "the library was made for another runtime";
     default:                   return "panic";
     }
 }

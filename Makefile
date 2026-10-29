@@ -938,6 +938,10 @@ TEST_OBJS = $(TEST_SRC:%.c=$(OBJ_DIR)/%.o)
 $(OBJ_DIR)/tools/ae_version.o: $(VERSION_HEADER)
 $(OBJ_DIR)/tools/ae.o: $(VERSION_HEADER)
 $(OBJ_DIR)/compiler/aetherc.o: $(VERSION_HEADER)
+# aether_abi.h includes it (#2957): the runtime ABI id the runtime reports
+# and the one the code generator writes into each library.
+$(OBJ_DIR)/runtime/aether_exec.o: $(VERSION_HEADER)
+$(OBJ_DIR)/compiler/codegen/codegen.o: $(VERSION_HEADER)
 
 # Test files using TEST() macro system (exclude standalone tests)
 TEST_SRC = tests/runtime/test_harness.c \
@@ -971,6 +975,7 @@ TEST_SRC = tests/runtime/test_harness.c \
            tests/runtime/test_ask_message.c \
            tests/runtime/test_step_context.c \
            tests/runtime/test_exec_accounts.c \
+           tests/runtime/test_abi_layout.c \
            tests/runtime/test_sender_move_order.c \
            tests/runtime/test_actor_thread_sends.c \
            tests/runtime/test_overflow_reentry.c \

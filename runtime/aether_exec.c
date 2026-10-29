@@ -24,6 +24,7 @@
  * changed it during the call. */
 
 #include "aether_exec.h"
+#include "aether_abi.h"
 #include "aether_resource_caps.h"
 #include "aether_host.h"
 #include "aether_sandbox.h"
@@ -362,6 +363,13 @@ AETHER_EXEC_API int aether_exec_cancel(AetherExecToken token) {
     atomic_store_explicit(&c->pending, token.serial, memory_order_release);
     atomic_store_explicit(&aether_caps_armed, 1, memory_order_relaxed);
     return 0;
+}
+
+/* aether_abi.h (#2957): the runtime ABI this runtime was built at, which a
+ * library compiled against its headers compares with its own before its
+ * first call runs. */
+AETHER_EXEC_API const char* aether_runtime_abi(void) {
+    return AETHER_RUNTIME_ABI_ID;
 }
 
 AETHER_EXEC_API int aether_last_outcome(void) {

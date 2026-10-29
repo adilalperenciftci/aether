@@ -18,7 +18,7 @@ exports(
     last_outcome, last_outcome_text,
     account_new, account_free, account_use, account_in_use, account_used, account_tripped,
     DEADLINE_ELAPSED, DEADLINE_ACTIVE, TRIPPED_DEADLINE, TRIPPED_MEMORY,
-    OK, PANICKED, DEADLINE, CANCELLED, MEMORY_CAP, OUT_OF_MEMORY
+    OK, PANICKED, DEADLINE, CANCELLED, MEMORY_CAP, OUT_OF_MEMORY, INCOMPATIBLE
 )
 
 // Emit an event to the host process. Returns 1 if a handler was found
@@ -130,6 +130,7 @@ const DEADLINE = 2
 const CANCELLED = 3
 const MEMORY_CAP = 4
 const OUT_OF_MEMORY = 5
+const INCOMPATIBLE = 6 // made for another runtime (#2957); any other is a failure too
 
 extern aether_last_outcome() -> int
 extern aether_last_outcome_text() -> string

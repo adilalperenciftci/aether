@@ -75,6 +75,7 @@ extern char** environ;
 #include "ae_help.h"
 #include "ae_fmt.h"
 #include "ae_sha256.h"
+#include "../runtime/aether_abi.h"   /* #2957: the runtime ABI this ae links programs against */
 #include "ae_bindgen.h"
 #include "ae_line.h"
 #include "ae_release_platform.h"
@@ -469,6 +470,9 @@ typedef struct {
     const unsigned char* closure_config_unused; /* schema >= 1.8, parallel to closures */
     const char* string_release;            /* schema >= 1.9: gives back a returned string */
     const char* outcome;                   /* schema >= 1.10: the outcome accessor (#2956) */
+    int         host_abi;                  /* schema >= 1.11 (#2957): libaether.h's level */
+    const char* runtime_abi;               /* schema >= 1.11: aether_abi.h's id it was compiled for */
+    const char* requires;                  /* schema >= 1.11: the duties of its importer */
 } _AeLibInfoMeta;
 
 /* The catalog's schema minor ("1.<minor>"). A reader may touch a field only
@@ -477,6 +481,69 @@ typedef struct {
 static int ae_lib_meta_minor(const _AeLibInfoMeta* m) {
     if (!m || !m->schema_version || strncmp(m->schema_version, "1.", 2) != 0) return 0;
     return atoi(m->schema_version + 2);
+}
+
+/* #2957: the duties this importer performs, by the names a 1.11 catalog's
+ * `requires` lists them. A catalog at 1.10 or before carries no list: what
+ * its minor appended is what it requires, and this importer performs all
+ * of those. Any other name is a duty this importer does not know: the
+ * library is refused, never used without it. */
+static const char* const k_ae_import_duties[] = {
+    "outcome_check",    /* 1.10: the outcome read after every call, a failure raised */
+    "string_release",   /* 1.9: a returned string given back to the library */
+    "shared_runtime",   /* 1.5: the program links the shared runtime */
+    "runtime_abi",      /* 1.11: that runtime's ABI is the library's */
+    "actors",           /* 1.7: the program runs the scheduler */
+};
+
+#define AE_CATALOG_MINOR_KNOWN 11
+
+/* A library's catalog against this importer (#2957): 0 when it can be used;
+ * otherwise each reason on stderr, naming what is missing, both versions and
+ * the fix, and -1. Called before anything of the library is used. */
+static int ae_lib_check_compat(const _AeLibInfoMeta* m, const char* so_path) {
+    const char* schema = m && m->schema_version ? m->schema_version : "(none)";
+    const char* built_by = m && m->aether_version ? m->aether_version : "(unknown)";
+    if (!m || !m->schema_version || strncmp(m->schema_version, "1.", 2) != 0) {
+        fprintf(stderr, "Error: %s: its catalog is schema %s, and this ae (%s) reads schema 1 only\n"
+                        "       Rebuild the library with this Aether, or import it with an ae of its own version.\n",
+                so_path, schema, AETHER_VERSION);
+        return -1;
+    }
+    int minor = ae_lib_meta_minor(m);
+    int refused = 0;
+    if (minor >= 11 && m->requires) {
+        const char* p = m->requires;
+        while (*p) {
+            const char* e = strchr(p, ',');
+            size_t n = e ? (size_t)(e - p) : strlen(p);
+            int known = 0;
+            for (size_t k = 0; k < sizeof(k_ae_import_duties) / sizeof(k_ae_import_duties[0]); k++)
+                if (strlen(k_ae_import_duties[k]) == n && strncmp(k_ae_import_duties[k], p, n) == 0) known = 1;
+            if (!known && n > 0) {
+                fprintf(stderr, "Error: %s requires `%.*s` of its importer, which this ae does not perform\n"
+                                "       The library was built by Aether %s (catalog %s); this ae is %s (catalog 1.%d).\n"
+                                "       Import it with an ae of version %s or newer, or rebuild the library with this one.\n",
+                        so_path, (int)n, p, built_by, schema, AETHER_VERSION, AE_CATALOG_MINOR_KNOWN, built_by);
+                refused = 1;
+            }
+            p += n + (e ? 1 : 0);
+        }
+    }
+    int shared = minor >= 5 && m->runtime && strcmp(m->runtime, "shared") == 0;
+    if (shared && minor < 11) {
+        fprintf(stderr, "Error: %s runs on the shared runtime, and was built by Aether %s (catalog %s, host ABI level 0),\n"
+                        "       which records no runtime ABI: it cannot be checked against this one (%s).\n"
+                        "       Rebuild the library with this Aether.\n",
+                so_path, built_by, schema, AETHER_RUNTIME_ABI_ID);
+        refused = 1;
+    } else if (shared && (!m->runtime_abi || strcmp(m->runtime_abi, AETHER_RUNTIME_ABI_ID) != 0)) {
+        fprintf(stderr, "Error: %s was made for the Aether runtime %s, and this ae links the shared runtime %s\n"
+                        "       Rebuild the library with this Aether, or build the program with the library's.\n",
+                so_path, m->runtime_abi ? m->runtime_abi : "(none)", AETHER_RUNTIME_ABI_ID);
+        refused = 1;
+    }
+    return refused ? -1 : 0;
 }
 
 // --coverage: when set, build_gcc_cmd appends `--coverage` to the gcc
@@ -5733,6 +5800,8 @@ static int ae_generate_binimport_stub(const char* so_path, const char* module, F
     if (!mf) { ae_lib_close(h); return -1; }
     const _AeLibInfoMeta* m = mf();
     if (!m) { ae_lib_close(h); return -1; }
+    /* #2957: refused before anything of it is used or declared. */
+    if (ae_lib_check_compat(m, so_path) != 0) exit(1);
 
     fprintf(out, "// Auto-generated Aether interface for %s\n", so_path);
     fprintf(out, "// Synthesized by `ae` from the artifact's aether_lib_meta\n");
@@ -13074,6 +13143,12 @@ static int cmd_lib_info(int argc, char** argv) {
     if (minor >= 10 && m->outcome && m->outcome[0]) {
         printf("  Outcome:       %s\n", m->outcome);
     }
+    /* #2957: none recorded is host ABI level 0 (Aether 0.856 and before). */
+    printf("  Host ABI:      %d\n", minor >= 11 ? m->host_abi : 0);
+    printf("  Runtime ABI:   %s\n", minor >= 11 && m->runtime_abi ? m->runtime_abi : "(not recorded)");
+    if (minor >= 11) printf("  Requires:      %s\n", m->requires && m->requires[0] ? m->requires : "(nothing)");
+    fflush(stdout);
+    printf("  Importable:    %s\n", ae_lib_check_compat(m, path) == 0 ? "yes, by this ae" : "no (above)");
     printf("\n");
 
     if (m->function_count > 0 && m->functions) {

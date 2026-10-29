@@ -338,3 +338,6 @@ tests/integration/crypto_key_wipe/
 tests/integration/pointer_store_published/
 # #3413: probe.ae links handle.c and force-includes handle.h (aether.toml); test_owned_drop_signatures.sh builds and runs it.
 tests/integration/owned_drop_signatures/
+# #2957: app.ae imports a hand-made catalog (fake_catalog.c) and abi_lib.ae is a
+# library with no main; test_abi_policy.sh builds both against each boundary.
+tests/integration/abi_policy/

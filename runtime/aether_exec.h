@@ -37,6 +37,7 @@ extern "C" {
 #define AETHER_CANCELLED      3
 #define AETHER_MEMORY_CAP     4
 #define AETHER_OUT_OF_MEMORY  5
+#define AETHER_INCOMPATIBLE   6   /* made for another runtime (#2957) */
 #endif
 
 /* The deepest executions nest on one thread: each is a panic frame. */
