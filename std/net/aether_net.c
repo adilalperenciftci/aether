@@ -373,6 +373,28 @@ static void net_set_socket_timeouts(int fd, int timeout_sec) {
 #endif
 }
 
+/* A write to a connection the peer has closed raises SIGPIPE, which ends a
+ * process that has not ignored it, with no word said (#3457): the pure TLS
+ * stack's peer died writing to a client that had stopped reading, and its
+ * client writing after the peer closed, on macOS, whose socket buffers are
+ * small enough for a write to come after the close. The write fails with
+ * EPIPE instead, as the HTTP server's do: Linux names it on each send
+ * (MSG_NOSIGNAL), macOS and the BSDs on the socket (SO_NOSIGPIPE), and
+ * Windows raises no signal. */
+#if defined(MSG_NOSIGNAL)
+#define AE_NET_NOSIGNAL MSG_NOSIGNAL
+#else
+#define AE_NET_NOSIGNAL 0
+#endif
+static void net_no_sigpipe(int fd) {
+#ifdef SO_NOSIGPIPE
+    int on = 1;
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+#else
+    (void)fd;
+#endif
+}
+
 /* tcp_connect_raw, and with `read_buffer` > 0 the receive buffer set before
  * the connection is made (tcp_connect_buffered_raw). */
 static TcpSocket* tcp_connect_with(const char* host, int port, int read_buffer) {
@@ -394,6 +416,7 @@ static TcpSocket* tcp_connect_with(const char* host, int port, int read_buffer) 
     if (sockfd < 0) return NULL;
 
     net_set_socket_timeouts(sockfd, 30);
+    net_no_sigpipe(sockfd);
 
     TcpSocket* sock = (TcpSocket*)malloc(sizeof(TcpSocket));
     if (!sock) { close(sockfd); return NULL; }
@@ -414,7 +437,7 @@ TcpSocket* tcp_connect_buffered_raw(const char* host, int port, int read_buffer)
 int tcp_send_raw(TcpSocket* sock, const char* data) {
     if (!sock || !sock->connected || !data) return -1;
 
-    int sent = send(sock->fd, data, strlen(data), 0);
+    int sent = send(sock->fd, data, strlen(data), AE_NET_NOSIGNAL);
     return sent;
 }
 
@@ -422,7 +445,7 @@ int tcp_send_n_raw(TcpSocket* sock, const char* data, int length) {
     if (!sock || !sock->connected || !data || length < 0) return -1;
     if (length == 0) return 0;
 
-    int sent = send(sock->fd, data, (size_t)length, 0);
+    int sent = send(sock->fd, data, (size_t)length, AE_NET_NOSIGNAL);
     return sent;
 }
 
@@ -508,7 +531,7 @@ int tcp_send_bytes_raw(TcpSocket* sock, const void* data, int length) {
     if (!sock || !sock->connected || length < 0) return -1;
     if (length == 0) return 0;
     if (!data) return -1;
-    int sent = send(sock->fd, (const char*)data, (size_t)length, 0);
+    int sent = send(sock->fd, (const char*)data, (size_t)length, AE_NET_NOSIGNAL);
     return sent < 0 ? -1 : sent;
 }
 
@@ -583,14 +606,14 @@ int tcp_send_all_raw(TcpSocket* sock, const void* data, int length) {
 #endif
     while (sent < length) {
 #ifdef _WIN32
-        int n = send(sock->fd, p + sent, (size_t)(length - sent), 0);
+        int n = send(sock->fd, p + sent, (size_t)(length - sent), AE_NET_NOSIGNAL);
         if (n > 0) {
             sent += n;
             continue;
         }
         if (n < 0 && WSAGetLastError() == WSAEINTR) continue;
 #else
-        int n = (int)send(sock->fd, p + sent, (size_t)(length - sent), MSG_DONTWAIT);
+        int n = (int)send(sock->fd, p + sent, (size_t)(length - sent), MSG_DONTWAIT | AE_NET_NOSIGNAL);
         if (n > 0) {
             sent += n;
             wait.sent = 1;
@@ -764,6 +787,7 @@ TcpSocket* tcp_accept_raw(TcpServer* server) {
     }
 
     net_set_socket_timeouts(newsockfd, 30);
+    net_no_sigpipe(newsockfd);
 
     TcpSocket* sock = (TcpSocket*)malloc(sizeof(TcpSocket));
     if (!sock) { close(newsockfd); return NULL; }
@@ -804,6 +828,7 @@ TcpSocket* tcp_socket_from_fd_owned(int fd) {
     if (flags >= 0) fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
 #endif
     net_set_socket_timeouts(fd, 30);
+    net_no_sigpipe(fd);
 
     TcpSocket* sock = (TcpSocket*)malloc(sizeof(TcpSocket));
     if (!sock) {
