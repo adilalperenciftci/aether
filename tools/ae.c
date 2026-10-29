@@ -2324,7 +2324,9 @@ found_root:
  * why, when the list cannot be read. */
 static int ae_runtime_srcs_ready(void) {
     if (tc.runtime_srcs && tc.runtime_srcs[0]) return 1;
-    char base[1024], mpath[1200];
+    /* Sized to hold the longest root and what is added to it, whole. */
+    char base[sizeof(tc.root) + sizeof("/share/aether")];
+    char mpath[sizeof(base) + sizeof("/build/MANIFEST")];
     if (tc.dev_mode) {
         snprintf(base, sizeof(base), "%s", tc.root);
         snprintf(mpath, sizeof(mpath), "%s/build/MANIFEST", tc.root);
