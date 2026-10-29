@@ -1577,8 +1577,10 @@ fn decode_basic_constraints(octet_content: @keep ptr, out: *LeafCert) {
     r = asn1.reader_new(octet_content)
     body, berr = asn1.read_tlv(r)
     btag = asn1.last_tag(r)
+    // Nothing after the SEQUENCE: bytes there were read past (#3303).
+    trailing = asn1.reader_eof(r) != 1
     asn1.reader_free(r)
-    if string.equals(berr, "") != 1 || btag != 0x30 {
+    if string.equals(berr, "") != 1 || btag != 0x30 || trailing {
         out.ext_bits = out.ext_bits | EXT_MALFORMED
         if body != null { bytes.wipe_free(body) }
         return

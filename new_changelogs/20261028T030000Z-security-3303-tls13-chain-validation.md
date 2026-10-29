@@ -18,7 +18,8 @@
   a repeated extension no longer lets the last copy win, and a BOOLEAN other
   than 0x00 or 0xFF (a cA, or an extension's critical flag) is no longer
   read as TRUE; each makes the certificate refused.
-  A basicConstraints field repeated or out of order (the last one won),
+  A basicConstraints field repeated or out of order (the last one won), or
+  a byte after the extension's SEQUENCE,
   and a pathLenConstraint that is negative or carries a leading zero it does
   not need is refused too; one of four bytes or more, too large to limit
   any path, reads as unbounded, as OpenSSL reads it.
