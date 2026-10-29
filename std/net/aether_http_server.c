@@ -9,7 +9,6 @@
 #include "../../runtime/utils/aether_cpu_available.h"
 #if !defined(_WIN32)
 #include <signal.h>    /* pthread_sigmask / sigset_t for the embedded-server signal mask */
-#include <sys/ioctl.h> /* FIONREAD: conn_fd_unread (#3405) */
 /* The portable thread shim, not raw <pthread.h> (see its header note).
  * It is real pthreads on POSIX, a CRITICAL_SECTION shim on Windows, and
  * no-op stubs where AETHER_HAS_THREADS is 0. Including <pthread.h> directly
@@ -301,6 +300,7 @@ const char* http_request_header_value(HttpRequest* r, int i) { (void)r; (void)i;
     #include <fcntl.h>
     #include <limits.h>
     #include <poll.h>
+    #include <sys/ioctl.h>         /* FIONREAD: conn_fd_unread (#3405) */
     #include <errno.h>
     /* Linux + macOS sendfile(2) live in different headers with
      * different signatures. Only one is pulled in per platform. */
