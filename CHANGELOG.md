@@ -14,6 +14,15 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.861.0]
+
+### Fixed
+
+- **The cross-version ABI matrix accepts matching shared runtimes.** CI
+  can compare a tree with its own published release. The matrix now reads
+  the libraries' runtime ABI IDs and verifies successful calls and imports
+  when they match, while still requiring rejection when they differ.
+
 ## [0.860.0]
 
 ### Added
