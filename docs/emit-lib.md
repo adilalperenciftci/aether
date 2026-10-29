@@ -780,7 +780,8 @@ use per thread, so an account is charged whichever copy allocates, and is
 refused on another thread whichever copy is asked.
 
 - The copy that owns the accounts must stay loaded while another runs:
-  unloading it first is not supported.
+  unloading it first is not supported. Any other copy may be unloaded: it
+  leaves the accounts as it goes (#3411), and is never written into after.
 - On Windows an executable exports nothing, so a program's own copy finds a
   library's only if the library was loaded before the program's first
   account call. Where two copies did not find each other, a copy refuses

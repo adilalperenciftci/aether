@@ -9,7 +9,10 @@
 # loading the library with another: one lock and one thread per account
 # across the copies, an account made before the copies found each other
 # refused by the copy that does not hold it, and (foreign_rv.c, loaded
-# first) a rendezvous of another layout refused by both copies.
+# first) a rendezvous of another layout refused by both copies. unload.c
+# unloads a copy that shared the accounts, then makes the first account,
+# and many.c has 70 copies share them, past the 64 the list once held
+# (#3411).
 #
 # Fixtures, not tests: accts.ae is a library and app.ae its importer; the
 # driver builds both.
@@ -147,6 +150,40 @@ expect "two copies, accounts of another layout loaded first" \
 expect "two copies, each copy names the layout once" \
     "$(grep -c "cannot share execution accounts" "$TMP/foreign.err")" "2"
 
+# #3411: a copy that shared the accounts and is unloaded is not written
+# into when the first account is made afterwards.
+cp "$TMP/own/libaccts.$ext" "$TMP/libaccts_b.$ext"
+# shellcheck disable=SC2086
+if ! "$CC" -O1 "$SCRIPT_DIR/unload.c" -o "$TMP/unload" $dl > "$TMP/cc_unload.log" 2>&1; then
+    echo "  [FAIL] emit_lib_accounts: the unload host did not build"
+    head -10 "$TMP/cc_unload.log" | sed 's/^/        /'
+    exit 1
+fi
+expect "a copy unloaded after it shared the accounts" \
+    "$("$TMP/unload" "$TMP/own/libaccts.$ext" "$TMP/libaccts_b.$ext" 2>"$TMP/unload.err" | tr -d '\r')" \
+    "unload: B's call 160, unloaded 0; an account made and freed after: yes"
+
+# #3411: more copies than the list once held (64), the last one charged.
+mkdir -p "$TMP/many"
+copies=""
+i=1
+while [ $i -lt 70 ]; do
+    cp "$TMP/own/libaccts.$ext" "$TMP/many/libaccts_$i.$ext"
+    copies="$copies $TMP/many/libaccts_$i.$ext"
+    i=$((i + 1))
+done
+# shellcheck disable=SC2086
+if ! "$CC" -O1 "$SCRIPT_DIR/many.c" -o "$TMP/many_host" $dl > "$TMP/cc_many.log" 2>&1; then
+    echo "  [FAIL] emit_lib_accounts: the many-copies host did not build"
+    head -10 "$TMP/cc_many.log" | sed 's/^/        /'
+    exit 1
+fi
+# shellcheck disable=SC2086
+expect "70 copies sharing the accounts" \
+    "$("$TMP/many_host" "$TMP/own/libaccts.$ext" $copies 2>"$TMP/many.err" | tr -d '\r')" \
+    "many: 70 copies joined; the last one's string charged: yes, freed: yes"
+rm -rf "$TMP/many"
+
 # 3. one shared runtime
 if ls "$ROOT/build/shared/" 2>/dev/null | grep -q "aether"; then
     if ! build_lib shared "--shared-runtime"; then
@@ -167,6 +204,6 @@ else
 fi
 
 if [ "$fail" = 0 ]; then
-    echo "  [PASS] emit_lib_accounts: two accounts on one thread keep their allowances, deadlines and blocks apart, a child narrows its parent, frees credit the account charged, and an Aether or C host's account charges a library with its own runtime (one lock, one thread per account across the copies, a copy of another layout refused): one runtime, the library's own$shared_note"
+    echo "  [PASS] emit_lib_accounts: two accounts on one thread keep their allowances, deadlines and blocks apart, a child narrows its parent, frees credit the account charged, and an Aether or C host's account charges a library with its own runtime (one lock, one thread per account across the copies, a copy of another layout refused, an unloaded copy never written into, 70 copies charged): one runtime, the library's own$shared_note"
 fi
 exit $fail

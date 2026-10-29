@@ -183,7 +183,8 @@ AETHER_API int aether_exec_cancel(AetherExecToken token);
  * or execution: one lock, one table, each thread's account in use in one
  * place, so an account is charged whichever copy allocates and is refused
  * on another thread whichever copy asks. The copy that owns them must stay
- * loaded while any other runs: unloading it first is not supported. On
+ * loaded while any other runs: unloading it first is not supported; any
+ * other copy may be unloaded, and leaves them as it goes (#3411). On
  * Windows a program's own copy is found by nobody (an executable exports
  * nothing), so it finds a library's only if the library was loaded before
  * that first call; where two copies did not find each other, a copy refuses

@@ -420,9 +420,16 @@ static void chain_credit(AetherExecAccount* a, uint64_t bytes) {
 /* The allocation fast-path word (aether_caps_slow) of every copy that shares
  * this copy's accounts, its own first: CAPS_SLOW_ACCOUNTS is set in each
  * while an account exists, so a copy's fast path stays one load of its own
- * word. Under the lock. */
-static _Atomic unsigned* g_copy_words[64] = { &aether_caps_slow };
+ * word. Every copy registers at its first execution or account call, used
+ * or not: a library's copy allocates under the account a host put in use
+ * through another copy, so it must know when one exists. A copy leaves when
+ * it is unloaded (#3411), so its word is never written after its image is
+ * gone. The list grows as needed (plain malloc); a copy that cannot join it
+ * keeps its own word slow and always asks the accounts. Under the lock. */
+static _Atomic unsigned* g_copy_words_here[16] = { &aether_caps_slow };
+static _Atomic unsigned** g_copy_words = g_copy_words_here;
 static int g_copy_count = 1;
+static int g_copy_cap = 16;
 
 static void copies_mark(int on) {
     for (int i = 0; i < g_copy_count; i++) {
@@ -436,11 +443,39 @@ static int own_register(_Atomic unsigned* word) {
     for (int i = 0; i < g_copy_count; i++) {
         if (g_copy_words[i] == word) { acct_unlock(); return 0; }
     }
-    if (g_copy_count == 64) { acct_unlock(); return -1; }
+    if (g_copy_count == g_copy_cap) {
+        int cap = g_copy_cap * 2;
+        _Atomic unsigned** more = (_Atomic unsigned**)malloc(sizeof(*more) * (size_t)cap);
+        if (!more) { acct_unlock(); return -1; }
+        memcpy(more, g_copy_words, sizeof(*more) * (size_t)g_copy_count);
+        if (g_copy_words != g_copy_words_here) free(g_copy_words);
+        g_copy_words = more;
+        g_copy_cap = cap;
+    }
     g_copy_words[g_copy_count++] = word;
     if (g_live_count > 0) atomic_fetch_or_explicit(word, CAPS_SLOW_ACCOUNTS, memory_order_release);
     acct_unlock();
     return 0;
+}
+
+/* A copy is unloaded, or the process ends (#3411): its word leaves. At
+ * process exit on Windows the other threads are gone first, and one may
+ * have held the lock: the wait is bounded, and past it the word stays
+ * (nothing marks one at exit). */
+static void own_unregister(_Atomic unsigned* word) {
+    int got = 0;
+    for (int tries = 0; tries < 100000; tries++) {
+        if (!atomic_flag_test_and_set_explicit(&g_acct_lock, memory_order_acquire)) { got = 1; break; }
+        acct_yield();
+    }
+    if (!got) return;
+    for (int i = 1; i < g_copy_count; i++) {
+        if (g_copy_words[i] == word) {
+            g_copy_words[i] = g_copy_words[--g_copy_count];
+            break;
+        }
+    }
+    acct_unlock();
 }
 
 /* Under the lock: one thing less names `a`. 1 when it was the last, and the
@@ -915,6 +950,7 @@ typedef struct AetherAccountsRendezvous {
     uint32_t account_size;    /* sizeof(struct AetherExecAccount) */
     uint32_t limits_size;     /* sizeof(AetherExecLimits) */
     int (*register_copy)(_Atomic unsigned* fast_path_word);
+    void (*unregister_copy)(_Atomic unsigned* fast_path_word);
     AetherExecAccount* (*account_new)(const AetherExecLimits* limits);
     void (*account_free)(AetherExecAccount* account);
     int (*use)(AetherExecAccount* account, AetherExecAccount** previous);
@@ -938,7 +974,8 @@ typedef struct AetherAccountsRendezvous {
 static const AetherAccountsRendezvous g_own_accounts = {
     AETHER_ACCOUNTS_RV_VERSION, (uint32_t)sizeof(AetherAccountsRendezvous),
     (uint32_t)sizeof(struct AetherExecAccount), (uint32_t)sizeof(AetherExecLimits),
-    own_register, own_new, own_free, own_use, own_restore, own_here, own_hold, own_used, own_tripped,
+    own_register, own_unregister, own_new, own_free, own_use, own_restore, own_here, own_hold,
+    own_used, own_tripped,
     own_exec_begin, own_exec_end, own_alloc, own_free_block, own_realloc_begin, own_realloc_end,
     own_step_aside, own_step_back,
 };
@@ -953,6 +990,7 @@ const AetherAccountsRendezvous* aether_accounts_rendezvous(void) {
 
 /* A copy whose layout differs from the owning copy's: no account, ever. */
 static int refused_register(_Atomic unsigned* w) { (void)w; return -1; }
+static void refused_unregister(_Atomic unsigned* w) { (void)w; }
 static AetherExecAccount* refused_new(const AetherExecLimits* l) { (void)l; return NULL; }
 static void refused_free(AetherExecAccount* a) { (void)a; }
 static int refused_use(AetherExecAccount* a, AetherExecAccount** prev) {
@@ -985,7 +1023,8 @@ static void refused_step_back(AetherExecAccount* was) { (void)was; }
 static const AetherAccountsRendezvous g_refused_accounts = {
     AETHER_ACCOUNTS_RV_VERSION, (uint32_t)sizeof(AetherAccountsRendezvous),
     (uint32_t)sizeof(struct AetherExecAccount), (uint32_t)sizeof(AetherExecLimits),
-    refused_register, refused_new, refused_free, refused_use, refused_restore, refused_here, refused_here,
+    refused_register, refused_unregister, refused_new, refused_free, refused_use, refused_restore,
+    refused_here, refused_here,
     refused_used, refused_tripped, refused_begin, refused_end, refused_alloc, refused_free_block,
     refused_realloc_begin, refused_realloc_end, refused_step_aside, refused_step_back,
 };
@@ -996,6 +1035,8 @@ static const AetherAccountsRendezvous* _Atomic g_accounts = NULL;
 _Atomic int aether_accounts_found = 0;
 
 typedef const AetherAccountsRendezvous* (*accounts_rv_fn)(void);
+
+static void accounts_copy_unloads(void);
 
 /* The accounts this copy works through, found the first time. */
 static const AetherAccountsRendezvous* accounts(void) {
@@ -1030,11 +1071,31 @@ static const AetherAccountsRendezvous* accounts(void) {
     const AetherAccountsRendezvous* expected = NULL;
     if (atomic_compare_exchange_strong_explicit(&g_accounts, &expected, found,
                                                 memory_order_acq_rel, memory_order_acquire)) {
-        (void)found->register_copy(&aether_caps_slow);
+        /* One that cannot join the list (no memory, #3411) asks the
+         * accounts on every allocation rather than miss one in use. */
+        if (found->register_copy(&aether_caps_slow) != 0 && found != &g_refused_accounts)
+            atomic_fetch_or_explicit(&aether_caps_slow, CAPS_SLOW_ACCOUNTS, memory_order_release);
+#if !(defined(__GNUC__) || defined(__clang__))
+        if (found != &g_own_accounts) atexit(accounts_copy_unloads);
+#endif
     }
     atomic_store_explicit(&aether_accounts_found, 1, memory_order_release);
     return atomic_load_explicit(&g_accounts, memory_order_acquire);
 }
+
+/* This copy is unloaded, or the process ends (#3411): its word leaves the
+ * accounts of the copy it shares them with, which would otherwise write
+ * into its image once it is gone. Run as a destructor (with atexit where
+ * there is none, which a library's C runtime runs at its unload). */
+static void accounts_copy_unloads(void) {
+    const AetherAccountsRendezvous* r = atomic_load_explicit(&g_accounts, memory_order_acquire);
+    if (r && r != &g_own_accounts) r->unregister_copy(&aether_caps_slow);
+}
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((destructor)) static void accounts_copy_dtor(void) {
+    accounts_copy_unloads();
+}
+#endif
 
 void aether_accounts_register(void) {
     (void)accounts();
