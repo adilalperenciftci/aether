@@ -12,8 +12,8 @@
  * the third test steps an actor inside an execution, on a core's thread.
  * Nor is it charged to the execution account in use (#2954): the fourth.
  * And what a step runs after its handler, the drops of an actor that
- * panicked or ended in it, is the step's as its handler is (#3416): the
- * last.
+ * panicked or ended in it, is the step's as its handler is (#3416), and an
+ * end it runs goes on past a death hook that panics (#3417): the last two.
  */
 
 #include "test_harness.h"
@@ -434,4 +434,119 @@ TEST_CATEGORY(step_context_drops_after_the_handler, TEST_CATEGORY_RUNTIME) {
     free(d);
     free(e);
     free(f);
+}
+
+/* #3417: an actor's end goes on past a death hook that panics. On core 0's
+ * thread, P's handler sends to Q, idle on core 0, so Q is stepped inline; Q
+ * queues a message to itself and stops, and W monitors Q. Q's finalize drops
+ * the queued message: its release panics, the frame the drop runs in
+ * catches it and reports it to the death hook, and the hook panics too. The
+ * hook ran bare there, so its panic left the finalize halfway: the message
+ * it had drained was never credited (scheduler_shutdown, which waits for
+ * every message sent to be handled or dropped, hung, and the runner ended
+ * the test at its limit) and W never got its Down. The hook runs in a frame
+ * of its own now: the end goes on, and P's handler after the send. */
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    ActorBase* tell;            // P: Q
+    int watcher;                // W
+    atomic_int after;           // P: the send returned to its handler
+    atomic_int in_step_after;   // P: g_aether_in_actor_step then
+    atomic_int downs;           // W: the Downs it took
+    atomic_int done;
+} HkActor;
+
+static atomic_int g_hk_hook_calls;
+
+static void hk_release_panics(int type, void* payload) {
+    (void)type;
+    (void)payload;
+    aether_panic("the release panicked");
+}
+
+static void hk_hook_panics(int actor_id, const char* reason) {
+    (void)actor_id;
+    (void)reason;
+    if (atomic_fetch_add(&g_hk_hook_calls, 1) == 0) aether_panic("the death hook panicked");
+}
+
+static void hk_step(HkActor* self) {
+    Message msg;
+    if (!mailbox_receive(&self->mailbox, &msg)) {
+        atomic_store_explicit(&self->active, 0, memory_order_relaxed);
+        return;
+    }
+    aether_reply_slot_set(msg._reply_slot);
+    if (msg.type == AETHER_MSG_DOWN) {
+        if (aether_down_accept((ActorBase*)self, &msg)) atomic_fetch_add(&self->downs, 1);
+        aether_message_drop((ActorBase*)self, &msg);
+    } else {
+        if (msg.payload_ptr) aether_free_message(msg.payload_ptr);
+        ScMsg m = { 1, 0 };
+        if (self->tell) {
+            aether_send_message(self->tell, &m, sizeof m);
+            atomic_store(&self->in_step_after, g_aether_in_actor_step);
+            atomic_store(&self->after, 1);
+        } else if (!self->watcher) {
+            aether_send_message(self, &m, sizeof m);   // queued: its finalize drops it
+            aether_actor_claim_end((ActorBase*)self, "normal", AETHER_ACTOR_STOPPED);
+        }
+        atomic_store(&self->done, 1);
+    }
+    atomic_store_explicit(&self->active, self->mailbox.count > 0, memory_order_relaxed);
+}
+
+static HkActor* hk_actor(int core, ActorBase* tell, int watcher) {
+    HkActor* a = calloc(1, sizeof(HkActor));
+    static int next_id = 9970;
+    a->id = next_id++;
+    a->tell = tell;
+    a->watcher = watcher;
+    a->step = (void (*)(void*))hk_step;
+    atomic_init(&a->assigned_core, -1);
+    atomic_init(&a->migrate_to, -1);
+    atomic_init(&a->reply_slot, NULL);
+    atomic_flag_clear_explicit(&a->step_lock, memory_order_relaxed);
+    mailbox_init(&a->mailbox);
+    scheduler_register_actor((ActorBase*)a, core);
+    /* After the registration, which leaves a caller's actor none. */
+    if (!tell && !watcher) a->release_message = hk_release_panics;
+    return a;
+}
+
+TEST_CATEGORY(step_context_end_past_a_panicking_hook, TEST_CATEGORY_RUNTIME) {
+    scheduler_init(1);
+    HkActor* q = hk_actor(0, NULL, 0);
+    HkActor* p = hk_actor(0, (ActorBase*)q, 0);
+    HkActor* w = hk_actor(0, NULL, 1);
+    aether_step_actor_set(w);   // as from W's handler: W monitors Q
+    aether_actor_monitor(q);
+    aether_step_actor_set(NULL);
+    atomic_store(&g_hk_hook_calls, 0);
+    aether_set_on_actor_death(hk_hook_panics);
+    uint64_t dead0 = scheduler_dead_sends();
+    scheduler_start();
+
+    ScMsg m = { 1, 0 };
+    aether_send_message(p, &m, sizeof m);
+    int done = sc_wait(&p->done, 1, 6000);
+    int down = sc_wait(&w->downs, 1, 6000);
+    int p_dead = atomic_load(&p->dead) != 0;
+    scheduler_shutdown();   // waits for every message sent: Q's dropped one is credited
+    uint64_t dead = scheduler_dead_sends() - dead0;
+    scheduler_cleanup();
+    aether_set_on_actor_death(NULL);
+
+    ASSERT_TRUE(done);
+    ASSERT_EQ(1, atomic_load(&q->done));
+    ASSERT_EQ(1, atomic_load(&p->after));          // P's handler went on after the send
+    ASSERT_EQ(1, atomic_load(&p->in_step_after));  // in its own step
+    ASSERT_FALSE(p_dead);
+    ASSERT_TRUE(down);                              // W was told of Q's end
+    ASSERT_EQ(1, atomic_load(&w->downs));
+    ASSERT_EQ(1, (int)dead);                        // Q's queued message, dropped and counted
+    ASSERT_EQ(1, atomic_load(&g_hk_hook_calls));    // the release's panic, reported once
+    free(p);
+    free(q);
+    free(w);
 }

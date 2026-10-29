@@ -285,31 +285,33 @@ static void test_kill_before_start(void) {
  * links working. Where a death is finalized as soon as it is seen (here the
  * threaded scheduler, stopped), the ends links pass on are made from a
  * queue; a panic that jumped past it left the thread marked as ending, so
- * every end a link passed on there afterwards was queued and never made. A
- * dropped message's release panics no more out of an end (it is caught and
- * reported through the death hook, #3401), but the hook is the host's code
- * and runs in the drain: here it panics in turn. a's death ends b through
- * b's link and b's ends c; c holds a message whose release panics, and the
- * hook that reports it panics out of the drain; then x's death must still
- * end y. */
-static int g_release_panics = 0;
-static int g_hook_panics = 0;
+ * every end a link passed on there afterwards was queued and never made.
+ * a's death ends b through b's link and b's ends c; c holds a message whose
+ * release panics out of the drain; then x's death must still end y.
+ *
+ * No real panic leaves a drain now: a dropped message's release runs in a
+ * frame of its own (#3401), and so does the death hook it reports a panic
+ * to (#3417), which was this test's way out until then. The drain still
+ * journals its queue (link_end_unwind) for a panic a later change would let
+ * through, and the release here stands for one: it raises its panic for
+ * the test's own frame, past the frame its drop runs in. A bare longjmp to
+ * the test's frame would not do: it would leave that frame pushed above the
+ * test's and skip the unwind of the test's depth, the journal's part. So
+ * the release leaves the frames above the test's as a path without them
+ * would never have entered them, and panics: the unwind then runs the
+ * drain's journal entry and jumps to the test's frame, as an escaped panic
+ * does. The drop frees the payload after the release, which this one never
+ * returns to, so it frees it itself. */
+static int g_release_escapes = 0;
+static AetherJmpFrame* g_escape_to = NULL;
 
-static void release_that_panics(int type, void* payload) {
+static void release_that_escapes(int type, void* payload) {
     (void)type;
-    (void)payload;
-    if (g_release_panics) {
-        g_release_panics = 0;
-        aether_panic("a release panicked");
-    }
-}
-
-static void hook_that_panics(int actor_id, const char* reason) {
-    (void)actor_id;
-    (void)reason;
-    if (g_hook_panics) {
-        g_hook_panics = 0;
-        aether_panic("the death hook panicked");
+    if (g_release_escapes) {
+        g_release_escapes = 0;
+        free(payload);
+        while (aether_current_frame() && aether_current_frame() != g_escape_to) aether_try_pop();
+        aether_panic("a release's panic got out of its frame");
     }
 }
 
@@ -328,25 +330,24 @@ static void test_link_end_after_panic(void) {
     aether_actor_link(x);
     aether_step_actor_set(NULL);
     scheduler_shutdown();
-    c->release_message = release_that_panics;
+    c->release_message = release_that_escapes;
     Message m;
     memset(&m, 0, sizeof m);
     m.type = 9;
     m.payload_ptr = malloc(16);
     int queued = mailbox_send(&c->mailbox, m);
-    g_release_panics = 1;
-    g_hook_panics = 1;
-    aether_set_on_actor_death(hook_that_panics);
+    g_release_escapes = 1;
     const char* volatile caught = NULL;
     AetherJmpFrame* f = aether_try_push();
+    g_escape_to = f;
     if (AETHER_SIGSETJMP(f->buf, 1) == 0) {
         aether_actor_kill(a);
     } else {
         caught = f->reason;
     }
     aether_try_pop();
-    aether_set_on_actor_death(NULL);
-    int hook_panicked = caught && strcmp(aether_panic_reason_text(caught), "the death hook panicked") == 0;
+    g_escape_to = NULL;
+    int escaped = caught && strcmp(aether_panic_reason_text(caught), "a release's panic got out of its frame") == 0;
     int b_ended = (atomic_load(&b->dead) & AETHER_ACTOR_KILLED) != 0;
     aether_actor_kill(x);
     int y_ended = (atomic_load(&y->dead) & AETHER_ACTOR_KILLED) &&
@@ -354,7 +355,7 @@ static void test_link_end_after_panic(void) {
     scheduler_cleanup();
 
     ASSERT_TRUE(queued);
-    ASSERT_TRUE(hook_panicked);
+    ASSERT_TRUE(escaped);
     ASSERT_TRUE(b_ended);
     ASSERT_TRUE(y_ended);
 }

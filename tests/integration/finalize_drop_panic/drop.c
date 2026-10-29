@@ -13,6 +13,12 @@
  * `w` its Down), let no panic out, and report the panic through the death
  * hook as the step barrier reports a panic in a release after a handler.
  *
+ * #3417: the same with a death hook that panics when it is told of the
+ * release's panic. The hook ran bare there, so its panic left the finalize
+ * halfway, after the first message: the rest were never released or
+ * counted, and the links and watchers never told. It runs in a frame of its
+ * own now, and the end goes on.
+ *
  * Built twice by test_finalize_drop_panic.sh: against libaether (the
  * threaded scheduler, stopped before the kill) and against the cooperative
  * runtime. */
@@ -26,6 +32,7 @@
 static int g_released = 0;
 static int g_hook_calls = 0;
 static int g_hook_actor = -1;
+static int g_hook_panics = 0;
 static char g_hook_reason[64];
 
 /* Message type 9 carries an int: 1 panics in the release, any other is
@@ -40,6 +47,7 @@ static void on_death(int actor_id, const char* reason) {
     g_hook_calls++;
     g_hook_actor = actor_id;
     snprintf(g_hook_reason, sizeof g_hook_reason, "%s", reason ? reason : "");
+    if (g_hook_panics) aether_panic("the death hook panicked");
 }
 
 static void step(void* self) {
@@ -56,31 +64,43 @@ static void queue(ActorBase* a, int value) {
     mailbox_send(&a->mailbox, m);
 }
 
-int main(void) {
-    scheduler_init(1);
-    ActorBase* v = scheduler_spawn_actor(0, step, sizeof(ActorBase));
-    ActorBase* l = scheduler_spawn_actor(0, step, sizeof(ActorBase));
-    ActorBase* w = scheduler_spawn_actor(0, step, sizeof(ActorBase));
-    aether_step_actor_set(l);   // as from l's handler
-    aether_actor_link(v);
-    aether_step_actor_set(w);
-    aether_actor_monitor(v);
+typedef struct {
+    ActorBase* v;   // the victim
+    ActorBase* l;   // linked to it
+    ActorBase* w;   // monitors it
+} EndCase;
+
+static EndCase end_case(void) {
+    EndCase c;
+    c.v = scheduler_spawn_actor(0, step, sizeof(ActorBase));
+    c.l = scheduler_spawn_actor(0, step, sizeof(ActorBase));
+    c.w = scheduler_spawn_actor(0, step, sizeof(ActorBase));
+    aether_step_actor_set(c.l);   // as from l's handler
+    aether_actor_link(c.v);
+    aether_step_actor_set(c.w);
+    aether_actor_monitor(c.v);
     aether_step_actor_set(NULL);
-#ifndef AETHER_NO_THREADING
-    /* Stopped, the threaded scheduler finalizes a death where it is seen,
-     * as the cooperative one always does. */
-    scheduler_shutdown();
-#endif
-    v->release_message = release;
-    queue(v, 1);
-    queue(v, 2);
-    queue(v, 3);
-    aether_set_on_actor_death(on_death);
+    return c;
+}
+
+/* Kills the case's victim with its three messages queued; the number of
+ * checks that failed. */
+static int end_check(const char* label, EndCase c, int hook_panics) {
+    c.v->release_message = release;
+    queue(c.v, 1);
+    queue(c.v, 2);
+    queue(c.v, 3);
+    g_released = 0;
+    g_hook_calls = 0;
+    g_hook_actor = -1;
+    g_hook_reason[0] = '\0';
+    g_hook_panics = hook_panics;
+    uint64_t dead0 = scheduler_dead_sends();
 
     int escaped = 0;
     AetherJmpFrame* f = aether_try_push();
     if (AETHER_SIGSETJMP(f->buf, 1) == 0) {
-        aether_actor_kill(v);
+        aether_actor_kill(c.v);
     } else {
         escaped = 1;
     }
@@ -88,35 +108,58 @@ int main(void) {
 
     int fails = 0;
     if (escaped) {
-        printf("FAIL: the drop's panic left the actor's end\n");
+        printf("FAIL (%s): a panic left the actor's end\n", label);
         fails++;
     }
     if (g_released != 2) {
-        printf("FAIL: %d of the 2 messages after the panicking one were released\n", g_released);
+        printf("FAIL (%s): %d of the 2 messages after the panicking one were released\n", label,
+               g_released);
         fails++;
     }
-    if (!((atomic_load(&l->dead) & AETHER_ACTOR_KILLED) &&
-          (atomic_load(&l->exit_flags) & AETHER_EXIT_FINALIZED))) {
-        printf("FAIL: the linked actor did not take the death\n");
+    uint64_t dead = scheduler_dead_sends() - dead0;
+    if (dead != 3) {
+        printf("FAIL (%s): %d of the 3 messages dropped were counted\n", label, (int)dead);
+        fails++;
+    }
+    if (!((atomic_load(&c.l->dead) & AETHER_ACTOR_KILLED) &&
+          (atomic_load(&c.l->exit_flags) & AETHER_EXIT_FINALIZED))) {
+        printf("FAIL (%s): the linked actor did not take the death\n", label);
         fails++;
     }
 #ifdef AETHER_NO_THREADING
     Message got;
     int down = 0;
-    while (mailbox_receive(&w->mailbox, &got)) {
+    while (mailbox_receive(&c.w->mailbox, &got)) {
         if (got.type == AETHER_MSG_DOWN) down++;
-        aether_message_drop(w, &got);
+        aether_message_drop(c.w, &got);
     }
     if (down != 1) {
-        printf("FAIL: the watcher got %d Down, not 1\n", down);
+        printf("FAIL (%s): the watcher got %d Down, not 1\n", label, down);
         fails++;
     }
 #endif
-    if (g_hook_calls != 1 || g_hook_actor != v->id || strcmp(g_hook_reason, "the drop panicked") != 0) {
-        printf("FAIL: the death hook saw %d call(s), actor %d, \"%s\"\n", g_hook_calls, g_hook_actor,
-               g_hook_reason);
+    if (g_hook_calls != 1 || g_hook_actor != c.v->id ||
+        strcmp(g_hook_reason, "the drop panicked") != 0) {
+        printf("FAIL (%s): the death hook saw %d call(s), actor %d, \"%s\"\n", label, g_hook_calls,
+               g_hook_actor, g_hook_reason);
         fails++;
     }
+    return fails;
+}
+
+int main(void) {
+    scheduler_init(1);
+    EndCase quiet = end_case();
+    EndCase loud = end_case();
+#ifndef AETHER_NO_THREADING
+    /* Stopped, the threaded scheduler finalizes a death where it is seen,
+     * as the cooperative one always does. */
+    scheduler_shutdown();
+#endif
+    aether_set_on_actor_death(on_death);
+    int fails = end_check("a drop that panics", quiet, 0);
+    fails += end_check("and a death hook that panics too", loud, 1);
+    aether_set_on_actor_death(NULL);
     if (fails) return 1;
     printf("PASS\n");
     return 0;

@@ -65,7 +65,7 @@ void aether_message_drop(ActorBase* target, Message* msg) {
  * (aether_contain): a panic in it is caught there, the unwind journal
  * giving back what the release held at its depth, and reported as the step
  * barrier reports a panic in the release that follows a handler, through
- * the death hook with
+ * the death hook (itself contained, #3417) with
  * the actor's id and the panic's reason, which is then released. The
  * actor's end has its reason already and keeps it. What the release did not
  * get to free (the payload, an owned zero-copy buffer) goes here, and the
@@ -111,13 +111,14 @@ void aether_message_drop_at_end(ActorBase* target, Message* msg) {
     const char* reason = NULL;
     void (*reason_release)(const void*) = NULL;
     if (!aether_message_drop_contained(target, msg, &reason, &reason_release)) return;
-    /* Bare, not in a frame of its own as the step barrier's are (#3403): a
-     * hook that panics here goes on to the finalize's caller, whose link drain
-     * is journaled for that (#3400). It leaves no step context put aside: the
-     * step barrier runs its finalize in a containment frame of its own,
-     * before it gives the context back (#3416), and a finalize elsewhere runs
-     * in no step's put-aside context. */
-    aether_fire_death_hook(target->id, reason);
+    /* In a frame of its own, as the step barrier's hook is (#3417): a hook
+     * that panics is reported on stderr and the finalize goes on. Fired
+     * bare, its panic left the finalize halfway (the messages it had drained
+     * never credited, so scheduler_shutdown waited for them forever, and the
+     * watchers never told), and the finalize, marked done, never ran again.
+     * Nothing a finalize runs leaves it now; a link's drain still journals
+     * its queue for a panic that would (#3400). */
+    aether_fire_death_hook_contained(target->id, reason);
     if (reason_release) reason_release(reason);
 }
 

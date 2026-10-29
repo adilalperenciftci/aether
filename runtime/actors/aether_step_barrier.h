@@ -164,10 +164,10 @@ static inline void aether_step_give_back(const AetherStepAside* s) {
 
 /* The finalize of an actor its step ended, in the step's context and in a
  * containment frame of its own (#3416). Its drops are the actor's code, each
- * contained already (aether_message_drop_at_end); what can still leave a
- * finalize is the panic of the death hook a drop's panic is reported to.
- * Caught here, it is reported on stderr and the step goes on: it never
- * leaves with the context put aside. */
+ * contained already with the death hook a drop's panic is reported to
+ * (aether_message_drop_at_end, #3417), so nothing it runs leaves it; the
+ * frame stands for a panic a later change would let out, which is then
+ * reported on stderr and never leaves with the context put aside. */
 typedef struct {
     ActorBase* actor;
     void (*finalize)(ActorBase*);

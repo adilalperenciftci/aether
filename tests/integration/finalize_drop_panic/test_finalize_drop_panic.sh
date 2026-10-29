@@ -9,7 +9,9 @@
 # released, and the actor's watchers and links were never told. Each drop
 # now runs in a frame of its own; a panic in one is reported through the
 # death hook, as the step barrier reports a panic in a release after a
-# handler, and the end goes on.
+# handler, and the end goes on. A death hook that panics when it is told of
+# that panic left the finalize halfway in turn, the rest of the drain, its
+# count and the notices undone (#3417); it runs in a frame of its own too.
 #
 # drop.c is built against libaether (the threaded scheduler, stopped
 # before the kill) and against the cooperative runtime
@@ -48,7 +50,7 @@ run_drop() {
         grep -v "scheduler is not running" "$out" | head -6 | sed 's/^/        /'
         fail=1
     else
-        echo "  [PASS] $NAME: $label: the end goes on past a panicking drop"
+        echo "  [PASS] $NAME: $label: the end goes on past a panicking drop, and past a death hook that panics on it"
     fi
 }
 
