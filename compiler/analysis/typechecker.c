@@ -11784,10 +11784,20 @@ static ASTNode* effect_resolve_callee(ASTNode* program, const char* name) {
 /* Walk `node`; return the first forbidden capability reached (recursing into
  * user-function callees), writing the offending `ns.fn` spelling to `outcall`.
  * `forbid` is the comma list of forbidden caps; `visited` guards recursion. */
+enum {
+    EFFECT_MAX_DEPTH = 128,
+    EFFECT_MAX_VISITED = 512
+};
+
 static const char* effect_scan(ASTNode* program, ASTNode* node, const char* forbid,
                                const char** visited, int* nvisited,
-                               char* outcall, size_t outsz, int depth) {
-    if (!node || depth > 128) return NULL;
+                               char* outcall, size_t outsz, int depth,
+                               int* incomplete) {
+    if (!node) return NULL;
+    if (depth > EFFECT_MAX_DEPTH) {
+        *incomplete = 1;
+        return NULL;
+    }
     if (node->type == AST_FUNCTION_CALL && node->value) {
         const char* dot = strchr(node->value, '.');
         if (dot) {
@@ -11809,21 +11819,26 @@ static const char* effect_scan(ASTNode* program, ASTNode* node, const char* forb
             int seen = 0;
             for (int i = 0; i < *nvisited; i++)
                 if (strcmp(visited[i], callee) == 0) { seen = 1; break; }
-            if (!seen && *nvisited < 512) {
+            if (!seen) {
                 if (def && def->child_count > 0) {
-                    visited[(*nvisited)++] = callee;
-                    for (int i = 0; i < program->child_count; i++) {
-                        ASTNode* clause = program->children[i];
-                        if (!clause ||
-                            (clause->type != AST_FUNCTION_DEFINITION &&
-                             clause->type != AST_BUILDER_FUNCTION) ||
-                            !clause->value || strcmp(clause->value, callee) != 0 ||
-                            clause->child_count == 0)
-                            continue;
-                        ASTNode* body = clause->children[clause->child_count - 1];
-                        const char* c = effect_scan(program, body, forbid, visited,
-                                                    nvisited, outcall, outsz, depth + 1);
-                        if (c) return c;
+                    if (*nvisited >= EFFECT_MAX_VISITED) {
+                        *incomplete = 1;
+                    } else {
+                        visited[(*nvisited)++] = callee;
+                        for (int i = 0; i < program->child_count; i++) {
+                            ASTNode* clause = program->children[i];
+                            if (!clause ||
+                                (clause->type != AST_FUNCTION_DEFINITION &&
+                                 clause->type != AST_BUILDER_FUNCTION) ||
+                                !clause->value || strcmp(clause->value, callee) != 0 ||
+                                clause->child_count == 0)
+                                continue;
+                            ASTNode* body = clause->children[clause->child_count - 1];
+                            const char* c = effect_scan(program, body, forbid, visited,
+                                                        nvisited, outcall, outsz, depth + 1,
+                                                        incomplete);
+                            if (c) return c;
+                        }
                     }
                 }
             }
@@ -11831,7 +11846,7 @@ static const char* effect_scan(ASTNode* program, ASTNode* node, const char* forb
     }
     for (int i = 0; i < node->child_count; i++) {
         const char* c = effect_scan(program, node->children[i], forbid, visited,
-                                    nvisited, outcall, outsz, depth);
+                                    nvisited, outcall, outsz, depth, incomplete);
         if (c) return c;
     }
     return NULL;
@@ -11850,11 +11865,12 @@ static void check_effect_tags(ASTNode* program) {
         if (!eff) continue;
         const char* forbid = eff + 7;  /* "fs,net,os" or a subset */
         if (fn->child_count == 0) continue;
-        const char* visited[512];
+        const char* visited[EFFECT_MAX_VISITED];
         int nv = 0;
         if (fn->value) visited[nv++] = fn->value;  /* no self-recursion loop */
         char offending[160];
         offending[0] = '\0';
+        int incomplete = 0;
         const char* cap = NULL;
         for (int j = 0; j < program->child_count && !cap; j++) {
             ASTNode* clause = program->children[j];
@@ -11866,7 +11882,7 @@ static void check_effect_tags(ASTNode* program) {
                 continue;
             ASTNode* body = clause->children[clause->child_count - 1];
             cap = effect_scan(program, body, forbid, visited, &nv,
-                              offending, sizeof(offending), 0);
+                              offending, sizeof(offending), 0, &incomplete);
         }
         if (cap) {
             /* #2729: named as the source spells it (`checks.shell`), not by
@@ -11879,6 +11895,17 @@ static void check_effect_tags(ASTNode* program) {
                 "`%s` operation through `%s`. Remove that call path, or drop the "
                 "effect tag.", name, cap, cap, offending);
             g_tc_file = fn->source_file;   /* #2064: the definition's own file */
+            type_error(msg, fn->line, fn->column);
+            g_tc_file = NULL;
+        } else if (incomplete) {
+            char shown[160];
+            const char* name = ast_source_name(fn, shown, sizeof(shown));
+            char msg[400];
+            snprintf(msg, sizeof(msg),
+                "function '%s' carries an effect tag, but effect analysis exceeded "
+                "its call-graph limit (%d levels or %d functions). Validation is refused.",
+                name, EFFECT_MAX_DEPTH, EFFECT_MAX_VISITED);
+            g_tc_file = fn->source_file;
             type_error(msg, fn->line, fn->column);
             g_tc_file = NULL;
         }
