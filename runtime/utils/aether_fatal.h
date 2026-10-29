@@ -13,9 +13,11 @@
  * second the flush is given up. POSIX tries the lock (flockfile's lock is
  * recursive, so the flush inside it takes it again). Windows' C runtime has
  * no such try, and a build without threads (wasi and Emscripten among them)
- * has no other thread, so they flush. Where abort() flushes the streams
- * itself (macOS, FreeBSD), that flush is the C library's, and waits as it
- * waits. Not for a signal handler: none of this is async-signal-safe. */
+ * has no other thread, so they flush. The bound is on the lock only: the
+ * flush's own write to a pipe nobody reads waits as any write there does.
+ * Where abort() flushes the streams itself (macOS, FreeBSD), that flush is
+ * the C library's, and waits as it waits. Not for a signal handler: none of
+ * this is async-signal-safe. */
 
 #include <stdio.h>
 #if !(defined(_WIN32) || defined(AETHER_NO_THREADING) || defined(__wasi__) || defined(__EMSCRIPTEN__))
