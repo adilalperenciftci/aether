@@ -23,6 +23,7 @@
  * when some thread has a level, the caller info when a host service
  * changed it during the call. */
 
+#include "libaether.h"
 #include "aether_exec.h"
 #include "aether_abi.h"
 #include "aether_resource_caps.h"
@@ -35,6 +36,29 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* The host API (libaether.h, aether_host.h) of a runtime copy. A C host sets
+ * a call's deadline, memory cap and caller, and reads its outcome, in the
+ * copy a library runs on, so a copy carries all of it even when its code
+ * calls none of it: a static archive links only what is called, and a DLL
+ * had no aether_set_call_deadline. Every library with a runtime of its own
+ * links this object (its stubs enter executions), and so does a program
+ * that loads libraries (std.dl keeps aether_runtime_abi). The table was in
+ * each library's generated C (#3439), where it also made a library built to
+ * run on its host's runtime, a gateway script, reference objects the host
+ * never linked, and a wasm library reference what the cooperative build
+ * does not compile. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((used))
+#endif
+static void (*const exec_host_api[])(void) = {
+    (void (*)(void))aether_set_memory_cap,       (void (*)(void))aether_set_call_deadline,
+    (void (*)(void))aether_deadline_tripped,     (void (*)(void))aether_set_caller,
+    (void (*)(void))aether_clear_caller,         (void (*)(void))aether_exec_token,
+    (void (*)(void))aether_exec_cancel,          (void (*)(void))aether_exec_account_new,
+    (void (*)(void))aether_exec_account_free,    (void (*)(void))aether_exec_use,
+    (void (*)(void))aether_exec_account_used,    (void (*)(void))aether_exec_account_tripped,
+};
 
 /* The two the public header (libaether.h) declares: exported however the
  * runtime is built. */

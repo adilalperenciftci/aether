@@ -5372,6 +5372,7 @@ static int build_wasm_cmd(char* cmd, size_t size,
         includes[sizeof(includes) - 1] = '\0';
     } else {
         static const char* include_dirs[] = {
+            "include",   /* libaether.h, which runtime/libaether_caps.c and aether_exec.c include */
             "runtime", "runtime/actors", "runtime/scheduler",
             "runtime/utils", "runtime/memory", "runtime/config",
             "std", "std/string", "std/io", "std/math",

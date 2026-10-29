@@ -3507,34 +3507,12 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
             "    return ok ? 0 : -1;\n"
             "}\n\n",
             AETHER_VERSION_NUM, AETHER_RUNTIME_ABI_REV, AETHER_VERSION, AETHER_RUNTIME_ABI_ID, check_sym);
-    /* The host API (libaether.h, aether_host.h) of the runtime this library
-     * runs on. A C host sets a call's deadline, memory cap and caller, and
-     * reads its outcome, in that runtime: a library with a runtime of its
-     * own must carry them even when its code calls none of them, as the
-     * static archive links only what is called (a DLL had no
-     * aether_set_call_deadline). Referenced from a kept table, through
-     * assembler names, so no C declaration meets one the program makes of
-     * the same function as an extern of its own. */
-    static const char* const host_api[] = {
-        "aether_set_memory_cap", "aether_set_call_deadline", "aether_deadline_tripped",
-        "aether_set_caller", "aether_clear_caller", "aether_last_outcome",
-        "aether_last_outcome_text", "aether_exec_token", "aether_exec_cancel",
-        "aether_exec_account_new", "aether_exec_account_free", "aether_exec_use",
-        "aether_exec_account_used", "aether_exec_account_tripped",
-    };
-    int host_api_n = (int)(sizeof(host_api) / sizeof(host_api[0]));
-    fprintf(gen->output,
-            "#if defined(__GNUC__) || defined(__clang__)\n"
-            "#define _AE_API_STR2(x) #x\n"
-            "#define _AE_API_STR(x) _AE_API_STR2(x)\n");
-    for (int k = 0; k < host_api_n; k++)
-        fprintf(gen->output,
-                "extern void _aether_api_%d(void) __asm__(_AE_API_STR(__USER_LABEL_PREFIX__) \"%s\");\n",
-                k, host_api[k]);
-    fprintf(gen->output, "__attribute__((used)) static void (* const _aether_lib_host_api[])(void) = {");
-    for (int k = 0; k < host_api_n; k++)
-        fprintf(gen->output, "%s_aether_api_%d", k ? ", " : " ", k);
-    fprintf(gen->output, " };\n#endif\n\n");
+    /* The host API a C host reaches the library's runtime through (the
+     * deadline, memory cap, caller, outcome and accounts) is kept by the
+     * runtime itself, in aether_exec.c, which every library with a runtime
+     * of its own links through these stubs (#3439). Kept here, it made a
+     * library meant to bind to its host's runtime reference objects that
+     * host never linked. */
     if (gen->csrc_header_file)
         fprintf(gen->csrc_header_file,
                 "/* How the last call into an export on this thread ended: a zero\n"

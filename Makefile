@@ -1230,8 +1230,11 @@ compiler: $(BUILD_DIR)/aetherc$(EXE_EXT) $(BUILD_TARGET_STAMP)
 # release compiler alike: compiler-fast kept a list of its own, which lost
 # aether_spawn.c and aether_sandbox.c and could not link (#3351), and so
 # did the release compiler's, which lost aether_unwind.c once the caps code
-# read the execution frames, so `make install` could not link.
-AETHERC_RUNTIME_SRC = runtime/utils/aether_spawn.c runtime/aether_sandbox.c runtime/sandbox/aether_audit.c runtime/actors/aether_panic.c runtime/actors/aether_unwind.c runtime/aether_resource_caps.c runtime/aether_locale_num.c runtime/aether_callbacks.c
+# read the execution frames, so `make install` could not link. std.dl keeps
+# what every Aether library binds to (aether_runtime_abi), and aether_exec.c
+# keeps the host API with it (#3439): the compiler links the std objects
+# whole, so it links those three files too.
+AETHERC_RUNTIME_SRC = runtime/utils/aether_spawn.c runtime/aether_sandbox.c runtime/sandbox/aether_audit.c runtime/actors/aether_panic.c runtime/actors/aether_unwind.c runtime/aether_resource_caps.c runtime/aether_locale_num.c runtime/aether_callbacks.c runtime/aether_exec.c runtime/aether_host.c runtime/libaether_caps.c
 AETHERC_RUNTIME_OBJS = $(patsubst %.c,$(OBJ_DIR)/%.o,$(AETHERC_RUNTIME_SRC))
 
 $(BUILD_DIR)/aetherc$(EXE_EXT): $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(AETHERC_RUNTIME_OBJS) $(IO_POLLER_OBJS) $(MANIFEST_OBJ) | $(VERSION_HEADER) $(STDLIB_SYMS_HEADER) $(FRONTEND_ID_HEADER)
@@ -3765,7 +3768,7 @@ ci-wasm: clean compiler ae
 # the build error it is.
 	@echo "[2/4] Compiling runtime + generated C with emcc..."
 	@WASM_CFLAGS="-O2 -DAETHER_NO_THREADING -DAETHER_NO_FILESYSTEM -DAETHER_NO_NETWORKING \
-		-Iruntime -Iruntime/actors -Iruntime/scheduler -Iruntime/utils -Iruntime/memory \
+		-Iinclude -Iruntime -Iruntime/actors -Iruntime/scheduler -Iruntime/utils -Iruntime/memory \
 		-Iruntime/config -Istd -Istd/string -Istd/io -Istd/math -Istd/net -Istd/collections -Istd/json \
 		-Wall -Wextra -Wno-unused-parameter -Wno-unused-function \
 		-Wno-unused-variable -Wno-missing-field-initializers -Wno-unused-label"; \
