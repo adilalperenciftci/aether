@@ -675,7 +675,12 @@ step returns (#3392). Code the runtime runs inside the call in a frame of
 its own (the drop of an ending actor's messages, when the call ends an
 actor there and then) is cut by the interruption, and the interruption
 goes on to the call: it ends at the call's next safe point, or when it
-returns, and a later call's `try` is not touched by it (#3404).
+returns, and a later call's `try` is not touched by it (#3404). Such a frame
+tells an interruption from a panic by what its own code raised: one already
+on its way when the code began (a `defer` the interruption's unwind runs
+ends an actor, whose drops run there) goes on as it was, and an ordinary
+panic in a drop is the drop's, reported as any is, so the call still ends
+with the interruption's outcome and a `try` on the way passes it on (#3415).
 
 The safe points are loop heads, and `json.parse`, which checks every 4096
 values it reads and then fails with "stopped: the call's deadline passed or

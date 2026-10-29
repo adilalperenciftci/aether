@@ -10,7 +10,15 @@
 # whose message drop runs a loop past the call's deadline (on the cooperative
 # runtime the kill finalizes there and then): the interruption was caught
 # as the drop's panic and left on its way, so the next call's try could not
-# catch an ordinary panic (#3404).
+# catch an ordinary panic (#3404). The kill's own call must end with what
+# its drop raised inside it, and normally where the drop runs on a core's
+# thread (#3415): with the deadline, and with a cancel, which trips no flag
+# of its own, so that a fix that dropped the interruption (the call then
+# ended normally, which the next call's try alone could not tell) fails
+# here. Then a kill in a defer that the deadline's unwind runs, whose drop
+# panics ordinarily: the panic was taken for the interruption, which was
+# then lost, so the call ended PANICKED and a try on the way ran its handler
+# (#3415).
 #
 # Fixtures, not tests: steps.ae is a library the driver builds and links
 # into host.c.
@@ -30,7 +38,10 @@ trap 'rm -rf "$TMP" || true' EXIT
 want='spin: 0 outcome 2, the spinner finished: yes
 catch: 1 outcome 0
 teller: "" outcome 0
-after a kill: catch 1 outcome 0'
+a kill: the call'"'"'s outcome is its drop'"'"'s: yes
+after a kill: catch 1 outcome 0
+a cancelled kill: the call'"'"'s outcome is its drop'"'"'s: yes
+an interrupted kill: outcome 2, in a try: outcome 2, caught 0'
 
 if ! "$AETHERC" --emit=lib --with=extern,os "$SCRIPT_DIR/steps.ae" "$TMP/steps.c" > "$TMP/steps.log" 2>&1; then
     echo "  [FAIL] emit_lib_actor_step_context: aetherc --emit=lib failed"
@@ -50,7 +61,7 @@ if [ "$got" != "$want" ]; then
     echo "  [FAIL] emit_lib_actor_step_context:"
     echo "      got:"; printf '%s\n' "$got" | sed 's/^/        /'
     echo "      want:"; printf '%s\n' "$want" | sed 's/^/        /'
-    head -5 "$TMP/host.err" | sed 's/^/        /'
+    { grep -E "^a (cancelled )?kill:" "$TMP/host.err"; grep -vE "^a (cancelled )?kill:" "$TMP/host.err" | head -5; } | sed 's/^/        /'
     exit 1
 fi
-echo "  [PASS] emit_lib_actor_step_context: an actor a call's ask steps runs outside the call: not cut by its deadline, no interruption left for the next call, no caller info of the call; a kill whose drop the deadline cuts leaves the next call's try its own"
+echo "  [PASS] emit_lib_actor_step_context: an actor a call's ask steps runs outside the call: not cut by its deadline, no interruption left for the next call, no caller info of the call; a kill whose drop the deadline or a cancel cuts ends its call with it and leaves the next call's try its own; an ordinary panic in a drop during the deadline's unwind leaves the deadline the call's"

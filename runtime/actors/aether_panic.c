@@ -643,19 +643,32 @@ void aether_fire_death_hook(int actor_id, const char* reason) {
     if (h) h(actor_id, reason ? aether_panic_reason_text(reason) : "unknown");
 }
 
-/* aether_panic.h (#3403, #3404). */
+/* aether_panic.h (#3403, #3404, #3415). What the frame caught is told by
+ * what its code raised, not by the state the thread is in after it: an
+ * interruption already on its way when the code began (its unwind runs
+ * defers and journal drains, and one that ends an actor runs the actor's
+ * drops here) is not the code's. It is put aside while the code runs and
+ * given back after it, so an ordinary panic in the code is reported as one
+ * and the interruption goes on as it was. Read after the catch, it made the
+ * code's ordinary panic the interruption: taken off its way, the unwind went
+ * on as an ordinary panic, which a `try` caught and the call's frame
+ * recorded as PANICKED. */
 int aether_contain(void (*fn)(void*), void* arg, const char** reason,
                    void (**reason_release)(const void*)) {
+    AetherFrames* F = aether_frames_here();
+    int on_its_way = F->interrupting;
+    F->interrupting = 0;
     AetherJmpFrame* f = aether_try_push();
     if (AETHER_SIGSETJMP(f->buf, 1) == 0) {
         fn(arg);
         aether_try_pop();
+        F->interrupting = on_its_way;
         return 0;
     }
     const char* r = f->reason;
     void (*rel)(const void*) = f->reason_release;
     aether_try_pop();
-    if (aether_exec_interrupting()) {
+    if (F->interrupting) {
         /* An interruption of the call this code runs inside, raised in it (a
          * drop function's loop past the call's deadline, in a finalize the
          * call runs): not this frame's to end, nor to report as a panic.
@@ -663,8 +676,10 @@ int aether_contain(void (*fn)(void*), void* arg, const char** reason,
          * on its way, it turned the call's next ordinary panic into it. */
         if (rel) rel(r);
         aether_exec_defer_interruption();
+        F->interrupting = on_its_way;
         return 2;
     }
+    F->interrupting = on_its_way;
     *reason = r;
     *reason_release = rel;
     return 1;
