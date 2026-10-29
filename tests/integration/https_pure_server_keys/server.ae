@@ -1,0 +1,83 @@
+// A std.http server on the pure-Aether TLS backend, for
+// test_https_pure_server_keys.sh (#3326, #3328).
+//
+//   CERT_PATH, KEY_PATH   the certificate and key
+//   SERVER_BACKEND        "openssl" for that backend (default "aether")
+//
+// Prints "READY <port>" and serves "/", "/big" (40000 bytes) and POST "/len"
+// (the request body's length) until killed, or "FAIL: server_set_tls:
+// <why>" when the pure server refuses the certificate and key, and exits 1.
+
+import std.http
+import std.os
+import std.strbuilder
+import std.cryptography.tls13_server
+
+extern exit(code: int)
+
+handle_root(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "keys-ok")
+}
+
+// /big: 40000 bytes, more than two TLS records of data (#3380).
+handle_big(req: ptr, res: ptr, ud: ptr) {
+    sb = strbuilder.new(40000)
+    i = 0
+    while i < 40000 {
+        _a = strbuilder.append_byte(sb, 98)
+        i = i + 1
+    }
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, strbuilder.finish(sb))
+}
+
+// POST /len: the length of the request body it got, as "len-<n>" (#3381).
+handle_len(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "len-${http.request_body_length(req)}")
+}
+
+message StartSrv { raw: ptr }
+
+actor SrvActor {
+    state s = 0
+    receive { StartSrv(raw) -> { s = raw; _ = http.server_start(raw) } }
+}
+
+main() {
+    raw = http.server_create(0)
+    if raw == 0 {
+        println("FAIL: server_create returned null")
+        exit(1)
+    }
+    http.server_set_host(raw, "127.0.0.1")
+    // SERVER_BACKEND=openssl serves on the OpenSSL backend instead (#3405).
+    backend = "aether"
+    if os.getenv("SERVER_BACKEND") != "" { backend = os.getenv("SERVER_BACKEND") }
+    berr = http.server_set_tls_backend(raw, backend)
+    if berr != "" {
+        println("FAIL: server_set_tls_backend: ${berr}")
+        exit(1)
+    }
+    tls_err = http.server_set_tls(raw, os.getenv("CERT_PATH"), os.getenv("KEY_PATH"))
+    if tls_err != "" {
+        println("FAIL: server_set_tls: ${tls_err}")
+        exit(1)
+    }
+    if http.server_bind(raw, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    println("READY ${http.server_port(raw)}")
+    http.server_get(raw, "/", handle_root, 0)
+    http.server_get(raw, "/big", handle_big, 0)
+    http.server_post(raw, "/len", handle_len, 0)
+    a = spawn(SrvActor())
+    a ! StartSrv { raw: raw }
+    sleep(60000)
+    exit(0)
+}

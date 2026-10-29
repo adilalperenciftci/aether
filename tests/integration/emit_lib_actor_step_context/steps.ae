@@ -1,0 +1,179 @@
+// The library of the actor step context test (#3392, #3396): exports that
+// ask an actor. On the cooperative runtime the ask polls, so the actor is
+// stepped inside the export's call, on its thread; with threads it runs on
+// a core's. Either way the actor's handler runs outside the call: the
+// call's deadline does not interrupt it, an interruption is never left on
+// its way for a later call, and it reads no caller info the host set for
+// the call.
+import std.actors
+import std.bytes
+import std.host
+import std.time
+
+message Spin { ms: int }
+message Who { tag: string }
+
+var g_spun = 0
+
+actor Spinner {
+    receive {
+        Spin(ms) -> {
+            t0 = time.now_ms()
+            while time.now_ms() - t0 < ms {
+            }
+            g_spun = g_spun + 1
+            reply 7
+        }
+    }
+}
+
+actor Teller {
+    receive {
+        Who(tag) -> { reply host.caller_identity() }
+    }
+}
+
+fn next_of(i: int) -> int {
+    return i + 1
+}
+
+// Asks a Spinner to spin `ms` milliseconds, then loops once: the call's
+// deadline, passed by then, ends the call at that loop head.
+ask_spin(ms: int) -> int {
+    sp = spawn(Spinner())
+    v, err = sp ? Spin { ms: ms }
+    if err != "" {
+        return -1
+    }
+    i = 0
+    while i < 1 { // a call in the step, so the loop runs, safe point and all
+        i = next_of(i)
+    }
+    return v
+}
+
+// How many spins ran to their end.
+spun() -> int {
+    return g_spun
+}
+
+// An ordinary panic, which the try catches.
+catches() -> int {
+    got = 0
+    try {
+        panic("ordinary")
+    } catch e {
+        got = 1
+    }
+    return got
+}
+
+// The caller identity an actor this call asks reads.
+teller_sees() -> string {
+    t = spawn(Teller())
+    s, err = t ? Who { tag: "x" }
+    if err != "" {
+        return "error: ${err}"
+    }
+    return s
+}
+
+// #3404: an actor ended inside a call (on the cooperative runtime a kill
+// finalizes it there and then) has its queued message dropped there, and
+// the field's drop runs a loop past the call's deadline. The interruption is
+// the call's: it ends the call, and nothing of it is left for the next one.
+// The drop notes whether it ran inside the call (it reads the caller info
+// the host set for the call), which says which outcome the call has (#3415).
+var g_slow_in_call = 0
+
+fn slow_drop(p: @frees ptr) {
+    if host.caller_identity() != "" {
+        g_slow_in_call = 1
+    }
+    i = 0
+    while i < 3 {
+        i = next_of(i)
+    }
+    bytes.free(p)
+}
+
+type Slow = owned ptr drop slow_drop
+
+message Keep { s: Slow }
+
+actor Holder {
+    receive {
+        Keep(s) -> { _n = bytes.length(s) }
+    }
+}
+
+// Queues a Slow for a Holder and kills it before it runs.
+kill_holder() -> int {
+    h = spawn(Holder())
+    h ! Keep { s: bytes.new(4) as Slow }
+    actors.kill(h)
+    return 1
+}
+
+// 1 when a Slow's drop ran inside a call that killed its Holder since this
+// was last asked.
+slow_dropped_in_call() -> int {
+    was = g_slow_in_call
+    g_slow_in_call = 0
+    return was
+}
+
+// #3415: an actor ended while the call's interruption unwinds the call (a
+// defer of the call's kills it; on the cooperative runtime the kill
+// finalizes it there and then) has its queued message dropped there, and
+// the field's drop panics, ordinarily. That panic is the drop's; the
+// interruption is the call's, and goes on to end it: a `try` it meets
+// passes it on, and the call ends with its deadline.
+fn bomb_drop(p: @frees ptr) {
+    bytes.free(p)
+    panic("the bomb went off in its drop")
+}
+
+type Bomb = owned ptr drop bomb_drop
+
+message Arm { b: Bomb }
+
+actor Fuse {
+    receive {
+        Arm() -> {}
+    }
+}
+
+var g_swallowed = 0
+
+// Arms a Fuse, kills it in a defer, and loops: the call's deadline, passed
+// by then, cuts the loop at its head, and the unwind runs the defer.
+fn armed_spin() -> int {
+    fuse = spawn(Fuse())
+    fuse ! Arm { b: bytes.new(4) as Bomb }
+    defer actors.kill(fuse)
+    i = 0
+    while i < 1000000000 {
+        i = next_of(i)
+    }
+    return i
+}
+
+interrupted_kill() -> int {
+    return armed_spin()
+}
+
+interrupted_kill_in_try() -> int {
+    got = 0
+    try {
+        got = armed_spin()
+    } catch e {
+        g_swallowed = 1
+    }
+    return got
+}
+
+// 1 when a try caught the call's interruption as a panic of its own.
+swallowed() -> int {
+    return g_swallowed
+}

@@ -1,0 +1,41 @@
+// A library whose enforce block catches a panic raised inside a nested
+// enforce (#3438): the catch ends the nested level, so the rest of the block
+// is held to the block's own grants (PATH, not the probe), and the block's
+// end leaves no level behind (the probe reads again).
+import std.sandbox
+import std.os
+
+extern host_note(which: int, got: int)
+
+fn caught_read(name: string) -> int {
+    v = os.os_getenv(name)
+    if v == null {
+        return 0
+    }
+    return 1
+}
+
+caught() -> int {
+    path_only = sandbox.new("path_only") {
+        grant_env("PATH")
+    }
+    nothing = sandbox.new("nothing") {
+    }
+    sandbox.enforce(path_only) callback {
+        try {
+            sandbox.enforce(nothing) callback {
+                panic("inside the nested block")
+            }
+        } catch e {
+            _seen = e
+        }
+        // Notes 0 and 1: after the catch, held to path_only.
+        host_note(0, caught_read("PATH"))
+        host_note(1, caught_read("CAUGHT_PROBE"))
+    }
+    // Note 2: after the block, no level left.
+    host_note(2, caught_read("CAUGHT_PROBE"))
+    sandbox.free(nothing)
+    sandbox.free(path_only)
+    return 0
+}

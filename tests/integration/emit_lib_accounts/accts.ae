@@ -1,0 +1,95 @@
+// The library of the execution-accounts test (#2954): exports that allocate
+// cap-aware memory (strings, a list, a JSON document), keep it for the host
+// or let it go, loop, and call a host service that runs another export.
+import std.string
+import std.list
+import std.json
+
+extern host_service(which: int)
+
+fn build(n: int) -> string {
+    s = ""
+    i = 0
+    while i < n {
+        s = string.concat(s, "0123456789abcdef")
+        i = i + 1
+    }
+    return s
+}
+
+// A string of n * 16 bytes, handed to the host: still allocated when the
+// call returns.
+hand_over(n: int) -> string {
+    return build(n)
+}
+
+// The length of a string of n * 16 bytes, which the call frees.
+grow(n: int) -> int {
+    return string.length(build(n))
+}
+
+// A list of n strings, handed to the host.
+keep_list(n: int) -> ptr {
+    l = list.new()
+    i = 0
+    while i < n {
+        _ = list.add(l, string.concat("item-", "0123456789abcdef"))
+        i = i + 1
+    }
+    return l
+}
+
+// Frees what keep_list made.
+drop_list(l: ptr) -> int {
+    n = list.size(l)
+    list.free(l)
+    return n
+}
+
+// The array size of a JSON document, which the call frees.
+parse_size(doc: string) -> int {
+    v, err = json.parse(doc)
+    if err != "" {
+        return -2
+    }
+    n = json.array_size(v)
+    json.free(v)
+    return n
+}
+
+// A loop a deadline cuts.
+spin(n: int) -> int {
+    i = 0
+    s = 0
+    while i < n {
+        if i % 2 == 0 {
+            s = s + i
+        } else {
+            s = s - 1
+        }
+        i = i + 1
+    }
+    return s
+}
+
+// Calls the host's service, which runs inner under an account of its own.
+outer(which: int) -> int {
+    host_service(which)
+    return which + 1
+}
+
+inner(n: int) -> int {
+    return grow(n)
+}
+
+// The size of a list of n strings, which the call frees, interrupted or not.
+count_list(n: int) -> int {
+    l = list.new()
+    defer list.free(l)
+    i = 0
+    while i < n {
+        _ = list.add(l, string.concat("item-", "0123456789abcdef"))
+        i = i + 1
+    }
+    return list.size(l)
+}

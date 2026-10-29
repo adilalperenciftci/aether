@@ -45,7 +45,7 @@ fn from_hex(s: string) -> ptr {
 }
 
 // DER DigestInfo for SHA-256: 19-byte fixed prefix + 32-byte hash
-// (mirrors sha256_digestinfo in std.cryptography.tls13_cert).
+// (as std.cryptography.tls13_cert builds it for SHA-256).
 fn sha256_digestinfo(hash32: ptr) -> ptr {
     di = bytes.new(51)
     pfx = from_hex("3031300d060960864801650304020105000420")

@@ -1,0 +1,99 @@
+// Copyright (c) 2026 Aether Developers.
+//
+// std.cryptography.ct: constant-time building blocks shared by the
+// std.cryptography modules that handle secrets, and the declassification
+// point the constant-time test harness hooks.
+//
+// Import with:  import std.cryptography.ct
+//
+// A function here never branches on, and never indexes memory with, a value
+// derived from its arguments: comparisons and selections are computed with
+// masks. They are written for 32-bit `int` operands that hold one byte or one
+// small counter (0..2^31-1); the result of a comparison is 1 or 0.
+//
+//   eq(a, b)              -> 1 if a == b, else 0
+//   lt(a, b)              -> 1 if a < b (both non-negative), else 0
+//   select(bit, a, b)     -> a when bit is 1, b when bit is 0
+//   bytes_eq(a, b, n)     -> 1 if the first n bytes of a and b are equal
+//   declassify(v)         -> v, marked public for the harness
+//
+// declassify is the one place a secret-derived value is allowed to decide a
+// branch: a signature's retry decision, a key's validity, an AEAD tag check's
+// verdict, an all-zero shared secret. Each of those values is public by the
+// time it is used (the protocol reveals it), and the call names that fact. In
+// a normal program it returns its argument. The constant-time test
+// (tests/integration/crypto_ct_valgrind) marks secret inputs undefined for
+// Valgrind's memcheck and installs a hook here that marks the declassified
+// value defined again, so memcheck reports every OTHER branch or memory index
+// that depends on a secret.
+
+import std.bytes
+
+exports(
+    DeclassifyHook, eq, lt, select, bytes_eq, bytes_eq_slice,
+    declassify, set_declassify_hook
+)
+
+// fn(int) -> int, the hook's C signature.
+type DeclassifyHook = fn(int) -> int
+
+var declassify_hook: DeclassifyHook = null
+
+// Install the harness's hook (a C function `int f(int)`), or null to
+// remove it. Test-only: call it once, before any other thread runs crypto.
+set_declassify_hook(h: DeclassifyHook) {
+    declassify_hook = h
+}
+
+// Return v, marked public. See the module comment.
+declassify(v: int) -> int {
+    if declassify_hook != null {
+        return declassify_hook(v)
+    }
+    return v
+}
+
+// 1 if a == b, else 0, without a branch.
+eq(a: int, b: int) -> int {
+    uint32 x = (a ^ b) as uint32
+    return ((((x | (0 - x)) >> 31) ^ 1) & 1) as int
+}
+
+// 1 if a < b, else 0, for non-negative a and b, without a branch.
+lt(a: int, b: int) -> int {
+    long d = (a as long) - (b as long)
+    return ((d >> 63) & 1) as int
+}
+
+// a when bit is 1, b when bit is 0 (bit must be 0 or 1), without a branch.
+select(bit: int, a: int, b: int) -> int {
+    int mask = 0 - bit
+    return b ^ (mask & (a ^ b))
+}
+
+// 1 if the first n bytes of the std.bytes buffers a and b are equal, else 0.
+// Reads all n bytes whatever they hold; n itself is public.
+bytes_eq(a: ptr, b: ptr, n: int) -> int {
+    int acc = 0
+    int i = 0
+    while i < n {
+        acc = acc | ((bytes.get(a, i) ^ bytes.get(b, i)) & 255)
+        i = i + 1
+    }
+    return eq(acc, 0)
+}
+
+// bytes_eq over two byte slices of the same length (0 if the lengths differ;
+// the lengths are public).
+bytes_eq_slice(a: byte[], b: byte[]) -> int {
+    if a.len != b.len {
+        return 0
+    }
+    int acc = 0
+    int i = 0
+    while i < a.len {
+        acc = acc | ((a[i] ^ b[i]) & 255)
+        i = i + 1
+    }
+    return eq(acc, 0)
+}

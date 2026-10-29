@@ -59,7 +59,10 @@
 
 exports(
     register, whereis, unregister, is_registered, registry_size,
-    registry_clear
+    registry_clear,
+    monitor, demonitor, kill, stop, dead_sends, full_drops,
+    link, unlink, trap_exits,
+    rebirth_begin, rebirth_end, incarnation
 )
 
 // ---- Raw externs ----
@@ -72,6 +75,20 @@ extern aether_actor_unregister(name: string) -> int
 extern aether_actor_is_registered(name: string) -> int
 extern aether_actor_registry_size() -> int
 extern aether_actor_registry_clear()
+
+// Death notices (#2974), runtime/actors/aether_supervision.c.
+extern aether_actor_monitor(ref: actor_ref) -> int
+extern aether_actor_demonitor(id: int)
+extern aether_actor_kill(ref: actor_ref)
+extern aether_actor_stop()
+extern aether_actor_dead_sends() -> long
+extern aether_actor_full_drops(ref: actor_ref) -> long
+extern aether_actor_link(ref: actor_ref)
+extern aether_actor_unlink(ref: actor_ref)
+extern aether_actor_trap_exits(on: int)
+extern aether_actor_rebirth_begin(ref: actor_ref) -> int
+extern aether_actor_rebirth_end(ref: actor_ref) -> int
+extern aether_actor_incarnation(ref: actor_ref) -> int
 
 // ---- Aether-side wrappers ----
 
@@ -110,4 +127,107 @@ registry_size() -> int {
 // Wipe all bindings. Tests use this for isolation.
 registry_clear() {
     aether_actor_registry_clear()
+}
+
+// ---- Death notices (#2974) ----
+//
+// A watched actor's death reaches its watcher as the system message
+// `Down { ref: actor_ref, reason: string }`, which the compiler declares:
+// an actor handles it in a `Down(ref, reason) -> { ... }` arm. The reason
+// is "normal" (it stopped, or was released), "killed" (actors.kill), or
+// the panic's reason. A Down is sent once its death is final: never while
+// its handler still runs, and after the last messages it sent the watcher.
+
+// From a handler: one Down to this actor when `ref` ends, at once if it has
+// ended already. Returns the monitor's id, for demonitor.
+monitor(ref: actor_ref) -> int {
+    return aether_actor_monitor(ref)
+}
+
+// From a handler: no Down of monitor `id` is handled after this, one
+// already on its way included.
+demonitor(id: int) {
+    aether_actor_demonitor(id)
+}
+
+// Ends `ref` with "killed" once its current handler, if one is running,
+// returns. Its queued messages are dropped and counted (dead_sends), an
+// ask it is waiting in ends at once, and its watchers get Down. From
+// anywhere; a dead actor is not killed twice.
+kill(ref: actor_ref) {
+    aether_actor_kill(ref)
+}
+
+// From a handler: this actor ends with "normal" when the handler returns.
+stop() {
+    aether_actor_stop()
+}
+
+// Messages a panicked, killed or stopped actor did not handle: queued at
+// its death or sent to it after, each released and counted once.
+dead_sends() -> long {
+    return aether_actor_dead_sends()
+}
+
+// Plain sends (`!`) to `ref` dropped because its mailbox was full: an actor
+// declared `@mailbox(bound: N)` takes at most N messages it has not handled
+// yet. try_send(ref, Msg {...}) says "the mailbox is full" instead, and an
+// ask fails with it; neither is counted here.
+full_drops(ref: actor_ref) -> long {
+    return aether_actor_full_drops(ref)
+}
+
+// From a handler: this actor and `ref` are linked, both ways. When either
+// ends, the other ends too, with the same reason (a panic's message, or
+// "killed"), unless that reason is "normal", which ends nothing; one that
+// traps exits gets a Down instead and lives on. Linked to an actor that has
+// ended already, this actor takes its death at once.
+link(ref: actor_ref) {
+    aether_actor_link(ref)
+}
+
+// From a handler: the link with `ref` goes, both ways. A death already
+// taken by it stays taken.
+unlink(ref: actor_ref) {
+    aether_actor_unlink(ref)
+}
+
+// From a handler: a linked actor's death reaches this actor as a Down (its
+// id 0, never dropped by demonitor) instead of ending it, while `on`.
+trap_exits(on: bool) {
+    if on {
+        aether_actor_trap_exits(1)
+    } else {
+        aether_actor_trap_exits(0)
+    }
+}
+
+// ---- Restart in place (#2974) ----
+//
+// What a supervisor (std.supervise) restarts a child with, under the ref its
+// siblings and clients already hold: rebirth_begin(child), then the child's
+// factory, whose spawn of the child's actor type takes the child's own block
+// and runs its state initializers, then rebirth_end(child). Messages queued
+// at the death, and sends while it is dead, are dropped and counted
+// (dead_sends); sends once the factory's spawn returns reach the new
+// incarnation.
+
+// 1 when `ref` is claimed for a restart on this thread: it has ended, its
+// death is finalized and no message of it is in flight. 0 when not yet (try
+// again soon), -1 when it cannot be (it is alive, released, or one a C host
+// registered).
+rebirth_begin(ref: actor_ref) -> int {
+    return aether_actor_rebirth_begin(ref)
+}
+
+// 1 when `ref` is alive again. 0 when the factory spawned no actor of its
+// type, or panicked first: the restart is undone and `ref` stays ended,
+// "the restart failed".
+rebirth_end(ref: actor_ref) -> int {
+    return aether_actor_rebirth_end(ref)
+}
+
+// How many times `ref` was restarted in place: 0 for the actor spawned.
+incarnation(ref: actor_ref) -> int {
+    return aether_actor_incarnation(ref)
 }

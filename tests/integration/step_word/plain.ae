@@ -1,0 +1,78 @@
+// A program that reads an environment variable and a file, as most do,
+// but holds no restart claim, no execution account and no sandbox level,
+// keeps the step's one word at 0: its actor steps stay plain (#3419). An
+// enforce block sets the word's sandbox bit, and a receiver stepped inline
+// inside it still runs without the block's levels.
+import std.os
+import std.fs
+import std.sandbox
+
+extern probe_step_bits() -> int
+
+message Ping { n: int }
+message Look {}
+message Seen {}
+message Go {}
+
+actor Echo {
+    state got = 0
+    receive {
+        Ping(n) -> { got = got + n }
+    }
+}
+
+fn readable() -> int {
+    v = os.os_getenv("PATH")
+    if v == null {
+        return 0
+    }
+    return 1
+}
+
+actor Looker {
+    state seen = -1
+    receive {
+        Look() -> { seen = readable() }
+        Seen() -> { reply seen }
+    }
+}
+
+// Sends Looker, idle on its own core, a message from inside a deny-all
+// block, so Looker is stepped inside the send. Replies what the block read
+// after the send times 10, plus what Looker read.
+actor Confined {
+    state looker: actor_ref = null
+    receive {
+        Go() -> {
+            nothing = sandbox.new("nothing") {
+            }
+            lk = looker
+            inside = ref(-1)
+            sandbox.enforce(nothing) callback {
+                lk ! Look {}
+                ref_set(inside, readable())
+            }
+            sandbox.free(nothing)
+            seen = looker ? Seen {}
+            reply ref_get(inside) * 10 + seen
+        }
+    }
+}
+
+main() {
+    path_set = readable()
+    _text, _err = fs.read("no_such_file_for_step_word")
+    e = spawn(Echo())
+    i = 0
+    while i < 1000 {
+        e ! Ping { n: 1 }
+        i = i + 1
+    }
+    wait_for_idle()
+    println("plain: getenv ${path_set}, ${e.got} messages, step bits ${probe_step_bits()}")
+    c = spawn(Confined(), core: 0)
+    l = spawn(Looker(), core: 0)
+    c.looker = l
+    int got = c ? Go {}
+    println("enforce: the receiver read PATH ${got % 10}, the block itself ${got / 10}, step bits now ${probe_step_bits()}")
+}

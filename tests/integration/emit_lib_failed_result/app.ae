@@ -1,0 +1,21 @@
+// An Aether importer of words.ae in binary form, built with its own
+// runtime (#3388): a failed call is raised again as a panic here, and the
+// string the library would have returned is not kept by either runtime.
+//
+// The reason is printed in the handler and not kept: on ELF, where the
+// program is linked with -rdynamic, the library's runtime calls bind to the
+// program's runtime (one runtime, not two), so words.used() reads the
+// program's count, which a kept reason string would be part of (#3437).
+import words
+
+main() {
+    base = words.used()
+    words.fail_next(1)
+    try {
+        _s = words.greet(7)
+    } catch e {
+        println("raised: ${e}")
+    }
+    println("the library holds what it held before: ${words.used() == base}")
+    println("then: ${words.greet(7)}")
+}

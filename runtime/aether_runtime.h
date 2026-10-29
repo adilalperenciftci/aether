@@ -13,7 +13,11 @@
 // Runtime configuration flags
 #define AETHER_FLAG_AUTO_DETECT      (1 << 0)  // Auto-detect CPU features (recommended)
 #define AETHER_FLAG_LOCKFREE_MAILBOX (1 << 1)  // Use lock-free SPSC mailboxes
-#define AETHER_FLAG_LOCKFREE_POOLS   (1 << 2)  // Use lock-free TLS message pools
+// Deprecated (#3374): accepted and ignored. There is no message pool; the
+// flag stays defined so code that passes it still builds, and its bit is
+// never given another meaning. aether_runtime_has_feature() reports it off.
+// Removed at host ABI level 2 (docs/abi-policy.md, "Deprecated names").
+#define AETHER_FLAG_LOCKFREE_POOLS   (1 << 2)
 #define AETHER_FLAG_ENABLE_SIMD      (1 << 3)  // Enable AVX2 vectorization
 #define AETHER_FLAG_ENABLE_MWAIT     (1 << 4)  // Enable MWAIT for idle
 #define AETHER_FLAG_VERBOSE          (1 << 5)  // Print configuration on init
@@ -23,7 +27,7 @@ typedef struct {
     int num_cores;
     int flags;
     int use_lockfree_mailbox;
-    int use_lockfree_pools;
+    int use_lockfree_pools;     // deprecated (#3374): always 0, kept so the fields after it stay put
     int use_mwait;
     int use_simd;
 } AetherRuntimeInitConfig;

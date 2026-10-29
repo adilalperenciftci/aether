@@ -9,6 +9,7 @@
 
 import std.bits
 import std.bytes
+import std.mem
 
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
@@ -261,6 +262,7 @@ new(algo: string) -> {
         ctx.sparkle_steps_big = 12
         ctx.state_words = 16
     } else {
+        mem.wipe(ctx, sizeof(SparkleCtx))
         free(ctx)
         return null, "unknown algorithm"
     }
@@ -357,7 +359,7 @@ finalize_to_bytes(c: *SparkleCtx) -> ptr {
 }
 
 free_internals(c: *SparkleCtx) {
-    if c.block != null { bytes.free(c.block); c.block = null }
+    if c.block != null { bytes.wipe_free(c.block); c.block = null }
 }
 
 final_bytes(ctx: ptr) -> ptr {
@@ -366,6 +368,7 @@ final_bytes(ctx: ptr) -> ptr {
     out = finalize_to_bytes(c)
     s = bytes.finish(out, n)
     free_internals(c)
+    mem.wipe(ctx, sizeof(SparkleCtx))
     free(ctx)
     res = bytes.new(n)
     bytes.copy_from_string(res, 0, s, n)
@@ -394,9 +397,10 @@ final_hex(ctx: ptr) -> string {
         bytes.set(hexbuf, i * 2 + 1, c_lo)
         i = i + 1
     }
-    bytes.free(out)
+    bytes.wipe_free(out)
     s = bytes.finish(hexbuf, n * 2)
     free_internals(c)
+    mem.wipe(ctx, sizeof(SparkleCtx))
     free(ctx)
     return s
 }
@@ -407,6 +411,7 @@ free_ctx(ctx: ptr) {
     }
     c = ctx as *SparkleCtx
     free_internals(c)
+    mem.wipe(ctx, sizeof(SparkleCtx))
     free(ctx)
 }
 

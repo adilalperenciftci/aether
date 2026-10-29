@@ -1,0 +1,9 @@
+// #3341 fixture: a message a module exports, for the importer's actors to
+// handle, and a function that sends it.
+exports(Ping, ping)
+
+message Ping { n: int }
+
+ping(a: actor_ref, n: int) {
+    a ! Ping { n: n }
+}

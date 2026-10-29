@@ -139,7 +139,7 @@ fi
 
 # --- 4. --emit=lib deadline --------------------------------------------------
 if "$AETHERC" --emit=lib "$SCRIPT_DIR/fixtures/lib_vm.ae" "$tmp/lib.c" > "$tmp/lib.log" 2>&1 &&
-   grep -q 'aether_caps_deadline_tripped()) { __aether_abort_call(); goto _ae_td_exit_1; }' "$tmp/lib.c" &&
+   grep -q 'aether_exec_poll()) { __aether_abort_call(); goto _ae_td_exit_1; }' "$tmp/lib.c" &&
    grep -q '_ae_td_exit_1: ;' "$tmp/lib.c"; then
     ok "--emit=lib: each threaded dispatch checks the call deadline"
 else

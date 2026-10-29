@@ -1,140 +1,497 @@
+/* MIT License (https://opensource.org/licenses/MIT)
+ *
+ * Portions copyright (c) 2016 Thomas Pornin (BearSSL, https://bearssl.org)
+ *
+ * Portions copyright (c) 2026 Aether Developers.
+ */
+
 #include "aether_aes.h"
 #include "../../../runtime/aether_resource_caps.h"
+#include "../../../runtime/utils/aether_wipe.h"
 
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 
-/* FIPS-197 over a raw pointer. Correctness is pinned by the same KATs the
- * Aether implementation is pinned by (tests/regression/test_aes.ae). */
+/* FIPS-197 AES in constant time (#2600).
+ *
+ * The cipher used to index a 256-byte S-box with key- and data-dependent
+ * bytes, which leaks the key through the cache (Bernstein 2005; Osvik,
+ * Shamir and Tromer 2006). This is the 64-bit bitsliced form of Thomas
+ * Pornin's BearSSL "ct64" implementation (MIT licence): four blocks are
+ * spread over eight 64-bit words, bit i of every state byte in word i, and
+ * every step is a fixed sequence of AND, XOR, shifts and rotations:
+ *
+ *   SubBytes      the Boyar-Peralta circuit of 113 gates (eprint 2009/191),
+ *                 and its inverse via the affine maps around it;
+ *   ShiftRows     masks and shifts within each word;
+ *   MixColumns    XORs and 16/32-bit rotations;
+ *   key schedule  the same S-box circuit on one word.
+ *
+ * No branch and no memory index depends on the key or the data, which
+ * tests/integration/crypto_ct_valgrind checks under Valgrind. Correctness
+ * is pinned by the FIPS-197 KATs (tests/regression/test_aes.ae) and the
+ * Wycheproof AES-GCM and AES-CMAC vectors. */
 
-static const uint8_t SBOX[256] = {
-0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
-0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
-0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
-0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
-0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
-0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
-0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
-0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
-0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
-0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
-0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
-0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
-0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
-0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
-0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
-0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16};
+/* ---- the bitsliced S-box (BearSSL br_aes_ct64_bitslice_Sbox) ---- */
 
-static uint8_t ISBOX[256];
-static int g_isbox_ready = 0;
+static void sbox_bits(uint64_t* q) {
+    /* x0 is the high bit, x7 the low bit, as in Boyar and Peralta. */
+    uint64_t x0, x1, x2, x3, x4, x5, x6, x7;
+    uint64_t y1, y2, y3, y4, y5, y6, y7, y8, y9;
+    uint64_t y10, y11, y12, y13, y14, y15, y16, y17, y18, y19;
+    uint64_t y20, y21;
+    uint64_t z0, z1, z2, z3, z4, z5, z6, z7, z8, z9;
+    uint64_t z10, z11, z12, z13, z14, z15, z16, z17;
+    uint64_t t0, t1, t2, t3, t4, t5, t6, t7, t8, t9;
+    uint64_t t10, t11, t12, t13, t14, t15, t16, t17, t18, t19;
+    uint64_t t20, t21, t22, t23, t24, t25, t26, t27, t28, t29;
+    uint64_t t30, t31, t32, t33, t34, t35, t36, t37, t38, t39;
+    uint64_t t40, t41, t42, t43, t44, t45, t46, t47, t48, t49;
+    uint64_t t50, t51, t52, t53, t54, t55, t56, t57, t58, t59;
+    uint64_t t60, t61, t62, t63, t64, t65, t66, t67;
+    uint64_t s0, s1, s2, s3, s4, s5, s6, s7;
 
-static void build_isbox(void) {
-    if (g_isbox_ready) return;
-    for (int i = 0; i < 256; i++) ISBOX[SBOX[i]] = (uint8_t)i;
-    g_isbox_ready = 1;
+    x0 = q[7];
+    x1 = q[6];
+    x2 = q[5];
+    x3 = q[4];
+    x4 = q[3];
+    x5 = q[2];
+    x6 = q[1];
+    x7 = q[0];
+
+    /* Top linear transformation. */
+    y14 = x3 ^ x5;
+    y13 = x0 ^ x6;
+    y9 = x0 ^ x3;
+    y8 = x0 ^ x5;
+    t0 = x1 ^ x2;
+    y1 = t0 ^ x7;
+    y4 = y1 ^ x3;
+    y12 = y13 ^ y14;
+    y2 = y1 ^ x0;
+    y5 = y1 ^ x6;
+    y3 = y5 ^ y8;
+    t1 = x4 ^ y12;
+    y15 = t1 ^ x5;
+    y20 = t1 ^ x1;
+    y6 = y15 ^ x7;
+    y10 = y15 ^ t0;
+    y11 = y20 ^ y9;
+    y7 = x7 ^ y11;
+    y17 = y10 ^ y11;
+    y19 = y10 ^ y8;
+    y16 = t0 ^ y11;
+    y21 = y13 ^ y16;
+    y18 = x0 ^ y16;
+
+    /* Non-linear section. */
+    t2 = y12 & y15;
+    t3 = y3 & y6;
+    t4 = t3 ^ t2;
+    t5 = y4 & x7;
+    t6 = t5 ^ t2;
+    t7 = y13 & y16;
+    t8 = y5 & y1;
+    t9 = t8 ^ t7;
+    t10 = y2 & y7;
+    t11 = t10 ^ t7;
+    t12 = y9 & y11;
+    t13 = y14 & y17;
+    t14 = t13 ^ t12;
+    t15 = y8 & y10;
+    t16 = t15 ^ t12;
+    t17 = t4 ^ t14;
+    t18 = t6 ^ t16;
+    t19 = t9 ^ t14;
+    t20 = t11 ^ t16;
+    t21 = t17 ^ y20;
+    t22 = t18 ^ y19;
+    t23 = t19 ^ y21;
+    t24 = t20 ^ y18;
+
+    t25 = t21 ^ t22;
+    t26 = t21 & t23;
+    t27 = t24 ^ t26;
+    t28 = t25 & t27;
+    t29 = t28 ^ t22;
+    t30 = t23 ^ t24;
+    t31 = t22 ^ t26;
+    t32 = t31 & t30;
+    t33 = t32 ^ t24;
+    t34 = t23 ^ t33;
+    t35 = t27 ^ t33;
+    t36 = t24 & t35;
+    t37 = t36 ^ t34;
+    t38 = t27 ^ t36;
+    t39 = t29 & t38;
+    t40 = t25 ^ t39;
+
+    t41 = t40 ^ t37;
+    t42 = t29 ^ t33;
+    t43 = t29 ^ t40;
+    t44 = t33 ^ t37;
+    t45 = t42 ^ t41;
+    z0 = t44 & y15;
+    z1 = t37 & y6;
+    z2 = t33 & x7;
+    z3 = t43 & y16;
+    z4 = t40 & y1;
+    z5 = t29 & y7;
+    z6 = t42 & y11;
+    z7 = t45 & y17;
+    z8 = t41 & y10;
+    z9 = t44 & y12;
+    z10 = t37 & y3;
+    z11 = t33 & y4;
+    z12 = t43 & y13;
+    z13 = t40 & y5;
+    z14 = t29 & y2;
+    z15 = t42 & y9;
+    z16 = t45 & y14;
+    z17 = t41 & y8;
+
+    /* Bottom linear transformation. */
+    t46 = z15 ^ z16;
+    t47 = z10 ^ z11;
+    t48 = z5 ^ z13;
+    t49 = z9 ^ z10;
+    t50 = z2 ^ z12;
+    t51 = z2 ^ z5;
+    t52 = z7 ^ z8;
+    t53 = z0 ^ z3;
+    t54 = z6 ^ z7;
+    t55 = z16 ^ z17;
+    t56 = z12 ^ t48;
+    t57 = t50 ^ t53;
+    t58 = z4 ^ t46;
+    t59 = z3 ^ t54;
+    t60 = t46 ^ t57;
+    t61 = z14 ^ t57;
+    t62 = t52 ^ t58;
+    t63 = t49 ^ t58;
+    t64 = z4 ^ t59;
+    t65 = t61 ^ t62;
+    t66 = z1 ^ t63;
+    s0 = t59 ^ t63;
+    s6 = t56 ^ ~t62;
+    s7 = t48 ^ ~t60;
+    t67 = t64 ^ t65;
+    s3 = t53 ^ t66;
+    s4 = t51 ^ t66;
+    s5 = t47 ^ t65;
+    s1 = t64 ^ ~s3;
+    s2 = t55 ^ ~t67;
+
+    q[7] = s0;
+    q[6] = s1;
+    q[5] = s2;
+    q[4] = s3;
+    q[3] = s4;
+    q[2] = s5;
+    q[1] = s6;
+    q[0] = s7;
+}
+
+/* The inverse affine map of the S-box, A^-1(x) = (x <<< 1) ^ (x <<< 3) ^
+ * (x <<< 6) ^ 0x05 in bit-planes: InvSubBytes(x) = A^-1(S(A^-1(x))), since
+ * S(x) = A(x^-1). */
+static void inv_affine_bits(uint64_t* q) {
+    uint64_t q0 = ~q[0], q1 = ~q[1], q2 = q[2], q3 = q[3];
+    uint64_t q4 = q[4], q5 = ~q[5], q6 = ~q[6], q7 = q[7];
+    q[7] = q1 ^ q4 ^ q6;
+    q[6] = q0 ^ q3 ^ q5;
+    q[5] = q7 ^ q2 ^ q4;
+    q[4] = q6 ^ q1 ^ q3;
+    q[3] = q5 ^ q0 ^ q2;
+    q[2] = q4 ^ q7 ^ q1;
+    q[1] = q3 ^ q6 ^ q0;
+    q[0] = q2 ^ q5 ^ q7;
+}
+
+static void inv_sbox_bits(uint64_t* q) {
+    inv_affine_bits(q);
+    sbox_bits(q);
+    inv_affine_bits(q);
+}
+
+/* ---- packing (BearSSL br_aes_ct64_ortho / interleave_in / _out) ---- */
+
+#define AE_SWAPN(cl, ch, s, x, y) do { \
+        uint64_t a_ = (x), b_ = (y); \
+        (x) = (a_ & (uint64_t)(cl)) | ((b_ & (uint64_t)(cl)) << (s)); \
+        (y) = ((a_ & (uint64_t)(ch)) >> (s)) | (b_ & (uint64_t)(ch)); \
+    } while (0)
+#define AE_SWAP2(x, y) AE_SWAPN(0x5555555555555555ULL, 0xAAAAAAAAAAAAAAAAULL, 1, x, y)
+#define AE_SWAP4(x, y) AE_SWAPN(0x3333333333333333ULL, 0xCCCCCCCCCCCCCCCCULL, 2, x, y)
+#define AE_SWAP8(x, y) AE_SWAPN(0x0F0F0F0F0F0F0F0FULL, 0xF0F0F0F0F0F0F0F0ULL, 4, x, y)
+
+static void ortho(uint64_t* q) {
+    AE_SWAP2(q[0], q[1]);
+    AE_SWAP2(q[2], q[3]);
+    AE_SWAP2(q[4], q[5]);
+    AE_SWAP2(q[6], q[7]);
+    AE_SWAP4(q[0], q[2]);
+    AE_SWAP4(q[1], q[3]);
+    AE_SWAP4(q[4], q[6]);
+    AE_SWAP4(q[5], q[7]);
+    AE_SWAP8(q[0], q[4]);
+    AE_SWAP8(q[1], q[5]);
+    AE_SWAP8(q[2], q[6]);
+    AE_SWAP8(q[3], q[7]);
+}
+
+static void interleave_in(uint64_t* q0, uint64_t* q1, const uint32_t* w) {
+    uint64_t x0 = w[0], x1 = w[1], x2 = w[2], x3 = w[3];
+    x0 |= (x0 << 16);
+    x1 |= (x1 << 16);
+    x2 |= (x2 << 16);
+    x3 |= (x3 << 16);
+    x0 &= 0x0000FFFF0000FFFFULL;
+    x1 &= 0x0000FFFF0000FFFFULL;
+    x2 &= 0x0000FFFF0000FFFFULL;
+    x3 &= 0x0000FFFF0000FFFFULL;
+    x0 |= (x0 << 8);
+    x1 |= (x1 << 8);
+    x2 |= (x2 << 8);
+    x3 |= (x3 << 8);
+    x0 &= 0x00FF00FF00FF00FFULL;
+    x1 &= 0x00FF00FF00FF00FFULL;
+    x2 &= 0x00FF00FF00FF00FFULL;
+    x3 &= 0x00FF00FF00FF00FFULL;
+    *q0 = x0 | (x2 << 8);
+    *q1 = x1 | (x3 << 8);
+}
+
+static void interleave_out(uint32_t* w, uint64_t q0, uint64_t q1) {
+    uint64_t x0 = q0 & 0x00FF00FF00FF00FFULL;
+    uint64_t x1 = q1 & 0x00FF00FF00FF00FFULL;
+    uint64_t x2 = (q0 >> 8) & 0x00FF00FF00FF00FFULL;
+    uint64_t x3 = (q1 >> 8) & 0x00FF00FF00FF00FFULL;
+    x0 |= (x0 >> 8);
+    x1 |= (x1 >> 8);
+    x2 |= (x2 >> 8);
+    x3 |= (x3 >> 8);
+    x0 &= 0x0000FFFF0000FFFFULL;
+    x1 &= 0x0000FFFF0000FFFFULL;
+    x2 &= 0x0000FFFF0000FFFFULL;
+    x3 &= 0x0000FFFF0000FFFFULL;
+    w[0] = (uint32_t)x0 | (uint32_t)(x0 >> 16);
+    w[1] = (uint32_t)x1 | (uint32_t)(x1 >> 16);
+    w[2] = (uint32_t)x2 | (uint32_t)(x2 >> 16);
+    w[3] = (uint32_t)x3 | (uint32_t)(x3 >> 16);
+}
+
+/* ---- rounds (BearSSL ct64 encrypt and decrypt) ---- */
+
+static void add_round_key(uint64_t* q, const uint64_t* sk) {
+    for (int i = 0; i < 8; i++) q[i] ^= sk[i];
+}
+
+static void shift_rows(uint64_t* q) {
+    for (int i = 0; i < 8; i++) {
+        uint64_t x = q[i];
+        q[i] = (x & 0x000000000000FFFFULL)
+             | ((x & 0x00000000FFF00000ULL) >> 4)
+             | ((x & 0x00000000000F0000ULL) << 12)
+             | ((x & 0x0000FF0000000000ULL) >> 8)
+             | ((x & 0x000000FF00000000ULL) << 8)
+             | ((x & 0xF000000000000000ULL) >> 12)
+             | ((x & 0x0FFF000000000000ULL) << 4);
+    }
+}
+
+static void inv_shift_rows(uint64_t* q) {
+    for (int i = 0; i < 8; i++) {
+        uint64_t x = q[i];
+        q[i] = (x & 0x000000000000FFFFULL)
+             | ((x & 0x000000000FFF0000ULL) << 4)
+             | ((x & 0x00000000F0000000ULL) >> 12)
+             | ((x & 0x000000FF00000000ULL) << 8)
+             | ((x & 0x0000FF0000000000ULL) >> 8)
+             | ((x & 0x000F000000000000ULL) << 12)
+             | ((x & 0xFFF0000000000000ULL) >> 4);
+    }
+}
+
+static uint64_t rotr32(uint64_t x) {
+    return (x << 32) | (x >> 32);
+}
+
+static void mix_columns(uint64_t* q) {
+    uint64_t q0 = q[0], q1 = q[1], q2 = q[2], q3 = q[3];
+    uint64_t q4 = q[4], q5 = q[5], q6 = q[6], q7 = q[7];
+    uint64_t r0 = (q0 >> 16) | (q0 << 48);
+    uint64_t r1 = (q1 >> 16) | (q1 << 48);
+    uint64_t r2 = (q2 >> 16) | (q2 << 48);
+    uint64_t r3 = (q3 >> 16) | (q3 << 48);
+    uint64_t r4 = (q4 >> 16) | (q4 << 48);
+    uint64_t r5 = (q5 >> 16) | (q5 << 48);
+    uint64_t r6 = (q6 >> 16) | (q6 << 48);
+    uint64_t r7 = (q7 >> 16) | (q7 << 48);
+    q[0] = q7 ^ r7 ^ r0 ^ rotr32(q0 ^ r0);
+    q[1] = q0 ^ r0 ^ q7 ^ r7 ^ r1 ^ rotr32(q1 ^ r1);
+    q[2] = q1 ^ r1 ^ r2 ^ rotr32(q2 ^ r2);
+    q[3] = q2 ^ r2 ^ q7 ^ r7 ^ r3 ^ rotr32(q3 ^ r3);
+    q[4] = q3 ^ r3 ^ q7 ^ r7 ^ r4 ^ rotr32(q4 ^ r4);
+    q[5] = q4 ^ r4 ^ r5 ^ rotr32(q5 ^ r5);
+    q[6] = q5 ^ r5 ^ r6 ^ rotr32(q6 ^ r6);
+    q[7] = q6 ^ r6 ^ r7 ^ rotr32(q7 ^ r7);
+}
+
+/* InvMixColumns as the standard pre-step, each column times
+ * {04}x^2 + {05}, then MixColumns: in bit-planes, multiplying a byte by
+ * {04} is a linear map, and the pre-step pairs row i with row i + 2,
+ * which is a 32-bit rotation of each word. */
+static void inv_mix_columns(uint64_t* q) {
+    /* u = xtime(xtime(a ^ (a >>> 2 rows))) for every byte. */
+    uint64_t a[8], u[8];
+    for (int i = 0; i < 8; i++) a[i] = q[i] ^ rotr32(q[i]);
+    /* xtime twice: bit i of 4a is bit i-2 of a, with the reduction
+     * polynomial 0x1b folded in for the two bits that shift out. */
+    u[0] = a[6];
+    u[1] = a[7] ^ a[6];
+    u[2] = a[0] ^ a[7];
+    u[3] = a[1] ^ a[6];
+    u[4] = a[2] ^ a[7] ^ a[6];
+    u[5] = a[3] ^ a[7];
+    u[6] = a[4];
+    u[7] = a[5];
+    for (int i = 0; i < 8; i++) q[i] ^= u[i];
+    mix_columns(q);
+}
+
+static void encrypt_bits(int rounds, const uint64_t* sk, uint64_t* q) {
+    add_round_key(q, sk);
+    for (int u = 1; u < rounds; u++) {
+        sbox_bits(q);
+        shift_rows(q);
+        mix_columns(q);
+        add_round_key(q, sk + (u << 3));
+    }
+    sbox_bits(q);
+    shift_rows(q);
+    add_round_key(q, sk + (rounds << 3));
+}
+
+static void decrypt_bits(int rounds, const uint64_t* sk, uint64_t* q) {
+    add_round_key(q, sk + (rounds << 3));
+    for (int u = rounds - 1; u > 0; u--) {
+        inv_shift_rows(q);
+        inv_sbox_bits(q);
+        add_round_key(q, sk + (u << 3));
+        inv_mix_columns(q);
+    }
+    inv_shift_rows(q);
+    inv_sbox_bits(q);
+    add_round_key(q, sk);
+}
+
+/* ---- key schedule (BearSSL br_aes_ct64_keysched / skey_expand) ---- */
+
+static uint32_t sub_word(uint32_t x) {
+    uint64_t q[8];
+    memset(q, 0, sizeof q);
+    q[0] = x;
+    ortho(q);
+    sbox_bits(q);
+    ortho(q);
+    return (uint32_t)q[0];
+}
+
+static uint32_t dec32le(const uint8_t* p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8)
+         | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static void enc32le(uint8_t* p, uint32_t x) {
+    p[0] = (uint8_t)x;
+    p[1] = (uint8_t)(x >> 8);
+    p[2] = (uint8_t)(x >> 16);
+    p[3] = (uint8_t)(x >> 24);
 }
 
 typedef struct {
-    uint8_t rk[240];   /* expanded key, up to 15 rounds x 16 bytes */
+    uint64_t sk[120]; /* expanded round keys, bitsliced: 8 words per round */
     int rounds;
     int encrypt;
 } AeAes;
 
-static uint8_t xtime(uint8_t x) {
-    return (uint8_t)((x << 1) ^ ((x >> 7) * 0x1b));
-}
-
 static void expand_key(AeAes* c, const uint8_t* key, int keylen) {
+    static const uint8_t rcon[10] = { 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1B, 0x36 };
     int nk = keylen / 4;
-    int nr = nk + 6;
-    c->rounds = nr;
-    memcpy(c->rk, key, (size_t)keylen);
-    uint8_t rcon = 1;
-    for (int i = nk; i < 4 * (nr + 1); i++) {
-        uint8_t t[4];
-        memcpy(t, c->rk + (i - 1) * 4, 4);
-        if (i % nk == 0) {
-            uint8_t tmp = t[0];
-            t[0] = (uint8_t)(SBOX[t[1]] ^ rcon);
-            t[1] = SBOX[t[2]];
-            t[2] = SBOX[t[3]];
-            t[3] = SBOX[tmp];
-            rcon = xtime(rcon);
-        } else if (nk > 6 && i % nk == 4) {
-            for (int j = 0; j < 4; j++) t[j] = SBOX[t[j]];
+    int rounds = nk + 6;
+    int nkf = (rounds + 1) * 4;
+    uint32_t skey[60];
+    uint64_t comp[30];
+    c->rounds = rounds;
+    for (int i = 0; i < nk; i++) skey[i] = dec32le(key + 4 * i);
+    uint32_t tmp = skey[nk - 1];
+    for (int i = nk, j = 0, k = 0; i < nkf; i++) {
+        if (j == 0) {
+            tmp = (tmp << 24) | (tmp >> 8);
+            tmp = sub_word(tmp) ^ rcon[k];
+        } else if (nk > 6 && j == 4) {
+            tmp = sub_word(tmp);
         }
-        for (int j = 0; j < 4; j++) {
-            c->rk[i * 4 + j] = (uint8_t)(c->rk[(i - nk) * 4 + j] ^ t[j]);
-        }
-    }
-}
-
-static void add_round_key(uint8_t* s, const uint8_t* rk, int rnd) {
-    for (int i = 0; i < 16; i++) s[i] ^= rk[rnd * 16 + i];
-}
-
-static void encrypt_block(const AeAes* c, const uint8_t* in, uint8_t* out) {
-    uint8_t s[16];
-    memcpy(s, in, 16);
-    add_round_key(s, c->rk, 0);
-    for (int rnd = 1; rnd <= c->rounds; rnd++) {
-        for (int i = 0; i < 16; i++) s[i] = SBOX[s[i]];
-        /* ShiftRows, column-major state as in FIPS-197 */
-        uint8_t t;
-        t = s[1];  s[1] = s[5];  s[5] = s[9];  s[9] = s[13];  s[13] = t;
-        t = s[2];  s[2] = s[10]; s[10] = t;    t = s[6];  s[6] = s[14]; s[14] = t;
-        t = s[15]; s[15] = s[11]; s[11] = s[7]; s[7] = s[3];  s[3] = t;
-        if (rnd != c->rounds) {
-            /* MixColumns via xtime only. The gmul form costs a bit-loop per
-               coefficient, which is ~29 million calls per megabyte. */
-            for (int col = 0; col < 4; col++) {
-                uint8_t* p = s + col * 4;
-                uint8_t a0 = p[0], a1 = p[1], a2 = p[2], a3 = p[3];
-                uint8_t t = (uint8_t)(a0 ^ a1 ^ a2 ^ a3);
-                p[0] = (uint8_t)(a0 ^ t ^ xtime((uint8_t)(a0 ^ a1)));
-                p[1] = (uint8_t)(a1 ^ t ^ xtime((uint8_t)(a1 ^ a2)));
-                p[2] = (uint8_t)(a2 ^ t ^ xtime((uint8_t)(a2 ^ a3)));
-                p[3] = (uint8_t)(a3 ^ t ^ xtime((uint8_t)(a3 ^ a0)));
-            }
-        }
-        add_round_key(s, c->rk, rnd);
-    }
-    memcpy(out, s, 16);
-}
-
-static void decrypt_block(const AeAes* c, const uint8_t* in, uint8_t* out) {
-    build_isbox();
-    uint8_t s[16];
-    memcpy(s, in, 16);
-    add_round_key(s, c->rk, c->rounds);
-    for (int rnd = c->rounds - 1; rnd >= 0; rnd--) {
-        uint8_t t;
-        /* InvShiftRows */
-        t = s[13]; s[13] = s[9]; s[9] = s[5]; s[5] = s[1]; s[1] = t;
-        t = s[2];  s[2] = s[10]; s[10] = t;   t = s[6]; s[6] = s[14]; s[14] = t;
-        t = s[3];  s[3] = s[7];  s[7] = s[11]; s[11] = s[15]; s[15] = t;
-        for (int i = 0; i < 16; i++) s[i] = ISBOX[s[i]];
-        add_round_key(s, c->rk, rnd);
-        if (rnd != 0) {
-            /* InvMixColumns as the standard pre-step plus forward MixColumns,
-               so it is xtime-only too. */
-            for (int col = 0; col < 4; col++) {
-                uint8_t* p = s + col * 4;
-                uint8_t a0 = p[0], a1 = p[1], a2 = p[2], a3 = p[3];
-                uint8_t u = xtime(xtime((uint8_t)(a0 ^ a2)));
-                uint8_t v = xtime(xtime((uint8_t)(a1 ^ a3)));
-                a0 = (uint8_t)(a0 ^ u); a1 = (uint8_t)(a1 ^ v);
-                a2 = (uint8_t)(a2 ^ u); a3 = (uint8_t)(a3 ^ v);
-                uint8_t t = (uint8_t)(a0 ^ a1 ^ a2 ^ a3);
-                p[0] = (uint8_t)(a0 ^ t ^ xtime((uint8_t)(a0 ^ a1)));
-                p[1] = (uint8_t)(a1 ^ t ^ xtime((uint8_t)(a1 ^ a2)));
-                p[2] = (uint8_t)(a2 ^ t ^ xtime((uint8_t)(a2 ^ a3)));
-                p[3] = (uint8_t)(a3 ^ t ^ xtime((uint8_t)(a3 ^ a0)));
-            }
+        tmp ^= skey[i - nk];
+        skey[i] = tmp;
+        if (++j == nk) {
+            j = 0;
+            k++;
         }
     }
-    memcpy(out, s, 16);
+    for (int i = 0, j = 0; i < nkf; i += 4, j += 2) {
+        uint64_t q[8];
+        interleave_in(&q[0], &q[4], skey + i);
+        q[1] = q[0];
+        q[2] = q[0];
+        q[3] = q[0];
+        q[5] = q[4];
+        q[6] = q[4];
+        q[7] = q[4];
+        ortho(q);
+        comp[j + 0] = (q[0] & 0x1111111111111111ULL) | (q[1] & 0x2222222222222222ULL)
+                    | (q[2] & 0x4444444444444444ULL) | (q[3] & 0x8888888888888888ULL);
+        comp[j + 1] = (q[4] & 0x1111111111111111ULL) | (q[5] & 0x2222222222222222ULL)
+                    | (q[6] & 0x4444444444444444ULL) | (q[7] & 0x8888888888888888ULL);
+    }
+    int n = (rounds + 1) << 1;
+    for (int u = 0, v = 0; u < n; u++, v += 4) {
+        uint64_t x0 = comp[u], x1 = comp[u], x2 = comp[u], x3 = comp[u];
+        x0 &= 0x1111111111111111ULL;
+        x1 &= 0x2222222222222222ULL;
+        x2 &= 0x4444444444444444ULL;
+        x3 &= 0x8888888888888888ULL;
+        x1 >>= 1;
+        x2 >>= 2;
+        x3 >>= 3;
+        c->sk[v + 0] = (x0 << 4) - x0;
+        c->sk[v + 1] = (x1 << 4) - x1;
+        c->sk[v + 2] = (x2 << 4) - x2;
+        c->sk[v + 3] = (x3 << 4) - x3;
+    }
+    aether_wipe(skey, sizeof skey);
+    aether_wipe(comp, sizeof comp);
+}
+
+/* Run 1 to 4 blocks (16 * nb bytes at in) through the cipher into out;
+ * in and out may alias. */
+static void run_blocks(const AeAes* c, int encrypt, const uint8_t* in, uint8_t* out, int nb) {
+    uint32_t w[16];
+    uint64_t q[8];
+    memset(w, 0, sizeof w);
+    for (int i = 0; i < 4 * nb; i++) w[i] = dec32le(in + 4 * i);
+    for (int i = 0; i < 4; i++) interleave_in(&q[i], &q[i + 4], w + (i << 2));
+    ortho(q);
+    if (encrypt) encrypt_bits(c->rounds, c->sk, q);
+    else         decrypt_bits(c->rounds, c->sk, q);
+    ortho(q);
+    for (int i = 0; i < 4; i++) interleave_out(w + (i << 2), q[i], q[i + 4]);
+    for (int i = 0; i < 4 * nb; i++) enc32le(out + 4 * i, w[i]);
+    aether_wipe(w, sizeof w);
+    aether_wipe(q, sizeof q);
 }
 
 int aether_aes_available(void) { return 1; }
@@ -152,16 +509,16 @@ void* aether_aes_new(const void* key, int keylen, int encrypt) {
 
 void aether_aes_free(void* ctx) {
     if (!ctx) return;
-    /* Key material must not outlive the context. */
-    memset(ctx, 0, sizeof(AeAes));
+    /* Key material must not outlive the context: aether_wipe, as a memset
+     * before a free is a dead store the compiler may drop (#3402). */
+    aether_wipe(ctx, sizeof(AeAes));
     aether_caps_free(ctx, sizeof(AeAes));
 }
 
 int aether_aes_block(void* ctx, const void* in, void* out) {
     AeAes* c = (AeAes*)ctx;
     if (!c || !in || !out) return 0;
-    if (c->encrypt) encrypt_block(c, (const uint8_t*)in, (uint8_t*)out);
-    else            decrypt_block(c, (const uint8_t*)in, (uint8_t*)out);
+    run_blocks(c, c->encrypt, (const uint8_t*)in, (uint8_t*)out, 1);
     return 1;
 }
 
@@ -177,7 +534,7 @@ int aether_aes_cbc_encrypt(void* ctx, const void* iv, const void* in,
     for (int off = 0; off < n; off += 16) {
         uint8_t blk[16];
         for (int i = 0; i < 16; i++) blk[i] = (uint8_t)(ip[off + i] ^ prev[i]);
-        encrypt_block(c, blk, op + off);
+        run_blocks(c, 1, blk, op + off, 1);
         memcpy(prev, op + off, 16);
     }
     return 1;
@@ -188,15 +545,20 @@ int aether_aes_cbc_decrypt(void* ctx, const void* iv, const void* in,
     AeAes* c = (AeAes*)ctx;
     if (!c || c->encrypt || !iv || !in || !out) return 0;
     if (n < 0 || n % 16 != 0) return 0;
-    uint8_t prev[16], cur[16];
+    uint8_t prev[16], cur[64], dec[64];
     memcpy(prev, iv, 16);
     const uint8_t* ip = (const uint8_t*)in;
     uint8_t* op = (uint8_t*)out;
-    for (int off = 0; off < n; off += 16) {
-        memcpy(cur, ip + off, 16);          /* in and out may alias */
-        decrypt_block(c, cur, op + off);
-        for (int i = 0; i < 16; i++) op[off + i] ^= prev[i];
-        memcpy(prev, cur, 16);
+    for (int off = 0; off < n; off += 64) {
+        int nb = (n - off) / 16;
+        if (nb > 4) nb = 4;
+        memcpy(cur, ip + off, (size_t)(16 * nb)); /* in and out may alias */
+        run_blocks(c, 0, cur, dec, nb);
+        for (int b = 0; b < nb; b++) {
+            const uint8_t* chain = b == 0 ? prev : cur + 16 * (b - 1);
+            for (int i = 0; i < 16; i++) op[off + 16 * b + i] = (uint8_t)(dec[16 * b + i] ^ chain[i]);
+        }
+        memcpy(prev, cur + 16 * (nb - 1), 16);
     }
     return 1;
 }
@@ -206,15 +568,24 @@ int aether_aes_ctr_xor(void* ctx, const void* iv, const void* in,
     AeAes* c = (AeAes*)ctx;
     if (!c || !c->encrypt || !iv || !in || !out) return 0;
     if (n < 0) return 0;
-    uint8_t ctr[16], ks[16];
+    uint8_t ctr[16], blocks[64];
     memcpy(ctr, iv, 16);
     const uint8_t* ip = (const uint8_t*)in;
     uint8_t* op = (uint8_t*)out;
-    for (int off = 0; off < n; off += 16) {
-        encrypt_block(c, ctr, ks);
-        int chunk = (n - off) < 16 ? (n - off) : 16;
-        for (int i = 0; i < chunk; i++) op[off + i] = (uint8_t)(ip[off + i] ^ ks[i]);
-        for (int i = 15; i >= 0; i--) { if (++ctr[i]) break; }
+    for (int off = 0; off < n; off += 64) {
+        int left = n - off;
+        int nb = (left + 15) / 16;
+        if (nb > 4) nb = 4;
+        for (int b = 0; b < nb; b++) {
+            memcpy(blocks + 16 * b, ctr, 16);
+            /* The counter is public (the IV and a block count): a branch
+             * on its carry leaks nothing. */
+            for (int i = 15; i >= 0; i--) { if (++ctr[i]) break; }
+        }
+        run_blocks(c, 1, blocks, blocks, nb);
+        int chunk = left < 64 ? left : 64;
+        for (int i = 0; i < chunk; i++) op[off + i] = (uint8_t)(ip[off + i] ^ blocks[i]);
     }
+    aether_wipe(blocks, sizeof blocks);
     return 1;
 }

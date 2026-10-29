@@ -357,7 +357,7 @@ aead_open(algo: string, key: ptr, nonce: ptr, aad: byte[], ct_with_tag: byte[]) 
     r3 = st.s3 ^ ld64_slice(ct_with_tag, pt_len)
     r4 = st.s4 ^ ld64_slice(ct_with_tag, pt_len + 8)
     if (r3 | r4) != 0 {
-        bytes.free(pt)
+        bytes.wipe_free(pt)
         return null, "tag verification failed"
     }
     return pt, ok

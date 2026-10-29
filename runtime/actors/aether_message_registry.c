@@ -8,6 +8,9 @@
 // registry assigns this ID so the generated dispatch table routes
 // scheduler-delivered I/O readiness notifications to the user's handler.
 #define AETHER_RESERVED_ID_IO_READY 255
+// The death notice, `message Down { ref: actor_ref, reason: string }`,
+// which the compiler declares (#2974). Must match AETHER_MSG_DOWN there.
+#define AETHER_RESERVED_ID_DOWN 254
 
 MessageRegistry* create_message_registry(void) {
     MessageRegistry* registry = (MessageRegistry*)malloc(sizeof(MessageRegistry));
@@ -54,11 +57,14 @@ int register_message_type(MessageRegistry* registry, const char* name, MessageFi
     // through the user's receive handler.
     if (strcmp(name, "IoReady") == 0) {
         def->message_id = AETHER_RESERVED_ID_IO_READY;
+    } else if (strcmp(name, "Down") == 0) {
+        def->message_id = AETHER_RESERVED_ID_DOWN;
     } else {
-        // Skip any reserved slot so user messages never collide with
-        // system IDs. With only one reserved slot (255), user IDs top out
-        // at 254, which is far beyond any realistic program.
-        if (registry->next_id == AETHER_RESERVED_ID_IO_READY) {
+        // Skip the reserved slots so user messages never collide with
+        // system IDs: user IDs top out at 253, which is far beyond any
+        // realistic program.
+        while (registry->next_id == AETHER_RESERVED_ID_IO_READY ||
+               registry->next_id == AETHER_RESERVED_ID_DOWN) {
             registry->next_id++;
         }
         def->message_id = registry->next_id++;

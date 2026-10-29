@@ -463,7 +463,12 @@ main() {
 The `_ctx: ptr` convention is the key to making builder DSLs feel declarative.
 When a function's first parameter is named `_ctx` with type `ptr`:
 
-1. **The parameter is hidden from callers**, it doesn't count toward arity
+1. **The parameter is hidden from callers**, it doesn't count toward arity:
+   in a trailing block the call gives the parameters after `_ctx`, and any
+   defaults among them fill what it leaves out (`item("a")` for
+   `item(_ctx, name, kind = "plain")`). A call that passes the context
+   itself first (`_ctx` or `builder_context()`), or gives every parameter,
+   passes it explicitly
 2. **Inside trailing blocks**, the compiler auto-injects `builder_context()` as the
    first argument
 3. **Outside trailing blocks**, the function can still be called explicitly with a

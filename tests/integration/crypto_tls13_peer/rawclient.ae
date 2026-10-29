@@ -1,0 +1,264 @@
+// Sends the bytes RAW (hex) to 127.0.0.1 PEER_PORT and prints what came
+// back: "ALERT <description>" for a plaintext alert, "SERVERHELLO" for a
+// handshake record ("SERVERHELLO+CCS" when a change_cipher_spec follows
+// it), "CLOSED", or "OTHER". RAW=ch:MODE sends a real ClientHello with one
+// thing wrong (see mutated_client_hello); RAW=split_ch sends a real
+// ClientHello split over two records instead.
+
+import std.os
+import std.tcp
+import std.bytes
+import std.string
+import std.cryptography
+import std.cryptography.x25519
+import std.cryptography.tls13_hs
+
+extern string_char_at(str: string, index: int) -> int
+
+fn hexval(h: int) -> int {
+    if h >= 48 && h <= 57 { return h - 48 }
+    if h >= 97 && h <= 102 { return h - 87 }
+    return h - 55
+}
+
+// A real ClientHello (x25519 only) sent split over two handshake records,
+// to see the server reassemble it (#3321).
+fn split_client_hello() -> ptr {
+    rnd, _r1 = cryptography.random_buffer(32)
+    sid, _r2 = cryptography.random_buffer(32)
+    priv, _r3 = cryptography.random_buffer(32)
+    pub = x25519.base_point(priv)
+    empty = bytes.new(0)
+    ch = tls13_hs.client_hello_full(rnd, bytes.view(sid)[0..32], tls13_hs.GROUP_X25519, bytes.view(pub)[0..32], 0, bytes.view(empty)[0..0], 0, bytes.view(empty)[0..0], "peer.example")
+    n = bytes.length(ch)
+    half = n / 2
+    out = bytes.new(10 + n)
+    bytes.set(out, 0, 0x16)
+    bytes.set(out, 1, 3)
+    bytes.set(out, 2, 3)
+    bytes.set(out, 3, (half >> 8) & 0xFF)
+    bytes.set(out, 4, half & 0xFF)
+    bytes.copy_from_bytes(out, 5, ch, 0, half)
+    bytes.set(out, 5 + half, 0x16)
+    bytes.set(out, 6 + half, 3)
+    bytes.set(out, 7 + half, 3)
+    bytes.set(out, 8 + half, ((n - half) >> 8) & 0xFF)
+    bytes.set(out, 9 + half, (n - half) & 0xFF)
+    bytes.copy_from_bytes(out, 10 + half, ch, half, n - half)
+    bytes.free(rnd); bytes.free(sid); bytes.free(priv); bytes.free(pub); bytes.free(empty); bytes.free(ch)
+    return out
+}
+
+// ---- ClientHellos with one thing wrong (RAW=ch:MODE, #3357) ----
+//
+// A real ClientHello (an x25519 share; SNI, supported_versions,
+// supported_groups, signature_algorithms, status_request, ALPN, key_share)
+// taken apart and put back together with MODE's change, in one record:
+//   comp_extra    compression methods { 1, 0 }: TLS 1.3 wants null alone
+//   comp_nonull   compression methods { 1 }
+//   dup_ext       the ALPN extension twice
+//   sni_trailing  a byte after the server_name list, inside the extension
+//   ca_empty      certificate_authorities with an empty list
+//   ks_dup        the x25519 share twice
+//   ks_trailing   a byte after the key shares, inside the extension
+//   no_groups     no supported_groups
+//   no_keyshare   no key_share
+//   psk_not_last  a pre_shared_key that is not the last extension
+//   wrong_type    handshake type 3 instead of client_hello
+//   msg_trailing  a byte after the extensions, inside the message
+//   empty_sid     no legacy_session_id (nothing wrong: the server still sends
+//                 its compatibility change_cipher_spec)
+
+struct Ext {
+    t: int
+    body: ptr
+}
+
+fn g16(b: ptr, p: int) -> int {
+    return ((bytes.get(b, p) & 0xFF) << 8) | (bytes.get(b, p + 1) & 0xFF)
+}
+
+fn put_ext(out: ptr, at: int, t: int, body: ptr) -> int {
+    n = bytes.length(body)
+    bytes.set(out, at, (t >> 8) & 0xFF)
+    bytes.set(out, at + 1, t & 0xFF)
+    bytes.set(out, at + 2, (n >> 8) & 0xFF)
+    bytes.set(out, at + 3, n & 0xFF)
+    if n > 0 { bytes.copy_from_bytes(out, at + 4, body, 0, n) }
+    return at + 4 + n
+}
+
+fn hexbytes(s: string) -> ptr {
+    n = string.length(s) / 2
+    b = bytes.new(n)
+    i = 0
+    while i < n {
+        bytes.set(b, i, hexval(string_char_at(s, 2 * i)) * 16 + hexval(string_char_at(s, 2 * i + 1)))
+        i = i + 1
+    }
+    return b
+}
+
+// The record of MODE's ClientHello.
+fn mutated_client_hello(mode: string) -> ptr {
+    rnd, _r1 = cryptography.random_buffer(32)
+    sid, _r2 = cryptography.random_buffer(32)
+    priv, _r3 = cryptography.random_buffer(32)
+    pub = x25519.base_point(priv)
+    empty = bytes.new(0)
+    sidn = 32
+    if mode == "empty_sid" { sidn = 0 }
+    ch = tls13_hs.client_hello_full(rnd, bytes.view(sid)[0..sidn], tls13_hs.GROUP_X25519, bytes.view(pub)[0..32], 0, bytes.view(empty)[0..0], 0, bytes.view(empty)[0..0], "peer.example")
+    // The fixed part: header, version, random, session id, suites.
+    p = 4 + 2 + 32
+    p = p + 1 + (bytes.get(ch, p) & 0xFF)
+    p = p + 2 + g16(ch, p)
+    fixed_end = p
+    p = p + 1 + (bytes.get(ch, p) & 0xFF)
+    ext_start = p + 2
+    ext_end = ext_start + g16(ch, p)
+    out = bytes.new(4096)
+    bytes.set(out, 4095, 0)
+    bytes.copy_from_bytes(out, 0, ch, 0, fixed_end)
+    o = fixed_end
+    if mode == "comp_extra" {
+        bytes.set(out, o, 2)
+        bytes.set(out, o + 1, 1)
+        bytes.set(out, o + 2, 0)
+        o = o + 3
+    } else if mode == "comp_nonull" {
+        bytes.set(out, o, 1)
+        bytes.set(out, o + 1, 1)
+        o = o + 2
+    } else {
+        bytes.set(out, o, 1)
+        bytes.set(out, o + 1, 0)
+        o = o + 2
+    }
+    elen_at = o
+    o = o + 2
+    q = ext_start
+    while q + 4 <= ext_end {
+        t = g16(ch, q)
+        n = g16(ch, q + 2)
+        body = bytes.new(n)
+        if n > 0 { bytes.copy_from_bytes(body, 0, ch, q + 4, n) }
+        keep = 1
+        if mode == "no_groups" && t == 10 { keep = 0 }
+        if mode == "no_keyshare" && t == 51 { keep = 0 }
+        if mode == "sni_trailing" && t == 0 {
+            bytes.set(body, n, 0)
+        }
+        if mode == "ks_trailing" && t == 51 {
+            bytes.set(body, n, 0)
+        }
+        if mode == "ks_dup" && t == 51 {
+            // client_shares holding the one share twice.
+            one = n - 2
+            dup = bytes.new(2 + 2 * one)
+            bytes.set(dup, 0, ((2 * one) >> 8) & 0xFF)
+            bytes.set(dup, 1, (2 * one) & 0xFF)
+            bytes.copy_from_bytes(dup, 2, body, 2, one)
+            bytes.copy_from_bytes(dup, 2 + one, body, 2, one)
+            bytes.free(body)
+            body = dup
+        }
+        if mode == "psk_not_last" && t == 51 {
+            psk = hexbytes("000a0004abcd0001000000000021200000000000000000000000000000000000000000000000000000000000000000")
+            o = put_ext(out, o, 41, psk)
+            bytes.free(psk)
+        }
+        if keep == 1 { o = put_ext(out, o, t, body) }
+        if mode == "dup_ext" && t == 16 { o = put_ext(out, o, t, body) }
+        bytes.free(body)
+        q = q + 4 + n
+    }
+    if mode == "ca_empty" {
+        ca = hexbytes("0000")
+        o = put_ext(out, o, 47, ca)
+        bytes.free(ca)
+    }
+    el = o - elen_at - 2
+    bytes.set(out, elen_at, (el >> 8) & 0xFF)
+    bytes.set(out, elen_at + 1, el & 0xFF)
+    if mode == "msg_trailing" {
+        bytes.set(out, o, 0)
+        o = o + 1
+    }
+    bl = o - 4
+    bytes.set(out, 1, (bl >> 16) & 0xFF)
+    bytes.set(out, 2, (bl >> 8) & 0xFF)
+    bytes.set(out, 3, bl & 0xFF)
+    if mode == "wrong_type" { bytes.set(out, 0, 3) }
+    rec = bytes.new(5 + o)
+    bytes.set(rec, 0, 0x16)
+    bytes.set(rec, 1, 3)
+    bytes.set(rec, 2, 1)
+    bytes.set(rec, 3, (o >> 8) & 0xFF)
+    bytes.set(rec, 4, o & 0xFF)
+    bytes.copy_from_bytes(rec, 5, out, 0, o)
+    bytes.free(out)
+    bytes.free(rnd); bytes.free(sid); bytes.free(priv); bytes.free(pub); bytes.free(empty); bytes.free(ch)
+    return rec
+}
+
+main() {
+    port, _perr = string.to_int(os.getenv("PEER_PORT"))
+    sock, derr = tcp.connect("127.0.0.1", port)
+    if derr != "" {
+        println("ERR: connect: ${derr}")
+        return
+    }
+    raw = os.getenv("RAW")
+    b = null
+    n = 0
+    if string.starts_with(raw, "ch:") == 1 {
+        b = mutated_client_hello(string.substring(raw, 3, string.length(raw)))
+        n = bytes.length(b)
+    } else if raw == "split_ch" {
+        b = split_client_hello()
+        n = bytes.length(b)
+    } else {
+        n = string.length(raw) / 2
+        b = bytes.new(n)
+        i = 0
+        while i < n {
+            bytes.set(b, i, hexval(string_char_at(raw, 2 * i)) * 16 + hexval(string_char_at(raw, 2 * i + 1)))
+            i = i + 1
+        }
+    }
+    _s, _werr = tcp.write_all(sock, bytes.view(b)[0..n])
+    bytes.free(b)
+    buf = bytes.new(4096)
+    bytes.set(buf, 4095, 0)
+    got, rerr = tcp.read_into(sock, bytes.view(buf)[0..4096])
+    // A ServerHello record: read on until the record after it has its header.
+    if rerr == "" && got >= 5 && (bytes.get(buf, 0) & 0xFF) == 0x16 {
+        need = 5 + (((bytes.get(buf, 3) & 0xFF) << 8) | (bytes.get(buf, 4) & 0xFF)) + 5
+        tries = 0
+        while got < need && got < 4000 && tries < 50 {
+            ready, _pe = tcp.poll(sock, 100)
+            if ready {
+                more, merr = tcp.read_into(sock, bytes.view(buf)[got..4096])
+                if merr != "" || more <= 0 { tries = 50 } else { got = got + more }
+            }
+            tries = tries + 1
+        }
+    }
+    if rerr != "" || got <= 0 {
+        println("CLOSED")
+    } else if (bytes.get(buf, 0) & 0xFF) == 0x16 {
+        shl = 5 + (((bytes.get(buf, 3) & 0xFF) << 8) | (bytes.get(buf, 4) & 0xFF))
+        if got > shl && (bytes.get(buf, shl) & 0xFF) == 0x14 {
+            println("SERVERHELLO+CCS")
+        } else {
+            println("SERVERHELLO")
+        }
+    } else if got >= 7 && (bytes.get(buf, 0) & 0xFF) == 0x15 {
+        println("ALERT ${bytes.get(buf, 6) & 0xFF}")
+    } else {
+        println("OTHER")
+    }
+    bytes.free(buf)
+    tcp.close(sock)
+}

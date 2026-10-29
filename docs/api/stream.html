@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>stream - Aether</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <h1><a href="index.html">Aether</a></h1>
+    <p class="tagline">Standard Library</p>
+  </div>
+  <input type="text" id="search" placeholder="Search stream..." onkeyup="searchModule()">
+  <h2>Exports</h2>
+  <ul class="function-nav">
+    <li><a href="#StreamChunk">StreamChunk</a></li>
+    <li><a href="#StreamCredit">StreamCredit</a></li>
+    <li><a href="#connect">connect</a></li>
+    <li><a href="#offer">offer</a></li>
+    <li><a href="#write">write</a></li>
+    <li><a href="#finish">finish</a></li>
+    <li><a href="#credit">credit</a></li>
+    <li><a href="#consumed">consumed</a></li>
+    <li><a href="#available">available</a></li>
+    <li><a href="#in_flight">in_flight</a></li>
+    <li><a href="#peak">peak</a></li>
+  </ul>
+  <hr>
+  <h2>Modules</h2>
+  <ul class="module-list">
+    <li><a href="actors.html">actors</a></li>
+    <li><a href="alloc.html">alloc</a></li>
+    <li><a href="arena.html">arena</a></li>
+    <li><a href="audio.html">audio</a></li>
+    <li><a href="audit.html">audit</a></li>
+    <li><a href="bignum.html">bignum</a></li>
+    <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
+    <li><a href="bytes.html">bytes</a></li>
+    <li><a href="capsicum.html">capsicum</a></li>
+    <li><a href="cas.html">cas</a></li>
+    <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
+    <li><a href="collections.html">collections</a></li>
+    <li><a href="config.html">config</a></li>
+    <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
+    <li><a href="deque.html">deque</a></li>
+    <li><a href="dir.html">dir</a></li>
+    <li><a href="dl.html">dl</a></li>
+    <li><a href="encoding.html">encoding</a></li>
+    <li><a href="file.html">file</a></li>
+    <li><a href="floatarr.html">floatarr</a></li>
+    <li><a href="fs.html">fs</a></li>
+    <li><a href="hash.html">hash</a></li>
+    <li><a href="host.html">host</a></li>
+    <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
+    <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
+    <li><a href="io.html">io</a></li>
+    <li><a href="ipc.html">ipc</a></li>
+    <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
+    <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
+    <li><a href="list.html">list</a></li>
+    <li><a href="log.html">log</a></li>
+    <li><a href="longarr.html">longarr</a></li>
+    <li><a href="lzf.html">lzf</a></li>
+    <li><a href="map.html">map</a></li>
+    <li><a href="math.html">math</a></li>
+    <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
+    <li><a href="nanoid.html">nanoid</a></li>
+    <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
+    <li><a href="os.html">os</a></li>
+    <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
+    <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
+    <li><a href="reflect.html">reflect</a></li>
+    <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
+    <li><a href="set.html">set</a></li>
+    <li><a href="signal.html">signal</a></li>
+    <li><a href="snapshot.html">snapshot</a></li>
+    <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
+    <li><a href="strbuilder.html">strbuilder</a></li>
+    <li class="active"><a href="stream.html">stream</a></li>
+    <li><a href="string.html">string</a></li>
+    <li><a href="supervise.html">supervise</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
+    <li><a href="tcp.html">tcp</a></li>
+    <li><a href="time.html">time</a></li>
+    <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
+    <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
+    <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
+    <li><a href="url.html">url</a></li>
+    <li><a href="uuid.html">uuid</a></li>
+    <li><a href="worker.html">worker</a></li>
+    <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
+    <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
+  </ul>
+</nav>
+<main class="content">
+  <div class="module-header">
+    <h1>stream</h1>
+    <p class="module-desc">std.stream: credit-windowed streams between actors (#426).</p>
+    <p class="import-line"><code>import std.stream</code></p>
+  </div>
+  <div class="functions" id="functions">
+    <div class="function" id="StreamChunk" data-name="StreamChunk">
+      <h3 class="function-name">StreamChunk <span class="kind">message</span></h3>
+      <pre class="usage"><code>message StreamChunk {
+    s: ptr, data: string, last: int
+}</code></pre>
+      <p class="doc">One chunk of stream `s`; `last` 1 (and no data) ends it.</p>
+    </div>
+    <div class="function" id="StreamCredit" data-name="StreamCredit">
+      <h3 class="function-name">StreamCredit <span class="kind">message</span></h3>
+      <pre class="usage"><code>message StreamCredit {
+    s: ptr, n: int
+}</code></pre>
+      <p class="doc">`n` more chunks of stream `s` may be sent; `n` 0 is the consumer's end of it, after its last credit.</p>
+    </div>
+    <div class="function" id="connect" data-name="connect">
+      <h3 class="function-name">connect <span class="kind">fn</span></h3>
+      <pre class="usage"><code>connect(producer, consumer, window) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">producer: actor_ref, consumer: actor_ref, window: int</span></p>
+      <p class="doc">A stream from `producer` to `consumer` with at most `window` chunks in flight, or null when `window` is less than 1. Give it to both actors; the consumer's end frees it (see stream.credit).</p>
+    </div>
+    <div class="function" id="offer" data-name="offer">
+      <h3 class="function-name">offer <span class="kind">fn</span></h3>
+      <pre class="usage"><code>offer(s, data) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, data: string</span></p>
+      <p class="doc">The producer's: sends `data` as the next chunk. 1 when it was sent; 0 when the window is full (send it again after the next StreamCredit); -1 after finish.</p>
+    </div>
+    <div class="function" id="write" data-name="write">
+      <h3 class="function-name">write <span class="kind">fn</span></h3>
+      <pre class="usage"><code>write(s, data, at, chunk) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, data: string, at: int, chunk: int</span></p>
+      <p class="doc">The producer's: sends `data` from byte `at` on, in chunks of at most `chunk` bytes, while the window allows. Returns the byte it got to: the length of `data` when all of it went, less when the window filled (call again from there after the next StreamCredit); -1 after finish, or when `chunk` is less than 1.</p>
+    </div>
+    <div class="function" id="finish" data-name="finish">
+      <h3 class="function-name">finish <span class="kind">fn</span></h3>
+      <pre class="usage"><code>finish(s)</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr</span></p>
+      <p class="doc">The producer's: the stream is done. The consumer gets the last chunk after every chunk sent before it. It costs no credit; the producer still takes StreamCredits until stream.credit says the stream has ended.</p>
+    </div>
+    <div class="function" id="credit" data-name="credit">
+      <h3 class="function-name">credit <span class="kind">fn</span></h3>
+      <pre class="usage"><code>credit(s, n) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, n: int</span></p>
+      <p class="doc">The producer's, for each StreamCredit it receives: 1 when `n` chunks more may be sent; 0 when this is the consumer's end of the stream, which is freed now (the producer drops it).</p>
+    </div>
+    <div class="function" id="consumed" data-name="consumed">
+      <h3 class="function-name">consumed <span class="kind">fn</span></h3>
+      <pre class="usage"><code>consumed(s, last)</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr, last: int</span></p>
+      <p class="doc">The consumer's, in its StreamChunk arm once it has handled the chunk: returns its credit to the producer or, for the last chunk (`last` 1, the chunk's own field), ends the stream for the consumer, which drops it.</p>
+    </div>
+    <div class="function" id="available" data-name="available">
+      <h3 class="function-name">available <span class="kind">fn</span></h3>
+      <pre class="usage"><code>available(s) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr</span></p>
+      <p class="doc">The producer's: chunks it may send now.</p>
+    </div>
+    <div class="function" id="in_flight" data-name="in_flight">
+      <h3 class="function-name">in_flight <span class="kind">fn</span></h3>
+      <pre class="usage"><code>in_flight(s) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr</span></p>
+      <p class="doc">The producer's: chunks sent whose credit has not come back yet.</p>
+    </div>
+    <div class="function" id="peak" data-name="peak">
+      <h3 class="function-name">peak <span class="kind">fn</span></h3>
+      <pre class="usage"><code>peak(s) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">s: ptr</span></p>
+      <p class="doc">The producer's: the most chunks that were in flight at once (never more than the window).</p>
+    </div>
+  </div>
+</main>
+<script src="search.js"></script>
+</body>
+</html>

@@ -1,0 +1,118 @@
+// std.cryptography.shield (#3376): a secret sealed behind a random pre-key
+// comes back whole, as many times as it is asked for; a bit changed in the
+// sealed secret or in the pre-key is refused; a null or empty secret is
+// refused at wrap.
+
+import std.bytes
+import std.string
+import std.cryptography.shield
+
+extern exit(code: int)
+
+fn same(a: ptr, b: ptr) -> bool {
+    n = bytes.length(a)
+    if n != bytes.length(b) { return false }
+    i = 0
+    while i < n {
+        if bytes.get(a, i) != bytes.get(b, i) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+fn secret_of(n: int, seed: int) -> ptr {
+    b = bytes.new(n)
+    i = 0
+    while i < n {
+        bytes.set(b, i, (i * 37 + seed) & 255)
+        i = i + 1
+    }
+    return b
+}
+
+main() {
+    fails = 0
+
+    // 1. It comes back whole, twice.
+    want = secret_of(66, 11)
+    h, err = shield.wrap(secret_of(66, 11))
+    if h == null {
+        println("FAIL wrap: ${err}")
+        exit(1)
+    }
+    got1, e1 = shield.unwrap(h)
+    got2, e2 = shield.unwrap(h)
+    if got1 != null && got2 != null && same(got1, want) && same(got2, want) {
+        println("ok   the secret comes back whole, twice")
+    } else {
+        println("FAIL unwrap: ${e1} ${e2}")
+        fails = fails + 1
+    }
+    bytes.wipe_free(got1)
+    bytes.wipe_free(got2)
+    s = h as *shield.Shielded
+    if bytes.length(s.prekey) == shield.PREKEY_SIZE && bytes.length(s.sealed) == 66 + 16 {
+        println("ok   a 16 KiB pre-key, and the secret sealed with its tag")
+    } else {
+        println("FAIL pre-key ${bytes.length(s.prekey)} bytes, sealed ${bytes.length(s.sealed)}")
+        fails = fails + 1
+    }
+
+    // 2. A bit changed in the sealed secret, then in the pre-key, is refused;
+    // put back, the secret comes back again.
+    b0 = bytes.get(s.sealed, 5)
+    bytes.set(s.sealed, 5, b0 ^ 4)
+    bad1, why1 = shield.unwrap(h)
+    bytes.set(s.sealed, 5, b0)
+    p0 = bytes.get(s.prekey, 9000)
+    bytes.set(s.prekey, 9000, p0 ^ 1)
+    bad2, why2 = shield.unwrap(h)
+    bytes.set(s.prekey, 9000, p0)
+    if bad1 == null && bad2 == null && string.index_of(why1, "changed in memory") >= 0 && string.index_of(why2, "changed in memory") >= 0 {
+        println("ok   a bit changed in the sealed secret or the pre-key is refused")
+    } else {
+        println("FAIL a changed bit was not refused: [${why1}] [${why2}]")
+        fails = fails + 1
+    }
+    back, eb = shield.unwrap(h)
+    if back != null && same(back, want) {
+        println("ok   put back, the secret comes back")
+    } else {
+        println("FAIL after the bits were put back: ${eb}")
+        fails = fails + 1
+    }
+    bytes.wipe_free(back)
+    shield.free(h)
+    bytes.free(want)
+
+    // 3. Each wrap has its own pre-key.
+    ha, _ea = shield.wrap(secret_of(32, 1))
+    hb, _eb2 = shield.wrap(secret_of(32, 1))
+    sa = ha as *shield.Shielded
+    sb = hb as *shield.Shielded
+    if same(sa.prekey, sb.prekey) || same(sa.sealed, sb.sealed) {
+        println("FAIL two wraps of one secret share a pre-key or a sealed form")
+        fails = fails + 1
+    } else {
+        println("ok   two wraps of one secret: two pre-keys, two sealed forms")
+    }
+    shield.free(ha)
+    shield.free(hb)
+
+    // 4. Refusals, and free on null.
+    hn, en = shield.wrap(null)
+    he, ee = shield.wrap(bytes.new(8))
+    if hn == null && he == null && en != "" && ee != "" {
+        println("ok   a null or empty secret is refused")
+    } else {
+        println("FAIL a null or empty secret was wrapped")
+        fails = fails + 1
+    }
+    shield.free(null)
+
+    if fails > 0 {
+        println("${fails} FAILED")
+        exit(1)
+    }
+    println("ALL PASS")
+}

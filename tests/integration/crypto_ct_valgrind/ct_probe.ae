@@ -1,0 +1,467 @@
+// Constant-time probe: every secret input below is marked undefined for
+// Valgrind's memcheck before the operation runs (ct_shim.c), and every
+// output is marked defined again before it is compared. Run under
+// valgrind by test_crypto_ct_valgrind.sh, memcheck reports any branch or
+// memory index that depends on a secret; run without it, the probe is a
+// known-answer test of the same operations.
+
+import std.bytes
+import std.string
+import std.cryptography.ct
+import std.cryptography.p256
+import std.cryptography.p384
+import std.cryptography.p521
+import std.cryptography.secp256k1
+import std.cryptography.rsa
+import std.cryptography.ed25519
+import std.cryptography.ed448
+import std.cryptography.x25519
+import std.cryptography.x448
+import std.cryptography.aes
+import std.cryptography.chacha20poly1305
+import std.cryptography.hmac
+import std.cryptography.hkdf
+import std.cryptography.sha2
+
+extern ct_shim_available() -> int
+extern ct_shim_secret(p: ptr, n: int)
+extern ct_shim_public(p: ptr, n: int)
+extern ct_shim_declassify_hook() -> ptr
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+extern exit(code: int)
+
+fn hv(c: int) -> int {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    if c >= 65 && c <= 70 { return c - 55 }
+    return 0
+}
+
+fn hb(h: string) -> ptr {
+    n = string.length(h)
+    b = bytes.new(n / 2)
+    i = 0
+    while i < n {
+        bytes.set(b, i / 2, hv(string_char_at_n(h, n, i)) * 16 + hv(string_char_at_n(h, n, i + 1)))
+        i = i + 2
+    }
+    return b
+}
+
+fn bh(b: ptr) -> string {
+    if b == null {
+        return "(null)"
+    }
+    d = "0123456789abcdef"
+    o = ""
+    n = bytes.length(b)
+    i = 0
+    while i < n {
+        v = bytes.get(b, i)
+        o = string.concat(o, string.concat(string.substring(d, (v / 16) & 15, ((v / 16) & 15) + 1), string.substring(d, v & 15, (v & 15) + 1)))
+        i = i + 1
+    }
+    return o
+}
+
+fn ascii(s: string) -> ptr {
+    n = string.length(s)
+    b = bytes.new(n)
+    i = 0
+    while i < n {
+        bytes.set(b, i, string_char_at_n(s, n, i))
+        i = i + 1
+    }
+    return b
+}
+
+fn digest(algo: string, m: ptr) -> ptr {
+    ctx, _e = sha2.new(algo)
+    sha2.update(ctx, bytes.view(m))
+    return sha2.final_bytes(ctx)
+}
+
+fn sha256(m: ptr) -> ptr {
+    return digest("sha256", m)
+}
+
+// Mark a std.bytes buffer's contents secret / public.
+fn secret(b: ptr) {
+    ct_shim_secret(bytes.data(b), bytes.length(b))
+}
+
+fn public(b: ptr) {
+    if b != null {
+        ct_shim_public(bytes.data(b), bytes.length(b))
+    }
+}
+
+// Compare an output (made public first) with the expected hex; 1 on a miss.
+fn check(label: string, got: ptr, want: string) -> int {
+    public(got)
+    g = bh(got)
+    if g == string.to_lower(want) {
+        println("ok   ${label}")
+        return 0
+    }
+    println("FAIL ${label}")
+    println("  got:  ${g}")
+    println("  want: ${string.to_lower(want)}")
+    return 1
+}
+
+// ---- P-256 ----
+
+fn p256_cases() -> int {
+    fails = 0
+    // RFC 6979 A.2.5, SHA-256, message "sample": the key and nonce secret.
+    d = hb("C9AFA9D845BA75166B5C215767B1D6934E50C3DB36E89B127B8A622B120F6721")
+    secret(d)
+    m = ascii("sample")
+    h = sha256(m)
+    r, s = p256.ecdsa_sign(d, h)
+    fails = fails + check("p256 ecdsa_sign r", r, "EFD48B2AACB6A8FD1140DD9CD45E81D69D2C877B56AAF991C34D0EA84EAF3716")
+    fails = fails + check("p256 ecdsa_sign s", s, "F7CB1C942D657C41D436C7A1B6E29F65F3E900DBB9AFF4064DC4AB2F843ACDA8")
+    // Public key from the secret scalar.
+    px, py = p256.scalar_mult_base(d)
+    fails = fails + check("p256 scalar_mult_base x", px, "60FED4BA255A9D31C961EB74C6356D68C049B8923B61FA6CE669622E60F29FB6")
+    fails = fails + check("p256 scalar_mult_base y", py, "7903FE1008B8BC99A41AE9E95628BC64F2F1B20C2D7E9F5177A3C294D4462299")
+    // The hedged nonce (#3376): the key and the extra bytes secret. No
+    // vector exists for it, so the signature must verify.
+    z = hb("0101010101010101010101010101010101010101010101010101010101010101")
+    secret(z)
+    hr, hs = p256.ecdsa_sign_hedged(d, h, z)
+    public(hr)
+    public(hs)
+    if p256.ecdsa_verify(px, py, h, hr, hs) == 1 {
+        println("ok   p256 ecdsa_sign_hedged verifies")
+    } else {
+        println("FAIL p256 ecdsa_sign_hedged does not verify")
+        fails = fails + 1
+    }
+    // NIST CAVP ECDH vector: the private scalar secret.
+    priv = hb("7d7dc5f71eb29ddaf80d6214632eeae03d9058af1fb6d22ed80badb62bc1a534")
+    secret(priv)
+    qx = hb("700c48f77f56584c5cc632ca65640db91b6bacce3a4df6b42ce7cc838833d287")
+    qy = hb("db71e509e3fd9b060ddb20ba5c51dcc5948d46fbf640dfe0441782cab85fa4ac")
+    z = p256.ecdh(priv, qx, qy)
+    fails = fails + check("p256 ecdh", z, "46fc62106420ff012e54a434fbdd2d25ccc5852060561e68040dd7778997bd7b")
+    bytes.free(d)
+    bytes.free(m)
+    bytes.free(h)
+    bytes.free(r)
+    bytes.free(s)
+    bytes.free(px)
+    bytes.free(py)
+    bytes.free(priv)
+    bytes.free(qx)
+    bytes.free(qy)
+    bytes.free(z)
+    return fails
+}
+
+// ---- P-384, P-521, secp256k1: sign (RFC 6979) and ECDH on G ----
+
+fn p384_cases() -> int {
+    fails = 0
+    // RFC 6979 A.2.6, SHA-384, "sample".
+    d = hb("6B9D3DAD2E1B8C1C05B19875B6659F4DE23C3B667BF297BA9AA47740787137D896D5724E4C70A825F872C9EA60D2EDF5")
+    secret(d)
+    m = ascii("sample")
+    h = digest("sha384", m)
+    r, s = p384.ecdsa_sign(d, h)
+    fails = fails + check("p384 ecdsa_sign r", r, "94EDBB92A5ECB8AAD4736E56C691916B3F88140666CE9FA73D64C4EA95AD133C81A648152E44ACF96E36DD1E80FABE46")
+    fails = fails + check("p384 ecdsa_sign s", s, "99EF4AEB15F178CEA1FE40DB2603138F130E740A19624526203B6351D0A3A94FA329C145786E679E7B82C71A38628AC8")
+    // ECDH with G as the peer: the shared x is the public key's x.
+    gx = hb("aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a385502f25dbf55296c3a545e3872760ab7")
+    gy = hb("3617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f0b8c00a60b1ce1d7e819d7a431d7c90ea0e5f")
+    z = p384.ecdh(d, gx, gy)
+    fails = fails + check("p384 ecdh", z, "EC3A4E415B4E19A4568618029F427FA5DA9A8BC4AE92E02E06AAE5286B300C64DEF8F0EA9055866064A254515480BC13")
+    bytes.free(d); bytes.free(m); bytes.free(h); bytes.free(r); bytes.free(s)
+    bytes.free(gx); bytes.free(gy); bytes.free(z)
+    return fails
+}
+
+fn p521_cases() -> int {
+    fails = 0
+    // RFC 6979 A.2.7, SHA-512, "sample".
+    d = hb("00FAD06DAA62BA3B25D2FB40133DA757205DE67F5BB0018FEE8C86E1B68C7E75CAA896EB32F1F47C70855836A6D16FCC1466F6D8FBEC67DB89EC0C08B0E996B83538")
+    secret(d)
+    m = ascii("sample")
+    h = digest("sha512", m)
+    r, s = p521.ecdsa_sign(d, h)
+    fails = fails + check("p521 ecdsa_sign r", r, "00C328FAFCBD79DD77850370C46325D987CB525569FB63C5D3BC53950E6D4C5F174E25A1EE9017B5D450606ADD152B534931D7D4E8455CC91F9B15BF05EC36E377FA")
+    fails = fails + check("p521 ecdsa_sign s", s, "00617CCE7CF5064806C467F678D3B4080D6F1CC50AF26CA209417308281B68AF282623EAA63E5B5C0723D8B8C37FF0777B1A20F8CCB1DCCC43997F1EE0E44DA4A67A")
+    gx = hb("00c6858e06b70404e9cd9e3ecb662395b4429c648139053fb521f828af606b4d3dbaa14b5e77efe75928fe1dc127a2ffa8de3348b3c1856a429bf97e7e31c2e5bd66")
+    gy = hb("011839296a789a3bc0045c8a5fb42c7d1bd998f54449579b446817afbd17273e662c97ee72995ef42640c550b9013fad0761353c7086a272c24088be94769fd16650")
+    z = p521.ecdh(d, gx, gy)
+    fails = fails + check("p521 ecdh", z, "01894550D0785932E00EAA23B694F213F8C3121F86DC97A04E5A7167DB4E5BCD371123D46E45DB6B5D5370A7F20FB633155D38FFA16D2BD761DCAC474B9A2F5023A4")
+    bytes.free(d); bytes.free(m); bytes.free(h); bytes.free(r); bytes.free(s)
+    bytes.free(gx); bytes.free(gy); bytes.free(z)
+    return fails
+}
+
+fn secp256k1_cases() -> int {
+    fails = 0
+    // bitcoinjs-lib's RFC 6979 vector: r is fixed by the nonce (s is checked
+    // by verifying, since that vector gives s in the low-S form).
+    d = hb("69ec59eaa1f4f2e36b639716b7c30ca86d9a5375c7b38d8918bd9c0ebc80ba64")
+    secret(d)
+    m = ascii("Computer science is no more about computers than astronomy is about telescopes.")
+    h = sha256(m)
+    r, s = secp256k1.ecdsa_sign(d, h)
+    fails = fails + check("secp256k1 ecdsa_sign r", r, "7186363571d65e084e7f02b0b77c3ec44fb1b257dee26274c38c928986fea45d")
+    public(s)
+    px, py = secp256k1.scalar_mult_base(d)
+    public(px)
+    public(py)
+    if secp256k1.ecdsa_verify(px, py, h, r, s) == 1 {
+        println("ok   secp256k1 ecdsa_sign s verifies")
+    } else {
+        println("FAIL secp256k1 ecdsa_sign s does not verify")
+        fails = fails + 1
+    }
+    // ECDH: 2 * G.
+    two = hb("0000000000000000000000000000000000000000000000000000000000000002")
+    secret(two)
+    gx = hb("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+    gy = hb("483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8")
+    z = secp256k1.ecdh(two, gx, gy)
+    fails = fails + check("secp256k1 ecdh", z, "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5")
+    bytes.free(d); bytes.free(m); bytes.free(h); bytes.free(r); bytes.free(s); bytes.free(px); bytes.free(py)
+    bytes.free(two); bytes.free(gx); bytes.free(gy); bytes.free(z)
+    return fails
+}
+
+// ---- RSA private-key operations: the private exponent secret ----
+
+fn rsa_cases() -> int {
+    fails = 0
+    // The RSA-1024 key of tests/integration/crypto_rsa_oaep_pss, d secret.
+    n = hb("cfc733d3d62af11a935cbba777e3bf08262629284d84095aecf7dfc63efe38dd0680a6972d677ff04cc3d2e7c84cb4463c528ebc87680623db37792f0315447b2a5da8d229afa229af95b5249eba3c4b3ea726f54989b76cca9002ee10a383de28efe84ebc6f5b74e9f201fd1b9543679e4ef022bf728270b9687beb10599d55")
+    e = hb("010001")
+    d = hb("7f6fea75cf31df573172fb15a80ee3a817dde7f87432bb9a2d258af688c45c14145cebd06564c9af9525b641bb34708d738a1f49bab32eb0e74f8ae02ebfe893976a220e1b8df88445fb1e9c2fe4f11fd8c6cd42fef697c22bf3c2dd9dab6333aef9b1cb4dc7dd4c371015f103d36561a5ce65f4ac5055403301a94c920f1401")
+    secret(d)
+    k = rsa.key_from_bytes(bytes.view(n), bytes.view(e), bytes.view(d))
+    // OAEP decryption of a known ciphertext.
+    c = hb("b07ad49540cd08de66247b1a8c28070ed013a6bfee2750bb76b28bb575af5fa6af3f88c5366f20c63da1990cd72263acf635a90cc77b1a8445d66ada0374c8b6b0401f940174df0194d883ec29bc93aecc99c0c17ea259d270b864d5b6dde614e6466bb32dbd6901f8fa6e6816b7ee6d8cf02a8a3fc63501a5a25e2d0c07fb5e")
+    pt, oerr = rsa.decrypt_oaep(k, c)
+    if oerr != "" {
+        println("FAIL rsa decrypt_oaep: ${oerr}")
+        fails = fails + 1
+    } else {
+        fails = fails + check("rsa decrypt_oaep", pt, "68656c6c6f206f616570")
+        bytes.free(pt)
+    }
+    // PSS signature with a fixed salt.
+    mh = hb("5d1961d33b1b26035f275173addb3ed49f4f1912bf9b8ea2bcb6df88480c5057")
+    salt = hb("404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f")
+    sig = rsa.sign_pss(k, mh, bytes.view(salt))
+    fails = fails + check("rsa sign_pss", sig, "cad326f8644bb81fdf7696a1100e0ea9b7f630d24a724874eb98048294d6e182c6bffd71600de9a58679ad027bf76429818d3376323743aedb9c46d0bc914866c36ae5f57d4aa9ad52f1adb2e076179ec16d66a9c5de12ab195c27c1afcee8ca1deb8785dfc5d722a7abe5c014be04c247b0d1f53ce026cf3dffdbc0e9051ca1")
+    // PKCS#1 v1.5: decrypt what encrypt (public, randomized) produced.
+    msg = hb("6b6e6f776e20706c61696e74657874")
+    c2, eerr = rsa.encrypt_pkcs1(k, msg)
+    if eerr != "" {
+        println("FAIL rsa encrypt_pkcs1: ${eerr}")
+        fails = fails + 1
+    } else {
+        p2, derr = rsa.decrypt_pkcs1(k, c2)
+        if derr != "" {
+            println("FAIL rsa decrypt_pkcs1: ${derr}")
+            fails = fails + 1
+        } else {
+            fails = fails + check("rsa decrypt_pkcs1", p2, "6b6e6f776e20706c61696e74657874")
+            bytes.free(p2)
+        }
+        bytes.free(c2)
+    }
+    // PKCS#1 v1.5 signature over a SHA-256 DigestInfo: deterministic.
+    di = hb("3031300d0609608648016503040201050004205d1961d33b1b26035f275173addb3ed49f4f1912bf9b8ea2bcb6df88480c5057")
+    s1, serr = rsa.sign_pkcs1(k, di)
+    public(s1)
+    if serr != "" || rsa.verify_pkcs1(k, di, bytes.view(s1)) != 1 {
+        println("FAIL rsa sign_pkcs1")
+        fails = fails + 1
+    } else {
+        println("ok   rsa sign_pkcs1")
+    }
+    bytes.free(s1)
+    bytes.free(n); bytes.free(e); bytes.free(d); bytes.free(c); bytes.free(mh); bytes.free(salt)
+    bytes.free(sig); bytes.free(msg); bytes.free(di)
+    rsa.key_free(k)
+    return fails
+}
+
+// ---- EdDSA signing, X25519 and X448: the seed or scalar secret ----
+
+fn eddsa_xdh_cases() -> int {
+    fails = 0
+    // RFC 8032 7.1 TEST 2: Ed25519 public key and signature of 0x72.
+    s1 = hb("4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb")
+    secret(s1)
+    m1 = hb("72")
+    sig1 = ed25519.sign(s1, bytes.view(m1))
+    fails = fails + check("ed25519 sign", sig1, "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00")
+    p1 = ed25519.publickey(s1)
+    fails = fails + check("ed25519 publickey", p1, "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c")
+    // The hedged r (#3376): the seed and the extra bytes secret; the
+    // signature must verify.
+    z1 = hb("0202020202020202020202020202020202020202020202020202020202020202")
+    secret(z1)
+    hsig = ed25519.sign_hedged(s1, bytes.view(m1), z1)
+    public(hsig)
+    if ed25519.verify(p1, bytes.view(m1), bytes.view(hsig)) == 1 {
+        println("ok   ed25519 sign_hedged verifies")
+    } else {
+        println("FAIL ed25519 sign_hedged does not verify")
+        fails = fails + 1
+    }
+    // RFC 8032 7.4 "Blank": Ed448 signature of the empty message.
+    s2 = hb("6c82a562cb808d10d632be89c8513ebf6c929f34ddfa8c9f63c9960ef6e348a3528c8a3fcc2f044e39a3fc5b94492f8f032e7549a20098f95b")
+    secret(s2)
+    e0 = bytes.new(0)
+    sig2 = ed448.sign(s2, bytes.view(e0)[0..0])
+    fails = fails + check("ed448 sign", sig2, "533a37f6bbe457251f023c0d88f976ae2dfb504a843e34d2074fd823d41a591f2b233f034f628281f2fd7a22ddd47d7828c59bd0a21bfd3980ff0d2028d4b18a9df63e006c5d1c2d345b925d8dc00b4104852db99ac5c7cdda8530a113a0f4dbb61149f05a7363268c71d95808ff2e652600")
+    // RFC 7748 6.1: X25519 public key and shared secret, Alice's scalar secret.
+    ak = hb("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
+    secret(ak)
+    apub = x25519.base_point(ak)
+    fails = fails + check("x25519 base_point", apub, "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a")
+    bpub = hb("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f")
+    sh1, xerr = x25519.agree(ak, bpub)
+    if xerr != "" {
+        println("FAIL x25519 agree: ${xerr}")
+        fails = fails + 1
+    } else {
+        fails = fails + check("x25519 agree", sh1, "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742")
+        bytes.free(sh1)
+    }
+    // RFC 7748 6.2: X448 shared secret, Alice's scalar secret.
+    xk = hb("9a8f4925d1519f5775cf46b04b5800d4ee9ee8bae8bc5565d498c28dd9c9baf574a9419744897391006382a6f127ab1d9ac2d8c0a598726b")
+    secret(xk)
+    xpub = hb("3eb7a829b0cd20f5bcfc0b599b6feccf6da4627107bdb0d4f345b43027d8b972fc3e34fb4232a13ca706dcb57aec3dae07bdc1c67bf33609")
+    sh2, yerr = x448.agree(xk, xpub)
+    if yerr != "" {
+        println("FAIL x448 agree: ${yerr}")
+        fails = fails + 1
+    } else {
+        fails = fails + check("x448 agree", sh2, "07fff4181ac6cc95ec1c16a94a0f74d12da232ce40a77552281d282bb60c0b56fd2464c335543936521c24403085d59a449a5037514a879d")
+        bytes.free(sh2)
+    }
+    bytes.free(s1); bytes.free(m1); bytes.free(sig1); bytes.free(p1)
+    bytes.free(s2); bytes.free(e0); bytes.free(sig2)
+    bytes.free(ak); bytes.free(apub); bytes.free(bpub); bytes.free(xk); bytes.free(xpub)
+    return fails
+}
+
+// ---- record ciphers, MACs and the key schedule: the key secret ----
+
+fn symmetric_cases() -> int {
+    fails = 0
+    // FIPS-197 C.1 and C.3: AES-128 and AES-256, encrypt and decrypt.
+    k128 = hb("000102030405060708090a0b0c0d0e0f")
+    secret(k128)
+    pt = hb("00112233445566778899aabbccddeeff")
+    e128 = aes.new_encryptor(bytes.view(k128))
+    c128 = aes.process_block(e128, pt)
+    fails = fails + check("aes-128 encrypt", c128, "69c4e0d86a7b0430d8cdb78070b4c55a")
+    d128 = aes.new_decryptor(bytes.view(k128))
+    p128 = aes.process_block(d128, c128)
+    fails = fails + check("aes-128 decrypt", p128, "00112233445566778899aabbccddeeff")
+    k256 = hb("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+    secret(k256)
+    e256 = aes.new_encryptor(bytes.view(k256))
+    c256 = aes.process_block(e256, pt)
+    fails = fails + check("aes-256 encrypt", c256, "8ea2b7ca516745bfeafc49904b496089")
+    // AES-GCM, the GCM specification's test case 4: seal and open.
+    kg = hb("feffe9928665731c6d6a8f9467308308")
+    secret(kg)
+    iv = hb("cafebabefacedbaddecaf888")
+    aad = hb("feedfacedeadbeeffeedfacedeadbeefabaddad2")
+    pg = hb("d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39")
+    eg = aes.new_encryptor(bytes.view(kg))
+    sealed = aes.gcm_seal(eg, iv, bytes.view(aad), bytes.view(pg))
+    fails = fails + check("aes-gcm seal", sealed, "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e0915bc94fbc3221a5db94fae95ae7121a47")
+    opened, gerr = aes.gcm_open(eg, iv, bytes.view(aad), bytes.view(sealed))
+    if gerr != "" {
+        println("FAIL aes-gcm open: ${gerr}")
+        fails = fails + 1
+    } else {
+        fails = fails + check("aes-gcm open", opened, "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39")
+        bytes.free(opened)
+    }
+    // RFC 8439 2.8.2: ChaCha20-Poly1305 seal and open.
+    kc = hb("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f")
+    secret(kc)
+    nc = hb("070000004041424344454647")
+    ac = hb("50515253c0c1c2c3c4c5c6c7")
+    pc = ascii("Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.")
+    sc = chacha20poly1305.aead_seal(kc, nc, bytes.view(ac), bytes.view(pc))
+    fails = fails + check("chacha20poly1305 seal", sc, "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d63dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b3692ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc3ff4def08e4b7a9de576d26586cec64b61161ae10b594f09e26a7e902ecbd0600691")
+    oc, cerr = chacha20poly1305.aead_open(kc, nc, bytes.view(ac), bytes.view(sc))
+    if cerr != "" {
+        println("FAIL chacha20poly1305 open: ${cerr}")
+        fails = fails + 1
+    } else {
+        public(oc)
+        if bh(oc) == bh(pc) {
+            println("ok   chacha20poly1305 open")
+        } else {
+            println("FAIL chacha20poly1305 open")
+            fails = fails + 1
+        }
+        bytes.free(oc)
+    }
+    // RFC 8439 2.5.2: Poly1305 with a secret one-time key.
+    kp = hb("85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b")
+    secret(kp)
+    mp = ascii("Cryptographic Forum Research Group")
+    tp = chacha20poly1305.poly1305_mac(kp, bytes.view(mp))
+    fails = fails + check("poly1305", tp, "a8061dc1305136c6c22b8baf0c0127a9")
+    // RFC 4231 test case 2: HMAC-SHA-256 with key "Jefe".
+    kh = ascii("Jefe")
+    secret(kh)
+    mh = ascii("what do ya want for nothing?")
+    th = hmac.hmac_sha256(bytes.view(kh), bytes.view(mh))
+    fails = fails + check("hmac-sha256", th, "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843")
+    // RFC 5869 test case 1: HKDF-SHA-256 with secret input keying material.
+    ikm = hb("0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b")
+    secret(ikm)
+    salt = hb("000102030405060708090a0b0c")
+    info = hb("f0f1f2f3f4f5f6f7f8f9")
+    okm = hkdf.hkdf("sha256", bytes.view(salt), bytes.view(ikm), bytes.view(info), 42)
+    fails = fails + check("hkdf-sha256", okm, "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865")
+    // SHA-256 of a secret message ("abc").
+    ms = ascii("abc")
+    secret(ms)
+    ds = sha256(ms)
+    fails = fails + check("sha-256", ds, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+    aes.free(e128); aes.free(d128); aes.free(e256); aes.free(eg)
+    bytes.free(k128); bytes.free(pt); bytes.free(c128); bytes.free(p128); bytes.free(k256); bytes.free(c256)
+    bytes.free(kg); bytes.free(iv); bytes.free(aad); bytes.free(pg); bytes.free(sealed)
+    bytes.free(kc); bytes.free(nc); bytes.free(ac); bytes.free(pc); bytes.free(sc)
+    bytes.free(kp); bytes.free(mp); bytes.free(tp); bytes.free(kh); bytes.free(mh); bytes.free(th)
+    bytes.free(ikm); bytes.free(salt); bytes.free(info); bytes.free(okm); bytes.free(ms); bytes.free(ds)
+    return fails
+}
+main() {
+    ct.set_declassify_hook(ct_shim_declassify_hook() as DeclassifyHook)
+    if ct_shim_available() == 1 {
+        println("ct_probe: under valgrind, secrets marked undefined")
+    } else {
+        println("ct_probe: no valgrind, known-answer run only")
+    }
+    fails = 0
+    fails = fails + p256_cases()
+    fails = fails + p384_cases()
+    fails = fails + p521_cases()
+    fails = fails + secp256k1_cases()
+    fails = fails + rsa_cases()
+    fails = fails + eddsa_xdh_cases()
+    fails = fails + symmetric_cases()
+    if fails > 0 {
+        println("${fails} FAILED")
+        exit(1)
+    }
+    println("ALL PASS")
+}

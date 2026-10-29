@@ -1,0 +1,22 @@
+// Part of: test_actor_ref_field_reject.sh. A field read through a bare
+// actor_ref, which names no actor (#3333).
+
+message Bump {}
+
+actor Counter {
+    state n = 0
+    receive {
+        Bump() -> { n = n + 1 }
+    }
+}
+
+peek(w: actor_ref) -> int {
+    return w.n
+}
+
+main() {
+    c = spawn(Counter())
+    c ! Bump {}
+    wait_for_idle()
+    println("${peek(c)}")
+}

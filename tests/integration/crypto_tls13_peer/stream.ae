@@ -1,0 +1,133 @@
+// A long stream over the pure TLS stack, for test_tls13_stream.sh (#3379).
+// ROLE=server listens on 127.0.0.1 (its port to PORT_OUT, its certificate
+// to CERT_OUT); ROLE=client connects to PORT trusting CERT. The client
+// sends STREAM_MB MiB in 16 KiB writes and the server reads them; then the
+// server sends as much back and the client reads it. The reader of each
+// direction prints the growth of the heap between its first 8 MiB and its
+// last byte: "<ROLE> read <bytes> grew <bytes>", or "<ROLE> ERR: <why>".
+
+import std.os
+import std.fs
+import std.tcp
+import std.bytes
+import std.string
+import std.mem
+import std.cryptography
+import std.cryptography.tls13_client
+import std.cryptography.tls13_server
+
+extern exit(code: int)
+
+const CHUNK = 16384
+const MARK = 8388608 // 8 MiB
+
+fn filled() -> ptr {
+    b = bytes.new(CHUNK)
+    i = 0
+    while i < CHUNK {
+        bytes.set(b, i, (i * 7) & 255)
+        i = i + 1
+    }
+    return b
+}
+
+// Read `total` bytes through `recv` (1 server, 0 client); the heap growth.
+fn read_all(conn: ptr, server: int, total: long, who: string) {
+    got = 0 as long
+    h0 = 0 as long
+    marked = 0
+    while got < total {
+        buf = null
+        n = 0
+        err = ""
+        if server == 1 { buf, n, err = tls13_server.conn_recv(conn) } else { buf, n, err = tls13_client.conn_recv(conn) }
+        if err != "" || buf == null {
+            println("${who} ERR: after ${got} bytes: ${err}")
+            return
+        }
+        bytes.free(buf)
+        got = got + (n as long)
+        if marked == 0 && got >= MARK {
+            h0 = mem.heap_in_use()
+            marked = 1
+        }
+    }
+    h1 = mem.heap_in_use()
+    println("${who} read ${got} grew ${h1 - h0}")
+}
+
+fn send_all(conn: ptr, server: int, total: long, who: string) -> int {
+    b = filled()
+    sent = 0 as long
+    while sent < total {
+        err = ""
+        if server == 1 { err = tls13_server.conn_send(conn, bytes.view(b)[0..CHUNK]) } else { err = tls13_client.conn_send(conn, bytes.view(b)[0..CHUNK]) }
+        if err != "" {
+            println("${who} ERR: send after ${sent} bytes: ${err}")
+            bytes.free(b)
+            return 0
+        }
+        sent = sent + (CHUNK as long)
+    }
+    bytes.free(b)
+    return 1
+}
+
+main() {
+    mb, _me = string.to_int(os.getenv("STREAM_MB"))
+    total = (mb as long) * 1048576
+    if os.getenv("ROLE") == "server" {
+        srv, lerr = tcp.listen_on("127.0.0.1", 0)
+        if lerr != "" {
+            println("server ERR: ${lerr}")
+            exit(1)
+        }
+        _wc = fs.write(os.getenv("CERT_OUT"), peer_pem())
+        _wp = fs.write(os.getenv("PORT_OUT"), "${tcp.server_port(srv)}")
+        sock, aerr = tcp.accept(srv)
+        if aerr != "" {
+            println("server ERR: ${aerr}")
+            exit(1)
+        }
+        chain, lens = tls13_server.parse_cert_chain_pem(peer_pem())
+        key, _kerr = tls13_server.load_private_key(peer_key())
+        xpriv, _rerr = cryptography.random_buffer(32)
+        conn, herr = tls13_server.accept(sock, chain, lens, key, xpriv)
+        bytes.free(xpriv)
+        tls13_server.free_private_key(key)
+        if herr != "" {
+            println("server ERR: ${herr}")
+            exit(1)
+        }
+        read_all(conn, 1, total, "server")
+        _s = send_all(conn, 1, total, "server")
+        // The client's close_notify ends it.
+        b, _n, _e = tls13_server.conn_recv(conn)
+        if b != null { bytes.free(b) }
+        tls13_server.close_conn(conn)
+        return
+    }
+    port, _pe = string.to_int(os.getenv("PORT"))
+    sock, derr = tcp.connect("127.0.0.1", port)
+    if derr != "" {
+        println("client ERR: connect: ${derr}")
+        exit(1)
+    }
+    conn, cerr = tls13_client.connect_socket(sock, "peer.example", os.getenv("CERT"))
+    if cerr != "" {
+        println("client ERR: ${cerr}")
+        exit(1)
+    }
+    if send_all(conn, 0, total, "client") == 1 {
+        read_all(conn, 0, total, "client")
+    }
+    tls13_client.close_conn(conn)
+}
+
+fn peer_pem() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBezCCASGgAwIBAgIFUEVFUgEwCgYIKoZIzj0EAwIwFzEVMBMGA1UEAwwMcGVl\nci5leGFtcGxlMCAXDTI2MDEwMTAwMDAwMFoYDzIxMjYwMTAxMDAwMDAwWjAXMRUw\nEwYDVQQDDAxwZWVyLmV4YW1wbGUwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARv\n7S9eWT57ZTmAOztQD2+5EetBRQ+B+cOtLJCr7BVBQPQExOwo/jrT1ahb6i7ZxObZ\nFrq4KWW801ggO2EZ0SqXo1gwVjAMBgNVHRMBAf8EAjAAMA4GA1UdDwEB/wQEAwIH\ngDAXBgNVHREEEDAOggxwZWVyLmV4YW1wbGUwHQYDVR0OBBYEFH8HRengm5cRK0K4\na6DbxP8afdpfMAoGCCqGSM49BAMCA0gAMEUCIDCIjkFoXJK1RI1twupNRu+WcP5M\nrU1MCAQ84vwQWP4tAiEArDbfJRioR7QSSuE4iKxVCCFaHbJs/7eLq3CNJGUFXoM=\n-----END CERTIFICATE-----\n"
+}
+
+fn peer_key() -> string {
+    return "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgJkV1/PXrot1pb8nd\ndzrI+0SX8Cx63OCppeTS/FARImOhRANCAARv7S9eWT57ZTmAOztQD2+5EetBRQ+B\n+cOtLJCr7BVBQPQExOwo/jrT1ahb6i7ZxObZFrq4KWW801ggO2EZ0SqX\n-----END PRIVATE KEY-----\n"
+}

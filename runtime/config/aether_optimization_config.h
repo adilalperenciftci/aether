@@ -12,7 +12,6 @@
 //   - Direct Send (same-core bypass)
 //   - Adaptive Batching (4-64 dynamic)
 //   - Message Coalescing (amortises atomics across bursts)
-//   - TLS Message Pools (eliminates mutex contention on the payload allocator)
 //
 // Tier 2 - AUTO-DETECT (hardware-dependent):
 //   - SIMD Batch Processing (requires AVX2/NEON)
@@ -277,51 +276,8 @@ static inline AetherPlatformCaps aether_platform_caps(void) {
 }
 
 // ============================================================================
-// MEMORY PROFILES (auto-detected or user-specified via AETHER_PROFILE)
-// Controls pool sizes for different workload characteristics
-// ============================================================================
-
-typedef enum {
-    AETHER_PROFILE_MICRO,    // <10 actors, <1M messages: pools=256
-    AETHER_PROFILE_SMALL,    // <100 actors: pools=1024
-    AETHER_PROFILE_MEDIUM,   // <1000 actors: pools=4096 (default)
-    AETHER_PROFILE_LARGE     // 1000+ actors: pools=16384
-} AetherProfile;
-
-// Profile pool sizes
-#define AETHER_PROFILE_MICRO_MSG_POOL   256
-#define AETHER_PROFILE_SMALL_MSG_POOL   1024
-#define AETHER_PROFILE_MEDIUM_MSG_POOL  4096
-#define AETHER_PROFILE_LARGE_MSG_POOL   16384
-
-// Get pool sizes for a profile
-static inline int aether_profile_msg_pool_size(AetherProfile p) {
-    switch (p) {
-        case AETHER_PROFILE_MICRO:  return AETHER_PROFILE_MICRO_MSG_POOL;
-        case AETHER_PROFILE_SMALL:  return AETHER_PROFILE_SMALL_MSG_POOL;
-        case AETHER_PROFILE_LARGE:  return AETHER_PROFILE_LARGE_MSG_POOL;
-        default:                    return AETHER_PROFILE_MEDIUM_MSG_POOL;
-    }
-}
-
-// ============================================================================
 // ENVIRONMENT VARIABLE HELPERS
 // ============================================================================
-
-// Parse AETHER_PROFILE env var
-static inline AetherProfile aether_profile_from_env(void) {
-#if AETHER_HAS_GETENV
-    const char* env = getenv("AETHER_PROFILE");
-    if (!env) return AETHER_PROFILE_MEDIUM;
-
-    if (env[0] == 'm' && env[1] == 'i') return AETHER_PROFILE_MICRO;  // "micro"
-    if (env[0] == 's') return AETHER_PROFILE_SMALL;                   // "small"
-    if (env[0] == 'l') return AETHER_PROFILE_LARGE;                   // "large"
-    return AETHER_PROFILE_MEDIUM;                                      // "medium" or unknown
-#else
-    return AETHER_PROFILE_MEDIUM;
-#endif
-}
 
 // Read integer from env var with default
 static inline int aether_env_int(const char* name, int default_val) {
@@ -409,10 +365,6 @@ typedef struct {
     // Live actors (spawned, not yet released)
     atomic_int actor_count;
 
-    // Memory profile (auto-detected or env override)
-    AetherProfile profile;
-    int msg_pool_size;    // Actual pool size (env override or from profile)
-
     // Cooperative preemption (opt-in, zero cost when disabled)
     // Scheduler-side: break out of drain loop if handler exceeds threshold
     atomic_bool preempt_enabled;         // AETHER_PREEMPT=1 env var
@@ -434,6 +386,11 @@ void aether_runtime_configure(AetherOptFlags flags);
 
 // Print current configuration
 void aether_print_config(void);
+
+// Print it once per process, however many ways ask (#3375): AETHER_VERBOSE in
+// the environment when the scheduler starts, a program compiled with
+// -DAETHER_VERBOSE, AETHER_OPT_VERBOSE.
+void aether_print_config_once(void);
 
 // ============================================================================
 // IMPLEMENTATION (inline for performance)
@@ -474,7 +431,8 @@ static inline void aether_on_actor_terminate(void) {
     atomic_fetch_sub_explicit(&g_aether_config.actor_count, 1, memory_order_relaxed);
 }
 
-// Initialize the profile from env vars
+// Read the runtime settings from the environment (AETHER_VERBOSE,
+// AETHER_PREEMPT, AETHER_PREEMPT_MS)
 // Called once at runtime init
 void aether_init_from_env(void);
 

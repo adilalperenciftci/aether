@@ -1,0 +1,115 @@
+// A receiver stepped inline inside an enforce block runs with its own
+// context, not the block's levels (#3393).
+//
+// std.sandbox says a message the block sends is handled on an actor's
+// thread, with no grants: an actor is not the block. But a send to an idle
+// actor of the same core steps it there and then, on the enforcing thread,
+// and that handler ran with the block's levels in force: a deny-all block
+// had the receiver's reads refused, while the same receiver on another
+// core, or stepped a moment later, read freely. A step now puts the
+// thread's levels aside and gives them back when it ends, so the receiver
+// is checked the same whichever thread steps it, and the block's own code
+// after the send is still held to the block.
+
+import std.sandbox
+import std.os
+
+message Look { what: string }
+message Seen {}
+message Go {}
+message GoBreak { breaker: actor_ref }
+
+extern exit(code: int)
+
+fn readable(name: string) -> int {
+    v = os.os_getenv(name)
+    if v == null {
+        return 0
+    }
+    return 1
+}
+
+actor Looker {
+    state seen = -1
+    receive {
+        Look(what) -> { seen = readable(what) }
+        Seen() -> { reply seen }
+    }
+}
+
+// Panics on what it is sent.
+actor Breaker {
+    receive {
+        Look(what) -> { panic("breaker blew up on ${what}") }
+    }
+}
+
+// Sends Looker, idle on its own core, a message from inside a deny-all
+// block: Looker is stepped inside the send. Replies what the block itself
+// read after the send (0) times 10, plus what Looker read (1).
+actor Confined {
+    state looker: actor_ref = null
+    receive {
+        // The receiver panics inline: the block's levels are still in
+        // force after the send (its panic ends only what it pushed).
+        GoBreak(breaker) -> {
+            nothing = sandbox.new("nothing") {
+            }
+            inside = ref(-1)
+            sandbox.enforce(nothing) callback {
+                breaker ! Look { what: "PATH" }
+                ref_set(inside, readable("PATH"))
+            }
+            sandbox.free(nothing)
+            int got = ref_get(inside) * 10 + readable("PATH")
+            ref_free(inside)
+            reply got
+        }
+        Go() -> {
+            nothing = sandbox.new("nothing") {
+            }
+            inside = ref(-1)
+            lk = looker
+            sandbox.enforce(nothing) callback {
+                lk ! Look { what: "PATH" }
+                ref_set(inside, readable("PATH"))
+            }
+            sandbox.free(nothing)
+            seen = looker ? Seen {}
+            int got = ref_get(inside) * 10 + seen
+            ref_free(inside)
+            reply got
+        }
+    }
+}
+
+check(label: string, ok: bool) -> int {
+    if !ok {
+        println("  FAIL ${label}")
+        return 1
+    }
+    println("  PASS ${label}")
+    return 0
+}
+
+main() {
+    println("=== a receiver stepped inline inside an enforce block runs with its own context (#3393) ===")
+    fails = 0
+    c = spawn(Confined(), core: 0)
+    l = spawn(Looker(), core: 0)
+    c.looker = l
+    int got = c ? Go {}
+    fails = fails + check("the receiver read PATH, not refused by the block it was sent from: ${got % 10}",
+        got % 10 == 1)
+    fails = fails + check("and the block's own read after the send was refused: ${got / 10}", got / 10 == 0)
+    b = spawn(Breaker(), core: 0)
+    int later = c ? GoBreak { breaker: b }
+    fails = fails + check("after the receiver panicked inline, the block's read was still refused: ${later / 10}",
+        later / 10 == 0)
+    fails = fails + check("and outside the block PATH reads again: ${later % 10}", later % 10 == 1)
+    if fails > 0 {
+        println("FAIL: ${fails} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

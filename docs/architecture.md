@@ -162,7 +162,7 @@ IDENTIFIER("x") EQUALS NUMBER(42) PLUS IDENTIFIER("y")
 
 **Key Features:**
 - Computed goto dispatch for message handlers
-- Inline single-int message encoding (bypasses pool allocation)
+- Inline single-int message encoding (no payload allocation)
 - `scheduler_send_local` / `scheduler_send_remote` routing based on `current_core_id`
 - Locality-aware actor placement via `scheduler_spawn_actor` (caller's core, or core 0 for main thread)
 - NUMA-aware actor allocation with derived-struct size
@@ -219,7 +219,7 @@ rejects timestamp macros outright.
        int count;                       // the actor's own state follows
    } CounterActor;
    ```
-   The fields, in order: `active`, `id`, `mailbox`, `step`, `thread`, `auto_process`, `assigned_core`, `migrate_to`, `spsc_queue`, `reply_slot`, `step_lock`, `timeout_ns`, `last_activity_ns`, `step_payload`, `step_type`, `dead`, `alloc_size`, `destroy_state`, `release_message`, `scheduler_owned`, `inbox`, `thread_parked`, `inflight`. The header comments each one.
+   The fields, in order: `active`, `id`, `mailbox`, `step`, `thread`, `auto_process`, `assigned_core`, `migrate_to`, `spsc_queue`, `reply_slot`, `step_lock`, `exit_flags`, `mailbox_bound`, `timeout_ns`, `last_activity_ns`, `step_payload`, `step_type`, `dead`, `alloc_size`, `destroy_state`, `release_message`, `scheduler_owned`, `incarnation`, `inbox`, `thread_parked`, `inflight`, `death_watch`, `mailbox_pending`, `full_drops`. The header comments each one.
 
 2. **Message Structure** (`runtime/actors/actor_state_machine.h`)
    ```c
@@ -358,10 +358,9 @@ On Windows `aether_thread.h` implements pthreads with Win32 primitives and inclu
 ### Memory Management
 
 **Message Payloads:**
-- Thread-local pool of 256 pre-allocated buffers (256 bytes each)
-- Pool acquisition and release use plain loads/stores (no atomics for TLS)
-- Falls back to malloc for oversized messages or pool exhaustion
-- `aether_free_message` returns buffers to the pool or calls `free`
+- A typed message's payload is a heap copy made by the send
+- `aether_free_message` frees it (`free()`) once the message is handled or dropped
+- No payload pool: an actor can move to another core after a message is sent, so a pooled payload would be released by a thread that does not own the pool (#3374)
 
 **Actor Allocation:**
 - `scheduler_spawn_actor` allocates via `aether_numa_alloc_aligned` with the full derived-struct size, on a 64-byte boundary (generated actor structs are declared `aligned(64)`)
@@ -381,16 +380,15 @@ design and its record in [design/ownership-model.md](design/ownership-model.md))
 
 The runtime implements these optimization strategies in the active code paths:
 
-1. **Thread-Local Message Pools** - Eliminate malloc/free overhead
-2. **Batch Dequeue** - Reduce atomic operations from N to 1 per batch
-3. **Adaptive Batching** - Scale batch size with load (64 to 1024)
-4. **Direct Mailbox Delivery** - Same-core messages bypass the queue
-5. **Computed Goto Dispatch** - Direct label jumps for message handlers
-6. **Inline Single-Int Messages** - Bypass pool allocation for common messages
-8. **Message-Driven Migration** - Co-locate communicating actors
-9. **Optimized Spinlock** - PAUSE/YIELD hints during spin-wait
-10. **Cache Line Alignment** - Prevent false sharing on shared structures
-11. **Relaxed Atomic Ordering** - Avoid barriers on non-critical counters
+1. **Batch Dequeue** - Reduce atomic operations from N to 1 per batch
+2. **Adaptive Batching** - Scale batch size with load (64 to 1024)
+3. **Direct Mailbox Delivery** - Same-core messages bypass the queue
+4. **Computed Goto Dispatch** - Direct label jumps for message handlers
+5. **Inline Single-Int Messages** - No payload allocation for common messages
+6. **Message-Driven Migration** - Co-locate communicating actors
+7. **Optimized Spinlock** - PAUSE/YIELD hints during spin-wait
+8. **Cache Line Alignment** - Prevent false sharing on shared structures
+9. **Relaxed Atomic Ordering** - Avoid barriers on non-critical counters
 
 See [runtime-optimizations.md](runtime-optimizations.md) for implementation details.
 

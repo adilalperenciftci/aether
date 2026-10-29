@@ -84,7 +84,9 @@
     <li><a href="spec.html">spec</a></li>
     <li><a href="strarr.html">strarr</a></li>
     <li><a href="strbuilder.html">strbuilder</a></li>
+    <li><a href="stream.html">stream</a></li>
     <li><a href="string.html">string</a></li>
+    <li><a href="supervise.html">supervise</a></li>
     <li><a href="sync.html">sync</a></li>
     <li><a href="tar.html">tar</a></li>
     <li><a href="tcp.html">tcp</a></li>
@@ -114,7 +116,7 @@
     <a href="actors.html" class="module-card">
       <h3>actors</h3>
       <p>std.actors — process-global name → actor_ref registry.</p>
-      <span class="count">6 exports</span>
+      <span class="count">18 exports</span>
     </a>
     <a href="alloc.html" class="module-card">
       <h3>alloc</h3>
@@ -154,7 +156,7 @@
     <a href="bytes.html" class="module-card">
       <h3>bytes</h3>
       <p>std.bytes — mutable byte buffer with random-access write and overlap-safe forward copy_within.</p>
-      <span class="count">32 exports</span>
+      <span class="count">34 exports</span>
     </a>
     <a href="capsicum.html" class="module-card">
       <h3>capsicum</h3>
@@ -194,7 +196,7 @@
     <a href="cryptography.html" class="module-card">
       <h3>cryptography</h3>
       <p>std.cryptography - Cryptographic hash primitives + Base64 codec Import with: import std.cryptography Pure functions: bytes in, hex digest or Base64 string out.</p>
-      <span class="count">34 exports</span>
+      <span class="count">35 exports</span>
     </a>
     <a href="decimal.html" class="module-card">
       <h3>decimal</h3>
@@ -244,12 +246,12 @@
     <a href="host.html" class="module-card">
       <h3>host</h3>
       <p>std.host — primitives for Aether scripts embedded in a host application.</p>
-      <span class="count">14 exports</span>
+      <span class="count">33 exports</span>
     </a>
     <a href="http.html" class="module-card">
       <h3>http</h3>
       <p>std.http - HTTP Client &amp; Server (alias for std.net) NB the pure-Aether TLS backends are deliberately NOT imported here.</p>
-      <span class="count">144 exports</span>
+      <span class="count">148 exports</span>
     </a>
     <a href="http1.html" class="module-card">
       <h3>http1</h3>
@@ -334,7 +336,7 @@
     <a href="mem.html" class="module-card">
       <h3>mem</h3>
       <p>std.mem — byte-level access to caller-allocated raw pointers.</p>
-      <span class="count">98 exports</span>
+      <span class="count">99 exports</span>
     </a>
     <a href="message.html" class="module-card">
       <h3>message</h3>
@@ -456,10 +458,20 @@
       <p>std.strbuilder — amortised-O(1) string append.</p>
       <span class="count">18 exports</span>
     </a>
+    <a href="stream.html" class="module-card">
+      <h3>stream</h3>
+      <p>std.stream: credit-windowed streams between actors (#426).</p>
+      <span class="count">11 exports</span>
+    </a>
     <a href="string.html" class="module-card">
       <h3>string</h3>
       <p>std.string - String Module Import with: import std.string Building strings incrementally? Do NOT loop `d = &quot;${d}${piece}&quot;` / `string.concat(d, piece)` — each iteration re-copies the whole prefix, so the loop is O(n²) in total bytes (issue #1346).</p>
       <span class="count">100 exports</span>
+    </a>
+    <a href="supervise.html" class="module-card">
+      <h3>supervise</h3>
+      <p>std.supervise: supervisors that restart actors (#2974).</p>
+      <span class="count">9 exports</span>
     </a>
     <a href="sync.html" class="module-card">
       <h3>sync</h3>
@@ -474,7 +486,7 @@
     <a href="tcp.html" class="module-card">
       <h3>tcp</h3>
       <p>std.tcp - TCP Socket Operations (alias for std.net) Raw externs end in `_raw` and return NULL/int in C-style.</p>
-      <span class="count">38 exports</span>
+      <span class="count">43 exports</span>
     </a>
     <a href="time.html" class="module-card">
       <h3>time</h3>
@@ -561,6 +573,18 @@
       <li class="function-item" data-name="is_registered"><a href="actors.html#is_registered"><span class="fn-name">is_registered</span><span class="fn-module">actors</span></a></li>
       <li class="function-item" data-name="registry_size"><a href="actors.html#registry_size"><span class="fn-name">registry_size</span><span class="fn-module">actors</span></a></li>
       <li class="function-item" data-name="registry_clear"><a href="actors.html#registry_clear"><span class="fn-name">registry_clear</span><span class="fn-module">actors</span></a></li>
+      <li class="function-item" data-name="monitor"><a href="actors.html#monitor"><span class="fn-name">monitor</span><span class="fn-module">actors</span></a></li>
+      <li class="function-item" data-name="demonitor"><a href="actors.html#demonitor"><span class="fn-name">demonitor</span><span class="fn-module">actors</span></a></li>
+      <li class="function-item" data-name="kill"><a href="actors.html#kill"><span class="fn-name">kill</span><span class="fn-module">actors</span></a></li>
+      <li class="function-item" data-name="stop"><a href="actors.html#stop"><span class="fn-name">stop</span><span class="fn-module">actors</span></a></li>
+      <li class="function-item" data-name="dead_sends"><a href="actors.html#dead_sends"><span class="fn-name">dead_sends</span><span class="fn-module">actors</span></a></li>
+      <li class="function-item" data-name="full_drops"><a href="actors.html#full_drops"><span class="fn-name">full_drops</span><span class="fn-module">actors</span></a></li>
+      <li class="function-item" data-name="link"><a href="actors.html#link"><span class="fn-name">link</span><span class="fn-module">actors</span></a></li>
+      <li class="function-item" data-name="unlink"><a href="actors.html#unlink"><span class="fn-name">unlink</span><span class="fn-module">actors</span></a></li>
+      <li class="function-item" data-name="trap_exits"><a href="actors.html#trap_exits"><span class="fn-name">trap_exits</span><span class="fn-module">actors</span></a></li>
+      <li class="function-item" data-name="rebirth_begin"><a href="actors.html#rebirth_begin"><span class="fn-name">rebirth_begin</span><span class="fn-module">actors</span></a></li>
+      <li class="function-item" data-name="rebirth_end"><a href="actors.html#rebirth_end"><span class="fn-name">rebirth_end</span><span class="fn-module">actors</span></a></li>
+      <li class="function-item" data-name="incarnation"><a href="actors.html#incarnation"><span class="fn-name">incarnation</span><span class="fn-module">actors</span></a></li>
       <li class="function-item" data-name="system"><a href="alloc.html#system"><span class="fn-name">system</span><span class="fn-module">alloc</span></a></li>
       <li class="function-item" data-name="of_arena"><a href="alloc.html#of_arena"><span class="fn-name">of_arena</span><span class="fn-module">alloc</span></a></li>
       <li class="function-item" data-name="arena_free"><a href="alloc.html#arena_free"><span class="fn-name">arena_free</span><span class="fn-module">alloc</span></a></li>
@@ -726,6 +750,8 @@
       <li class="function-item" data-name="finish"><a href="bytes.html#finish"><span class="fn-name">finish</span><span class="fn-module">bytes</span></a></li>
       <li class="function-item" data-name="to_string"><a href="bytes.html#to_string"><span class="fn-name">to_string</span><span class="fn-module">bytes</span></a></li>
       <li class="function-item" data-name="free"><a href="bytes.html#free"><span class="fn-name">free</span><span class="fn-module">bytes</span></a></li>
+      <li class="function-item" data-name="wipe"><a href="bytes.html#wipe"><span class="fn-name">wipe</span><span class="fn-module">bytes</span></a></li>
+      <li class="function-item" data-name="wipe_free"><a href="bytes.html#wipe_free"><span class="fn-name">wipe_free</span><span class="fn-module">bytes</span></a></li>
       <li class="function-item" data-name="data"><a href="bytes.html#data"><span class="fn-name">data</span><span class="fn-module">bytes</span></a></li>
       <li class="function-item" data-name="capacity"><a href="bytes.html#capacity"><span class="fn-name">capacity</span><span class="fn-module">bytes</span></a></li>
       <li class="function-item" data-name="set_length"><a href="bytes.html#set_length"><span class="fn-name">set_length</span><span class="fn-module">bytes</span></a></li>
@@ -934,6 +960,7 @@
       <li class="function-item" data-name="sha256_bytes"><a href="cryptography.html#sha256_bytes"><span class="fn-name">sha256_bytes</span><span class="fn-module">cryptography</span></a></li>
       <li class="function-item" data-name="hash_bytes"><a href="cryptography.html#hash_bytes"><span class="fn-name">hash_bytes</span><span class="fn-module">cryptography</span></a></li>
       <li class="function-item" data-name="random_bytes"><a href="cryptography.html#random_bytes"><span class="fn-name">random_bytes</span><span class="fn-module">cryptography</span></a></li>
+      <li class="function-item" data-name="random_buffer"><a href="cryptography.html#random_buffer"><span class="fn-name">random_buffer</span><span class="fn-module">cryptography</span></a></li>
       <li class="function-item" data-name="random_hex"><a href="cryptography.html#random_hex"><span class="fn-name">random_hex</span><span class="fn-module">cryptography</span></a></li>
       <li class="function-item" data-name="random_base64"><a href="cryptography.html#random_base64"><span class="fn-name">random_base64</span><span class="fn-module">cryptography</span></a></li>
       <li class="function-item" data-name="digest_new"><a href="cryptography.html#digest_new"><span class="fn-name">digest_new</span><span class="fn-module">cryptography</span></a></li>
@@ -1231,6 +1258,25 @@
       <li class="function-item" data-name="caller_identity"><a href="host.html#caller_identity"><span class="fn-name">caller_identity</span><span class="fn-module">host</span></a></li>
       <li class="function-item" data-name="caller_attribute"><a href="host.html#caller_attribute"><span class="fn-name">caller_attribute</span><span class="fn-module">host</span></a></li>
       <li class="function-item" data-name="caller_deadline_ms"><a href="host.html#caller_deadline_ms"><span class="fn-name">caller_deadline_ms</span><span class="fn-module">host</span></a></li>
+      <li class="function-item" data-name="last_outcome"><a href="host.html#last_outcome"><span class="fn-name">last_outcome</span><span class="fn-module">host</span></a></li>
+      <li class="function-item" data-name="last_outcome_text"><a href="host.html#last_outcome_text"><span class="fn-name">last_outcome_text</span><span class="fn-module">host</span></a></li>
+      <li class="function-item" data-name="account_new"><a href="host.html#account_new"><span class="fn-name">account_new</span><span class="fn-module">host</span></a></li>
+      <li class="function-item" data-name="account_free"><a href="host.html#account_free"><span class="fn-name">account_free</span><span class="fn-module">host</span></a></li>
+      <li class="function-item" data-name="account_use"><a href="host.html#account_use"><span class="fn-name">account_use</span><span class="fn-module">host</span></a></li>
+      <li class="function-item" data-name="account_in_use"><a href="host.html#account_in_use"><span class="fn-name">account_in_use</span><span class="fn-module">host</span></a></li>
+      <li class="function-item" data-name="account_used"><a href="host.html#account_used"><span class="fn-name">account_used</span><span class="fn-module">host</span></a></li>
+      <li class="function-item" data-name="account_tripped"><a href="host.html#account_tripped"><span class="fn-name">account_tripped</span><span class="fn-module">host</span></a></li>
+      <li class="function-item" data-name="DEADLINE_ELAPSED"><a href="host.html#DEADLINE_ELAPSED"><span class="fn-name">DEADLINE_ELAPSED</span><span class="fn-module">host</span></a></li>
+      <li class="function-item" data-name="DEADLINE_ACTIVE"><a href="host.html#DEADLINE_ACTIVE"><span class="fn-name">DEADLINE_ACTIVE</span><span class="fn-module">host</span></a></li>
+      <li class="function-item" data-name="TRIPPED_DEADLINE"><a href="host.html#TRIPPED_DEADLINE"><span class="fn-name">TRIPPED_DEADLINE</span><span class="fn-module">host</span></a></li>
+      <li class="function-item" data-name="TRIPPED_MEMORY"><a href="host.html#TRIPPED_MEMORY"><span class="fn-name">TRIPPED_MEMORY</span><span class="fn-module">host</span></a></li>
+      <li class="function-item" data-name="OK"><a href="host.html#OK"><span class="fn-name">OK</span><span class="fn-module">host</span></a></li>
+      <li class="function-item" data-name="PANICKED"><a href="host.html#PANICKED"><span class="fn-name">PANICKED</span><span class="fn-module">host</span></a></li>
+      <li class="function-item" data-name="DEADLINE"><a href="host.html#DEADLINE"><span class="fn-name">DEADLINE</span><span class="fn-module">host</span></a></li>
+      <li class="function-item" data-name="CANCELLED"><a href="host.html#CANCELLED"><span class="fn-name">CANCELLED</span><span class="fn-module">host</span></a></li>
+      <li class="function-item" data-name="MEMORY_CAP"><a href="host.html#MEMORY_CAP"><span class="fn-name">MEMORY_CAP</span><span class="fn-module">host</span></a></li>
+      <li class="function-item" data-name="OUT_OF_MEMORY"><a href="host.html#OUT_OF_MEMORY"><span class="fn-name">OUT_OF_MEMORY</span><span class="fn-module">host</span></a></li>
+      <li class="function-item" data-name="INCOMPATIBLE"><a href="host.html#INCOMPATIBLE"><span class="fn-name">INCOMPATIBLE</span><span class="fn-module">host</span></a></li>
       <li class="function-item" data-name="get_raw"><a href="http.html#get_raw"><span class="fn-name">get_raw</span><span class="fn-module">http</span></a></li>
       <li class="function-item" data-name="get_with_timeout_raw"><a href="http.html#get_with_timeout_raw"><span class="fn-name">get_with_timeout_raw</span><span class="fn-module">http</span></a></li>
       <li class="function-item" data-name="get_with_timeout_ns_raw"><a href="http.html#get_with_timeout_ns_raw"><span class="fn-name">get_with_timeout_ns_raw</span><span class="fn-module">http</span></a></li>
@@ -1272,6 +1318,10 @@
       <li class="function-item" data-name="server_free"><a href="http.html#server_free"><span class="fn-name">server_free</span><span class="fn-module">http</span></a></li>
       <li class="function-item" data-name="server_set_tls_raw"><a href="http.html#server_set_tls_raw"><span class="fn-name">server_set_tls_raw</span><span class="fn-module">http</span></a></li>
       <li class="function-item" data-name="server_set_tls"><a href="http.html#server_set_tls"><span class="fn-name">server_set_tls</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_set_tls_pem_raw"><a href="http.html#server_set_tls_pem_raw"><span class="fn-name">server_set_tls_pem_raw</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_set_tls_pem"><a href="http.html#server_set_tls_pem"><span class="fn-name">server_set_tls_pem</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_set_tls_backend_raw"><a href="http.html#server_set_tls_backend_raw"><span class="fn-name">server_set_tls_backend_raw</span><span class="fn-module">http</span></a></li>
+      <li class="function-item" data-name="server_set_tls_backend"><a href="http.html#server_set_tls_backend"><span class="fn-name">server_set_tls_backend</span><span class="fn-module">http</span></a></li>
       <li class="function-item" data-name="server_set_keepalive_raw"><a href="http.html#server_set_keepalive_raw"><span class="fn-name">server_set_keepalive_raw</span><span class="fn-module">http</span></a></li>
       <li class="function-item" data-name="server_set_keepalive"><a href="http.html#server_set_keepalive"><span class="fn-name">server_set_keepalive</span><span class="fn-module">http</span></a></li>
       <li class="function-item" data-name="server_set_h2_raw"><a href="http.html#server_set_h2_raw"><span class="fn-name">server_set_h2_raw</span><span class="fn-module">http</span></a></li>
@@ -1846,6 +1896,7 @@
       <li class="function-item" data-name="move"><a href="mem.html#move"><span class="fn-name">move</span><span class="fn-module">mem</span></a></li>
       <li class="function-item" data-name="compare"><a href="mem.html#compare"><span class="fn-name">compare</span><span class="fn-module">mem</span></a></li>
       <li class="function-item" data-name="set"><a href="mem.html#set"><span class="fn-name">set</span><span class="fn-module">mem</span></a></li>
+      <li class="function-item" data-name="wipe"><a href="mem.html#wipe"><span class="fn-name">wipe</span><span class="fn-module">mem</span></a></li>
       <li class="function-item" data-name="copy_at"><a href="mem.html#copy_at"><span class="fn-name">copy_at</span><span class="fn-module">mem</span></a></li>
       <li class="function-item" data-name="move_at"><a href="mem.html#move_at"><span class="fn-name">move_at</span><span class="fn-module">mem</span></a></li>
       <li class="function-item" data-name="fill_at"><a href="mem.html#fill_at"><span class="fn-name">fill_at</span><span class="fn-module">mem</span></a></li>
@@ -2472,6 +2523,17 @@
       <li class="function-item" data-name="finish"><a href="strbuilder.html#finish"><span class="fn-name">finish</span><span class="fn-module">strbuilder</span></a></li>
       <li class="function-item" data-name="finish_with_length"><a href="strbuilder.html#finish_with_length"><span class="fn-name">finish_with_length</span><span class="fn-module">strbuilder</span></a></li>
       <li class="function-item" data-name="free"><a href="strbuilder.html#free"><span class="fn-name">free</span><span class="fn-module">strbuilder</span></a></li>
+      <li class="function-item" data-name="StreamChunk"><a href="stream.html#StreamChunk"><span class="fn-name">StreamChunk</span><span class="fn-module">stream</span></a></li>
+      <li class="function-item" data-name="StreamCredit"><a href="stream.html#StreamCredit"><span class="fn-name">StreamCredit</span><span class="fn-module">stream</span></a></li>
+      <li class="function-item" data-name="connect"><a href="stream.html#connect"><span class="fn-name">connect</span><span class="fn-module">stream</span></a></li>
+      <li class="function-item" data-name="offer"><a href="stream.html#offer"><span class="fn-name">offer</span><span class="fn-module">stream</span></a></li>
+      <li class="function-item" data-name="write"><a href="stream.html#write"><span class="fn-name">write</span><span class="fn-module">stream</span></a></li>
+      <li class="function-item" data-name="finish"><a href="stream.html#finish"><span class="fn-name">finish</span><span class="fn-module">stream</span></a></li>
+      <li class="function-item" data-name="credit"><a href="stream.html#credit"><span class="fn-name">credit</span><span class="fn-module">stream</span></a></li>
+      <li class="function-item" data-name="consumed"><a href="stream.html#consumed"><span class="fn-name">consumed</span><span class="fn-module">stream</span></a></li>
+      <li class="function-item" data-name="available"><a href="stream.html#available"><span class="fn-name">available</span><span class="fn-module">stream</span></a></li>
+      <li class="function-item" data-name="in_flight"><a href="stream.html#in_flight"><span class="fn-name">in_flight</span><span class="fn-module">stream</span></a></li>
+      <li class="function-item" data-name="peak"><a href="stream.html#peak"><span class="fn-name">peak</span><span class="fn-module">stream</span></a></li>
       <li class="function-item" data-name="new"><a href="string.html#new"><span class="fn-name">new</span><span class="fn-module">string</span></a></li>
       <li class="function-item" data-name="from_cstr"><a href="string.html#from_cstr"><span class="fn-name">from_cstr</span><span class="fn-module">string</span></a></li>
       <li class="function-item" data-name="from_literal"><a href="string.html#from_literal"><span class="fn-name">from_literal</span><span class="fn-module">string</span></a></li>
@@ -2572,6 +2634,15 @@
       <li class="function-item" data-name="keep"><a href="string.html#keep"><span class="fn-name">keep</span><span class="fn-module">string</span></a></li>
       <li class="function-item" data-name="release_kept"><a href="string.html#release_kept"><span class="fn-name">release_kept</span><span class="fn-module">string</span></a></li>
       <li class="function-item" data-name="from_ptr"><a href="string.html#from_ptr"><span class="fn-name">from_ptr</span><span class="fn-module">string</span></a></li>
+      <li class="function-item" data-name="start"><a href="supervise.html#start"><span class="fn-name">start</span><span class="fn-module">supervise</span></a></li>
+      <li class="function-item" data-name="child"><a href="supervise.html#child"><span class="fn-name">child</span><span class="fn-module">supervise</span></a></li>
+      <li class="function-item" data-name="child_restart"><a href="supervise.html#child_restart"><span class="fn-name">child_restart</span><span class="fn-module">supervise</span></a></li>
+      <li class="function-item" data-name="which"><a href="supervise.html#which"><span class="fn-name">which</span><span class="fn-module">supervise</span></a></li>
+      <li class="function-item" data-name="restarts"><a href="supervise.html#restarts"><span class="fn-name">restarts</span><span class="fn-module">supervise</span></a></li>
+      <li class="function-item" data-name="stop"><a href="supervise.html#stop"><span class="fn-name">stop</span><span class="fn-module">supervise</span></a></li>
+      <li class="function-item" data-name="SuperviseChild"><a href="supervise.html#SuperviseChild"><span class="fn-name">SuperviseChild</span><span class="fn-module">supervise</span></a></li>
+      <li class="function-item" data-name="SuperviseSpec"><a href="supervise.html#SuperviseSpec"><span class="fn-name">SuperviseSpec</span><span class="fn-module">supervise</span></a></li>
+      <li class="function-item" data-name="MAX_CHILDREN"><a href="supervise.html#MAX_CHILDREN"><span class="fn-name">MAX_CHILDREN</span><span class="fn-module">supervise</span></a></li>
       <li class="function-item" data-name="atomic_new"><a href="sync.html#atomic_new"><span class="fn-name">atomic_new</span><span class="fn-module">sync</span></a></li>
       <li class="function-item" data-name="atomic_load"><a href="sync.html#atomic_load"><span class="fn-name">atomic_load</span><span class="fn-module">sync</span></a></li>
       <li class="function-item" data-name="atomic_store"><a href="sync.html#atomic_store"><span class="fn-name">atomic_store</span><span class="fn-module">sync</span></a></li>
@@ -2604,6 +2675,7 @@
       <li class="function-item" data-name="writer_finish"><a href="tar.html#writer_finish"><span class="fn-name">writer_finish</span><span class="fn-module">tar</span></a></li>
       <li class="function-item" data-name="writer_abort"><a href="tar.html#writer_abort"><span class="fn-name">writer_abort</span><span class="fn-module">tar</span></a></li>
       <li class="function-item" data-name="connect_raw"><a href="tcp.html#connect_raw"><span class="fn-name">connect_raw</span><span class="fn-module">tcp</span></a></li>
+      <li class="function-item" data-name="connect_buffered_raw"><a href="tcp.html#connect_buffered_raw"><span class="fn-name">connect_buffered_raw</span><span class="fn-module">tcp</span></a></li>
       <li class="function-item" data-name="send_raw"><a href="tcp.html#send_raw"><span class="fn-name">send_raw</span><span class="fn-module">tcp</span></a></li>
       <li class="function-item" data-name="receive_raw"><a href="tcp.html#receive_raw"><span class="fn-name">receive_raw</span><span class="fn-module">tcp</span></a></li>
       <li class="function-item" data-name="receive_n_raw"><a href="tcp.html#receive_n_raw"><span class="fn-name">receive_n_raw</span><span class="fn-module">tcp</span></a></li>
@@ -2616,6 +2688,7 @@
       <li class="function-item" data-name="server_poll_raw"><a href="tcp.html#server_poll_raw"><span class="fn-name">server_poll_raw</span><span class="fn-module">tcp</span></a></li>
       <li class="function-item" data-name="set_nodelay_raw"><a href="tcp.html#set_nodelay_raw"><span class="fn-name">set_nodelay_raw</span><span class="fn-module">tcp</span></a></li>
       <li class="function-item" data-name="set_read_buffer_raw"><a href="tcp.html#set_read_buffer_raw"><span class="fn-name">set_read_buffer_raw</span><span class="fn-module">tcp</span></a></li>
+      <li class="function-item" data-name="available_raw"><a href="tcp.html#available_raw"><span class="fn-name">available_raw</span><span class="fn-module">tcp</span></a></li>
       <li class="function-item" data-name="fd_raw"><a href="tcp.html#fd_raw"><span class="fn-name">fd_raw</span><span class="fn-module">tcp</span></a></li>
       <li class="function-item" data-name="server_fd_raw"><a href="tcp.html#server_fd_raw"><span class="fn-name">server_fd_raw</span><span class="fn-module">tcp</span></a></li>
       <li class="function-item" data-name="poll_raw"><a href="tcp.html#poll_raw"><span class="fn-name">poll_raw</span><span class="fn-module">tcp</span></a></li>
@@ -2623,6 +2696,7 @@
       <li class="function-item" data-name="send_bytes_raw"><a href="tcp.html#send_bytes_raw"><span class="fn-name">send_bytes_raw</span><span class="fn-module">tcp</span></a></li>
       <li class="function-item" data-name="receive_into_raw"><a href="tcp.html#receive_into_raw"><span class="fn-name">receive_into_raw</span><span class="fn-module">tcp</span></a></li>
       <li class="function-item" data-name="connect"><a href="tcp.html#connect"><span class="fn-name">connect</span><span class="fn-module">tcp</span></a></li>
+      <li class="function-item" data-name="connect_buffered"><a href="tcp.html#connect_buffered"><span class="fn-name">connect_buffered</span><span class="fn-module">tcp</span></a></li>
       <li class="function-item" data-name="write"><a href="tcp.html#write"><span class="fn-name">write</span><span class="fn-module">tcp</span></a></li>
       <li class="function-item" data-name="write_n"><a href="tcp.html#write_n"><span class="fn-name">write_n</span><span class="fn-module">tcp</span></a></li>
       <li class="function-item" data-name="write_slice"><a href="tcp.html#write_slice"><span class="fn-name">write_slice</span><span class="fn-module">tcp</span></a></li>
@@ -2639,8 +2713,10 @@
       <li class="function-item" data-name="server_poll"><a href="tcp.html#server_poll"><span class="fn-name">server_poll</span><span class="fn-module">tcp</span></a></li>
       <li class="function-item" data-name="set_nodelay"><a href="tcp.html#set_nodelay"><span class="fn-name">set_nodelay</span><span class="fn-module">tcp</span></a></li>
       <li class="function-item" data-name="set_read_buffer"><a href="tcp.html#set_read_buffer"><span class="fn-name">set_read_buffer</span><span class="fn-module">tcp</span></a></li>
+      <li class="function-item" data-name="available"><a href="tcp.html#available"><span class="fn-name">available</span><span class="fn-module">tcp</span></a></li>
       <li class="function-item" data-name="poll"><a href="tcp.html#poll"><span class="fn-name">poll</span><span class="fn-module">tcp</span></a></li>
       <li class="function-item" data-name="poll2"><a href="tcp.html#poll2"><span class="fn-name">poll2</span><span class="fn-module">tcp</span></a></li>
+      <li class="function-item" data-name="close_drained"><a href="tcp.html#close_drained"><span class="fn-name">close_drained</span><span class="fn-module">tcp</span></a></li>
       <li class="function-item" data-name="DateTime"><a href="time.html#DateTime"><span class="fn-name">DateTime</span><span class="fn-module">time</span></a></li>
       <li class="function-item" data-name="now"><a href="time.html#now"><span class="fn-name">now</span><span class="fn-module">time</span></a></li>
       <li class="function-item" data-name="now_ms"><a href="time.html#now_ms"><span class="fn-name">now_ms</span><span class="fn-module">time</span></a></li>

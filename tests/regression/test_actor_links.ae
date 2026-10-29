@@ -1,0 +1,133 @@
+// Linked actors share their deaths (#2974).
+//
+// actors.link(ref) ties two actors both ways: when either ends, the other
+// ends too, with the same reason, unless the reason is "normal"; an actor
+// that traps exits (actors.trap_exits(true)) gets a Down instead and lives.
+// actors.unlink(ref) takes the tie away, and a link to an actor that has
+// ended already takes its death at once.
+
+import std.actors
+
+message Link { to: actor_ref }
+message Unlink { to: actor_ref }
+message Trap {}
+message Watch { who: actor_ref }
+message Boom {}
+message Halt {}
+message Ping {}
+
+extern exit(code: int)
+
+actor Node {
+    state pings = 0
+    state downs = 0
+    state down_reason = ""
+    receive {
+        Link(to) -> { actors.link(to) }
+        Unlink(to) -> { actors.unlink(to) }
+        Trap() -> { actors.trap_exits(true) }
+        Boom() -> { panic("node failure") }
+        Halt() -> { actors.stop() }
+        Ping() -> { pings = pings + 1 }
+        Down(ref, reason) -> {
+            downs = downs + 1
+            down_reason = reason
+        }
+    }
+}
+
+actor Watcher {
+    state downs = 0
+    state last_reason = ""
+    receive {
+        Watch(who) -> { _id = actors.monitor(who) }
+        Down(ref, reason) -> {
+            downs = downs + 1
+            last_reason = reason
+        }
+    }
+}
+
+check(label: string, ok: bool) -> int {
+    if !ok {
+        println("  FAIL ${label}")
+        return 1
+    }
+    println("  PASS ${label}")
+    return 0
+}
+
+main() {
+    println("=== linked actors share their deaths (#2974) ===")
+    fails = 0
+
+    // A panic crosses a link, with its reason.
+    a = spawn(Node())
+    b = spawn(Node())
+    wa = spawn(Watcher())
+    wa ! Watch { who: a }
+    a ! Link { to: b }
+    wait_for_idle()
+    b ! Boom {}
+    wait_for_idle()
+    a ! Ping {}
+    wait_for_idle()
+    fails = fails + check("A, linked to B that panicked, ends with B's reason, got ${wa.downs}, \"${wa.last_reason}\"",
+        wa.downs == 1 && wa.last_reason == "node failure")
+    fails = fails + check("and handles nothing after, got ${a.pings}", a.pings == 0)
+
+    // Trapping exits: a Down, and life goes on.
+    c = spawn(Node())
+    d = spawn(Node())
+    c ! Trap {}
+    c ! Link { to: d }
+    wait_for_idle()
+    actors.kill(d)
+    wait_for_idle()
+    c ! Ping {}
+    wait_for_idle()
+    fails = fails + check("a trapping actor gets a Down, \"killed\", got ${c.downs}, \"${c.down_reason}\"",
+        c.downs == 1 && c.down_reason == "killed")
+    fails = fails + check("and lives on, got ${c.pings}", c.pings == 1)
+
+    // "normal" does not cross a link.
+    e = spawn(Node())
+    f = spawn(Node())
+    e ! Link { to: f }
+    wait_for_idle()
+    f ! Halt {}
+    wait_for_idle()
+    e ! Ping {}
+    wait_for_idle()
+    fails = fails + check("a normal end leaves the linked actor alive, got ${e.pings}", e.pings == 1)
+
+    // Unlinked first: nothing crosses.
+    g = spawn(Node())
+    h = spawn(Node())
+    g ! Link { to: h }
+    g ! Unlink { to: h }
+    wait_for_idle()
+    h ! Boom {}
+    wait_for_idle()
+    g ! Ping {}
+    wait_for_idle()
+    fails = fails + check("unlinked first, it lives on, got ${g.pings}", g.pings == 1)
+
+    // A link to an actor that has ended: its death is taken at once.
+    i = spawn(Node())
+    j = spawn(Node())
+    wi = spawn(Watcher())
+    wi ! Watch { who: i }
+    j ! Boom {}
+    wait_for_idle()
+    i ! Link { to: j }
+    wait_for_idle()
+    fails = fails + check("linked to the dead, it ends with its reason, got ${wi.downs}, \"${wi.last_reason}\"",
+        wi.downs == 1 && wi.last_reason == "node failure")
+
+    if fails > 0 {
+        println("FAIL: ${fails} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

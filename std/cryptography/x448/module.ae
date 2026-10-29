@@ -2,217 +2,154 @@
 // Portions copyright (c) 2000-2026 The Legion of the Bouncy Castle Inc. (https://www.bouncycastle.org)
 // Portions copyright (c) 2026 Aether Developers.
 //
-// std.cryptography.x448 — X448 (RFC 7748) in pure Aether, on top of
-// std.bignum. NO externs to OpenSSL. X448 is the Diffie-Hellman function on
-// Curve448 (Montgomery form, y^2 = x^3 + 156326 x^2 + x over the field
-// GF(2^448 - 2^224 - 1)) computed with a single x-coordinate Montgomery
-// ladder. a24 = (156326 - 2) / 4 = 39081.
+// std.cryptography.x448: X448 (RFC 7748) in pure Aether, constant time, on
+// std.cryptography.ecc's fixed-width field. NO externs to OpenSSL. X448 is
+// the Diffie-Hellman function on Curve448 (Montgomery form,
+// y^2 = x^3 + 156326 x^2 + x over GF(2^448 - 2^224 - 1)) computed with the
+// x-coordinate Montgomery ladder, a24 = (156326 - 2) / 4 = 39081.
 //
-//   x448(scalar56, u56) -> shared56      (the core RFC 7748 function)
-//   base_mult(scalar56)  -> public56      (scalar * base point, u=5)
+//   x448(scalar56, u56)   -> shared56         (the core RFC 7748 function)
+//   agree(scalar56, u56)  -> (shared56, err)  (refuses an all-zero result)
+//   base_mult(scalar56)   -> public56         (scalar * base point, u = 5)
 //
 // All inputs/outputs are 56-byte little-endian std.bytes buffers (the wire
-// format). `scalar` is clamped per RFC 7748 §5 (clear low 2 bits of byte 0,
-// set the high bit of byte 55). The field is exactly 448 bits so there is no
-// high-bit masking of `u`.
+// format); a buffer of another length gives null. `scalar` is clamped per
+// RFC 7748 section 5 (clear the low 2 bits of byte 0, set the high bit of
+// byte 55); `u` is taken modulo p, as the RFC asks for non-canonical values.
 //
-// NOTE: correctness-first port (field math goes through the variable-time
-// std.bignum), not a constant-time/side-channel-hardened implementation.
-// Validated against the RFC 7748 §5.2 scalar/u vector and the §6.2
-// Diffie-Hellman shared-secret vector.
+// The ladder runs all 448 steps whatever the scalar, swaps with masks, and
+// does its arithmetic on fixed-width Montgomery limbs: constant time in the
+// scalar (tests/integration/crypto_ct_valgrind). agree is the key-agreement
+// entry point, as x25519.agree is: an all-zero shared secret means the peer
+// sent a small-order point, and RFC 7748 section 6.2 lets (and TLS 1.3
+// requires) the caller refuse it.
+//
+// About 1 ms per agreement with the default `ae build` on an x86-64 Windows
+// desktop (6.6 ms on std.bignum).
 
 import std.bytes
-import std.bignum
+import std.cryptography.ct
+import std.cryptography.ecc
 
 exports(
-    x448, base_mult
+    x448, agree, base_mult
 )
 
-// ---- field prime p = 2^448 - 2^224 - 1 ----
-// As 56-byte big-endian:
-//   ffffffffffffffffffffffffffffffffffffffffffffffffffffffff (28 x ff)
-//   fffffffffffffffffffffffffffffffffffffffffffffffffffffffe (bytes for
-//   the 2^224-1 borrow): the low 28 bytes are fe followed by 27 x ff.
-// i.e. byte[27] = 0xFE, all others = 0xFF.
-field_p() -> ptr {
-    b = bytes.new(56)
-    i = 0
-    while i < 56 { bytes.set(b, i, 0xFF); i = i + 1 }
-    bytes.set(b, 27, 0xFE) // big-endian index 27 = the 2^224 bit position
-    p = bignum.from_bytes_unsigned(b, 56)
-    bytes.free(b)
-    return p
-}
-// p - 2 for the Fermat inverse exponent.
-field_p_minus_2() -> ptr {
-    p = field_p()
-    two = bignum.from_int(2)
-    e = bignum.subtract(p, two)
-    bignum.free(p); bignum.free(two)
-    return e
+fn field(F: *ecc.Field) {
+    ecc.field_init(F, "fffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
 }
 
-// ---- field ops (operands and result are *BN; p is passed in) ----
-fadd(a: ptr, b: ptr, p: ptr) -> ptr { s = bignum.add(a, b); r = bignum.mod(s, p); bignum.free(s); return r }
-fsub(a: ptr, b: ptr, p: ptr) -> ptr { d = bignum.subtract(a, b); r = bignum.mod(d, p); bignum.free(d); return r }
-fmul(a: ptr, b: ptr, p: ptr) -> ptr { m = bignum.multiply(a, b); r = bignum.mod(m, p); bignum.free(m); return r }
-finv(a: ptr, p: ptr) -> ptr {
-    e = field_p_minus_2()
-    r = bignum.mod_pow(a, e, p)
-    bignum.free(e)
-    return r
-}
-
-// Decode a 56-byte little-endian buffer to a *BN.
-from_le56(b: ptr) -> ptr {
-    be = bytes.new(56)
-    i = 0
-    while i < 56 {
-        bytes.set(be, i, bytes.get(b, 55 - i))
-        i = i + 1
+// X448(scalar, u): the RFC 7748 section 5 function. Returns a fresh 56-byte
+// little-endian result (all zero for a small-order u), or null for inputs
+// that are not 56 bytes.
+x448(scalar: ptr, u: ptr) -> ptr {
+    if scalar == null || u == null || bytes.length(scalar) != 56 || bytes.length(u) != 56 {
+        return null
     }
-    n = bignum.from_bytes_unsigned(be, 56)
-    bytes.free(be)
-    return n
-}
+    F = ecc.Field {}
+    field(&F)
+    // Clamp: clear the low 2 bits of byte 0, set the high bit of byte 55.
+    k = bytes.new(56)
+    bytes.copy_from_bytes(k, 0, scalar, 0, 56)
+    bytes.set(k, 0, bytes.get(k, 0) & 252)
+    bytes.set(k, 55, bytes.get(k, 55) | 128)
 
-// Encode a *BN (0 <= n < 2^448) as 56-byte little-endian into a fresh buffer.
-to_le56(n: ptr) -> ptr {
-    be = bignum.to_bytes_unsigned(n)
-    blen = bytes.length(be)
-    out = bytes.new(56)
-    i = 0
-    while i < 56 { bytes.set(out, i, 0); i = i + 1 }
-    i = 0
-    while i < blen {
-        if i < 56 {
-            bytes.set(out, i, bytes.get(be, blen - 1 - i))
-        }
-        i = i + 1
-    }
-    bytes.free(be)
-    return out
-}
-
-// ---- the Montgomery ladder ----
-// `k` is the already-clamped scalar (*BN), `u` is the field element (*BN).
-ladder(k: ptr, u: ptr, p: ptr) -> ptr {
-    a24 = bignum.from_int(39081)
-
-    one = bignum.from_int(1)
-    zero = bignum.from_int(0)
-
-    x1 = bignum.clone(u)
-    x2 = bignum.clone(one)
-    z2 = bignum.clone(zero)
-    x3 = bignum.clone(u)
-    z3 = bignum.clone(one)
-    swap = 0
-
-    t = 447
+    x1 = ecc.Fe {}
+    ecc.fe_reduce_le(&F, &x1, u, 0, 56)
+    ecc.fe_to_mont(&F, &x1, &x1)
+    x2 = ecc.Fe {}
+    ecc.fe_one(&F, &x2)
+    z2 = ecc.Fe {}
+    ecc.fe_zero(&z2)
+    x3 = ecc.Fe {}
+    ecc.fe_copy(&x3, &x1)
+    z3 = ecc.Fe {}
+    ecc.fe_one(&F, &z3)
+    a24 = ecc.Fe {}
+    ecc.fe_from_int(&F, &a24, 39081)
+    a = ecc.Fe {}
+    aa = ecc.Fe {}
+    b = ecc.Fe {}
+    bb = ecc.Fe {}
+    e = ecc.Fe {}
+    c = ecc.Fe {}
+    d = ecc.Fe {}
+    da = ecc.Fe {}
+    cb = ecc.Fe {}
+    int swap = 0
+    int t = 447
     while t >= 0 {
-        kt = bignum.shift_right(k, t)
-        bit = bit0(kt)
-        bignum.free(kt)
-
-        swap = swap ^ bit
-        if swap == 1 {
-            tmp = x2; x2 = x3; x3 = tmp
-            tmp = z2; z2 = z3; z3 = tmp
-        }
-        swap = bit
-
-        A = fadd(x2, z2, p)
-        AA = fmul(A, A, p)
-        B = fsub(x2, z2, p)
-        BB = fmul(B, B, p)
-        E = fsub(AA, BB, p)
-        C = fadd(x3, z3, p)
-        D = fsub(x3, z3, p)
-        DA = fmul(D, A, p)
-        CB = fmul(C, B, p)
-        s1 = fadd(DA, CB, p)
-        nx3 = fmul(s1, s1, p)
-        s2 = fsub(DA, CB, p)
-        s2s = fmul(s2, s2, p)
-        nz3 = fmul(x1, s2s, p)
-        nx2 = fmul(AA, BB, p)
-        a24E = fmul(a24, E, p)
-        sum = fadd(AA, a24E, p)
-        nz2 = fmul(E, sum, p)
-
-        bignum.free(x2); bignum.free(z2); bignum.free(x3); bignum.free(z3)
-        bignum.free(A); bignum.free(AA); bignum.free(B); bignum.free(BB)
-        bignum.free(E); bignum.free(C); bignum.free(D); bignum.free(DA); bignum.free(CB)
-        bignum.free(s1); bignum.free(s2); bignum.free(s2s); bignum.free(a24E); bignum.free(sum)
-        x2 = nx2; z2 = nz2; x3 = nx3; z3 = nz3
-
+        int kt = (bytes.get(k, t / 8) >> (t % 8)) & 1
+        swap = swap ^ kt
+        ecc.fe_cswap(&F, &x2, &x3, swap)
+        ecc.fe_cswap(&F, &z2, &z3, swap)
+        swap = kt
+        ecc.fe_add(&F, &a, &x2, &z2)
+        ecc.fe_sqr(&F, &aa, &a)
+        ecc.fe_sub(&F, &b, &x2, &z2)
+        ecc.fe_sqr(&F, &bb, &b)
+        ecc.fe_sub(&F, &e, &aa, &bb)
+        ecc.fe_add(&F, &c, &x3, &z3)
+        ecc.fe_sub(&F, &d, &x3, &z3)
+        ecc.fe_mul(&F, &da, &d, &a)
+        ecc.fe_mul(&F, &cb, &c, &b)
+        ecc.fe_add(&F, &x3, &da, &cb)
+        ecc.fe_sqr(&F, &x3, &x3)
+        ecc.fe_sub(&F, &z3, &da, &cb)
+        ecc.fe_sqr(&F, &z3, &z3)
+        ecc.fe_mul(&F, &z3, &z3, &x1)
+        ecc.fe_mul(&F, &x2, &aa, &bb)
+        ecc.fe_mul(&F, &z2, &a24, &e)
+        ecc.fe_add(&F, &z2, &z2, &aa)
+        ecc.fe_mul(&F, &z2, &z2, &e)
         t = t - 1
     }
-
-    if swap == 1 {
-        tmp = x2; x2 = x3; x3 = tmp
-        tmp = z2; z2 = z3; z3 = tmp
+    ecc.fe_cswap(&F, &x2, &x3, swap)
+    ecc.fe_cswap(&F, &z2, &z3, swap)
+    ecc.fe_inv(&F, &z2, &z2)
+    ecc.fe_mul(&F, &x2, &x2, &z2)
+    ecc.fe_from_mont(&F, &x2, &x2)
+    out = bytes.new(56)
+    ecc.fe_to_le(&x2, out, 0, 56)
+    int i = 0
+    while i < 56 {
+        bytes.set(k, i, 0)
+        i = i + 1
     }
-
-    zinv = finv(z2, p)
-    res = fmul(x2, zinv, p)
-
-    bignum.free(a24); bignum.free(one); bignum.free(zero)
-    bignum.free(x1); bignum.free(x2); bignum.free(z2); bignum.free(x3); bignum.free(z3)
-    bignum.free(zinv)
-    return res
-}
-
-// Low bit of a *BN (0 or 1).
-bit0(n: ptr) -> int {
-    if bignum.is_zero(n) == 1 {
-        return 0
-    }
-    two = bignum.from_int(2)
-    r = bignum.mod(n, two)
-    bit = 0
-    if bignum.is_zero(r) != 1 { bit = 1 }
-    bignum.free(two)
-    bignum.free(r)
-    return bit
-}
-
-// ---- public API ----
-
-// X448(scalar, u): the RFC 7748 §5 function. `scalar` and `u` are 56-byte
-// little-endian buffers; returns a fresh 56-byte little-endian shared secret.
-x448(scalar: ptr, u: ptr) -> ptr {
-    // Clamp the scalar (RFC 7748 §5 for X448): clear the low 2 bits of byte 0,
-    // set the high bit of byte 55.
-    s = bytes.new(56)
-    bytes.copy_from_bytes(s, 0, scalar, 0, 56)
-    bytes.set(s, 0, bytes.get(s, 0) & 252)
-    bytes.set(s, 55, bytes.get(s, 55) | 128)
-
-    // No high-bit masking of u: the field is exactly 448 bits.
-    um = bytes.new(56)
-    bytes.copy_from_bytes(um, 0, u, 0, 56)
-
-    p = field_p()
-    k = from_le56(s)
-    ucoord = from_le56(um)
-
-    r = ladder(k, ucoord, p)
-    out = to_le56(r)
-
-    bignum.free(p); bignum.free(k); bignum.free(ucoord); bignum.free(r)
-    bytes.free(s); bytes.free(um)
+    bytes.wipe_free(k)
     return out
+}
+
+// Diffie-Hellman with RFC 7748's check: (shared, "") or, when the shared
+// secret is all zero (a small-order u), (null, error) with nothing kept.
+agree(scalar: ptr, u: ptr) -> (ptr, string) {
+    r = x448(scalar, u)
+    if r == null {
+        return null, "x448: scalar and u must be 56 bytes"
+    }
+    int acc = 0
+    int i = 0
+    while i < 56 {
+        acc = acc | (bytes.get(r, i) & 255)
+        i = i + 1
+    }
+    if ct.declassify(ct.eq(acc, 0)) == 1 {
+        bytes.wipe_free(r)
+        return null, "x448: all-zero shared secret (small-order point)"
+    }
+    return r, ""
 }
 
 // scalar * base point (u = 5): the public key for a private scalar.
 base_mult(scalar: ptr) -> ptr {
     base = bytes.new(56)
-    i = 0
-    while i < 56 { bytes.set(base, i, 0); i = i + 1 }
+    int i = 0
+    while i < 56 {
+        bytes.set(base, i, 0)
+        i = i + 1
+    }
     bytes.set(base, 0, 5)
     r = x448(scalar, base)
-    bytes.free(base)
+    bytes.wipe_free(base)
     return r
 }

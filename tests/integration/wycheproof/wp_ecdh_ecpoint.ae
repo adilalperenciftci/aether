@@ -1,0 +1,167 @@
+// Wycheproof adversarial vectors: ECDH over P-256, P-384 and P-521, public
+// keys as bare uncompressed points (EcdhEcpointTest, #3291).
+//
+// Each case gives a private scalar, the peer's point "04 || x || y" and the
+// expected shared x-coordinate:
+//   "valid"      -> ecdh MUST return the shared secret.
+//   "invalid"    -> ecdh MUST return null: points off the curve (the
+//                   invalid-curve attack), coordinates >= p, points of
+//                   another curve, malformed encodings.
+//   "acceptable" -> either (a compressed point, which this API cannot take).
+// A point that is not 1 + 2L bytes starting 04 (compressed, wrong length)
+// cannot be passed to ecdh(priv, x, y) at all and counts as refused.
+//
+// Every case runs (no stride): an ECDH is a few milliseconds now.
+
+import std.cryptography.p256
+import std.cryptography.p384
+import std.cryptography.p521
+import std.fs
+import std.json
+import std.bytes
+import std.string
+
+extern exit(code: int)
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+extern string_length(s: string) -> int
+
+fn hexval(h: int) -> int {
+    if h >= 48 && h <= 57 { return h - 48 }
+    if h >= 97 && h <= 102 { return h - 87 }
+    if h >= 65 && h <= 70 { return h - 55 }
+    return 0
+}
+
+// The bytes of hex string s from hex digit `from` (even) for n bytes.
+fn hex_bytes(s: string, from: int, n: int) -> ptr {
+    slen = string_length(s)
+    b = bytes.new(n)
+    if n > 0 { bytes.set(b, n - 1, 0) }
+    i = 0
+    while i < n {
+        hi = hexval(string_char_at_n(s, slen, from + i * 2))
+        lo = hexval(string_char_at_n(s, slen, from + i * 2 + 1))
+        bytes.set(b, i, (hi << 4) | lo)
+        i = i + 1
+    }
+    return b
+}
+
+// A big-endian hex integer as exactly l bytes (Wycheproof private keys carry
+// a leading 00 when their top bit is set, or are shorter).
+fn scalar_bytes(s: string, l: int) -> ptr {
+    n = string_length(s) / 2
+    out = bytes.new(l)
+    bytes.set(out, l - 1, 0)
+    i = 0
+    while i < l { bytes.set(out, i, 0) i = i + 1 }
+    raw = hex_bytes(s, 0, n)
+    i = 0
+    while i < n {
+        dst = l - n + i
+        if dst >= 0 { bytes.set(out, dst, bytes.get(raw, i)) }
+        i = i + 1
+    }
+    bytes.free(raw)
+    return out
+}
+
+fn to_hex(b: ptr) -> string {
+    d = "0123456789abcdef"
+    o = ""
+    n = bytes.length(b)
+    i = 0
+    while i < n {
+        v = bytes.get(b, i)
+        o = string.concat(o, string.concat(string.substring(d, (v >> 4) & 15, ((v >> 4) & 15) + 1), string.substring(d, v & 15, (v & 15) + 1)))
+        i = i + 1
+    }
+    return o
+}
+
+fn curve_ecdh(curve: string, priv: ptr, x: ptr, y: ptr) -> ptr {
+    if curve == "secp384r1" { return p384.ecdh(priv, x, y) }
+    if curve == "secp521r1" { return p521.ecdh(priv, x, y) }
+    return p256.ecdh(priv, x, y)
+}
+
+// Run one vector file; returns the number of failures.
+fn run_file(path: string, curve: string, l: int) -> int {
+    doc, ferr = fs.read(path)
+    if ferr != "" {
+        println("FAIL: cannot read ${path}: ${ferr}")
+        return 1
+    }
+    root, jerr = json.parse(doc)
+    if jerr != "" {
+        println("FAIL: ${path}: JSON parse: ${jerr}")
+        return 1
+    }
+    groups = json.object_get_raw(root, "testGroups")
+    ngroups = json.array_size(groups)
+    valid_ok = 0
+    refused = 0
+    acceptable = 0
+    failed = 0
+    gi = 0
+    while gi < ngroups {
+        g = json.array_get_raw(groups, gi)
+        tests = json.object_get_raw(g, "tests")
+        nt = json.array_size(tests)
+        ti = 0
+        while ti < nt {
+            t = json.array_get_raw(tests, ti)
+            tc_id = json.get_int(json.object_get_raw(t, "tcId"))
+            res = json.get_string_raw(json.object_get_raw(t, "result"))
+            pub_hex = json.get_string_raw(json.object_get_raw(t, "public"))
+            priv_hex = json.get_string_raw(json.object_get_raw(t, "private"))
+            want = string.to_lower(json.get_string_raw(json.object_get_raw(t, "shared")))
+            got = ""
+            refused_here = 1
+            if string_length(pub_hex) == 2 + 4 * l && string.substring(pub_hex, 0, 2) == "04" {
+                x = hex_bytes(pub_hex, 2, l)
+                y = hex_bytes(pub_hex, 2 + 2 * l, l)
+                priv = scalar_bytes(priv_hex, l)
+                z = curve_ecdh(curve, priv, x, y)
+                if z != null {
+                    got = to_hex(z)
+                    refused_here = 0
+                    bytes.free(z)
+                }
+                bytes.free(x)
+                bytes.free(y)
+                bytes.free(priv)
+            }
+            if res == "valid" {
+                if refused_here == 0 && got == want {
+                    valid_ok = valid_ok + 1
+                } else {
+                    println("FAIL ${curve} tcId=${tc_id} (valid): got '${got}', want '${want}'")
+                    failed = failed + 1
+                }
+            } else if res == "invalid" {
+                if refused_here == 1 {
+                    refused = refused + 1
+                } else {
+                    println("FAIL ${curve} tcId=${tc_id} (invalid): ecdh ACCEPTED it, shared '${got}'")
+                    failed = failed + 1
+                }
+            } else {
+                acceptable = acceptable + 1
+            }
+            ti = ti + 1
+        }
+        gi = gi + 1
+    }
+    println("wycheproof ecdh_${curve}_ecpoint: ${valid_ok} valid ok, ${refused} invalid refused, ${acceptable} acceptable, ${failed} failed")
+    return failed
+}
+
+main() {
+    failed = 0
+    failed = failed + run_file("tests/vectors/wycheproof/ecdh_secp256r1_ecpoint_test.json", "secp256r1", 32)
+    failed = failed + run_file("tests/vectors/wycheproof/ecdh_secp384r1_ecpoint_test.json", "secp384r1", 48)
+    failed = failed + run_file("tests/vectors/wycheproof/ecdh_secp521r1_ecpoint_test.json", "secp521r1", 66)
+    if failed > 0 { exit(1) }
+    println("ALL PASS")
+}

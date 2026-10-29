@@ -5264,7 +5264,7 @@ void emit_closure_definitions(CodeGenerator* gen) {
             fprintf(gen->output, "static void* _aether_make_env_%d(", id);
             emit_make_closure_params(gen, ci);
             fprintf(gen->output, ") {\n");
-            fprintf(gen->output, "    _closure_env_%d* _e = malloc(sizeof(_closure_env_%d));\n", id, id);
+            fprintf(gen->output, "    _closure_env_%d* _e = (_closure_env_%d*)_aether_alloc(sizeof(_closure_env_%d), 0, \"out of memory allocating a closure environment\");\n", id, id, id);
             fprintf(gen->output, "    _e->_dtor = _closure_env_%d_free;\n", id);
             fprintf(gen->output, "    atomic_init(&_e->_refs, 1);\n");
             for (int i = 0; i < cap_count; i++) {
@@ -6431,6 +6431,9 @@ static Type* match_operand_type(ASTNode* m) {
  * as an operand (#2993) is a fourth: it is a statement whatever its form. */
 int is_control_value(CodeGenerator* gen, ASTNode* e) {
     if (!e) return 0;
+    /* #2974: try_send(ref, Msg { ... }), a send written as statements. */
+    if (e->type == AST_SEND_FIRE_FORGET)
+        return e->annotation && strcmp(e->annotation, "try_send") == 0;
     if (e->type == AST_MATCH_STATEMENT) return ast_match_is_operand(e) && match_operand_type(e);
     if (e->type == AST_OR_ELSE) {
         if (e->child_count < 2 || !e->children[1] || e->children[1]->type != AST_BLOCK) return 0;
@@ -7716,7 +7719,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     "in heap.new", AETHER_ERR_NONE);
                 struct_c = "void";
             }
-            fprintf(gen->output, "((%s*)calloc(1, sizeof(%s)))",
+            fprintf(gen->output, "((%s*)_aether_alloc(sizeof(%s), 1, \"out of memory in heap.new\"))",
                     struct_c, struct_c);
             break;
         }
@@ -9534,7 +9537,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 if (site) {
                     const ASTNode* saved_site = g_sandbox_site_wrapping;
                     g_sandbox_site_wrapping = expr;
-                    fprintf(gen->output, "(_aether_sandbox_pending_site = %d, ", site);
+                    fprintf(gen->output, "(aether_sandbox_tag_site(&_aether_sandbox_image, %d), ", site);
                     generate_expression(gen, expr);
                     fprintf(gen->output, ")");
                     g_sandbox_site_wrapping = saved_site;
@@ -9549,9 +9552,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
              * pointer later reaches its type (`malloc(n) as *T`, or a `ptr`
              * bound first and cast after), then has its fields read by a
              * field store, which releases the value it replaces; malloc left
-             * them garbage (#1873). */
+             * them garbage (#1873). It still returns NULL when out of
+             * memory, as the program's own malloc does, and a library call
+             * then ends at its next safe point (#3377). */
             if (call_is_c_malloc(gen, expr)) {
-                fprintf(gen->output, "calloc(1, (size_t)(");
+                fprintf(gen->output, "_aether_alloc_or_null((size_t)(");
                 generate_expression(gen, expr->children[0]);
                 fprintf(gen->output, "))");
                 break;
@@ -10295,7 +10300,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 // ref(value) — create a heap-allocated mutable cell
                 else if (strcmp(func_name, "ref") == 0 && expr->child_count == 1) {
                     fprintf(gen->output, "\n#if AETHER_GCC_COMPAT\n");
-                    fprintf(gen->output, "({ intptr_t* _r = malloc(sizeof(intptr_t)); *_r = (intptr_t)(");
+                    fprintf(gen->output, "({ intptr_t* _r = (intptr_t*)_aether_alloc(sizeof(intptr_t), 0, \"out of memory allocating a ref\"); *_r = (intptr_t)(");
                     generate_expression(gen, expr->children[0]);
                     fprintf(gen->output, "); (void*)_r; })");
                     fprintf(gen->output, "\n#else\n");
@@ -10514,22 +10519,23 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     }
                     fprintf(gen->output, ")");
                 }
-                // ctx_push(ptr) / ctx_pop() — explicit context stack manipulation
+                // sandbox_push(grants) / sandbox_pop(): a grant level on this
+                // thread, kept by the runtime (#2955)
                 else if (strcmp(func_name, "sandbox_push") == 0 && expr->child_count == 1) {
-                    fprintf(gen->output, "_aether_sandbox_push((void*)(intptr_t)");
+                    fprintf(gen->output, "aether_sandbox_push((void*)(intptr_t)");
                     generate_expression(gen, expr->children[0]);
                     fprintf(gen->output, ")");
                 }
                 else if (strcmp(func_name, "sandbox_pop") == 0 && expr->child_count == 0) {
-                    fprintf(gen->output, "_aether_sandbox_pop()");
+                    fprintf(gen->output, "aether_sandbox_pop()");
                 }
-                // sandbox_install() — activate runtime sandbox checking
-                else if (strcmp(func_name, "sandbox_install") == 0 && expr->child_count == 0) {
-                    fprintf(gen->output, "_aether_sandbox_install()");
-                }
-                // sandbox_uninstall() — deactivate runtime sandbox checking
-                else if (strcmp(func_name, "sandbox_uninstall") == 0 && expr->child_count == 0) {
-                    fprintf(gen->output, "_aether_sandbox_uninstall()");
+                // sandbox_install() / sandbox_uninstall(): nothing to do
+                // since #2955. The check reads the thread's levels, so a push
+                // is all it takes; the process-wide checker these set and
+                // cleared is gone. Kept so code that calls them still builds.
+                else if ((strcmp(func_name, "sandbox_install") == 0 ||
+                          strcmp(func_name, "sandbox_uninstall") == 0) && expr->child_count == 0) {
+                    fprintf(gen->output, "((void)0)");
                 }
                 // builder_depth() — returns the current builder nesting depth
                 else if (strcmp(func_name, "builder_depth") == 0) {
@@ -12020,7 +12026,26 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             if (expr->child_count >= 2) {
                 ASTNode* target = expr->children[0];
                 ASTNode* message = expr->children[1];
-                
+                /* #2974: try_send(ref, Msg { ... }) is the same send, made
+                 * by scheduler_try_send (aether_try_send_message for a
+                 * payload), never batched, its answer a string. Run ahead
+                 * of its statement (is_control_value), its answer a
+                 * temporary the statement reads; a statement expression
+                 * where nothing can be declared ahead. */
+                const char* try_var = NULL;
+                int try_as_stmts = 0;
+                if (expr->annotation && strcmp(expr->annotation, "try_send") == 0) {
+                    static int try_send_seq = 0;
+                    try_var = cg_internf("_ts%d", try_send_seq++);
+                    try_as_stmts = g_ctl_emitting == expr;
+                    if (try_as_stmts) {
+                        hoist_declare(gen, "const char*", try_var);
+                        print_indent(gen);
+                    } else {
+                        fprintf(gen->output, "({ const char* %s = \"\"; ", try_var);
+                    }
+                }
+
                 if (message && message->type == AST_MESSAGE_CONSTRUCTOR) {
                     MessageDef* msg_def = lookup_message(gen->message_registry, message->value);
                     if (msg_def) {
@@ -12050,7 +12075,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             }
                             fprintf(gen->output, ", NULL, {NULL, 0, 0}}; ");
 
-                            if (gen->in_main_loop) {
+                            if (try_var) {
+                                fprintf(gen->output, "%s = scheduler_try_send(", try_var);
+                                emit_send_target(gen, target, "ActorBase*", "send");
+                                fprintf(gen->output, ", _imsg); }");
+                            } else if (gen->in_main_loop) {
                                 fprintf(gen->output, "scheduler_send_batch_add(");
                                 emit_send_target(gen, target, "ActorBase*", "send");
                                 fprintf(gen->output, ", _imsg); }");
@@ -12114,14 +12143,23 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             /* #3117: in a batched loop every send joins the
                              * batch, so a payload message keeps its place
                              * among the loop's one-int ones. */
-                            fprintf(gen->output, gen->in_main_loop ? "aether_send_message_batch("
-                                                                   : "aether_send_message(");
+                            if (try_var)
+                                fprintf(gen->output, "%s = aether_try_send_message(", try_var);
+                            else
+                                fprintf(gen->output, gen->in_main_loop ? "aether_send_message_batch("
+                                                                       : "aether_send_message(");
                             emit_send_target(gen, target, "void*", "send");
                             fprintf(gen->output, ", &_msg, sizeof(%s)); }", message->value);
                         }
                     } else {
                         fprintf(gen->output, "/* ERROR: unknown message type %s */", message->value ? message->value : "<?>");
                     }
+                }
+                if (try_var && try_as_stmts) {
+                    fprintf(gen->output, "\n");
+                    ctl_bind(expr, try_var);
+                } else if (try_var) {
+                    fprintf(gen->output, " %s; })", try_var);
                 }
             }
             break;
@@ -12181,6 +12219,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 case TYPE_UINT64:     c_type = "uint64_t"; c_zero = "0"; break;
                                 case TYPE_DURATION:   c_type = "int64_t"; c_zero = "0"; break;
                                 case TYPE_PTR:        c_type = "void*"; c_zero = "NULL"; break;
+                                /* #3332: a reference is a pointer; as an int it lost its high half. */
+                                case TYPE_ACTOR_REF:  c_type = "void*"; c_zero = "NULL"; break;
                                 case TYPE_FUNCTION:   c_type = "_AeClosure"; c_zero = "(_AeClosure){0}"; break;
                                 default:              c_type = "int"; c_zero = "0"; break;
                             }
@@ -12372,7 +12412,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             } else {
                 // Heap-allocate the environment (portable, no use-after-free)
                 fprintf(gen->output, "\n#if AETHER_GCC_COMPAT\n");
-                fprintf(gen->output, "({ _closure_env_%d* _e = malloc(sizeof(_closure_env_%d)); _e->_dtor = _closure_env_%d_free; atomic_init(&_e->_refs, 1); ", id, id, id);
+                fprintf(gen->output, "({ _closure_env_%d* _e = (_closure_env_%d*)_aether_alloc(sizeof(_closure_env_%d), 0, \"out of memory allocating a closure environment\"); _e->_dtor = _closure_env_%d_free; atomic_init(&_e->_refs, 1); ", id, id, id, id);
                 for (int i = 0; i < cap_count; i++) {
                     const char* src = capture_source(gen, captures[i]);   /* #2890 */
                     if (capture_is_closure_value(gen, captures[i], cl_parent_func)) {

@@ -20,6 +20,21 @@
 
 #define AETHER_DL_ERR_CAP 512
 
+/* What every Aether library binds to in the runtime it runs on (#3439): its
+ * stubs check the runtime ABI and read the outcome. A library built to run
+ * on its host's runtime (a script the HTTP gateway loads, linked with its
+ * runtime calls left to the host) binds them at load, and a host exports
+ * only the archive members it linked; kept here, a program that loads
+ * libraries links them, and with them the rest of the host API
+ * (aether_exec.c keeps it). */
+extern const char* aether_runtime_abi(void);
+extern int aether_last_outcome(void);
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((used)) static void (*const dl_library_api[])(void) = {
+    (void (*)(void))aether_runtime_abi, (void (*)(void))aether_last_outcome,
+};
+#endif
+
 static AETHER_TLS char g_dl_last_err[AETHER_DL_ERR_CAP];
 
 static void dl_clear_error(void) {

@@ -608,6 +608,44 @@ jobs:
         make test-install
         make test-release-archive
 
+    # -- The cross-version ABI matrix (#2957, docs/abi-policy.md) ---
+    # This release's libraries and hosts against the release before it: the
+    # latest published one, since this one is published only after every
+    # build leg. The tree names the script, so an older tag that lacks it
+    # skips the step (the rule at the checkout above).
+    - name: ABI matrix against the previous release (Unix)
+      if: matrix.os != 'windows-latest'
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        [ -f tests/integration/abi_matrix/test_abi_matrix.sh ] || exit 0
+        prev="$RUNNER_TEMP/aether-prev"
+        mkdir -p "$prev"
+        gh release download --repo "${{ github.repository }}" --pattern "aether-*-${{ matrix.target }}.tar.gz" --dir "$RUNNER_TEMP"
+        tar -xzf "$RUNNER_TEMP"/aether-*-${{ matrix.target }}.tar.gz -C "$prev"
+        echo "against $(cat "$prev/VERSION")"
+        AETHER_ABI_OLD_HOME="$prev" sh tests/integration/abi_matrix/test_abi_matrix.sh
+
+    - name: Download the previous release (Windows, ABI matrix)
+      if: matrix.os == 'windows-latest'
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        if (-not (Test-Path tests/integration/abi_matrix/test_abi_matrix.sh)) { exit 0 }
+        gh release download --repo "${{ github.repository }}" --pattern "aether-*-windows-x86_64.zip" --dir "$env:RUNNER_TEMP"
+        $zip = Get-ChildItem "$env:RUNNER_TEMP" -Filter "aether-*-windows-x86_64.zip" | Select-Object -First 1
+        Expand-Archive -Path $zip.FullName -DestinationPath "$env:RUNNER_TEMP/aether-prev"
+
+    - name: ABI matrix against the previous release (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: msys2 {0}
+      run: |
+        [ -f tests/integration/abi_matrix/test_abi_matrix.sh ] || exit 0
+        prev="$(cygpath -u "$RUNNER_TEMP")/aether-prev"
+        echo "against $(cat "$prev/VERSION")"
+        AETHER_ABI_OLD_HOME="$prev" CC=gcc sh tests/integration/abi_matrix/test_abi_matrix.sh
+
     - name: Strip (Windows)
       if: matrix.os == 'windows-latest'
       shell: msys2 {0}

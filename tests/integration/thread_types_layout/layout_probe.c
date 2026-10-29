@@ -24,19 +24,26 @@ int main(void) {
     AT(ActorBase, spsc_queue);
     AT(ActorBase, reply_slot);
     AT(ActorBase, step_lock);
+    AT(ActorBase, exit_flags);
+    AT(ActorBase, mailbox_bound);
     AT(ActorBase, timeout_ns);
     AT(ActorBase, last_activity_ns);
     AT(ActorBase, dead);
     AT(ActorBase, alloc_size);
     AT(ActorBase, destroy_state);
     AT(ActorBase, scheduler_owned);
+    AT(ActorBase, incarnation);
     AT(ActorBase, inbox);
     AT(ActorBase, thread_parked);
     AT(ActorBase, inflight);
+    AT(ActorBase, death_watch);
+    AT(ActorBase, mailbox_pending);
+    AT(ActorBase, full_drops);
     SIZE(ActorReplySlot);
     AT(ActorReplySlot, mutex);
     AT(ActorReplySlot, cond);
     AT(ActorReplySlot, refcount);
+    AT(ActorReplySlot, deadline_ns);
     SIZE(Scheduler);
     AT(Scheduler, thread);
     AT(Scheduler, actor_table);
@@ -45,6 +52,7 @@ int main(void) {
     AT(Scheduler, park_mutex);
     AT(Scheduler, park_cond);
     AT(Scheduler, parked);
+    AT(Scheduler, control_pending);
     AT(Scheduler, io_registered_count);
     return 0;
 }

@@ -75,6 +75,7 @@ extern char** environ;
 #include "ae_help.h"
 #include "ae_fmt.h"
 #include "ae_sha256.h"
+#include "../runtime/aether_abi.h"   /* #2957: the runtime ABI this ae links programs against */
 #include "ae_bindgen.h"
 #include "ae_line.h"
 #include "ae_release_platform.h"
@@ -468,6 +469,10 @@ typedef struct {
     int         actors;                    /* schema >= 1.7: the library runs actors */
     const unsigned char* closure_config_unused; /* schema >= 1.8, parallel to closures */
     const char* string_release;            /* schema >= 1.9: gives back a returned string */
+    const char* outcome;                   /* schema >= 1.10: the outcome accessor (#2956) */
+    int         host_abi;                  /* schema >= 1.11 (#2957): libaether.h's level */
+    const char* runtime_abi;               /* schema >= 1.11: aether_abi.h's id it was compiled for */
+    const char* requires;                  /* schema >= 1.11: the duties of its importer */
 } _AeLibInfoMeta;
 
 /* The catalog's schema minor ("1.<minor>"). A reader may touch a field only
@@ -476,6 +481,69 @@ typedef struct {
 static int ae_lib_meta_minor(const _AeLibInfoMeta* m) {
     if (!m || !m->schema_version || strncmp(m->schema_version, "1.", 2) != 0) return 0;
     return atoi(m->schema_version + 2);
+}
+
+/* #2957: the duties this importer performs, by the names a 1.11 catalog's
+ * `requires` lists them. A catalog at 1.10 or before carries no list: what
+ * its minor appended is what it requires, and this importer performs all
+ * of those. Any other name is a duty this importer does not know: the
+ * library is refused, never used without it. */
+static const char* const k_ae_import_duties[] = {
+    "outcome_check",    /* 1.10: the outcome read after every call, a failure raised */
+    "string_release",   /* 1.9: a returned string given back to the library */
+    "shared_runtime",   /* 1.5: the program links the shared runtime */
+    "runtime_abi",      /* 1.11: that runtime's ABI is the library's */
+    "actors",           /* 1.7: the program runs the scheduler */
+};
+
+#define AE_CATALOG_MINOR_KNOWN 11
+
+/* A library's catalog against this importer (#2957): 0 when it can be used;
+ * otherwise each reason on stderr, naming what is missing, both versions and
+ * the fix, and -1. Called before anything of the library is used. */
+static int ae_lib_check_compat(const _AeLibInfoMeta* m, const char* so_path) {
+    const char* schema = m && m->schema_version ? m->schema_version : "(none)";
+    const char* built_by = m && m->aether_version ? m->aether_version : "(unknown)";
+    if (!m || !m->schema_version || strncmp(m->schema_version, "1.", 2) != 0) {
+        fprintf(stderr, "Error: %s: its catalog is schema %s, and this ae (%s) reads schema 1 only\n"
+                        "       Rebuild the library with this Aether, or import it with an ae of its own version.\n",
+                so_path, schema, AETHER_VERSION);
+        return -1;
+    }
+    int minor = ae_lib_meta_minor(m);
+    int refused = 0;
+    if (minor >= 11 && m->requires) {
+        const char* p = m->requires;
+        while (*p) {
+            const char* e = strchr(p, ',');
+            size_t n = e ? (size_t)(e - p) : strlen(p);
+            int known = 0;
+            for (size_t k = 0; k < sizeof(k_ae_import_duties) / sizeof(k_ae_import_duties[0]); k++)
+                if (strlen(k_ae_import_duties[k]) == n && strncmp(k_ae_import_duties[k], p, n) == 0) known = 1;
+            if (!known && n > 0) {
+                fprintf(stderr, "Error: %s requires `%.*s` of its importer, which this ae does not perform\n"
+                                "       The library was built by Aether %s (catalog %s); this ae is %s (catalog 1.%d).\n"
+                                "       Import it with an ae of version %s or newer, or rebuild the library with this one.\n",
+                        so_path, (int)n, p, built_by, schema, AETHER_VERSION, AE_CATALOG_MINOR_KNOWN, built_by);
+                refused = 1;
+            }
+            p += n + (e ? 1 : 0);
+        }
+    }
+    int shared = minor >= 5 && m->runtime && strcmp(m->runtime, "shared") == 0;
+    if (shared && minor < 11) {
+        fprintf(stderr, "Error: %s runs on the shared runtime, and was built by Aether %s (catalog %s, host ABI level 0),\n"
+                        "       which records no runtime ABI: it cannot be checked against this one (%s).\n"
+                        "       Rebuild the library with this Aether.\n",
+                so_path, built_by, schema, AETHER_RUNTIME_ABI_ID);
+        refused = 1;
+    } else if (shared && (!m->runtime_abi || strcmp(m->runtime_abi, AETHER_RUNTIME_ABI_ID) != 0)) {
+        fprintf(stderr, "Error: %s was made for the Aether runtime %s, and this ae links the shared runtime %s\n"
+                        "       Rebuild the library with this Aether, or build the program with the library's.\n",
+                so_path, m->runtime_abi ? m->runtime_abi : "(none)", AETHER_RUNTIME_ABI_ID);
+        refused = 1;
+    }
+    return refused ? -1 : 0;
 }
 
 // --coverage: when set, build_gcc_cmd appends `--coverage` to the gcc
@@ -2209,18 +2277,8 @@ found_root:
                     "Warning: out of memory building the include list for the dev tree; some -I dirs dropped.\n");
         }
 
-        if (!tc.has_lib) {
-            char mpath[1200];
-            snprintf(mpath, sizeof(mpath), "%s/build/MANIFEST", tc.root);
-            if (!append_manifest_srcs(&tc.runtime_srcs, &tc.runtime_srcs_cap,
-                                      mpath, tc.root)) {
-                fprintf(stderr,
-                    "error: cannot build the runtime source list from %s\n"
-                    "  run `make stdlib` to regenerate it\n",
-                    mpath);
-                exit(1);
-            }
-        }
+        // No libaether.a: the runtime is compiled from this tree, by the
+        // list ae_runtime_srcs_ready reads.
     } else {
         // Installed layout: headers in include/aether/, source in
         // share/aether/. Walk both trees — include/ is the canonical
@@ -2251,23 +2309,45 @@ found_root:
                     "Warning: out of memory building the include list for the installed tree; some -I dirs dropped.\n");
         }
 
-        // No libaether.a: compile the runtime from share/aether/.
-        if (!tc.has_lib) {
-            char src[1024];
-            snprintf(src, sizeof(src), "%s/share/aether", tc.root);
-            char mpath2[1200];
-            snprintf(mpath2, sizeof(mpath2), "%s/MANIFEST", src);
-            if (!append_manifest_srcs(&tc.runtime_srcs, &tc.runtime_srcs_cap,
-                                      mpath2, src)) {
-                fprintf(stderr,
-                    "error: cannot build the runtime source list from %s\n"
-                    "  reinstall Aether, or copy build/MANIFEST from a source\n"
-                    "  tree to that path; it lists the sources to compile\n",
-                    mpath2);
-                exit(1);
-            }
-        }
+        // No libaether.a: the runtime is compiled from share/aether/, by
+        // the list ae_runtime_srcs_ready reads.
     }
+}
+
+/* The runtime sources a build without libaether.a compiles, from MANIFEST:
+ * build/MANIFEST in a source tree, share/aether/MANIFEST installed. Read
+ * where a native link needs them, not when the toolchain is found: no
+ * other command reads them (a wasm build compiles the list in
+ * runtime/coop_runtime_sources.txt, a check compiles nothing), and failing
+ * every command on a file only a native link reads stopped
+ * `ae build --target=wasm` in a tree `make compiler ae` built. 0, said
+ * why, when the list cannot be read. */
+static int ae_runtime_srcs_ready(void) {
+    if (tc.runtime_srcs && tc.runtime_srcs[0]) return 1;
+    /* Sized to hold the longest root and what is added to it, whole. */
+    char base[sizeof(tc.root) + sizeof("/share/aether")];
+    char mpath[sizeof(base) + sizeof("/build/MANIFEST")];
+    if (tc.dev_mode) {
+        snprintf(base, sizeof(base), "%s", tc.root);
+        snprintf(mpath, sizeof(mpath), "%s/build/MANIFEST", tc.root);
+    } else {
+        snprintf(base, sizeof(base), "%s/share/aether", tc.root);
+        snprintf(mpath, sizeof(mpath), "%s/MANIFEST", base);
+    }
+    if (append_manifest_srcs(&tc.runtime_srcs, &tc.runtime_srcs_cap, mpath, base)) return 1;
+    if (tc.dev_mode) {
+        fprintf(stderr,
+            "error: cannot build the runtime source list from %s\n"
+            "  run `make stdlib` to regenerate it\n",
+            mpath);
+    } else {
+        fprintf(stderr,
+            "error: cannot build the runtime source list from %s\n"
+            "  reinstall Aether, or copy build/MANIFEST from a source\n"
+            "  tree to that path; it lists the sources to compile\n",
+            mpath);
+    }
+    return 0;
 }
 
 // Expand ${VAR} occurrences in `src` against the process environment,
@@ -4940,6 +5020,7 @@ void build_gcc_cmd(char* cmd, size_t size,
             cmd_too_long(cmd, size, w);
         }
     } else {
+        if (!ae_runtime_srcs_ready()) { free(opt); set_failing_cmd(cmd, size); return; }
         /* #2757: the runtime sources compiled to objects in parallel, when
          * that can be done; else the sources, compiled by this command. */
         char* rt_objs = NULL;
@@ -5213,6 +5294,7 @@ void build_gcc_cmd(char* cmd, size_t size,
             cmd_too_long(cmd, size, w);
         }
     } else {
+        if (!ae_runtime_srcs_ready()) { free(opt); set_failing_cmd(cmd, size); return; }
         /* #2757: the runtime sources compiled to objects in parallel, when
          * that can be done; else the sources, compiled by this command. */
         char* rt_objs = NULL;
@@ -5239,6 +5321,48 @@ void build_gcc_cmd(char* cmd, size_t size,
     free(opt);
 }
 
+/* The runtime sources of a wasm build, as emcc arguments: each path
+ * runtime/coop_runtime_sources.txt lists, under the source root (share/aether
+ * on an installed tree), one per line of the file, comments (#) and blank
+ * lines skipped. Malloc'd; NULL, said, when the file cannot be read. */
+static char* wasm_runtime_sources(void) {
+    char* list_path = ae_path_printf("%s/runtime/coop_runtime_sources.txt", tc.src_root);
+    FILE* f = list_path ? fopen(list_path, "r") : NULL;
+    if (!f) {
+        fprintf(stderr, "Error: cannot read %s, the runtime list of a wasm build.\n",
+                list_path ? list_path : "runtime/coop_runtime_sources.txt");
+        free(list_path);
+        return NULL;
+    }
+    size_t cap = 4096, len = 0;
+    char* out = malloc(cap);
+    char line[1024];
+    while (out && fgets(line, sizeof(line), f)) {
+        size_t n = strlen(line);
+        while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r' || line[n - 1] == ' ' ||
+                         line[n - 1] == '\t'))
+            line[--n] = '\0';
+        if (n == 0 || line[0] == '#') continue;
+        size_t need = len + strlen(tc.src_root) + 1 + n + 2;
+        if (need > cap) {
+            while (cap < need) cap *= 2;
+            char* grown = realloc(out, cap);
+            if (!grown) { free(out); out = NULL; break; }
+            out = grown;
+        }
+        len += (size_t)snprintf(out + len, cap - len, "%s/%s ", tc.src_root, line);
+    }
+    fclose(f);
+    if (!out) fprintf(stderr, "Error: out of memory reading %s.\n", list_path);
+    else if (len == 0) {
+        fprintf(stderr, "Error: %s lists no runtime sources.\n", list_path);
+        free(out);
+        out = NULL;
+    }
+    free(list_path);
+    return out;
+}
+
 static int build_wasm_cmd(char* cmd, size_t size,
                           const char* c_file, const char* out_file) {
     // Build include paths from toolchain root
@@ -5248,6 +5372,7 @@ static int build_wasm_cmd(char* cmd, size_t size,
         includes[sizeof(includes) - 1] = '\0';
     } else {
         static const char* include_dirs[] = {
+            "include",   /* libaether.h, which runtime/libaether_caps.c and aether_exec.c include */
             "runtime", "runtime/actors", "runtime/scheduler",
             "runtime/utils", "runtime/memory", "runtime/config",
             "std", "std/string", "std/io", "std/math",
@@ -5281,70 +5406,13 @@ static int build_wasm_cmd(char* cmd, size_t size,
         }
     }
 
-    // Runtime source files (cooperative scheduler, not multicore)
-    static const char* wasm_runtime_files[] = {
-        "runtime/scheduler/aether_scheduler_coop.c",
-        "runtime/scheduler/scheduler_optimizations.c",
-        "runtime/config/aether_optimization_config.c",
-        "runtime/memory/aether_arena.c",
-        "runtime/memory/aether_pool.c",
-        "runtime/memory/aether_memory_stats.c",
-        "runtime/utils/aether_bounds_check.c",
-        "runtime/utils/aether_test.c",
-        "runtime/utils/aether_spawn.c",
-        "runtime/memory/aether_arena_optimized.c",
-        "runtime/aether_runtime_types.c",
-        "runtime/utils/aether_cpu_detect.c",
-        "runtime/utils/aether_simd_vectorized.c",
-        "runtime/aether_runtime.c",
-        "runtime/aether_numa.c",
-        "runtime/actors/aether_send_buffer.c",
-        "runtime/actors/aether_send_message.c",
-        "runtime/actors/aether_actor_thread.c",
-        "runtime/actors/aether_panic.c",
-        "runtime/actors/aether_unwind.c",
-        "runtime/aether_callbacks.c",
-        "std/string/aether_string.c",
-        "std/math/aether_math.c",
-        "std/net/aether_http.c",
-        "std/net/aether_http_server.c",
-        "std/net/aether_http_pool.c",
-        "std/net/aether_net.c",
-        "std/net/aether_actor_bridge.c",
-        "std/collections/aether_collections.c",
-        "std/json/aether_json.c",
-        "std/fs/aether_fs.c",
-        "std/log/aether_log.c",
-        "std/io/aether_io.c",
-        "std/os/aether_os.c",
-        "std/collections/aether_set.c",
-        "std/collections/aether_pqueue.c",
-        "std/collections/aether_intarr.c",
-        "std/collections/aether_floatarr.c",
-        "std/collections/aether_longarr.c",
-        "std/collections/aether_bits.c",
-        "std/collections/aether_stringlist.c",
-        "std/collections/aether_stringseq.c",
-        NULL
-    };
-    char runtime[8192];
-    size_t rlen = 0;
-    runtime[0] = '\0';
-    for (int i = 0; wasm_runtime_files[i]; i++) {
-        /* src_root, not root — this bare tc.root was the bug: on an installed
-         * tree it composed <prefix>/runtime/... and emcc failed on every file. */
-        int w = snprintf(runtime + rlen, sizeof(runtime) - rlen, "%s/%s ",
-                         tc.src_root, wasm_runtime_files[i]);
-        if (w < 0 || (size_t)w >= sizeof(runtime) - rlen) {
-            /* Refused rather than cut (#2537): a cut list compiles a
-             * runtime missing the files past it. */
-            fprintf(stderr, "Error: the wasm runtime sources under %s do not fit "
-                            "%zu bytes; build from a shorter path.\n",
-                    tc.src_root, sizeof(runtime));
-            return 0;
-        }
-        rlen += (size_t)w;
-    }
+    /* The runtime it links: runtime/coop_runtime_sources.txt, the one list the
+     * ci-wasm and ESP32 builds read too, installed with the runtime (#3383).
+     * ae kept a copy of its own, which drifted: it lacked
+     * aether_resource_caps.c, which every string release calls, so no program
+     * linked. */
+    char* runtime = wasm_runtime_sources();
+    if (!runtime) return 0;   /* said */
 
     /* --emit=lib: a side-effect-free module with named exports rather than a
      * program. Emscripten spells that -sEXPORTED_FUNCTIONS (leading underscore
@@ -5360,7 +5428,7 @@ static int build_wasm_cmd(char* cmd, size_t size,
     if (g_emit_lib && !g_emit_exe) {
         int n;
         char* names = wasm_collect_export_names(c_file, g_wasm_exports, &n);
-        if (!names) return 0;   /* out of memory, said */
+        if (!names) { free(runtime); return 0; }   /* out of memory, said */
         static const char base[] = "--no-entry -sEXPORTED_RUNTIME_METHODS=ccall,cwrap "
                                    "-sALLOW_MEMORY_GROWTH=1 -sEXPORTED_FUNCTIONS=_malloc,_free";
         size_t cap = sizeof(base) + strlen(names) + (size_t)n;
@@ -5368,6 +5436,7 @@ static int build_wasm_cmd(char* cmd, size_t size,
         if (!lib_flags) {
             free(names);
             fprintf(stderr, "Error: out of memory listing the wasm exports.\n");
+            free(runtime);
             return 0;
         }
         size_t p = (size_t)snprintf(lib_flags, cap, "%s", base);
@@ -5387,6 +5456,7 @@ static int build_wasm_cmd(char* cmd, size_t size,
         "-Wno-unused-variable -Wno-missing-field-initializers -Wno-unused-label",
         lib_flags ? lib_flags : "", includes, c_file, runtime, out_file);
     free(lib_flags);
+    free(runtime);
     if (w >= (int)size) {
         cmd_too_long(cmd, size, w);
         return 0;
@@ -5475,23 +5545,57 @@ static void ae_param_names(const char* params, char* args, size_t acap) {
  * own made it in that runtime, which alone may free it: the stub copies it
  * into the program's (aether_string_import) and gives the library's back
  * through the release its catalog names. `kind` is "" or "builder ". */
+/* #2956: set while a stub is written for a library whose catalog names its
+ * outcome accessor (schema >= 1.10): each call is followed by __aeo_check(),
+ * which raises a failed call again as a panic in the program. */
+static int s_aeo_check = 0;
+
 static void ae_emit_string_export(FILE* out, const char* kind, const char* csym,
                                   const char* ext_name, const char* name,
                                   const char* ext_params, const char* params,
                                   const char* call_args, int shared) {
+    const char* check = s_aeo_check ? "    __aeo_check()\n" : "";
     if (shared) {
+        /* The call needs a wrapper to be checked: the extern takes another name. */
+        char ext_own[300];
+        if (s_aeo_check && !strcmp(ext_name, name)) {
+            snprintf(ext_own, sizeof(ext_own), "__aex_%s", name);
+            ext_name = ext_own;
+        }
         fprintf(out, "@extern(\"%s\") %s(%s) -> string @heap\n", csym, ext_name, ext_params);
         if (!strcmp(ext_name, name)) return;
-        fprintf(out, "%s%s(%s) {\n    return %s(%s)\n}\n", kind, name, params, ext_name,
-                call_args);
+        fprintf(out, "%s%s(%s)%s {\n    _aes_s = %s(%s)\n%s    return _aes_s\n}\n", kind, name,
+                params, kind[0] ? "" : " -> string", ext_name, call_args, check);
         return;
     }
+    /* #3388: a failed call's string goes back to the library before the
+     * failure is raised here, which skips the rest. A library built since
+     * returns none (NULL, which the release takes); one built before
+     * returned its result whatever the outcome. */
     fprintf(out, "@extern(\"%s\") __aes_%s(%s) -> ptr\n", csym, name, ext_params);
     fprintf(out, "%s%s(%s)%s {\n", kind, name, params, kind[0] ? "" : " -> string");
     fprintf(out, "    _aes_h = __aes_%s(%s)\n", name, call_args);
+    if (s_aeo_check) fprintf(out, "    if __aeo_code() != 0 {\n        __aes_release(_aes_h)\n    }\n");
+    fprintf(out, "%s", check);
     fprintf(out, "    _aes_s = __aes_import(_aes_h)\n");
     fprintf(out, "    __aes_release(_aes_h)\n");
     fprintf(out, "    return _aes_s\n}\n");
+}
+
+/* #2956: a function export, its call followed by the outcome check. */
+static void ae_emit_checked_export(FILE* out, const char* csym, const char* name,
+                                   const char* params, const char* ret) {
+    char args[700];
+    ae_param_names(params, args, sizeof(args));
+    int is_void = strcmp(ret, "void") == 0;
+    if (is_void) {
+        fprintf(out, "@extern(\"%s\") __aex_%s(%s)\n", csym, name, params);
+        fprintf(out, "%s(%s) {\n    __aex_%s(%s)\n    __aeo_check()\n}\n", name, params, name, args);
+    } else {
+        fprintf(out, "@extern(\"%s\") __aex_%s(%s) -> %s\n", csym, name, params, ret);
+        fprintf(out, "%s(%s) -> %s {\n    _aex_r = __aex_%s(%s)\n    __aeo_check()\n    return _aex_r\n}\n",
+                name, params, ret, name, args);
+    }
 }
 
 // Split a rendered signature "(A, B) -> R" into an Aether parameter list
@@ -5711,6 +5815,8 @@ static int ae_generate_binimport_stub(const char* so_path, const char* module, F
     if (!mf) { ae_lib_close(h); return -1; }
     const _AeLibInfoMeta* m = mf();
     if (!m) { ae_lib_close(h); return -1; }
+    /* #2957: refused before anything of it is used or declared. */
+    if (ae_lib_check_compat(m, so_path) != 0) exit(1);
 
     fprintf(out, "// Auto-generated Aether interface for %s\n", so_path);
     fprintf(out, "// Synthesized by `ae` from the artifact's aether_lib_meta\n");
@@ -5787,6 +5893,26 @@ static int ae_generate_binimport_stub(const char* so_path, const char* module, F
         fprintf(out, "@extern(\"%s\") __aes_release(s: @aether ptr)\n\n", m->string_release);
     }
 
+    /* #2956: every export runs in an execution frame, so a panic in it ends
+     * the call with an outcome instead of the process. After each call the
+     * stub reads the outcome from the library's own runtime (which may not
+     * be the program's), records it in the program's (std.host's
+     * last_outcome) and raises a failure again as a panic with the same
+     * reason, which a `try` around the call catches. */
+    s_aeo_check = minor >= 10 && m->outcome && m->outcome[0];
+    if (s_aeo_check) {
+        fprintf(out, "@extern(\"%s\") __aeo_code() -> int\n", m->outcome);
+        fprintf(out, "@extern(\"%s_text\") __aeo_text() -> string\n", m->outcome);
+        fprintf(out, "@extern(\"aether_exec_note_outcome\") __aeo_note(outcome: int, text: string)\n");
+        fprintf(out, "fn __aeo_check() {\n"
+                     "    oc = __aeo_code()\n"
+                     "    __aeo_note(oc, __aeo_text())\n"
+                     "    if oc != 0 {\n"
+                     "        panic(\"${__aeo_text()}\")\n"
+                     "    }\n"
+                     "}\n\n");
+    }
+
     // Function-table exports → `@extern("<c_symbol>") <name>(params) -> ret`.
     for (int i = 0; i < m->function_count && m->functions; i++) {
         const _AeLibInfoFn* f = &m->functions[i];
@@ -5820,7 +5946,10 @@ static int ae_generate_binimport_stub(const char* so_path, const char* module, F
                                           params, params, args, shared_rt);
                     continue;
                 }
-                if (strcmp(rt, "void") == 0) {
+                if (s_aeo_check) {
+                    snprintf(params, sizeof(params), "%.*s", plen, ssig + 1);
+                    ae_emit_checked_export(out, f->c_symbol, f->aether_name, params, rt);
+                } else if (strcmp(rt, "void") == 0) {
                     fprintf(out, "@extern(\"%s\") %s(%.*s)\n",
                             f->c_symbol, f->aether_name, plen, ssig + 1);
                 } else {
@@ -5835,6 +5964,8 @@ static int ae_generate_binimport_stub(const char* so_path, const char* module, F
         if (strings_handed && strcmp(ret, "string") == 0) {
             ae_emit_string_export(out, "", f->c_symbol, f->aether_name, f->aether_name,
                                   params, params, args, shared_rt);
+        } else if (s_aeo_check) {
+            ae_emit_checked_export(out, f->c_symbol, f->aether_name, params, ret);
         } else if (strcmp(ret, "void") == 0) {
             fprintf(out, "@extern(\"%s\") %s(%s)\n", f->c_symbol, f->aether_name, params);
         } else {
@@ -5909,11 +6040,18 @@ static int ae_generate_binimport_stub(const char* so_path, const char* module, F
                 csym, c->name, params, comma,
                 is_void ? "" : " -> ", is_void ? "" : ret);
         fprintf(out, "builder %s(%s) {\n", c->name, params);
-        fprintf(out, "    %s__aeb_%s(%s%s%s)\n",
-                is_void ? "" : "return ", c->name, args, acomma,
-                config_unused ? "null" : "_builder");
+        if (s_aeo_check) {
+            fprintf(out, "    %s__aeb_%s(%s%s%s)\n    __aeo_check()\n%s",
+                    is_void ? "" : "_aex_r = ", c->name, args, acomma,
+                    config_unused ? "null" : "_builder", is_void ? "" : "    return _aex_r\n");
+        } else {
+            fprintf(out, "    %s__aeb_%s(%s%s%s)\n",
+                    is_void ? "" : "return ", c->name, args, acomma,
+                    config_unused ? "null" : "_builder");
+        }
         fprintf(out, "}\n");
     }
+    s_aeo_check = 0;
 
     ae_lib_close(h);  // m points into the library; everything was emitted above.
     return 0;
@@ -13017,6 +13155,15 @@ static int cmd_lib_info(int argc, char** argv) {
     if (minor >= 7) {
         printf("  Actors:        %s\n", m->actors ? "yes" : "no");
     }
+    if (minor >= 10 && m->outcome && m->outcome[0]) {
+        printf("  Outcome:       %s\n", m->outcome);
+    }
+    /* #2957: none recorded is host ABI level 0 (Aether 0.856 and before). */
+    printf("  Host ABI:      %d\n", minor >= 11 ? m->host_abi : 0);
+    printf("  Runtime ABI:   %s\n", minor >= 11 && m->runtime_abi ? m->runtime_abi : "(not recorded)");
+    if (minor >= 11) printf("  Requires:      %s\n", m->requires && m->requires[0] ? m->requires : "(nothing)");
+    fflush(stdout);
+    printf("  Importable:    %s\n", ae_lib_check_compat(m, path) == 0 ? "yes, by this ae" : "no (above)");
     printf("\n");
 
     if (m->function_count > 0 && m->functions) {

@@ -1,22 +1,26 @@
 #include "aether_panic.h"
+#include "../utils/aether_fatal.h"   /* aether_fatal_flush (#3435) */
 /* Header-only use: is_aether_string and the AetherString layout. Nothing
  * from std/string is linked, so a runtime-only link (the WASI panic lib)
  * still resolves. */
 #include "../../std/string/aether_string.h"
+#include "../aether_exec.h"
+#include "aether_frames.h"
 
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
+#include <stdatomic.h>
 
 // Stack-trace capture (issue #347). Three platform paths:
 //
 //   - glibc / macOS:  backtrace() + backtrace_symbols() from
 //                     <execinfo.h>. Already in libc, no extra link.
 //   - Windows / MinGW: CaptureStackBackTrace from kernel32 plus
-//                     SymInitialize + SymFromAddr from dbghelp.dll.
-//                     The Makefile + ae.c link `-ldbghelp`.
+//                     SymInitialize + SymFromAddr from dbghelp.dll,
+//                     loaded when a trace is printed (no link flag).
 //   - Everything else (musl, wasm, freestanding): no-op stubs.
 //
 // Each path captures into the same TLS slot at the call site
@@ -45,19 +49,24 @@
 // Per-thread jmp frame stack
 // ---------------------------------------------------------------------------
 
-typedef struct {
-    AetherJmpFrame frames[AETHER_PANIC_MAX_DEPTH];
-    int depth;  // number of frames currently live; innermost is frames[depth-1]
-} AetherJmpStack;
 
-/* AETHER_TLS_SHARED rather than AETHER_TLS: aether_panic.o is
- * pulled into both the main `ae` executable AND `--emit=lib` .so
- * outputs (codegen emits aether_panic_capture_stack + aether_panic
- * at every user `panic("...")` call site). Initial-Exec TLS
- * relocations don't work inside shared objects; Global-Dynamic
- * works in both contexts with a tiny GOT-indirection overhead.
- * See AETHER_TLS_SHARED in runtime/utils/aether_compiler.h. */
-static AETHER_TLS_SHARED AetherJmpStack tls_stack = { .depth = 0 };
+/* The frames live in the per-thread block aether_frames.h describes,
+ * with the executions and the allocation journal. */
+
+/* To the frame a panic was raised for: an execution frame by the
+ * __builtin_setjmp buffer in its export stub, any other by its own. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noreturn))
+#endif
+static void aether_jump_to(AetherJmpFrame* f) {
+#if AETHER_EXEC_BUILTIN_SJLJ
+    if (f->exec_buf) __builtin_longjmp(f->exec_buf, 1);
+#endif
+    AETHER_SIGLONGJMP(f->buf, 1);
+#if !(defined(__GNUC__) || defined(__clang__))
+    abort();
+#endif
+}
 
 AETHER_TLS_SHARED int g_aether_in_actor_step = 0;
 AETHER_TLS_SHARED int g_aether_current_actor_id = -1;
@@ -78,36 +87,57 @@ int aether_fnptr_claim(const void* r) {
 
 static AetherDeathHook death_hook = NULL;
 
-AetherJmpFrame* aether_try_push(void) {
-    if (tls_stack.depth >= AETHER_PANIC_MAX_DEPTH) {
-        fprintf(stderr, "aether: try/catch nesting exceeded %d, aborting\n",
-                AETHER_PANIC_MAX_DEPTH);
-        abort();
+/* The copies of the sandbox the panic and the step barrier serve
+ * (aether_panic.h, #3438): each registers its unwind of the levels pushed
+ * inside a frame a panic leaves (#2955) and its part of an actor step's
+ * context (#3393) when it first looks for the runtime copies, before any
+ * thread can push one of its levels. Reached through here so that a program
+ * that panics but never enforces links no sandbox (aether_sandbox.o and the
+ * audit log it writes to), and the scheduler, which every actor program
+ * links, none either. With them, the threads with a sandbox level in force
+ * (the pointer aether_sandbox.h's check reads, set once the copies are
+ * found). These bind as the code that reads them does: under ELF
+ * interposition a library that runs the program's panic and step barrier
+ * registers its sandbox with the program's. */
+atomic_int* _Atomic aether_sandbox_in_force = NULL;
+const AetherSandboxHooks* _Atomic aether_sandbox_hooks[AETHER_SANDBOX_HOOKS_MAX];
+
+int aether_sandbox_hooks_add(const AetherSandboxHooks* h) {
+    if (!h) return -1;
+    for (int i = 0; i < AETHER_SANDBOX_HOOKS_MAX; i++)
+        if (atomic_load_explicit(&aether_sandbox_hooks[i], memory_order_acquire) == h) return 0;
+    for (int i = 0; i < AETHER_SANDBOX_HOOKS_MAX; i++) {
+        const AetherSandboxHooks* none = NULL;
+        if (atomic_compare_exchange_strong_explicit(&aether_sandbox_hooks[i], &none, h, memory_order_acq_rel,
+                                                    memory_order_acquire) ||
+            none == h)
+            return 0;
     }
-    AetherJmpFrame* f = &tls_stack.frames[tls_stack.depth++];
-    f->reason = NULL;
-    f->reason_release = NULL;
-    aether_unwind_enter_frame();
-    return f;
+    return -1;
 }
 
-void aether_try_pop(void) {
-    if (tls_stack.depth <= 0) {
-        // Defensive: popping an empty stack means codegen/runtime mismatch.
-        fprintf(stderr, "aether: aether_try_pop on empty stack\n");
-        abort();
+void aether_sandbox_hooks_remove(const AetherSandboxHooks* h) {
+    for (int i = 0; i < AETHER_SANDBOX_HOOKS_MAX; i++) {
+        const AetherSandboxHooks* mine = h;
+        atomic_compare_exchange_strong_explicit(&aether_sandbox_hooks[i], &mine, NULL, memory_order_acq_rel,
+                                                memory_order_relaxed);
     }
-    aether_unwind_exit_frame();
-    tls_stack.depth--;
 }
+/* How this copy joins another copy's sandbox count before its first step
+ * (#3438): aether_sandbox.c's, set when that file is loaded, and called by
+ * scheduler_init. NULL in a copy without the sandbox, which has no level to
+ * see. This copy's own: a constructor sets it, which runs in every image
+ * whatever the interposition (aether_sandbox.c). */
+AETHER_COPY_LOCAL void (*_Atomic aether_sandbox_join)(void) = NULL;
 
-AetherJmpFrame* aether_current_frame(void) {
-    if (tls_stack.depth == 0) return NULL;
-    return &tls_stack.frames[tls_stack.depth - 1];
-}
-
-int aether_try_depth(void) {
-    return tls_stack.depth;
+/* Every copy's levels pushed inside the frame the panic leaves: each copy
+ * keeps its own, and the try depth is the one every copy reads. */
+static void unwind_sandbox_levels(void) {
+    int frames = aether_try_depth();
+    for (int i = 0; i < AETHER_SANDBOX_HOOKS_MAX; i++) {
+        const AetherSandboxHooks* h = atomic_load_explicit(&aether_sandbox_hooks[i], memory_order_acquire);
+        if (h && h->unwind) h->unwind(frames);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -296,8 +326,8 @@ static void aether_print_stack_trace_to_stderr(void) {
 #elif AETHER_STACK_TRACE_WIN32
 
 // Windows path: CaptureStackBackTrace lives in kernel32 (always
-// linked), SymFromAddr lives in dbghelp.dll (Makefile + ae.c add
-// -ldbghelp). The shape mirrors the POSIX path — TLS-buffered
+// linked), SymFromAddr lives in dbghelp.dll (loaded below when a
+// trace is printed). The shape mirrors the POSIX path, TLS-buffered
 // frames captured at the call site, walked + pretty-printed in the
 // fallback printer — so the rest of the panic plumbing is identical.
 
@@ -305,6 +335,34 @@ static void aether_print_stack_trace_to_stderr(void) {
 static AETHER_TLS_SHARED PVOID tls_panic_trace[AETHER_PANIC_TRACE_MAX];
 static AETHER_TLS_SHARED USHORT tls_panic_trace_n = 0;
 static AETHER_TLS_SHARED int tls_panic_sym_initialised = 0;
+
+/* dbghelp is loaded when a trace is printed, not linked: every export runs
+ * in a panic frame (#2956), so this object is in every library, and a C
+ * host linking one with libaether.a would otherwise need -ldbghelp. */
+typedef DWORD (WINAPI *aether_sym_get_options_fn)(void);
+typedef DWORD (WINAPI *aether_sym_set_options_fn)(DWORD);
+typedef BOOL (WINAPI *aether_sym_initialize_fn)(HANDLE, PCSTR, BOOL);
+typedef BOOL (WINAPI *aether_sym_from_addr_fn)(HANDLE, DWORD64, PDWORD64, PSYMBOL_INFO);
+static aether_sym_from_addr_fn aether_sym_from_addr = NULL;
+
+static void aether_load_dbghelp(HANDLE proc) {
+    HMODULE h = LoadLibraryA("dbghelp.dll");
+    if (!h) return;
+    FARPROC get = GetProcAddress(h, "SymGetOptions");
+    FARPROC set = GetProcAddress(h, "SymSetOptions");
+    FARPROC init = GetProcAddress(h, "SymInitialize");
+    FARPROC from = GetProcAddress(h, "SymFromAddr");
+    if (!get || !set || !init || !from) return;
+    aether_sym_get_options_fn get_options;
+    aether_sym_set_options_fn set_options;
+    aether_sym_initialize_fn initialize;
+    memcpy(&get_options, &get, sizeof(get_options));
+    memcpy(&set_options, &set, sizeof(set_options));
+    memcpy(&initialize, &init, sizeof(initialize));
+    set_options(get_options() | SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+    initialize(proc, NULL, TRUE);
+    memcpy(&aether_sym_from_addr, &from, sizeof(aether_sym_from_addr));
+}
 
 void aether_panic_capture_stack(void) {
     // Skip 1 frame (this function itself); the next frame is the
@@ -350,8 +408,7 @@ static void aether_print_stack_trace_to_stderr(void) {
         // safe to call once per thread that actually needs symbols.
         // SYMOPT_LOAD_LINES could be added for line numbers; deferred
         // (PDB availability is implementation-defined under MinGW).
-        SymSetOptions(SymGetOptions() | SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
-        SymInitialize(proc, NULL, TRUE);
+        aether_load_dbghelp(proc);
         tls_panic_sym_initialised = 1;
     }
 
@@ -374,7 +431,7 @@ static void aether_print_stack_trace_to_stderr(void) {
         sym->SizeOfStruct = sizeof(SYMBOL_INFO);
         sym->MaxNameLen   = NAME_MAX;
         DWORD64 disp = 0;
-        BOOL ok = SymFromAddr(proc, addr, &disp, sym);
+        BOOL ok = aether_sym_from_addr ? aether_sym_from_addr(proc, addr, &disp, sym) : FALSE;
 
         if (ok && sym->Name[0] != '\0') {
             // Skip our own panic-handler frames so the first thing
@@ -438,13 +495,49 @@ static void aether_print_stack_trace_to_stderr(void) {
  * the runtime as the AetherString codegen made it -- the catch lowering
  * adopts that object as its binding -- so printing it as a C string would
  * print the header. A literal is a plain char* and is its own text. */
-static const char* panic_reason_text(const char* reason) {
+const char* aether_panic_reason_text(const char* reason) {
+    if (!reason) return "unknown";
     if (is_aether_string(reason)) return ((const AetherString*)reason)->data;
     return reason;
 }
 
 void aether_panic(const char* reason) {
     aether_panic_owned(reason, NULL);
+}
+
+/* The reason an interruption of a library call carries (#2956,
+ * aether_exec.c), by its outcome. */
+const char* aether_exec_reason(int outcome) {
+    switch (outcome) {
+    case AETHER_DEADLINE:      return "the call's deadline passed";
+    case AETHER_CANCELLED:     return "the call was cancelled";
+    case AETHER_MEMORY_CAP:    return "the call went past the memory cap";
+    case AETHER_OUT_OF_MEMORY: return "the call ran out of memory";
+    case AETHER_INCOMPATIBLE:  return "the library was made for another runtime";
+    default:                   return "panic";
+    }
+}
+
+/* An allocation the code cannot go on without failed (#2956). Inside an
+ * execution the call ends with AETHER_OUT_OF_MEMORY, an interruption a
+ * `try` does not catch, its reason a static string: nothing on the way
+ * allocates. Outside one it is the panic `what` it always was. */
+void aether_out_of_memory(const char* what) {
+    AetherFrames* F = aether_frames_here();
+    if (F->exec_depth > F->exec_floor) {   /* an execution of this code's (#3392) */
+        F->interrupting = AETHER_OUT_OF_MEMORY;
+        aether_panic(aether_exec_reason(AETHER_OUT_OF_MEMORY));
+    }
+    aether_panic(what);
+}
+
+/* A `try` caught an interruption (aether_exec_interrupting()): it has done
+ * its cleanup, and the interruption goes on to the next frame out, which
+ * ends with the execution's. Here, with the panic it raises again, since
+ * every program with a `try` calls it. */
+void aether_exec_reraise(void) {
+    aether_try_pop();
+    aether_panic(aether_exec_reason(aether_frames_here()->interrupting));
 }
 
 void aether_panic_owned(const char* reason, void (*release)(const void*)) {
@@ -454,10 +547,16 @@ void aether_panic_owned(const char* reason, void (*release)(const void*)) {
     if (f) {
         f->reason = reason;
         f->reason_release = release;
+        // The sandbox levels pushed inside the frame are left with it, in
+        // the runtime, whichever code catches (#2955): a catch in code that
+        // never enforces, or an actor's barrier, restored nothing, and the
+        // thread stayed held to grants freed with the block. Before the
+        // drain, which may free them.
+        unwind_sandbox_levels();
         // Free the innermost frame's still-live journaled allocations
         // before the jump skips their deferred frees (aether_unwind.c).
         aether_unwind_drain_current();
-        AETHER_SIGLONGJMP(f->buf, 1);
+        aether_jump_to(f);
         // unreachable
     }
 
@@ -468,8 +567,13 @@ void aether_panic_owned(const char* reason, void (*release)(const void*)) {
     // frame reach the fallback. Suppress the trace via
     // AETHER_STACK_TRACE=0 if the noise gets in the way (e.g. tests
     // that diff stderr line-for-line).
+    //
+    // The program's own lines first (#3435): stdout is fully buffered when it
+    // is a file or a pipe, and abort() flushes no stdio stream on glibc, so
+    // what the program printed last was lost behind this message.
+    aether_fatal_flush();
     fprintf(stderr, "aether: panic outside any try/catch or actor: %s\n",
-            panic_reason_text(reason));
+            aether_panic_reason_text(reason));
     const char* trace_env = getenv("AETHER_STACK_TRACE");
     if (!trace_env || strcmp(trace_env, "0") != 0) {
         aether_print_stack_trace_to_stderr();
@@ -526,7 +630,8 @@ static void aether_sig_handler(int sig, siginfo_t* info, void* ucontext) {
     }
     f->reason = reason;
     f->reason_release = NULL;
-    AETHER_SIGLONGJMP(f->buf, 1);
+    unwind_sandbox_levels();
+    aether_jump_to(f);
 }
 
 void aether_panic_install_signal_handlers(void) {
@@ -573,5 +678,66 @@ void aether_set_on_actor_death(AetherDeathHook fn) {
 
 void aether_fire_death_hook(int actor_id, const char* reason) {
     AetherDeathHook h = death_hook;
-    if (h) h(actor_id, reason ? panic_reason_text(reason) : "unknown");
+    if (h) h(actor_id, reason ? aether_panic_reason_text(reason) : "unknown");
+}
+
+/* aether_panic.h (#3403, #3404, #3415). What the frame caught is told by
+ * what its code raised, not by the state the thread is in after it: an
+ * interruption already on its way when the code began (its unwind runs
+ * defers and journal drains, and one that ends an actor runs the actor's
+ * drops here) is not the code's. It is put aside while the code runs and
+ * given back after it, so an ordinary panic in the code is reported as one
+ * and the interruption goes on as it was. Read after the catch, it made the
+ * code's ordinary panic the interruption: taken off its way, the unwind went
+ * on as an ordinary panic, which a `try` caught and the call's frame
+ * recorded as PANICKED. */
+int aether_contain(void (*fn)(void*), void* arg, const char** reason,
+                   void (**reason_release)(const void*)) {
+    AetherFrames* F = aether_frames_here();
+    int on_its_way = F->interrupting;
+    F->interrupting = 0;
+    AetherJmpFrame* f = aether_try_push();
+    if (AETHER_SIGSETJMP(f->buf, 1) == 0) {
+        fn(arg);
+        aether_try_pop();
+        F->interrupting = on_its_way;
+        return 0;
+    }
+    const char* r = f->reason;
+    void (*rel)(const void*) = f->reason_release;
+    aether_try_pop();
+    if (F->interrupting) {
+        /* An interruption of the call this code runs inside, raised in it (a
+         * drop function's loop past the call's deadline, in a finalize the
+         * call runs): not this frame's to end, nor to report as a panic.
+         * The call ends at its own next safe point, or at its return. Left
+         * on its way, it turned the call's next ordinary panic into it. */
+        if (rel) rel(r);
+        aether_exec_defer_interruption();
+        F->interrupting = on_its_way;
+        return 2;
+    }
+    F->interrupting = on_its_way;
+    *reason = r;
+    *reason_release = rel;
+    return 1;
+}
+
+typedef struct { int id; const char* reason; } DeathHookCall;
+
+static void death_hook_body(void* p) {
+    DeathHookCall* c = (DeathHookCall*)p;
+    aether_fire_death_hook(c->id, c->reason);
+}
+
+void aether_fire_death_hook_contained(int actor_id, const char* reason) {
+    if (!death_hook) return;
+    DeathHookCall c = { actor_id, reason };
+    const char* r = NULL;
+    void (*rel)(const void*) = NULL;
+    if (aether_contain(death_hook_body, &c, &r, &rel) == 1) {
+        fprintf(stderr, "aether: the death hook of actor %d panicked: %s\n", actor_id,
+                aether_panic_reason_text(r));
+        if (rel) rel(r);
+    }
 }

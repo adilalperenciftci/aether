@@ -13,7 +13,8 @@ captures a fresh string, an `fn[2]`, a struct owning a string, a
 `(string, int)` tuple, a `string[2]`, a `Doc[2]`, a named function used as a
 closure, the error slot of an `int!`, a sum whose variant owns a string or a
 closure) held in one **place** (a local, a local rebound in a loop, a struct
-field, an array element, a tuple slot, an optional, a module `var`, a
+field, a field of a heap box reached through a pointer, an array element, a
+tuple slot, an optional, a module `var`, a
 closure's capture or cell, a list or map, actor state, a message field, a
 `ptr` slot, a part of a parameter, a temporary)
 and moved by one **transfer** (store and leave, overwrite, `break`/`continue`,

@@ -36,10 +36,10 @@ AETHER_HOME="$ROOT" "$AE" build --emit=lib --package gamekit -o "libgamekit$SO_E
 [ -f "libgamekit$SO_EXT" ] || fail "libgamekit$SO_EXT not produced"
 
 INFO="$(AETHER_HOME="$ROOT" "$AE" lib-info "./libgamekit$SO_EXT" 2>&1)" || fail "ae lib-info"
-# 1.9: an export returns a string (#2931), the highest feature the catalog
-# has; core.label never using its config (1.8, #2860) and the package's
-# module records (1.6) are there too.
-echo "$INFO" | grep -q "Schema:[[:space:]]*1\.9" || { echo "$INFO"; fail "schema is not 1.9 (a package library returning a string)"; }
+# 1.11: every catalog has the outcome slot (#2956) and the host ABI, the runtime ABI and the duties (#2957); an export returning a
+# string (1.9, #2931), core.label never using its config (1.8, #2860) and
+# the package's module records (1.6) are there too.
+echo "$INFO" | grep -q "Schema:[[:space:]]*1\.11" || { echo "$INFO"; fail "schema is not 1.11"; }
 echo "$INFO" | grep -q "String release:[[:space:]]*aether_gamekit_string_release" || { echo "$INFO"; fail "no string release named for gamekit"; }
 echo "$INFO" | grep -q "config: never used" || { echo "$INFO"; fail "core.label is not recorded as never using its config"; }
 echo "$INFO" | grep -q "c_symbol: aether_gamekit_core__create" \

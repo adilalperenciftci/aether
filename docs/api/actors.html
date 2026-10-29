@@ -21,6 +21,18 @@
     <li><a href="#is_registered">is_registered</a></li>
     <li><a href="#registry_size">registry_size</a></li>
     <li><a href="#registry_clear">registry_clear</a></li>
+    <li><a href="#monitor">monitor</a></li>
+    <li><a href="#demonitor">demonitor</a></li>
+    <li><a href="#kill">kill</a></li>
+    <li><a href="#stop">stop</a></li>
+    <li><a href="#dead_sends">dead_sends</a></li>
+    <li><a href="#full_drops">full_drops</a></li>
+    <li><a href="#link">link</a></li>
+    <li><a href="#unlink">unlink</a></li>
+    <li><a href="#trap_exits">trap_exits</a></li>
+    <li><a href="#rebirth_begin">rebirth_begin</a></li>
+    <li><a href="#rebirth_end">rebirth_end</a></li>
+    <li><a href="#incarnation">incarnation</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -94,7 +106,9 @@
     <li><a href="spec.html">spec</a></li>
     <li><a href="strarr.html">strarr</a></li>
     <li><a href="strbuilder.html">strbuilder</a></li>
+    <li><a href="stream.html">stream</a></li>
     <li><a href="string.html">string</a></li>
+    <li><a href="supervise.html">supervise</a></li>
     <li><a href="sync.html">sync</a></li>
     <li><a href="tar.html">tar</a></li>
     <li><a href="tcp.html">tcp</a></li>
@@ -155,6 +169,76 @@
       <h3 class="function-name">registry_clear <span class="kind">fn</span></h3>
       <pre class="usage"><code>registry_clear()</code></pre>
       <p class="doc">Wipe all bindings. Tests use this for isolation.</p>
+    </div>
+    <div class="function" id="monitor" data-name="monitor">
+      <h3 class="function-name">monitor <span class="kind">fn</span></h3>
+      <pre class="usage"><code>monitor(ref) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">ref: actor_ref</span></p>
+      <p class="doc">From a handler: one Down to this actor when `ref` ends, at once if it has ended already. Returns the monitor's id, for demonitor.</p>
+    </div>
+    <div class="function" id="demonitor" data-name="demonitor">
+      <h3 class="function-name">demonitor <span class="kind">fn</span></h3>
+      <pre class="usage"><code>demonitor(id)</code></pre>
+      <p class="signature"><span class="sig-params">id: int</span></p>
+      <p class="doc">From a handler: no Down of monitor `id` is handled after this, one already on its way included.</p>
+    </div>
+    <div class="function" id="kill" data-name="kill">
+      <h3 class="function-name">kill <span class="kind">fn</span></h3>
+      <pre class="usage"><code>kill(ref)</code></pre>
+      <p class="signature"><span class="sig-params">ref: actor_ref</span></p>
+      <p class="doc">Ends `ref` with &quot;killed&quot; once its current handler, if one is running, returns. Its queued messages are dropped and counted (dead_sends), an ask it is waiting in ends at once, and its watchers get Down. From anywhere; a dead actor is not killed twice.</p>
+    </div>
+    <div class="function" id="stop" data-name="stop">
+      <h3 class="function-name">stop <span class="kind">fn</span></h3>
+      <pre class="usage"><code>stop()</code></pre>
+      <p class="doc">From a handler: this actor ends with &quot;normal&quot; when the handler returns.</p>
+    </div>
+    <div class="function" id="dead_sends" data-name="dead_sends">
+      <h3 class="function-name">dead_sends <span class="kind">fn</span></h3>
+      <pre class="usage"><code>dead_sends() <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="doc">Messages a panicked, killed or stopped actor did not handle: queued at its death or sent to it after, each released and counted once.</p>
+    </div>
+    <div class="function" id="full_drops" data-name="full_drops">
+      <h3 class="function-name">full_drops <span class="kind">fn</span></h3>
+      <pre class="usage"><code>full_drops(ref) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">ref: actor_ref</span></p>
+      <p class="doc">Plain sends (`!`) to `ref` dropped because its mailbox was full: an actor declared `@mailbox(bound: N)` takes at most N messages it has not handled yet. try_send(ref, Msg {...}) says &quot;the mailbox is full&quot; instead, and an ask fails with it; neither is counted here.</p>
+    </div>
+    <div class="function" id="link" data-name="link">
+      <h3 class="function-name">link <span class="kind">fn</span></h3>
+      <pre class="usage"><code>link(ref)</code></pre>
+      <p class="signature"><span class="sig-params">ref: actor_ref</span></p>
+      <p class="doc">From a handler: this actor and `ref` are linked, both ways. When either ends, the other ends too, with the same reason (a panic's message, or &quot;killed&quot;), unless that reason is &quot;normal&quot;, which ends nothing; one that traps exits gets a Down instead and lives on. Linked to an actor that has ended already, this actor takes its death at once.</p>
+    </div>
+    <div class="function" id="unlink" data-name="unlink">
+      <h3 class="function-name">unlink <span class="kind">fn</span></h3>
+      <pre class="usage"><code>unlink(ref)</code></pre>
+      <p class="signature"><span class="sig-params">ref: actor_ref</span></p>
+      <p class="doc">From a handler: the link with `ref` goes, both ways. A death already taken by it stays taken.</p>
+    </div>
+    <div class="function" id="trap_exits" data-name="trap_exits">
+      <h3 class="function-name">trap_exits <span class="kind">fn</span></h3>
+      <pre class="usage"><code>trap_exits(on)</code></pre>
+      <p class="signature"><span class="sig-params">on: bool</span></p>
+      <p class="doc">From a handler: a linked actor's death reaches this actor as a Down (its id 0, never dropped by demonitor) instead of ending it, while `on`.</p>
+    </div>
+    <div class="function" id="rebirth_begin" data-name="rebirth_begin">
+      <h3 class="function-name">rebirth_begin <span class="kind">fn</span></h3>
+      <pre class="usage"><code>rebirth_begin(ref) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">ref: actor_ref</span></p>
+      <p class="doc">1 when `ref` is claimed for a restart on this thread: it has ended, its death is finalized and no message of it is in flight. 0 when not yet (try again soon), -1 when it cannot be (it is alive, released, or one a C host registered).</p>
+    </div>
+    <div class="function" id="rebirth_end" data-name="rebirth_end">
+      <h3 class="function-name">rebirth_end <span class="kind">fn</span></h3>
+      <pre class="usage"><code>rebirth_end(ref) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">ref: actor_ref</span></p>
+      <p class="doc">1 when `ref` is alive again. 0 when the factory spawned no actor of its type, or panicked first: the restart is undone and `ref` stays ended, &quot;the restart failed&quot;.</p>
+    </div>
+    <div class="function" id="incarnation" data-name="incarnation">
+      <h3 class="function-name">incarnation <span class="kind">fn</span></h3>
+      <pre class="usage"><code>incarnation(ref) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">ref: actor_ref</span></p>
+      <p class="doc">How many times `ref` was restarted in place: 0 for the actor spawned.</p>
     </div>
   </div>
 </main>

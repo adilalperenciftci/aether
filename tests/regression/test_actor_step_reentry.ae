@@ -1,0 +1,100 @@
+// An actor's handler is never stepped inside its own run (#3391).
+//
+// On the cooperative scheduler an ask polls every actor until its reply,
+// the asking actor included: a handler that asked had the actor's next
+// message handled inside its ask, by a second step of the same actor while
+// the first was still on the stack. Its state changed under the handler,
+// and a stop() or a panic there finalized the actor (its Down sent, what it
+// had queued dropped) while the outer handler still ran. With threads the
+// waiting thread steps only its target, and an actor stepping is left
+// alone. Now neither scheduler steps an actor whose step is on the stack:
+// its next message waits for the handler to return, as it always did with
+// threads.
+
+import std.actors
+
+message First {}
+message Second {}
+message Stop {}
+message Get {}
+message Order {}
+message Watch { who: actor_ref }
+
+extern exit(code: int)
+
+actor Answerer {
+    receive {
+        Get() -> { reply 1 }
+    }
+}
+
+actor Asker {
+    state log = ""
+    state answerer: actor_ref = null
+    receive {
+        First() -> {
+            log = "${log}first-begin "
+            _v = answerer ? Get {}
+            log = "${log}first-end "
+        }
+        Second() -> { log = "${log}second " }
+        Stop() -> {
+            log = "${log}stop "
+            actors.stop()
+        }
+        Order() -> { reply log }
+    }
+}
+
+// Counts the Downs of the actor it watches.
+actor Watcher {
+    state downs = 0
+    receive {
+        Watch(who) -> {
+            _id = actors.monitor(who)
+        }
+        Down(ref, reason: why) -> { downs = downs + 1 }
+    }
+}
+
+check(label: string, ok: bool) -> int {
+    if !ok {
+        println("  FAIL ${label}")
+        return 1
+    }
+    println("  PASS ${label}")
+    return 0
+}
+
+main() {
+    println("=== an actor's handler is never stepped inside its own run (#3391) ===")
+    fails = 0
+
+    a = spawn(Asker())
+    a.answerer = spawn(Answerer())
+    a ! First {}
+    a ! Second {}
+    wait_for_idle()
+    order = a ? Order {}
+    fails = fails + check("the second message waits for the first's handler, got \"${order}\"",
+        order == "first-begin first-end second ")
+
+    // A stop queued behind a handler that asks: the actor ends after the
+    // handler, never inside its ask.
+    b = spawn(Asker())
+    b.answerer = spawn(Answerer())
+    w = spawn(Watcher())
+    w ! Watch { who: b }
+    wait_for_idle()
+    b ! First {}
+    b ! Stop {}
+    wait_for_idle()
+    fails = fails + check("the stop ran after the handler: \"${b.log}\"", b.log == "first-begin first-end stop ")
+    fails = fails + check("and one Down came, got ${w.downs}", w.downs == 1)
+
+    if fails > 0 {
+        println("FAIL: ${fails} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

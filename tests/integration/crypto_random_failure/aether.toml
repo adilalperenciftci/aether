@@ -1,0 +1,4 @@
+[[bin]]
+name = "rngfail"
+path = "rngfail.ae"
+extra_sources = ["rng_fail_shim.c"]

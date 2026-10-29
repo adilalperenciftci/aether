@@ -109,13 +109,27 @@ over any bounded `byte[]` (a sub-slice of a view, a fixed array), and
 `cursor.read_view(c, n)` returns the next `n` bytes as a borrowed sub-slice
 without copying, where `read_slice` copies them into a new buffer.
 
+## Secrets (#3376)
+
+A buffer that held a secret (key material, a nonce, the text of a private
+key) is given back with `bytes.wipe_free(b)`, or zeroed in place with
+`bytes.wipe(b)`. Both zero the whole capacity, past the length too, and
+their writes cannot be dropped: a loop of `bytes.set(b, i, 0)` before a free
+is a dead store the C compiler may remove once it inlines the calls. A
+buffer that grew moved its contents, and the memory it moved out of was
+freed as it was, so a secret is best given a buffer of its final size
+(`bytes.new(n)`, then `set` or `capacity_view`). A `string` cannot be wiped:
+it is immutable and may be shared, so a secret that must be wiped is kept in
+a buffer, not a string.
+
 ## Exports
 
 `new`, `from_ptr`, `string_from_ptr`, `set`, `get`, `length`, `set_length`,
-`capacity`, `data`, `finish`, `to_string`, `free`, `copy_from_string`,
-`copy_from_bytes`, `copy_within`, the slice forms `view`, `capacity_view`,
-`from_slice`, `copy_from_slice`, `string_from_slice`, and the fixed-width
-endian accessors `set_le16`/`get_le16` through `set_be64`/`get_be64`.
+`capacity`, `data`, `finish`, `to_string`, `free`, `wipe`, `wipe_free`,
+`copy_from_string`, `copy_from_bytes`, `copy_within`, the slice forms `view`,
+`capacity_view`, `from_slice`, `copy_from_slice`, `string_from_slice`, and the
+fixed-width endian accessors `set_le16`/`get_le16` through
+`set_be64`/`get_be64`.
 
 The endian accessors are the reason to reach for a `bytes` buffer over a
 string when building a wire format: `set_be32` writes the four bytes in

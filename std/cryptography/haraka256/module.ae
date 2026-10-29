@@ -11,6 +11,7 @@
 // Import with:  import std.cryptography.haraka256
 
 import std.bytes
+import std.mem
 
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
@@ -287,31 +288,31 @@ finalize_to_bytes(c: *Haraka256Ctx) -> ptr {
 
 free_internals(c: *Haraka256Ctx) {
     if c.buf != null {
-        bytes.free(c.buf)
+        bytes.wipe_free(c.buf)
         c.buf = null
     }
     if c.s_scratch != null {
-        bytes.free(c.s_scratch)
+        bytes.wipe_free(c.s_scratch)
         c.s_scratch = null
     }
     if c.t_scratch != null {
-        bytes.free(c.t_scratch)
+        bytes.wipe_free(c.t_scratch)
         c.t_scratch = null
     }
     if c.s1_0 != null {
-        bytes.free(c.s1_0)
+        bytes.wipe_free(c.s1_0)
         c.s1_0 = null
     }
     if c.s1_1 != null {
-        bytes.free(c.s1_1)
+        bytes.wipe_free(c.s1_1)
         c.s1_1 = null
     }
     if c.s2_0 != null {
-        bytes.free(c.s2_0)
+        bytes.wipe_free(c.s2_0)
         c.s2_0 = null
     }
     if c.s2_1 != null {
-        bytes.free(c.s2_1)
+        bytes.wipe_free(c.s2_1)
         c.s2_1 = null
     }
 }
@@ -322,11 +323,13 @@ final_bytes(ctx: ptr) -> ptr {
     if out == null {
         // wrong-length input — refuse, per BC's exact-32-bytes contract.
         free_internals(c)
+        mem.wipe(ctx, sizeof(Haraka256Ctx))
         free(ctx)
         return null
     }
     s = bytes.finish(out, 32)
     free_internals(c)
+    mem.wipe(ctx, sizeof(Haraka256Ctx))
     free(ctx)
     res = bytes.new(32)
     bytes.copy_from_string(res, 0, s, 32)
@@ -339,6 +342,7 @@ final_hex(ctx: ptr) -> string {
     if out == null {
         // wrong-length input — refuse, per BC's exact-32-bytes contract.
         free_internals(c)
+        mem.wipe(ctx, sizeof(Haraka256Ctx))
         free(ctx)
         return ""
     }
@@ -360,9 +364,10 @@ final_hex(ctx: ptr) -> string {
         bytes.set(hexbuf, i * 2 + 1, c_lo)
         i = i + 1
     }
-    bytes.free(out)
+    bytes.wipe_free(out)
     s = bytes.finish(hexbuf, 64)
     free_internals(c)
+    mem.wipe(ctx, sizeof(Haraka256Ctx))
     free(ctx)
     return s
 }
@@ -373,6 +378,7 @@ free_ctx(ctx: ptr) {
     }
     c = ctx as *Haraka256Ctx
     free_internals(c)
+    mem.wipe(ctx, sizeof(Haraka256Ctx))
     free(ctx)
 }
 

@@ -1,0 +1,69 @@
+// A std.http TLS server for test_https_server_tls_pem.sh (#3362, #3370).
+//
+//   BACKEND               "aether" or "openssl"
+//   MODE                  "pem": the files' text, through server_set_tls_pem;
+//                         "path": the paths, through server_set_tls
+//   CERT_PATH, KEY_PATH   the certificate chain and the key
+//
+// Prints "READY <port>" and serves "/" until killed, or
+// "FAIL: <call>: <why>" when the server refuses the setup, and exits 1.
+
+import std.fs
+import std.http
+import std.os
+import std.cryptography.tls13_server
+
+extern exit(code: int)
+
+handle_root(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "pem-ok")
+}
+
+message StartSrv { raw: ptr }
+
+actor SrvActor {
+    state s = 0
+    receive { StartSrv(raw) -> { s = raw; _ = http.server_start(raw) } }
+}
+
+main() {
+    raw = http.server_create(0)
+    if raw == 0 {
+        println("FAIL: server_create returned null")
+        exit(1)
+    }
+    http.server_set_host(raw, "127.0.0.1")
+    berr = http.server_set_tls_backend(raw, os.getenv("BACKEND"))
+    if berr != "" {
+        println("FAIL: server_set_tls_backend: ${berr}")
+        exit(1)
+    }
+    if os.getenv("MODE") == "pem" {
+        // The text the files hold; a missing file stands for empty text.
+        cert, _cerr = fs.read(os.getenv("CERT_PATH"))
+        key, _kerr = fs.read(os.getenv("KEY_PATH"))
+        perr = http.server_set_tls_pem(raw, cert, key)
+        if perr != "" {
+            println("FAIL: server_set_tls_pem: ${perr}")
+            exit(1)
+        }
+    } else {
+        terr = http.server_set_tls(raw, os.getenv("CERT_PATH"), os.getenv("KEY_PATH"))
+        if terr != "" {
+            println("FAIL: server_set_tls: ${terr}")
+            exit(1)
+        }
+    }
+    if http.server_bind(raw, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    println("READY ${http.server_port(raw)}")
+    http.server_get(raw, "/", handle_root, 0)
+    a = spawn(SrvActor())
+    a ! StartSrv { raw: raw }
+    sleep(60000)
+    exit(0)
+}

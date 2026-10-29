@@ -1,0 +1,31 @@
+// An Aether host of the library in binary form (#2954): the account in use
+// is set through this program's std.host, the library allocates through its
+// own runtime when it is built with one, and the accounts are one per
+// process either way.
+import accts
+import std.host
+
+// A call past the account's allowance, raised again here as a panic. Its
+// reason is a string this program allocates under the account, freed when
+// this function returns.
+fn refused(a: ptr) {
+    got = ""
+    try {
+        _n = accts.grow(4000)
+    } catch e {
+        got = e
+    }
+    println("refused: ${got} (outcome ${host.last_outcome()}, tripped ${host.account_tripped(a)})")
+}
+
+main() {
+    a = host.account_new(65536, 0, host.DEADLINE_ELAPSED, null)
+    _ = host.account_use(a)
+    l = accts.keep_list(20)
+    println("charged: ${host.account_used(a) > 0}")
+    refused(a)
+    _ = host.account_use(null)
+    dropped = accts.drop_list(l)
+    println("freed outside the account: ${dropped} items, the account holds ${host.account_used(a)}")
+    host.account_free(a)
+}

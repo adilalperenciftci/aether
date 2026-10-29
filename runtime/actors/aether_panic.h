@@ -121,6 +121,22 @@ typedef jmp_buf aether_sigjmp_buf;
   #define AETHER_SIGLONGJMP(buf, val)     _longjmp((buf), (val))
 #endif
 
+// An export's execution frame (aether_exec.h) saves its context with GCC's
+// __builtin_setjmp, which keeps the frame pointer, stack pointer and resume
+// address (the compiler saves the rest in the stub's own frame), where the
+// C library's setjmp saves every callee-saved register and, on Win64, ten
+// XMM registers: 0.57 ns against 2.85 ns on MinGW. A panic reaches it with
+// __builtin_longjmp. x86 and x86-64 only: clang has no such builtins on
+// AArch64 (macOS arm64), where the C library's setjmp is cheap anyway, and
+// wasm has no unwinding; there the stub uses AETHER_SIGSETJMP on a frame's
+// buf instead.
+#if (defined(__GNUC__) || defined(__clang__)) && (defined(__x86_64__) || defined(__i386__)) && \
+    !defined(__wasm__) && !defined(__EMSCRIPTEN__)
+  #define AETHER_EXEC_BUILTIN_SJLJ 1
+#else
+  #define AETHER_EXEC_BUILTIN_SJLJ 0
+#endif
+
 // Maximum nesting depth of try/catch (and scheduler step barriers) per
 // thread. 32 covers any realistic handler; the limit lets the stack live
 // in TLS without dynamic allocation.
@@ -135,6 +151,12 @@ typedef struct AetherJmpFrame {
     // aether_panic_owned(); the catch lowering adopts it as the binding's
     // heap flag, and the actor barrier releases it after the death hook.
     void (*reason_release)(const void*);
+    // An execution frame entered by aether_exec_enter_at (aether_exec.h):
+    // the __builtin_setjmp buffer in the export stub's own frame, which a
+    // panic reaches with __builtin_longjmp. NULL for every other frame,
+    // which a panic reaches through `buf`. Appended: the fields above keep
+    // their offsets.
+    void** exec_buf;
 } AetherJmpFrame;
 
 // Push a new frame onto the current thread's stack and return it. The
@@ -171,6 +193,15 @@ __attribute__((noreturn))
 #endif
 void aether_panic_owned(const char* reason, void (*release)(const void*));
 
+// An allocation the code cannot go on without failed (#2956): inside a
+// library call's execution the call ends with AETHER_OUT_OF_MEMORY (a
+// `try` does not catch it, and nothing on the way allocates); elsewhere it
+// is aether_panic(what). Does not return.
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noreturn))
+#endif
+void aether_out_of_memory(const char* what);
+
 // Install SIGSEGV/SIGFPE/SIGBUS handlers that convert native faults into
 // panics. No-op unless AETHER_CATCH_SIGNALS=1 is set in the environment.
 // Call once at process init.
@@ -195,11 +226,34 @@ void aether_panic_capture_stack(void);
 typedef void (*AetherDeathHook)(int actor_id, const char* reason);
 void aether_set_on_actor_death(AetherDeathHook fn);
 
+// The text of a caught panic's reason: a reason built at run time is an
+// AetherString, a literal its own text (#2340). "unknown" for NULL.
+const char* aether_panic_reason_text(const char* reason);
+
 // Called by the scheduler after catching a panic. Fires the on_actor_death
 // hook if one is set. Separated from the push/pop primitives so scheduler
 // code can decide its own ordering (e.g. mark actor dead first, then fire
 // the hook).
 void aether_fire_death_hook(int actor_id, const char* reason);
+
+// A containment frame (#3403, #3404): fn(arg) runs in a frame of its own,
+// so a panic in it ends there and never jumps past the caller's own cleanup.
+// 0: fn returned. 1: it panicked; *reason and *reason_release are the
+// panic's, the caller's to report and release. 2: an interruption of the
+// library call this code runs inside was raised in it (#3404): it is not the
+// frame's to end, and ends the call at the call's next safe point or its
+// return, as a stop noted for the call does; nothing to report. An
+// interruption already on its way when fn begins (an unwind's defer that
+// ends an actor runs its drops here) is not fn's: it is put aside while fn
+// runs and given back after, so an ordinary panic in fn is 1 and the
+// interruption goes on as it was (#3415). The step barrier runs what follows
+// a panicking handler through it, and an ending actor's drops
+// (aether_message_drop_at_end).
+int aether_contain(void (*fn)(void*), void* arg, const char** reason,
+                   void (**reason_release)(const void*));
+// The death hook, inside a containment frame: a hook that panics is
+// reported on stderr and the caller goes on.
+void aether_fire_death_hook_contained(int actor_id, const char* reason);
 
 // Allocation journal for panic-unwind heap cleanup: see aether_unwind.h.
 #include "aether_unwind.h"
@@ -223,6 +277,36 @@ extern AETHER_TLS_SHARED int g_aether_current_actor_id;
 void aether_fnptr_mark(const void* s);
 // Whether r is the marked pointer; clears the mark either way.
 int aether_fnptr_claim(const void* r);
+
+/* How the panic and the step barrier reach a copy of the sandbox, which
+ * they do not link (#2955, #3393): its unwind of the levels pushed inside a
+ * frame a panic leaves, and how a step puts this thread's levels aside and
+ * gives them back, each on that copy's own levels. Every copy of the sandbox
+ * registers its hooks once, when it first looks for the runtime copies, and
+ * the panic and the step barrier serve every copy registered with them:
+ * their own, and under ELF interposition several (a library whose code runs
+ * the program's panic registers its own sandbox there, beside the program's
+ * or another library's). One slot of each, which the last copy to look set,
+ * served only that one: a panic caught inside another copy's block left its
+ * level in force (#3438). */
+typedef struct AetherSandboxHooks {
+    void (*unwind)(int frames);
+    int (*hide)(int saved[2]);
+    void (*show)(const int saved[2]);
+} AetherSandboxHooks;
+
+#define AETHER_SANDBOX_HOOKS_MAX 64
+extern const AetherSandboxHooks* _Atomic aether_sandbox_hooks[AETHER_SANDBOX_HOOKS_MAX];
+// Registers `h`, once: 0, or -1 when every place is taken (a copy past
+// AETHER_SANDBOX_HOOKS_MAX refuses every check inside its blocks until a
+// place frees: refused more, never less).
+int aether_sandbox_hooks_add(const AetherSandboxHooks* h);
+// The copies whose levels one step puts aside: those that have some on the
+// thread at once, few; one past it keeps its levels in force for the step
+// (refused more, never less).
+#define AETHER_STEP_SANDBOX_COPIES 8
+// A copy that is unloaded gives its place up.
+void aether_sandbox_hooks_remove(const AetherSandboxHooks* h);
 
 #ifdef __cplusplus
 }

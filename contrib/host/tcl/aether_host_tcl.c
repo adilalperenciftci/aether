@@ -1,7 +1,7 @@
 // aether_host_tcl.c — Embedded Tcl Language Host Module
 //
 // Embeds libtcl in the Aether process. When run_sandboxed is called,
-// installs the Aether sandbox checker so Tcl's libc calls (open,
+// pushes its grants as a level of the calling thread's (#2955), so Tcl's libc calls (open,
 // getenv, socket, exec) are intercepted and checked against the
 // grant list.
 //
@@ -184,8 +184,6 @@ static int load_libtcl(void) {
 static Tcl_Interp* T = NULL;
 
 // Bridge-owned permission stack.
-static void* tcl_perms_stack[64];
-static int   tcl_perms_depth = 0;
 
 extern int list_size(void*);
 extern void* list_get_raw(void*, int);
@@ -196,28 +194,6 @@ extern const char* aether_string_data(const void*);
 
 // The shared grant matcher (runtime/aether_sandbox_match.h).
 #include "aether_sandbox_match.h"
-
-static int perms_allow(void* ctx, const char* category, const char* resource) {
-    if (!ctx) return 1;
-    int n = list_size(ctx);
-    if (n == 0) return 0;
-    for (int i = 0; i < n; i += 2) {
-        const char* cat = aether_string_data(list_get_raw(ctx, i));
-        const char* pat = aether_string_data(list_get_raw(ctx, i + 1));
-        if (!cat || !pat) continue;
-        if (cat[0] == '*' && pat[0] == '*') return 1;
-        if (strcmp(cat, category) == 0 && aether_grant_match(category, pat, resource)) return 1;
-    }
-    return 0;
-}
-
-static int host_tcl_checker(const char* category, const char* resource) {
-    if (tcl_perms_depth <= 0) return 1;
-    for (int level = 0; level < tcl_perms_depth; level++) {
-        if (!perms_allow(tcl_perms_stack[level], category, resource)) return 0;
-    }
-    return 1;
-}
 
 int tcl_init(void) {
     if (T) return 0;
@@ -255,11 +231,9 @@ int tcl_run(const char* code) {
 int tcl_run_sandboxed(void* perms, const char* code) {
     if (!code) return -1;
     if (tcl_init() != 0) return -1;
-    if (tcl_perms_depth >= 64) return -1;
+    if (aether_sandbox_depth() >= AETHER_SANDBOX_MAX_LEVELS) return -1;
 
-    tcl_perms_stack[tcl_perms_depth++] = perms;
-    aether_sandbox_check_fn prev = _aether_sandbox_checker;
-    _aether_sandbox_checker = host_tcl_checker;
+    aether_sandbox_push(perms);
 
     int result = 0;
     if (tcl_eval(T, code) != TCL_OK) {
@@ -267,8 +241,7 @@ int tcl_run_sandboxed(void* perms, const char* code) {
         result = -1;
     }
 
-    _aether_sandbox_checker = prev;
-    tcl_perms_depth--;
+    aether_sandbox_pop();
 
     return result;
 }
@@ -317,7 +290,7 @@ static void register_map_bindings(Tcl_Interp* interp) {
 int tcl_run_sandboxed_with_map(void* perms, const char* code, uint64_t map_token) {
     if (!code) return -1;
     if (tcl_init() != 0) return -1;
-    if (tcl_perms_depth >= 64) return -1;
+    if (aether_sandbox_depth() >= AETHER_SANDBOX_MAX_LEVELS) return -1;
     register_map_bindings(T);
 
     extern void aether_shared_map_freeze_inputs_by_token(uint64_t);
@@ -325,9 +298,7 @@ int tcl_run_sandboxed_with_map(void* perms, const char* code, uint64_t map_token
 
     current_map_token = map_token;
 
-    tcl_perms_stack[tcl_perms_depth++] = perms;
-    aether_sandbox_check_fn prev = _aether_sandbox_checker;
-    _aether_sandbox_checker = host_tcl_checker;
+    aether_sandbox_push(perms);
 
     int result = 0;
     if (tcl_eval(T, code) != TCL_OK) {
@@ -335,8 +306,7 @@ int tcl_run_sandboxed_with_map(void* perms, const char* code, uint64_t map_token
         result = -1;
     }
 
-    _aether_sandbox_checker = prev;
-    tcl_perms_depth--;
+    aether_sandbox_pop();
     current_map_token = 0;
 
     return result;

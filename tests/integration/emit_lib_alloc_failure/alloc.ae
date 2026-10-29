@@ -1,0 +1,33 @@
+// The library of the allocation-failure test (#2956): a call whose
+// allocation fails, past the memory cap or with the allocator out of
+// memory, ends with that outcome at its next safe point.
+import std.string
+
+extern host_defer_ran()
+
+fn grow(n: int) -> int {
+    defer host_defer_ran()
+    s = ""
+    i = 0
+    while i < n {
+        s = string.concat(s, "0123456789abcdef")
+        i = i + 1
+    }
+    return string.length(s)
+}
+
+// A string grown n times: past the cap, the call ends, the defer has run.
+build(n: int) -> int {
+    return grow(n)
+}
+
+// The same inside a user `try`: the failure is not the try's to catch.
+guarded_build(n: int) -> int {
+    got = 7
+    try {
+        got = grow(n)
+    } catch e {
+        got = -1
+    }
+    return got
+}

@@ -1,0 +1,185 @@
+// Every buffer the cryptography modules free is wiped first (#3402, #3414).
+//
+// A buffer a cryptographic module frees may have held a key, a nonce, a
+// keystream block, a hash state or the text of a private key, and freed
+// memory keeps what it held until it is handed out again. A rule decided
+// call by call missed one module after another (the X25519 scalar, the
+// TLS key schedule's salts), so the rule is the whole tree's: under
+// std/cryptography a std.bytes buffer is freed with bytes.wipe_free, never
+// bytes.free. A public buffer pays a memset, which is nothing next to the
+// cryptography that made it.
+//
+// This reads every module.ae under the given directories (the modules, not
+// their test programs) and reports each
+// call of bytes.free (`bytes.free(`), comments and string literals skipped.
+//
+//     check [--expect N] DIR...
+//
+// Exits 1 on a call it reports; with --expect, unless exactly N were found
+// (the self-test over tests/crypto_wipe/fixture). `make check-crypto-wipe`
+// runs both.
+
+import std.fs
+import std.os
+import std.io
+import std.string
+import std.collections
+
+extern exit(code: int)
+
+say(s: string) {
+    _w = io.stdout_write("${s}\n")
+}
+
+// The lines of a text, without their line breaks.
+split_lines(text: string) -> ptr {
+    out = collections.string_list_new()
+    n = string.length(text)
+    start = 0
+    while start < n {
+        cut = string.index_of_from(text, "\n", start)
+        stop = cut
+        if cut < 0 {
+            stop = n
+        }
+        line_end = stop
+        if line_end > start && string.char_at_n(text, n, line_end - 1) == 13 {
+            line_end = line_end - 1
+        }
+        collections.string_list_add(out, string.substring(text, start, line_end))
+        start = stop + 1
+    }
+    return out
+}
+
+// A line with its comment cut off and every string literal's contents
+// blanked (the quotes stay), so neither is read as code.
+code_of(line: string) -> string {
+    n = string.length(line)
+    out = ""
+    in_str = 0
+    i = 0
+    while i < n {
+        c = string.char_at_n(line, n, i)
+        if in_str == 1 {
+            if c == 92 {
+                i = i + 2
+                continue
+            }
+            if c == 34 {
+                in_str = 0
+                out = "${out}\""
+            }
+            i = i + 1
+            continue
+        }
+        if c == 34 {
+            in_str = 1
+            out = "${out}\""
+            i = i + 1
+            continue
+        }
+        if c == 47 && i + 1 < n && string.char_at_n(line, n, i + 1) == 47 {
+            break
+        }
+        out = "${out}${string.from_char(c)}"
+        i = i + 1
+    }
+    return out
+}
+
+// How many times `bytes.free(` begins a call in `code`, not as the tail of
+// a longer name (`mybytes.free(`).
+calls_in(code: string) -> int {
+    found = 0
+    n = string.length(code)
+    at = string.index_of_from(code, "bytes.free(", 0)
+    while at >= 0 {
+        before = 32
+        if at > 0 { before = string.char_at_n(code, n, at - 1) }
+        named = (before >= 97 && before <= 122) || (before >= 65 && before <= 90) || (before >= 48 && before <= 57) || before == 95 || before == 46
+        if !named { found = found + 1 }
+        at = string.index_of_from(code, "bytes.free(", at + 1)
+    }
+    return found
+}
+
+main() {
+    dirs = collections.string_list_new()
+    expect = -1
+    argc = os.args_count()
+    i = 1
+    while i < argc {
+        a = os.args_get(i)
+        if a == "--expect" && i + 1 < argc {
+            i = i + 1
+            expect = string.get_int(os.args_get(i))
+        } else {
+            collections.string_list_add(dirs, string.replace_all(a, "\\", "/"))
+        }
+        i = i + 1
+    }
+    if collections.string_list_size(dirs) == 0 {
+        say("usage: check [--expect N] DIR...")
+        exit(2)
+    }
+
+    files = collections.string_list_new()
+    nd = collections.string_list_size(dirs)
+    i = 0
+    while i < nd {
+        root = collections.string_list_get(dirs, i)
+        _n, werr = fs.walk(root) | path: string, kind: int, depth: int | {
+            p = string.replace_all(path, "\\", "/")
+            if kind == 1 && string.ends_with(p, "/module.ae") == 1 {
+                collections.string_list_add(files, p)
+            }
+            return 0
+        }
+        if werr != "" {
+            say("crypto wipe: cannot walk ${root}: ${werr}")
+            exit(2)
+        }
+        i = i + 1
+    }
+
+    found = 0
+    nf = collections.string_list_size(files)
+    i = 0
+    while i < nf {
+        p = collections.string_list_get(files, i)
+        text, rerr = fs.read(p)
+        if rerr != "" {
+            say("crypto wipe: cannot read ${p}: ${rerr}")
+            exit(2)
+        }
+        lines = split_lines(text)
+        nl = collections.string_list_size(lines)
+        k = 0
+        while k < nl {
+            c = calls_in(code_of(collections.string_list_get(lines, k)))
+            if c > 0 {
+                if expect < 0 {
+                    say("${p}:${k + 1}: bytes.free in a cryptography module: free the buffer with bytes.wipe_free")
+                }
+                found = found + c
+            }
+            k = k + 1
+        }
+        i = i + 1
+    }
+
+    if expect >= 0 {
+        if found != expect {
+            say("crypto wipe self-test: found ${found}, expected ${expect}")
+            exit(1)
+        }
+        say("crypto wipe self-test: ${found} found, as expected")
+        return
+    }
+    if found > 0 {
+        say("crypto wipe: ${found} plain bytes.free in std/cryptography (#3414)")
+        exit(1)
+    }
+    say("crypto wipe: every buffer the cryptography modules free is wiped first")
+}

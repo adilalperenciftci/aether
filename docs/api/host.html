@@ -29,6 +29,25 @@
     <li><a href="#caller_identity">caller_identity</a></li>
     <li><a href="#caller_attribute">caller_attribute</a></li>
     <li><a href="#caller_deadline_ms">caller_deadline_ms</a></li>
+    <li><a href="#last_outcome">last_outcome</a></li>
+    <li><a href="#last_outcome_text">last_outcome_text</a></li>
+    <li><a href="#account_new">account_new</a></li>
+    <li><a href="#account_free">account_free</a></li>
+    <li><a href="#account_use">account_use</a></li>
+    <li><a href="#account_in_use">account_in_use</a></li>
+    <li><a href="#account_used">account_used</a></li>
+    <li><a href="#account_tripped">account_tripped</a></li>
+    <li><a href="#DEADLINE_ELAPSED">DEADLINE_ELAPSED</a></li>
+    <li><a href="#DEADLINE_ACTIVE">DEADLINE_ACTIVE</a></li>
+    <li><a href="#TRIPPED_DEADLINE">TRIPPED_DEADLINE</a></li>
+    <li><a href="#TRIPPED_MEMORY">TRIPPED_MEMORY</a></li>
+    <li><a href="#OK">OK</a></li>
+    <li><a href="#PANICKED">PANICKED</a></li>
+    <li><a href="#DEADLINE">DEADLINE</a></li>
+    <li><a href="#CANCELLED">CANCELLED</a></li>
+    <li><a href="#MEMORY_CAP">MEMORY_CAP</a></li>
+    <li><a href="#OUT_OF_MEMORY">OUT_OF_MEMORY</a></li>
+    <li><a href="#INCOMPATIBLE">INCOMPATIBLE</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -102,7 +121,9 @@
     <li><a href="spec.html">spec</a></li>
     <li><a href="strarr.html">strarr</a></li>
     <li><a href="strbuilder.html">strbuilder</a></li>
+    <li><a href="stream.html">stream</a></li>
     <li><a href="string.html">string</a></li>
+    <li><a href="supervise.html">supervise</a></li>
     <li><a href="sync.html">sync</a></li>
     <li><a href="tar.html">tar</a></li>
     <li><a href="tcp.html">tcp</a></li>
@@ -201,6 +222,95 @@
     <div class="function" id="caller_deadline_ms" data-name="caller_deadline_ms">
       <h3 class="function-name">caller_deadline_ms <span class="kind">fn</span></h3>
       <pre class="usage"><code>caller_deadline_ms() <span class="arrow">-&gt;</span> long</code></pre>
+    </div>
+    <div class="function" id="last_outcome" data-name="last_outcome">
+      <h3 class="function-name">last_outcome <span class="kind">fn</span></h3>
+      <pre class="usage"><code>last_outcome() <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="doc">host.OK, or what ended the last call: host.PANICKED, host.DEADLINE, ...</p>
+    </div>
+    <div class="function" id="last_outcome_text" data-name="last_outcome_text">
+      <h3 class="function-name">last_outcome_text <span class="kind">fn</span></h3>
+      <pre class="usage"><code>last_outcome_text() <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="doc">&quot;&quot; for host.OK, else the reason (a panic's message, cut at 1023 bytes).</p>
+    </div>
+    <div class="function" id="account_new" data-name="account_new">
+      <h3 class="function-name">account_new <span class="kind">fn</span></h3>
+      <pre class="usage"><code>account_new(memory_bytes, deadline_ms, counts, parent) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">memory_bytes: long, deadline_ms: long, counts: int, parent: ptr</span></p>
+      <p class="doc">A new account: at most `memory_bytes` live (0: no limit of its own), a deadline of `deadline_ms` (0: none) counted as host.DEADLINE_ELAPSED or host.DEADLINE_ACTIVE, and `parent` (null, or an account it narrows: what it holds counts against the parent too). null when out of memory, or when `parent` is no live account (freed, or another runtime copy's).</p>
+    </div>
+    <div class="function" id="account_free" data-name="account_free">
+      <h3 class="function-name">account_free <span class="kind">fn</span></h3>
+      <pre class="usage"><code>account_free(account)</code></pre>
+      <p class="signature"><span class="sig-params">account: ptr</span></p>
+      <p class="doc">Frees an account. The blocks charged to it are detached (its parent chain credited for them), and its children go under its own parent. Freed while in use, it is in use no more: account_in_use() is null after, here and, from its next allocation or call, on any other thread.</p>
+    </div>
+    <div class="function" id="account_use" data-name="account_use">
+      <h3 class="function-name">account_use <span class="kind">fn</span></h3>
+      <pre class="usage"><code>account_use(account) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">account: ptr</span></p>
+      <p class="doc">Puts `account` (null: none) in use on this thread: 0, or -1 when it is in use on another thread.</p>
+    </div>
+    <div class="function" id="account_in_use" data-name="account_in_use">
+      <h3 class="function-name">account_in_use <span class="kind">fn</span></h3>
+      <pre class="usage"><code>account_in_use() <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="doc">The account in use on this thread, or null.</p>
+    </div>
+    <div class="function" id="account_used" data-name="account_used">
+      <h3 class="function-name">account_used <span class="kind">fn</span></h3>
+      <pre class="usage"><code>account_used(account) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">account: ptr</span></p>
+      <p class="doc">The live bytes charged to `account` (and its children).</p>
+    </div>
+    <div class="function" id="account_tripped" data-name="account_tripped">
+      <h3 class="function-name">account_tripped <span class="kind">fn</span></h3>
+      <pre class="usage"><code>account_tripped(account) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">account: ptr</span></p>
+      <p class="doc">host.TRIPPED_DEADLINE and host.TRIPPED_MEMORY bits: what the account ran out of. 0 when neither.</p>
+    </div>
+    <div class="function" id="DEADLINE_ELAPSED" data-name="DEADLINE_ELAPSED">
+      <h3 class="function-name">DEADLINE_ELAPSED <span class="kind">const</span></h3>
+      <pre class="usage"><code>DEADLINE_ELAPSED = 0</code></pre>
+    </div>
+    <div class="function" id="DEADLINE_ACTIVE" data-name="DEADLINE_ACTIVE">
+      <h3 class="function-name">DEADLINE_ACTIVE <span class="kind">const</span></h3>
+      <pre class="usage"><code>DEADLINE_ACTIVE = 1</code></pre>
+    </div>
+    <div class="function" id="TRIPPED_DEADLINE" data-name="TRIPPED_DEADLINE">
+      <h3 class="function-name">TRIPPED_DEADLINE <span class="kind">const</span></h3>
+      <pre class="usage"><code>TRIPPED_DEADLINE = 1</code></pre>
+    </div>
+    <div class="function" id="TRIPPED_MEMORY" data-name="TRIPPED_MEMORY">
+      <h3 class="function-name">TRIPPED_MEMORY <span class="kind">const</span></h3>
+      <pre class="usage"><code>TRIPPED_MEMORY = 2</code></pre>
+    </div>
+    <div class="function" id="OK" data-name="OK">
+      <h3 class="function-name">OK <span class="kind">const</span></h3>
+      <pre class="usage"><code>OK = 0</code></pre>
+    </div>
+    <div class="function" id="PANICKED" data-name="PANICKED">
+      <h3 class="function-name">PANICKED <span class="kind">const</span></h3>
+      <pre class="usage"><code>PANICKED = 1</code></pre>
+    </div>
+    <div class="function" id="DEADLINE" data-name="DEADLINE">
+      <h3 class="function-name">DEADLINE <span class="kind">const</span></h3>
+      <pre class="usage"><code>DEADLINE = 2</code></pre>
+    </div>
+    <div class="function" id="CANCELLED" data-name="CANCELLED">
+      <h3 class="function-name">CANCELLED <span class="kind">const</span></h3>
+      <pre class="usage"><code>CANCELLED = 3</code></pre>
+    </div>
+    <div class="function" id="MEMORY_CAP" data-name="MEMORY_CAP">
+      <h3 class="function-name">MEMORY_CAP <span class="kind">const</span></h3>
+      <pre class="usage"><code>MEMORY_CAP = 4</code></pre>
+    </div>
+    <div class="function" id="OUT_OF_MEMORY" data-name="OUT_OF_MEMORY">
+      <h3 class="function-name">OUT_OF_MEMORY <span class="kind">const</span></h3>
+      <pre class="usage"><code>OUT_OF_MEMORY = 5</code></pre>
+    </div>
+    <div class="function" id="INCOMPATIBLE" data-name="INCOMPATIBLE">
+      <h3 class="function-name">INCOMPATIBLE <span class="kind">const</span></h3>
+      <pre class="usage"><code>INCOMPATIBLE = 6</code></pre>
     </div>
   </div>
 </main>

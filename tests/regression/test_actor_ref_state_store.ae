@@ -1,0 +1,168 @@
+// Regression (#3386): a store into another actor's state through its
+// reference (`k.name = s`, `k.kept = r`, `k.items[i] = r`, `k.names = arr`,
+// `k.kept.name = s`) is a store into a place the actor owns: it takes the
+// value and releases the one it replaces, as the actor's own store does.
+//
+// It was a plain C assignment. The state shared what its source still
+// owned, so once the source's owner let go (a local's scope exit, a box's
+// heap.free) the actor held released strings and closure environments,
+// read them, and released them again when it ended; and what a store
+// replaced leaked. std.supervise's start copied its spec's children that
+// way and then freed the spec (tests/regression/test_supervise.ae).
+//
+// Each check reads its values after churn, allocations of the same sizes
+// that reuse what was freed. Every store happens while the actor is idle
+// (after an ask). The leak check runs where the heap count is exact
+// (mem.heap_in_use_exact): after a warm-up, some window of the same work
+// grows by exactly 0 (mem.steady_growth). Strings are built from
+// parameters, because string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+extern scheduler_release_actor(a: ptr) @c_import
+extern scheduler_reclaim_released() -> int @c_import
+
+struct Item {
+    name: string
+    f: fn
+}
+
+message Churn { w: string }
+message Get {}
+message Joined { s: string }
+
+actor Keeper {
+    state name = ""
+    state kept = Item { name: "", f: || { return 0 } }
+    state Item[2] items
+    state string[2] names
+    state cb = || { return 0 }
+
+    receive {
+        Churn(w: w) -> {
+            i = 0
+            while i < 8 {
+                c = string.concat(w, "!")
+                d = Item { name: string.concat(w, "!!"), f: counter(w) }
+                i = i + string.length(c) + string.length(d.name)
+            }
+        }
+        Get() -> {
+            int a = call(kept.f)
+            int b = call(items[0].f)
+            int c = call(items[1].f)
+            int e = call(cb)
+            reply Joined { s: "${name},${kept.name}:${a},${items[0].name}:${b},${items[1].name}:${c},${names[0]},${names[1]},${e}" }
+        }
+    }
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3386: ${msg}")
+        exit(1)
+    }
+}
+
+// A closure over a string of its own: its length.
+counter(w: string) -> fn {
+    label = string.concat(w, "+")
+    return || { return string.length(label) }
+}
+
+ask_all(k: actor_ref[Keeper]) -> string {
+    string s = k ? Get {}
+    return s
+}
+
+// Each source is a local of this function, released at its exit; the
+// actor's state must hold references of its own.
+fill(k: actor_ref[Keeper], w: string) {
+    s = string.concat(w, "n")
+    k.name = s
+    r = Item { name: string.concat(w, "kk"), f: counter(w) }
+    k.kept = r
+    q = Item { name: string.concat(w, "i0"), f: counter(string.concat(w, "x")) }
+    k.items[0] = q
+    k.items[1] = r
+    arr = [string.concat(w, "a"), string.concat(w, "bb")]
+    k.names = arr
+    t = string.concat(w, "n1")
+    k.names[1] = t
+    f = counter(string.concat(w, "yy"))
+    k.cb = f
+}
+
+// Stores into a part of a state field: a struct field's string, an
+// element's string.
+rename(k: actor_ref[Keeper], w: string) {
+    s = string.concat(w, "rk")
+    k.kept.name = s
+    t = string.concat(w, "r1")
+    k.items[1].name = t
+}
+
+round(k: actor_ref[Keeper], w: string) -> int {
+    fill(k, w)
+    k ! Churn { w: w }
+    got = ask_all(k)
+    // name "wn"; kept "wkk", its closure over "w+" (2); items[0] "wi0", over
+    // "wx+" (3); items[1] the same as kept; names "wa", "wn1"; cb over
+    // "wyy+" (4).
+    check(got == "wn,wkk:2,wi0:3,wkk:2,wa,wn1,4", "stores through the reference (${got})")
+    rename(k, w)
+    k ! Churn { w: w }
+    got = ask_all(k)
+    check(got == "wn,wrk:2,wi0:3,wr1:2,wa,wn1,4", "stores into parts of the state (${got})")
+    return string.length(got)
+}
+
+// A fresh actor per round, filled through its reference, asked and
+// released: its state drop releases only the references the state took.
+release_round(w: string) {
+    k = spawn(Keeper())
+    round(k, w)
+    let kp: ptr = k
+    scheduler_release_actor(kp)
+}
+
+fn release_window(w: string, n: int) {
+    i = 0
+    while i < n {
+        release_round(w)
+        i = i + 1
+    }
+}
+
+main() {
+    println("=== test_actor_ref_state_store ===")
+    k = spawn(Keeper())
+    check(round(k, "w") == 29, "a round adds up")
+    i = 0
+    while i < 20 {
+        round(k, "w")
+        i = i + 1
+    }
+    release_window("w", 20)
+    check(scheduler_reclaim_released() == 0, "released actors still retired after the first rounds")
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                j = 0
+                while j < 10 {
+                    round(k, "w")
+                    j = j + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 10 rounds grew the heap by ${grown} bytes in every run")
+        release_window("w", 250)
+        check(scheduler_reclaim_released() == 0, "released actors still retired after the warm-up")
+        grown = mem.steady_growth(|| {
+                release_window("w", 50)
+                check(scheduler_reclaim_released() == 0, "released actors still retired after a window")
+            }, 5)
+        check(grown == 0, "spawn, fill and release grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_actor_ref_state_store passed ===")
+}

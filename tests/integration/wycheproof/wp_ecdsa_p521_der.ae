@@ -4,16 +4,13 @@
 // the real tls13_cert.split_ecdsa_sig (coord width 66), then p521.ecdsa_verify.
 //   "valid"   -> parse+verify MUST succeed (1).
 //   "invalid" -> parse MUST error or verify MUST return 0.
-// Stride sampling (default 10, as P-256 and P-384; WYCHEPROOF_FULL=1 sweeps
-// all, WYCHEPROOF_STRIDE=N overrides). It was 40 while std.bignum divided a
-// bit at a time and a P-521 verify took seconds; with Algorithm D (#2595)
-// it takes about 60 ms, and the full suite passes.
+// Every vector runs by default (a P-521 verify is a few milliseconds since
+// #2600; it was about 60 ms on std.bignum, and seconds before #2595);
+// WYCHEPROOF_STRIDE=N samples every Nth case instead.
 //
-// P-521 hash note: the curve order is 521 bits (66 bytes), but SHA-512 is
-// only 64 bytes. FIPS 186-5 uses the whole digest as the integer z when the
-// hash is shorter than the order — i.e. the 64-byte digest right-aligned in
-// a 66-byte big-endian buffer (two leading zero bytes), which is exactly
-// what p521.ecdsa_verify reads via from_be66. hash66() below builds that.
+// P-521 hash note: the curve order is 521 bits, SHA-512 only 512, and
+// FIPS 186-5 uses the leftmost min(521, 512) bits of the digest: all of
+// it. ecdsa_verify takes the 64-byte digest as it is (sha512_of below).
 
 import std.cryptography.tls13_cert
 import std.cryptography.p521
@@ -69,24 +66,17 @@ fn coordn(hexs: string, width: int) -> ptr {
     return out
 }
 
-// SHA-512 of the message, right-aligned into a 66-byte big-endian buffer so
-// p521.ecdsa_verify's from_be66 reads the correct integer z (FIPS 186-5:
-// short hash used whole, not truncated). 64-byte digest -> 2 leading zeros.
-fn hash66(b: ptr, n: int) -> ptr {
-    ctx, e = sha2.new("sha512")
+// The SHA-512 digest itself, 64 bytes: ecdsa_verify uses the leftmost 521
+// bits of the digest it is given (FIPS 186-5), so a shorter digest is used
+// whole. Zero-padding it to 66 bytes would make it a different number.
+fn sha512_of(b: ptr, n: int) -> ptr {
+    ctx, _e = sha2.new("sha512")
     sha2.update(ctx, bytes.view(b)[0..n])
-    d = sha2.final_bytes(ctx) // 64 bytes
-    out = bytes.new(66)
-    bytes.set(out, 0, 0)
-    bytes.set(out, 1, 0)
-    i = 0
-    while i < 64 { bytes.set(out, 2 + i, bytes.get(d, i)) i = i + 1 }
-    bytes.free(d)
-    return out
+    return sha2.final_bytes(ctx)
 }
 
 main() {
-    stride = 10
+    stride = 1
     wf = os.getenv("WYCHEPROOF_FULL")
     if wf == "1" { stride = 1 }
     sv = os.getenv("WYCHEPROOF_STRIDE")
@@ -133,7 +123,7 @@ main() {
             sig_hex = json.get_string_raw(json.object_get_raw(t, "sig"))
 
             msg = from_hex(msg_hex)
-            h = hash66(msg, string_length(msg_hex) / 2)
+            h = sha512_of(msg, string_length(msg_hex) / 2)
             sig = from_hex(sig_hex)
             sig_len = string_length(sig_hex) / 2
 

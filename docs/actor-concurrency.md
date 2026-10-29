@@ -37,11 +37,6 @@ a scheduler thread runs the handler, from the first actor on (#3112).
 - Batch dequeue drains multiple messages in a single atomic operation
 - Configurable threshold (SCHEDULER_DRAIN_BATCH = 512)
 
-**Thread-Local Message Pools:**
-- Per-thread pool of 256 pre-allocated buffers (up to 256 bytes each)
-- Eliminates malloc/free on the message hot path
-- Falls back to malloc for oversized messages or pool exhaustion
-
 **Direct Send:**
 - Bypasses incoming queue for same-core actors
 - Writes directly to the actor's mailbox
@@ -52,7 +47,7 @@ a scheduler thread runs the handler, from the first actor on (#3112).
 - Increases under sustained load, decreases when idle
 
 **Inline Single-Int Messages:**
-- Messages with one integer field bypass pool allocation entirely
+- Messages with one integer field need no payload allocation at all
 - Value encoded directly in `Message.payload_int`
 
 ## Actor Model
@@ -65,6 +60,7 @@ Aether implements a lightweight actor model where actors are state machines that
 2. **Send** - Send messages with the `!` operator or generated send functions
 3. **Step** - Scheduler calls the actor's step function to process mailbox messages
 4. **Deactivate** - Actor is marked inactive when its mailbox is empty
+5. **End** - A panic in its handler, `actors.kill(ref)`, `actors.stop()` from its own handler, or a C host's release ends it, once ([The end of an actor](#the-end-of-an-actor))
 
 ### Actor Structure
 
@@ -80,7 +76,7 @@ typedef struct {
 } CounterActor;
 ```
 
-The fields, in order: `active`, `id`, `mailbox`, `step`, `thread`, `auto_process`, `assigned_core`, `migrate_to`, `spsc_queue`, `reply_slot`, `step_lock`, `timeout_ns`, `last_activity_ns`, `step_payload`, `step_type`, `dead`, `alloc_size`, `destroy_state`, `release_message`, `scheduler_owned`, `inbox`, `thread_parked`, `inflight`. The header comments each one.
+The fields, in order: `active`, `id`, `mailbox`, `step`, `thread`, `auto_process`, `assigned_core`, `migrate_to`, `spsc_queue`, `reply_slot`, `step_lock`, `exit_flags`, `mailbox_bound`, `timeout_ns`, `last_activity_ns`, `step_payload`, `step_type`, `dead`, `alloc_size`, `destroy_state`, `release_message`, `scheduler_owned`, `incarnation`, `inbox`, `thread_parked`, `inflight`, `death_watch`, `mailbox_pending`, `full_drops`. The header comments each one.
 
 An actor the compiler generates holds the base as its first member instead, `ActorBase _aether_base;`, followed by its states. So a state can be named like any of these fields (`state id`, `state active`); only a state named `_aether_base` is refused (#3094).
 
@@ -103,6 +99,15 @@ typedef struct {
 ```
 
 The mailbox is a single-producer single-consumer (SPSC) queue. The owning scheduler thread delivers messages and calls the actor's step function. `count` is `_Atomic` to handle the rare case where work-stealing transfers an actor between cores mid-flight. Cross-core messages arrive via the scheduler's per-sender lock-free incoming queues and are delivered to the mailbox by the owning core.
+
+### A bounded mailbox
+
+The 32 slots are not a limit: what a full mailbox cannot take waits in the core queues, the senders' deferred sends and the actor's overflow, without bound. An actor declared `@mailbox(bound: N)` (#2974) takes at most N messages that its step has not taken yet, wherever they wait. The generated spawn sets `ActorBase.mailbox_bound`; `mailbox_pending` counts the messages accepted for the actor and not yet taken or dropped:
+
+- A send takes its place before it routes (`aether_mailbox_admit`, a compare-and-swap loop, exact: refused only while N are pending), in `scheduler_send_local` and `scheduler_send_remote`; `scheduler_send_many` sends a bounded actor's messages through them one at a time, and the main thread's batch takes each one's place as it joins the batch. The bound sits in the padding after `step_lock`, on the line `dead` is on, so an unbounded actor's send pays one load and a branch, and no field moved for it.
+- Refused, it is never blocked on (a blocked sender can be a core's thread that the actor's own core waits on): a plain `!` is released and counted (`ActorBase.full_drops`, `scheduler_full_drops()`, `actors.full_drops(ref)`), reported once on stderr; an ask fails at once with `AETHER_ASK_FULL`, "the mailbox is full"; `scheduler_try_send` (`try_send(ref, Msg { ... })`) returns the reason, "the mailbox is full" or "the actor is dead", to its caller, and counts nothing.
+- A place comes back when the generated step takes the message (`aether_mailbox_took`, emitted only for a bounded actor) or when a drop releases it before that (`release_undelivered` and the cooperative scheduler's drops: a death's drain, a message on its way to a dead actor, a teardown).
+- System messages (`Down`, `IoReady`) are neither counted nor refused.
 
 ### Message Structure
 
@@ -134,7 +139,7 @@ if (current_core_id >= 0 && current_core_id == atomic_load_explicit(&actor->assi
 }
 ```
 
-For single-int messages, the code generator emits an inline path that stores the value directly in `msg.payload_int`, bypassing pool allocation.
+For single-int messages, the code generator emits an inline path that stores the value directly in `msg.payload_int`, with no payload allocation.
 
 A `ptr` field (a `std.bytes` handle, a `*T`) crosses as the pointer, with no copy. To hand the buffer over rather than share it, send it with `move`: `r ! Chunk { data: move buf }`. The sender's `buf` is then moved-from, and any later use of it is a compile error naming the line of the move. See [`move`](isolated.md#move-handing-a-buffer-over-2975).
 
@@ -180,7 +185,7 @@ A handled message's fields are released by the step after its handler: `_aether_
 
 - the messages queued to an actor that panicked, or that was released, and the ones sent to it after;
 - a message of a type its receiver has no handler for (its payload was not even freed before);
-- the message a handler panicked on: the step records it in `step_payload` while the handler runs, and the step's panic barrier drops it, since the release after the handler never ran;
+- the message a handler panicked on: the step records it in `step_payload` while the handler runs, and the step's panic barrier drops it, since the release after the handler never ran. Its drop functions run in a frame of their own, as the drops at an actor's end do: one that panics is reported through the death hook and ends there (#3403). They run in the step's context, as on the actor's own thread, and the barrier gives the thread's context back after them (#3416);
 - a message refused because the scheduler is not running, or that could not be queued for lack of memory.
 
 The receiver's own definitions interpret the payload, as its dispatch does, so a message is released as the program that defined it lays it out. A `ptr` field owns nothing (R4), so a buffer sent with `move` in one and dropped undelivered is not freed; a field of an owned type (`type Buf = owned ptr drop bytes.free`, #3142) is, by this same release, and a handler that binds such a field takes it out of the message, so the release after the handler finds nothing left of it. A message sent through a C `AetherActorRef` whose actor was released has only its payload freed, since the block may hold another actor by then, whose definitions need not be the sender's.
@@ -192,9 +197,12 @@ An ask (`actor ? Msg {}`) sends its message with a reply slot (`Message._reply_s
 - an ask to an actor that is already dead (panicked or released) is not sent;
 - an ask whose message is dropped undelivered (its target died or was released on the way, or the mailbox it waited in was drained at the death) fails as dead;
 - an ask whose handler panics with it in hand fails from the step's panic barrier as "died before it replied";
-- an ask whose handler returns without replying fails when its step ends, as "returned without replying".
+- an ask whose handler returns without replying fails when its step ends, as "returned without replying";
+- an ask with no memory to make it (its reply slot, or the copy of its message) fails at once and sends nothing (#3387): no state of the thread or of its core is left set, and inside a library call the call ends with `AETHER_OUT_OF_MEMORY`.
 
-The ask a handler holds is part of its thread's step context, with the actor stepping. A step can run inside another (a send steps an idle actor of the same core inline, and a cooperative ask polls until its reply), so each step starts with no ask of its own and gives the enclosing step its context back when it ends: a handler that sends, or asks, before it replies still answers its own asker.
+The slot rides in the ask's own message, which the ask builds itself (#3395). It is never handed to the send through the thread: the send can step its target inline, and a message that handler sends carries no slot.
+
+The ask a handler holds is part of its thread's step context, with the actor stepping. A step can run inside another (a send steps an idle actor of the same core inline, and a cooperative ask polls until its reply), so each step starts with no ask of its own and gives the enclosing step its context back when it ends: a handler that sends, or asks, before it replies still answers its own asker. The ask is one part of a step's context ("The delivery contract", item 5, has the rest).
 
 `v, err = actor ? Msg {}` reads the reason (the language reference's Ask Pattern lists them); `v = actor ? Msg {}` gives the reply type's zero value for any of them, as it does at a timeout.
 
@@ -219,6 +227,70 @@ Like the mailbox, the overflow is touched only by the thread that runs the actor
 
 An ask that was answered or failed returns only once its reply slot is freed. The replier lets go of the slot a few instructions after it wakes the asker, so the asker waits for that and frees the slot itself (#3245). What an ask allocated is gone when it returns, which a program that counts its heap around asks relies on. A timed-out ask does not wait; its replier frees the slot when it comes.
 
+## The delivery contract
+
+What a send promises, on both schedulers (#2974):
+
+1. **Per sender, in order.** Two messages one sender sends one receiver are handled in the order they were sent, on any core and across the receiver's moves between cores (#3090, #3093, #3240, #3241). Nothing is promised between two senders.
+2. **At most once.** A message is handled once, or dropped once. A message to an actor that has ended (panicked, killed, stopped), or that its death or a restart in place drops, is released through `aether_message_drop` (what its fields own included) and counted by `scheduler_dead_sends()` (`actors.dead_sends()`); one to a released actor by `scheduler_released_sends()`, one sent while the scheduler is stopped by `scheduler_stopped_sends()`. An ask that no reply can come for fails with the reason as soon as that is known (the actor is dead, dies with it, or its mailbox is full), not at its timeout (#3151).
+3. **Unbounded by default, as a decision.** A send never blocks its sender. The sender is often a core's own thread, and one blocked on a full mailbox whose actor that same core, or a core in a cycle with it, must run would deadlock the scheduler. So what a mailbox cannot take waits in the core queues, the senders' deferred sends and the actor's overflow, and memory is the limit.
+4. **A bound when the actor asks for one.** `@mailbox(bound: N)` (above, "A bounded mailbox") caps what waits for an actor at N. A send past it is refused at once rather than blocked: counted for a plain `!`, reported to the caller of `try_send` and of an ask.
+5. **A handler runs in its own context, whichever thread steps it.** A step can run inside another: a send steps an idle actor of the same core inline, inside the sender's handler, and a cooperative ask polls until its reply. So every step, at entry, puts aside the per-thread context of the code it runs inside and starts with none of it; at exit, normal or by panic, it gives that context back as it was; and its panic, or its end, undoes only what the step itself made (#3389; the rule is written once, in `runtime/actors/aether_step_barrier.h`). What follows the handler is the step's too, and runs in its context as on the actor's own thread: the drop of the message a panicking handler ran on, the finalize of an actor its step ended (the drops of the messages waiting for it are the actor's code) and the death hook, each in a containment frame of its own, so that a panic there ends nothing but itself; the context is given back after them (#3403, #3416). No step runs an actor whose step is already on the stack, so none finalizes an actor whose handler is still running (#3391): both schedulers step an actor only under its step lock, and an ask's poll leaves the asker, and any actor stepping below it, alone. The context, part by part:
+   - the ask in hand and the actor stepping: a handler that sends, or asks, before it replies still answers its own asker;
+   - the in-step flags the signal handler reads: the outer handler keeps its signal recovery after an inner step;
+   - a supervisor's restart claim, the reborn block and the spawn brackets: a nested step's spawn takes no claimed block and is no factory's child, and its panic undoes no enclosing claim;
+   - the sandbox levels in force on the thread, in every runtime copy that shares the count: a receiver stepped inside an enforce block is checked as on a thread of its own, against the levels it pushes itself, its drops after its handler included (#3416: they ran against the block's), and the block's levels are in force again when the send returns (#3393);
+   - the library calls running on the thread, with what they carry: an interruption on its way, the call's deadline and cancel, the stop a failed allocation notes, and the caller info the host set for the call. An actor stepped inside a call (a send's inline step on a core's thread, or a cooperative ask's poll in an export) is not the call: its loops are not cut by the call's deadline, a `try` in it catches its own panics, and it reads no caller info, as on a core's thread, in its handler and in its drops after it; the call is cut at its own next safe point once the step returns (#3392, #3396, #3416);
+   - the execution account in use on the thread (`aether_exec_use`, #2954): an actor stepped inside code that has one in use is charged nothing to it, its drops included, as on a thread of its own; the account stays the thread's meanwhile, and one the step left in use is let go.
+
+   A plain step pays for none of the parts: one word (`aether_caps_slow`'s step bits) says whether some thread holds any of them, read once at each end of the step with one predicted branch; only when it is set are the parts looked at, out of line, each put aside only when this thread holds it. The executions are read from the thread's frames block, which the step's try frame is pushed on anyway. Measured against the barrier before the step-context rule (76d090fd), ping_pong and thread_ring are within 1%, inside the runs' spread; what remains is two thread-local reads at entry, the outer step's in-step flag and actor id, which a nested step gives back.
+
+## The end of an actor
+
+An actor ends once (#2974), by the first of these: a panic in its handler (the step's barrier catches it), `actors.kill(ref)` from anywhere (or the death of an actor it is linked to), `actors.stop()` from its own handler, or a C host's `scheduler_release_actor`. Each sets a bit in `ActorBase.dead` (`PANICKED`, `KILLED`, `STOPPED`, `RELEASED`), and the first keeps its reason with its watch list (`aether_actor_death_reason`): the panic's reason, `"killed"` or `"normal"`. From then on a send to it is dropped.
+
+Its death is then finalized, once, on the thread that owns its mailbox and while the actor steps nothing: what waits for it (its mailbox, the overflow behind it, an actor thread's inbox) is dropped through `aether_message_drop`, an ask among them fails as dead, and every message is credited as handled and counted by `scheduler_dead_sends()` (`actors.dead_sends()`), with those sent to it later and those still on their way when it died. A dropped message's release is the program's code for a field of an owned type (its drop function); each one runs in a frame of its own (`aether_message_drop_at_end`), so a panic in it is reported through the death hook with the actor's id and the panic's reason, as a panic in the release after a handler is by the step barrier, and the drain goes on (#3401: it left the finalize, so the rest of the drain and the notice never ran). The hook runs in a frame of its own too: one that panics is reported on stderr, and the drain goes on (#3417: its panic left the finalize halfway, the messages it had drained never counted, so `scheduler_shutdown` and `wait_for_idle()` waited for them forever, and the watchers never told). Nothing a finalize runs leaves it. Its watchers are then told. Where it happens:
+
+- a panic: in the step barrier, as the step unwinds;
+- a stop, and a kill that lands while its handler runs: when the handler returns (the barrier checks the bits after every step). In the barrier, on either path, the finalize runs in the step's context and in a containment frame of its own, before the step gives the thread's context back: its drops are the actor's code, so an actor stepped inline runs them as on its own thread (#3416);
+- a kill of an actor that is not stepping: its core finalizes it at the top of its loop, from a request the kill posts (`Scheduler.control`), or from its relief while it waits in an ask. `scheduler_wait` counts the requests, so `wait_for_idle()` returns only once the Downs are sent. Where no core thread runs (a C host between `scheduler_init` and `scheduler_start`, or one that never starts the cores, and a scheduler that has stopped), the kill finalizes it at once, on the killing thread (#3399: before the start it was posted to cores that did not run yet, and never finalized if they never did);
+- an actor with a thread of its own: on that thread, at the end of its loop (#3298: its inbox is dropped and credited too, and a sender that pushes after that drain drops what it pushed).
+
+So a `Down` never comes while the actor's handler still runs, and it comes after the last messages the actor sent its watcher, on the same core's path. A killed actor whose handler is waiting in an ask has that ask end at once, with `"the asking actor was killed"`; the handler then runs to its end, and the actor ends after it (a handler is never cut short).
+
+### Death notices
+
+`actors.monitor(ref)`, from a handler, asks for one `Down { ref: actor_ref, reason: string }` when `ref` ends, and returns the monitor's id; if `ref` has ended already, the `Down` is sent at once with the reason it died of. `actors.demonitor(id)` drops the monitor: no `Down` of it is handled after the call, one already on its way included, since the monitor's id rides in the message (`Message.payload_int`) and the generated step checks it against the watcher's own list before the arm runs (`aether_down_accept`). An actor handles it in a `Down(ref, reason) -> { ... }` arm.
+
+`Down` is the runtime's message: the compiler declares it for every program that names it, with the reserved id 254 (`AETHER_MSG_DOWN`), and checks its struct against the runtime's `AetherDownMsg`, since the runtime writes the payload; a program's own `message Down` is refused. Its `reason` is a counted string the message owns. An actor with no `Down` arm drops a `Down` as any message it has no arm for.
+
+Each actor's watchers live in its `death_watch` list (`runtime/actors/aether_supervision.c`), made on first use: who monitors it, whom it monitors, and whom it is linked to. A death marks the list finished under its lock and takes its entries; a monitor that comes after finds it finished and is answered at once. No two lists are locked together.
+
+### Links
+
+`actors.link(ref)`, from a handler, ties the two actors both ways (a `LINK` entry in each list). When either ends, the other takes the death as its watchers are told: an actor that traps exits (`actors.trap_exits(true)`, the `AETHER_EXIT_TRAP` bit) gets a `Down` with the reason (monitor id 0, which `demonitor` never drops), and one that does not ends too, by `KILLED`, with the same reason, unless the reason is `"normal"`, which ends nothing. Its own watchers and links then take its death in turn, so a failure climbs a tree of links until an actor that traps exits. Where a death is finalized as soon as it is seen (the cooperative scheduler, and the threaded one once it is stopped), an end a link passes on while the thread is still making another waits in the thread's queue and is made after it, so a chain of linked actors ends in the same stack depth however long it is (#3394). No panic leaves such an end now (a dropped message's release, an owned field's drop function, and the death hook it reports a panic to each run in a frame of their own, #3401, #3417); the queue is still journaled, so a panic that got out would give up the ends still queued, as an unwinding recursion did, and leave the thread's later links working (#3400). `actors.unlink(ref)` removes the entries both ways; a death already taken stays taken. Linking to an actor that has ended already takes its death at once.
+
+Both schedulers step inside one panic barrier (`runtime/actors/aether_step_barrier.h`), so on the cooperative one too (Emscripten, esp32) a panic is a death with a `Down`. On wasi a panic ends the program, since the target has no setjmp to unwind with, so a death a monitor would watch cannot be caught there: `actors.monitor`, `actors.link` and `actors.trap_exits` (and `std.supervise`, built on them) are refused at compile time on that target, through an `unavailable` attribute on the runtime's declaration.
+
+### Restart in place
+
+A supervisor restarts a child under the ref its siblings and clients already hold (`std.supervise`, built on `actors.rebirth_begin`, `actors.rebirth_end` and `actors.incarnation`). It reruns the child's factory, so the factory's configuration (state writes, first messages) reaches the new incarnation too, and the factory's spawn of the child's actor type takes the child's own block instead of a new one:
+
+1. `actors.rebirth_begin(child)` claims the block when no message for it can still arrive: the child has ended, its death is finalized (what was queued is dropped and counted), its step lock is free (taken now, so nothing steps it), and no message is counted in flight for it. Otherwise it says "not yet" (0), and the supervisor tries again from a message to itself, so it never waits on its own core; or "never" (-1), for a live, released or C-registered actor.
+2. The spawn (`scheduler_spawn_actor`, which finds the claim in a runtime thread-local) resets the block: the old state destroyed (`destroy_state`) and zeroed, the mailbox, timeouts, watch lists and reason cleared (the list emptied in place, under its lock: a monitor or a link of the dead child, from another handler, may hold it to read the death it told), `incarnation` one more; `id`, `assigned_core`, the overflow's allocation and the mailbox bound and its pending count kept (every message counted against the bound is taken or dropped, so the count stays exact). The generated spawn then runs the state initializers as on a new block.
+3. Its last line, `scheduler_spawn_ready`, clears the death bits with a release store and lets go of the step lock: the child is alive. A fresh spawn is alive already: `aether_rebirth_take` and `scheduler_spawn_ready` read their thread-locals only while a claim or a spawn capture is live on some thread (a process-wide count), so a spawn pays one load for them, not a thread-local read (a call, with emutls).
+4. `actors.rebirth_end(child)` returns 1, or undoes a rebirth the factory did not finish (it spawned no actor of that type, or panicked: the child stays ended, "the restart failed"). A panic of the supervisor's own handler undoes it as well.
+
+No message sent before the restart reaches the new incarnation. A counted send reads its target's death after counting itself, so a message counted before the claim held it up (in flight), and one counted after it reads the death and drops itself (counted in `dead_sends`), until the release store, after which it reaches the new incarnation. The main thread's batch flush reads the death only while a claim is live: the claim counts itself in `aether_caps_slow` (from bit 8, the word a step reads anyway) before it reads the child's inflight count, and the flush counts its messages before it reads that count, both seq_cst, so one of the two sees the other. A local send reads the death on the child's core, where the death was finalized. While the child is dead its core touches it only through counted messages (none) and steps it only under the step lock (the rebirth's), so the reset and the initializers run without a race against its core or its senders. A ref need not tell incarnations apart: the handle is the point. `actors.incarnation(ref)` says how many times it was restarted, and a monitor is per incarnation (a client re-monitors after a restart). A C `AetherActorRef` keeps its `id`, so it reaches the new incarnation too.
+
+`tests/runtime/test_actor_rebirth.c` restarts an actor that panics every 150 messages while three sender actors and the main thread send to it: each message is handled at most once and in its sender's order, handled plus dropped is what was sent, nothing reaches a half-made incarnation, and nothing a sender had finished sending when the child was claimed reaches the new one.
+
+### Supervisors
+
+`std.supervise` is an ordinary actor on these pieces (`std/supervise/module.ae`). `supervise.start` runs each child's factory in order before it returns, inside a spawn capture (`aether_actor_capture_begin` and `aether_actor_capture_end`: the first actor that comes alive between the two, through `scheduler_spawn_ready`, is the child; captures nest), so every child's ref is known at once. The supervisor then traps exits and links each child, so a child's death reaches it as a `Down`, and its own death, by a panic or a kill, takes the children with it.
+
+At a child's `Down` it checks the child's restart kind (`"permanent"`, `"transient"`, `"temporary"`) and its budget (the restarts made within the window, kept in a ring of times), then takes the strategy's set: the child alone (`one_for_one`), every child (`one_for_all`) or the child and those started after it (`rest_for_one`). The others in the set are killed, newest first, and each child of the set is marked to restart; one an earlier death marked and that is not restarted yet is not marked again, so a death while a restart still waits joins it, and each child restarts once (#3390). The marked children are restarted from a message to itself, one at a time, the first in start order next: a child it killed waits for its own `Down` (so its death is finalized before the claim), and a claim that says "not yet" is tried again from a later message, so the supervisor never blocks its core. Each restart runs the factory between `rebirth_begin` and `rebirth_end`, in the same capture, and links the child again. Past its budget, or at a restart that fails, it kills its children, newest first, and panics with the reason, so its own watchers get a `Down` saying why, and a supervisor it is linked to restarts it in turn.
+
 ## Actor Timeouts
 
 The `after` clause on a `receive` block fires a handler if no message arrives within a given number of milliseconds:
@@ -235,7 +307,7 @@ actor Monitor {
 
 The countdown starts when the actor waits on an empty mailbox: at spawn, and again each time it has handled a message. A message that arrives within the interval stops it, and the next wait starts it from the beginning, as Erlang's `receive ... after` does: the Monitor warns every time 5 seconds pass without a heartbeat. The timeout fires once per countdown. When its handler has run, only a message starts the next one, so a handler that sends the actor a message (`self ! Tick {}` below) keeps a cycle going, and one that sends nothing leaves the actor idle (#3162).
 
-Internally, `timeout_ns` in the actor's base holds the interval, set at spawn and kept, and `last_activity_ns` when the countdown was armed (0 while it is not). The generated `spawn_<Actor>` arms it. The generated step function arms it again at the end of each message's handling, disarms it when it takes a message, and before each `mailbox_receive()` fires the `after` arm (disarming it first) when it is armed, the interval has passed by `_aether_clock_ns()`, and no message is waiting. With no message to step it for, the actor's core (or its own thread) steps it once the deadline passes, so the timeout fires within a park's timed wait of it (32 ms at most). `wait_for_idle()` waits for every armed countdown of a live actor to end (#3102), so a poller that never stops keeps it waiting. The end of `main` waits for the messages sent to be handled, but not for countdowns (#3219): an actor with `after 60000` that handled a message moments before `main` returned does not hold the exit, and its timeout does not run, on either scheduler. `scheduler_shutdown()` calls the wait with countdowns left out, where `wait_for_idle()` keeps them. A program that wants a countdown to fire before it ends calls `wait_for_idle()` first.
+Internally, `timeout_ns` in the actor's base holds the interval, set at spawn and kept, and `last_activity_ns` when the countdown was armed (0 while it is not). The generated `spawn_<Actor>` arms it. The generated step function arms it again at the end of each message's handling, disarms it when it takes a message, and before each `mailbox_receive()` fires the `after` arm (disarming it first) when it is armed, the interval has passed by `_aether_clock_ns()`, and no message is waiting. With no message to step it for, the actor's core (or its own thread) steps it once the deadline passes, so the timeout fires within a park's timed wait of it (32 ms at most). `wait_for_idle()` waits for every armed countdown of a live actor to end (#3102), and for each arm that fired to return (#3443: the step disarms the countdown before the arm runs, and the arm may still send), so a poller that never stops keeps it waiting. The end of `main` waits for the messages sent to be handled, but not for countdowns (#3219): an actor with `after 60000` that handled a message moments before `main` returned does not hold the exit, and its timeout does not run, on either scheduler. `scheduler_shutdown()` calls the wait with countdowns left out, where `wait_for_idle()` keeps them. A program that wants a countdown to fire before it ends calls `wait_for_idle()` first.
 
 The timeout expression can reference actor state fields, not just integer literals, useful when the interval is configurable per-actor or computed:
 
@@ -321,6 +393,14 @@ Both levels are independent and can be used alone or together.
 
 In single-core mode, actors run cooperatively. The scheduler processes actors in a loop, calling each actor's step function when its mailbox contains messages.
 
+Each step runs inside the same panic barrier the multi-core scheduler uses (`runtime/actors/aether_step_barrier.h`, #2974), so a panic in a handler ends that actor, not the program: its death is finalized on the spot (or when its handler returns, for a kill or a stop that came during it) and its watchers get a `Down`, as above. Where the target has no setjmp (wasi), a panic still ends the program, and watching a death is refused at compile time.
+
+An ask polls the actors until its reply comes, on the one thread. Its timeout holds as with threads (#3330): the polls stop at the deadline, and a handler slower than the timeout, which the poll cannot leave while it runs, has its reply discarded as late, so the ask ends with `"ask timed out after N ms"`. The deadline is the only bound: an ask behind a long queue gets its reply once the queue ahead of it is handled, as with threads. An ask whose message is still queued at its deadline leaves it there as a plain send: it is handled later and its reply goes nowhere. An ask nothing can answer (no actor has a message left and no receive timeout is armed) ends at once with the same reason.
+
+The polls never step the asking actor, nor any actor whose handler is on the stack below it: its next message waits for the handler to return, as with threads (#3391). It used to be handled inside the ask, by a second step of the same actor, its state changing under the first handler, and a `stop()` or a panic there finalized the actor while the first still ran. So an ask only the asker could answer (it asked itself, or an actor that asks it back) is one nothing can answer, and ends at once.
+
+An export of a library on this runtime that asks (or waits) steps the actors it polls on the call's thread, inside the call, and they run outside it, as every nested step does ("The delivery contract", item 5): the call's deadline does not cut their loops and they read none of the call's caller info. A call can only wait for an actor it steps to return; its deadline then cuts it at its own next safe point (#3392).
+
 ## Multi-Core Runtime
 
 The multi-core scheduler uses core partitioning with locality-aware placement:
@@ -333,7 +413,7 @@ The multi-core scheduler uses core partitioning with locality-aware placement:
 
 ### Synchronization
 
-The `wait_for_idle()` function blocks until all actors have finished processing their messages (quiescence). It is **non-destructive**: it does not stop or join scheduler threads, so it can be called multiple times in a program. This is the recommended way to synchronize the main thread with actor completion:
+The `wait_for_idle()` function blocks until all actors have finished processing their messages (quiescence). It is **non-destructive**: it does not stop or join scheduler threads, so it can be called multiple times in a program. It is for code outside the actors (main, or a host's thread): it waits for every actor, so inside one (a handler, a receive timeout's arm) it would wait for its own step, and on the threaded scheduler a drop or a death hook a core runs would wait for that core; it panics there instead, on either scheduler for a handler or an arm (the cooperative one used to run the other actors nested and return), ending that actor with the reason; a drop run outside any frame ends the process with it, and on the cooperative scheduler a drop or a death hook after a step still waits nested and returns (#3463). This is the recommended way to synchronize the main thread with actor completion:
 
 ```aether,fragment
 main() {
@@ -395,13 +475,13 @@ Measured on Windows (i7-13700K, 1,000,000 messages, 10 runs, M msg/s, medians) a
 
 Actor memory is allocated using NUMA-aware allocation (`aether_numa_alloc_aligned`, on a 64-byte boundary) at spawn time. The `scheduler_spawn_actor` function accepts the full derived-struct size to ensure correct allocation for user-defined actor types.
 
-Message payloads are managed by thread-local pools. Payloads are returned to the pool on free via `aether_free_message`, which checks whether the pointer falls within the pool range before falling back to `free`.
+A typed message's payload is a heap copy, freed with `free()` by `aether_free_message` once the message is handled or dropped. There is no payload pool: an actor can move to another core after a message is sent, so a pooled payload would be released by a thread that does not own the pool (#3374).
 
 ## Memory Model
 
 The actor runtime uses several allocation strategies for automatic cleanup:
 - **Actor memory**: one NUMA-aware, 64-byte-aligned allocation per actor at spawn time (`aether_numa_alloc_aligned`), or the kept block of a released actor of the same size. `scheduler_release_actor` takes the actor out of its core's table and retires it; it is reclaimed once every core's scheduler thread and every per-actor thread has passed the top of its loop since, and no other thread is walking the tables. The scheduler threads, per-actor threads and `wait_for_idle`'s scan for armed timeouts read the tables without a lock, so the reclaim has to wait for them; a core blocked in a long step delays it. A reclaimed block is not returned to the allocator while the scheduler runs: it stays marked released, so a send to it is dropped rather than reading freed memory, and the next spawn of that size takes it. The blocks go back with the scheduler's tables. The mailbox is an inline struct member, not a separate allocation.
-- **Message payloads**: thread-local pools with automatic return
+- **Message payloads**: a heap copy per typed message, freed when it is handled or dropped
 - **Arenas**: a general-purpose arena allocator provides bulk deallocation without per-object tracking for opt-in uses (`std.arena`, JSON parsing). The actor path does not use arenas.
 
 See [Memory Management](memory-management.md) for details on arenas, pools, and allocation strategies.

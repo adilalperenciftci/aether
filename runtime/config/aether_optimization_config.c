@@ -17,8 +17,6 @@ AetherRuntimeConfig g_aether_config = {
     .actor_count = 0,
     .preempt_enabled = false,       // Opt-in: AETHER_PREEMPT=1
     .preempt_threshold_ns = 1000000, // 1ms default
-    .profile = AETHER_PROFILE_MEDIUM,
-    .msg_pool_size = AETHER_PROFILE_MEDIUM_MSG_POOL,
     .actors_malloced = 0,
     .direct_sends = 0,
     .queue_sends = 0,
@@ -91,29 +89,20 @@ void aether_runtime_configure(AetherOptFlags flags) {
     atomic_store(&g_aether_config.use_message_dedup, (flags & AETHER_OPT_MESSAGE_DEDUP) != 0);
     atomic_store(&g_aether_config.verbose, (flags & AETHER_OPT_VERBOSE) != 0);
     
-    // Print config if verbose
-    if (flags & AETHER_OPT_VERBOSE) {
-        aether_print_config();
-    }
+    if (flags & AETHER_OPT_VERBOSE) aether_print_config_once();
 }
 
 // Initialize runtime config from environment variables
 // Called once at scheduler init before any actors spawn
 void aether_init_from_env(void) {
 #if AETHER_HAS_GETENV
-    // Profile from env or default
-    g_aether_config.profile = aether_profile_from_env();
-
-    // Pool size: env override > profile default
-    int env_msg = aether_env_int("AETHER_MSG_POOL_SIZE", 0);
-
-    g_aether_config.msg_pool_size = env_msg > 0
-        ? env_msg
-        : aether_profile_msg_pool_size(g_aether_config.profile);
-
-    // Check verbose mode
+    // AETHER_VERBOSE: the configuration, printed when the scheduler starts
+    // (#3375), whatever the program was compiled with. It used to set a
+    // flag nothing read: only a program compiled with -DAETHER_VERBOSE
+    // printed it.
     if (getenv("AETHER_VERBOSE")) {
         atomic_store(&g_aether_config.verbose, true);
+        aether_print_config_once();
     }
 
     // Cooperative preemption (opt-in)
@@ -124,21 +113,14 @@ void aether_init_from_env(void) {
             g_aether_config.preempt_threshold_ns = (uint64_t)threshold * 1000000ULL;
         }
     }
-#else
-    // No getenv: use defaults
-    g_aether_config.profile = AETHER_PROFILE_MEDIUM;
-    g_aether_config.msg_pool_size = aether_profile_msg_pool_size(AETHER_PROFILE_MEDIUM);
 #endif
 }
 
-// Profile name helper
-static const char* aether_profile_name(AetherProfile p) {
-    switch (p) {
-        case AETHER_PROFILE_MICRO:  return "micro";
-        case AETHER_PROFILE_SMALL:  return "small";
-        case AETHER_PROFILE_LARGE:  return "large";
-        default:                    return "medium";
-    }
+// Once per process: the environment, the program and the flags may all ask.
+static atomic_int g_config_printed = 0;
+
+void aether_print_config_once(void) {
+    if (atomic_exchange(&g_config_printed, 1) == 0) aether_print_config();
 }
 
 // Print current configuration
@@ -157,15 +139,10 @@ void aether_print_config(void) {
     printf("  malloc:     %s\n", AETHER_HAS_MALLOC     ? "YES" : "NO");
     printf("  shell:      %s\n\n", AETHER_HAS_SHELL    ? "YES" : "NO");
 
-    printf("PROFILE: %s (msg_pool=%d)\n\n",
-           aether_profile_name(g_aether_config.profile),
-           g_aether_config.msg_pool_size);
-
     printf("TIER 1 - ALWAYS ON:\n");
     printf("  [ON] Direct Send          - Same-core bypass\n");
     printf("  [ON] Adaptive Batching    - Dynamic 4-64 batch size\n");
-    printf("  [ON] Message Coalescing   - Amortises atomics across bursts\n");
-    printf("  [ON] TLS Message Pools    - Eliminates mutex contention\n\n");
+    printf("  [ON] Message Coalescing   - Amortises atomics across bursts\n\n");
 
     printf("TIER 2 - AUTO-DETECTED:\n");
     printf("  [%s] SIMD Processing      - %d-bit vectors%s\n",

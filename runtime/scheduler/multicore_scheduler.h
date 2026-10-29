@@ -46,6 +46,7 @@ typedef struct {
     pthread_mutex_t    mutex;        // protects reply_ready / timed_out / cond
     pthread_cond_t     cond;         // signalled by scheduler_reply()
     atomic_int         refcount;     // starts at 2 (asker + actor); freed when hits 0
+    uint64_t           deadline_ns;  // the cooperative ask's: a reply after it is late, 0 = none (#3330)
 } ActorReplySlot;
 
 // I/O readiness message — delivered to actor when the poller reports fd ready.
@@ -53,6 +54,19 @@ typedef struct {
 // 255 is the top of that range and is reserved for system messages; the Aether
 // message registry allocates user message IDs starting at 0 and never hands out 255.
 #define MSG_IO_READY 255
+
+/* The death notice (#2974): `message Down { ref: actor_ref, reason: string }`,
+ * declared by the compiler for every program that names it, with this
+ * reserved id. The runtime writes its payload, so the compiler checks its
+ * generated struct against this layout. `reason` is a counted string the
+ * message owns. A monitor's Down carries the monitor id in
+ * Message.payload_int (0 for a link's). */
+#define AETHER_MSG_DOWN 254
+typedef struct {
+    int _message_id;
+    void* ref;
+    const char* reason;
+} AetherDownMsg;
 
 // TLS pointer to the actor whose step() is currently running on this
 // thread. Set by generated *_step() functions at entry; read by the
@@ -140,6 +154,13 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
      * Set (TAS) by the thread about to call step(); cleared (release) after. \
      * Work-stealing threads that find this set retry next outer iteration. */ \
     atomic_flag step_lock; \
+    /* AETHER_EXIT_* bits (#2974). In the padding after step_lock. */ \
+    _Atomic(unsigned char) exit_flags; \
+    /* The mailbox bound (#2974, `@mailbox(bound: N)`): at most this many \
+     * messages accepted for the actor and not yet taken by its step, 0 for \
+     * none. Set by the generated spawn; read by every send. In the padding \
+     * after step_lock, on the line `dead` is on: no field moves for it. */ \
+    atomic_int mailbox_bound; \
     /* Receive timeout (#3162): the interval a `receive ... after` names, \
      * in ns, set at spawn and kept; 0 = the actor has none. */ \
     uint64_t timeout_ns; \
@@ -157,9 +178,12 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
     /* Bits (#2517): AETHER_ACTOR_PANICKED once the actor's step() unwound \
      * via aether_panic() or a caught signal, AETHER_ACTOR_RELEASED once it \
      * was released, AETHER_ACTOR_THREAD_GONE once its own thread (an \
-     * auto_process actor's) has left its loop. Non-zero actors are skipped \
-     * by the scheduler and incoming messages are dropped. Bits are only \
-     * ever set. */ \
+     * auto_process actor's) has left its loop, AETHER_ACTOR_KILLED once a \
+     * kill or a linked actor's death ended it, AETHER_ACTOR_STOPPED once \
+     * it stopped itself (#2974). Non-zero actors are skipped by the \
+     * scheduler and incoming messages are dropped. Bits are only ever \
+     * set, but by a restart in place (#2974), which clears the death \
+     * bits (never RELEASED) once the new incarnation is ready. */ \
     atomic_int dead; \
     /* Full allocation size passed to scheduler_spawn_actor. numa_free() unmaps \
      * exactly [ptr, ptr+size), so freeing a derived actor with \
@@ -183,6 +207,10 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
      * whose memory stays the caller's. Written before the actor is \
      * published, never after. */ \
     int scheduler_owned; \
+    /* How many times the actor was restarted in place, under the same ref \
+     * (#2974): 0 for the actor spawned, one more at each rebirth. In the \
+     * padding before inbox. */ \
+    atomic_int incarnation; \
     /* An auto_process actor's inbox (#2598): every sender puts its \
      * messages here and only the actor's thread takes them. Made by the \
      * first send, NULL until then. For an actor a core runs, its overflow \
@@ -202,16 +230,46 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
      * another core only while this is \
      * 0, with AETHER_INFLIGHT_MOVING set for the move, so no message is \
      * left behind on the core it leaves. */ \
-    atomic_int inflight;
+    atomic_int inflight; \
+    /* Its death notices (#2974): the actors that monitor it or are linked \
+     * to it, the ones it monitors, and why it ended \
+     * (runtime/actors/aether_supervision.c, aether_actor_death_reason). \
+     * Made by the first monitor, link or death, freed with the actor. \
+     * \
+     * The fields #2974 added take 16 bytes past `inflight` and none of \
+     * the earlier ones moved: an actor's state starts on the cache line it \
+     * started on, which the step of a small actor touches (thread_ring \
+     * and skynet lost 6% when it moved to the next one). */ \
+    _Atomic(struct AetherWatch*) death_watch; \
+    /* With a mailbox bound (#2974): the messages accepted for it and not \
+     * yet taken by its step or dropped, wherever they are (a core's queue, \
+     * a sender's deferred sends, its overflow, its mailbox). System \
+     * messages (Down, IoReady) are neither counted nor refused. */ \
+    atomic_int mailbox_pending; \
+    /* Plain sends dropped because its mailbox was full (#2974). */ \
+    atomic_uint full_drops;
 
 typedef struct {
     AETHER_ACTOR_BASE_FIELDS
 } ActorBase;
 
+struct AetherWatch;  /* runtime/actors/aether_supervision.c */
+
 /* The bits of ActorBase.dead; a send checks only that it is non-zero. */
 #define AETHER_ACTOR_PANICKED 1
 #define AETHER_ACTOR_RELEASED 2
 #define AETHER_ACTOR_THREAD_GONE 4
+#define AETHER_ACTOR_KILLED 8
+#define AETHER_ACTOR_STOPPED 16
+/* The bits that end an actor: the first one set decides its reason. */
+#define AETHER_ACTOR_ENDED (AETHER_ACTOR_PANICKED | AETHER_ACTOR_RELEASED | \
+                            AETHER_ACTOR_KILLED | AETHER_ACTOR_STOPPED)
+
+/* ActorBase.exit_flags (#2974): linked deaths reach it as Down messages
+ * (trap_exits), and its death has been finalized (drained, its watchers
+ * told), which happens once. */
+#define AETHER_EXIT_TRAP      1
+#define AETHER_EXIT_FINALIZED 2
 
 /* ActorBase.inflight (#3090, #3093): set while the actor's core moves it to
  * another; the counts of messages in flight sit below it. */
@@ -222,7 +280,7 @@ typedef struct {
  * actor stays on its core, so the messages reach it there. During a move it
  * waits for the move to end, and then reads the new core. */
 static inline void inflight_enter(ActorBase* actor, int n) {
-    int v = atomic_fetch_add_explicit(&actor->inflight, n, memory_order_acq_rel);
+    int v = atomic_fetch_add_explicit(&actor->inflight, n, memory_order_seq_cst);
     while (unlikely(v & AETHER_INFLIGHT_MOVING)) {
         AETHER_CPU_PAUSE();
         v = atomic_load_explicit(&actor->inflight, memory_order_acquire);
@@ -313,9 +371,19 @@ typedef struct {
     // The innermost of those asks: the actor it waits on and its reply
     // slot, set and put back under actor_lock with `asking`. Another core's
     // relief moves that actor here, where the waiting thread steps it, and
-    // wakes the wait through the slot (#3197).
+    // wakes the wait through the slot (#3197). And the actor that asked,
+    // whose kill wakes the wait through the slot too (#2974).
     _Atomic(ActorBase*)      ask_target;
     _Atomic(ActorReplySlot*) ask_slot;
+    _Atomic(ActorBase*)      ask_asker;
+    // Actors of this core whose death is to be finalized here (#2974): a
+    // kill or a link's from another thread posts them, and the core's loop
+    // (or its relief) finalizes each once it is not stepping.
+    atomic_flag     control_lock;
+    atomic_int      control_pending;
+    ActorBase**     control;
+    int             control_count;
+    int             control_cap;
     // Where this core's next relief scan of its table starts (#3197).
     int             relief_cursor;
 
@@ -346,6 +414,14 @@ int scheduler_core_cpu(int core_id);
 
 void scheduler_stop(void);
 void scheduler_wait(void);      // Wait for quiescence (all pending messages processed). Non-destructive.
+/* The panic scheduler_wait() raises inside an actor's step, on either
+ * scheduler, and on the threaded one on any thread that runs actors (a
+ * core's, an actor's own), where a drop or a death hook runs too (#3463): it
+ * waits for every actor, those this thread runs too. */
+#define AETHER_WAIT_IN_STEP_REASON                                                  \
+    "wait_for_idle() inside an actor, or on a thread that runs actors: it waits "   \
+    "for every actor, those this thread runs too, which cannot step while it "      \
+    "waits; call it outside the actors (main, a host's thread)"
 void scheduler_shutdown(void);  // Wait + stop + join threads. Call once at program exit.
 void scheduler_cleanup(void);
 
@@ -401,6 +477,166 @@ uint64_t scheduler_released_sends(void);
 // and reported once on stderr (#2912).
 uint64_t scheduler_stopped_sends(void);
 
+/* ------------------------------------------------------------------------
+ * Death notices (#2974): runtime/actors/aether_supervision.c and the
+ * schedulers' finalize. An actor ends once, by its first death bit: a
+ * panic, a kill (or a linked actor's death), a stop, a release. Its death
+ * is finalized on its own thread once it is not stepping (drained, its
+ * watchers sent Down), so no Down comes for an actor whose handler still
+ * runs.
+ * ------------------------------------------------------------------------ */
+
+/* Messages a panicked, killed or stopped actor did not handle: queued at its
+ * death or sent to it after. Each was released through aether_message_drop. */
+uint64_t scheduler_dead_sends(void);
+void scheduler_count_dead_sends(int n);
+
+/* ------------------------------------------------------------------------
+ * A bounded mailbox (#2974): `@mailbox(bound: N)` on an actor. A send
+ * (scheduler_send_local, scheduler_send_remote and the paths built on
+ * them) is accepted while fewer than N messages are pending for the actor
+ * and refused otherwise, never blocked: a plain send is dropped, released
+ * and counted (full_drops, reported once on stderr), an ask fails at once
+ * with AETHER_ASK_FULL, and scheduler_try_send says so to its caller. The
+ * generated step of a bounded actor gives a message back as it takes it
+ * (aether_mailbox_took), and every drop of one not taken gives it back
+ * (aether_mailbox_untake), so `mailbox_pending` is exact. System messages
+ * are never refused nor counted.
+ * ------------------------------------------------------------------------ */
+
+static inline int aether_message_is_system(int type) {
+    return type == AETHER_MSG_DOWN || type == MSG_IO_READY;
+}
+
+/* Takes a place for one message of `type`: 1 when accepted. Exact: a send
+ * is refused only while `bound` messages are pending. */
+static inline int aether_mailbox_admit(ActorBase* a, int type) {
+    int bound = atomic_load_explicit(&a->mailbox_bound, memory_order_relaxed);
+    if (bound == 0 || aether_message_is_system(type)) return 1;
+    int p = atomic_load_explicit(&a->mailbox_pending, memory_order_relaxed);
+    while (p < bound) {
+        if (atomic_compare_exchange_weak_explicit(&a->mailbox_pending, &p, p + 1,
+                                                  memory_order_relaxed, memory_order_relaxed))
+            return 1;
+    }
+    return 0;
+}
+
+/* A message of `type` that was accepted is dropped before its step took it. */
+static inline void aether_mailbox_untake(ActorBase* a, int type) {
+    if (a && atomic_load_explicit(&a->mailbox_bound, memory_order_relaxed) != 0 &&
+        !aether_message_is_system(type))
+        atomic_fetch_sub_explicit(&a->mailbox_pending, 1, memory_order_relaxed);
+}
+
+/* The generated step of a bounded actor, after it takes a message. */
+static inline void aether_mailbox_took(ActorBase* a, int type) {
+    if (!aether_message_is_system(type))
+        atomic_fetch_sub_explicit(&a->mailbox_pending, 1, memory_order_relaxed);
+}
+
+/* Sends `msg` unless its target is dead or its mailbox is full, and says
+ * which: "" when sent, "the mailbox is full" or "the actor is dead" when
+ * not, the message released (and counted nowhere: the caller knows).
+ * `try_send(ref, Msg {...})` (aether_try_send_message for a payload). */
+const char* scheduler_try_send(ActorBase* actor, Message msg);
+const char* aether_try_send_message(void* actor, void* message_data, size_t message_size);
+
+/* Plain sends dropped because their target's mailbox was full. */
+uint64_t scheduler_full_drops(void);
+
+/* Ends `actor` with `reason` by death bit `bit` (KILLED, STOPPED), unless it
+ * ended already; returns 1 when this call ended it. Its finalize runs on its
+ * own thread once its current step (if any) returns. From any thread. */
+int scheduler_actor_end(ActorBase* actor, const char* reason, int bit);
+
+/* Claims `actor`'s death for `reason` and sets `bit`: 1 when nothing ended
+ * it before, else 0 and nothing changes but the bit. */
+int aether_actor_claim_end(ActorBase* actor, const char* reason, int bit);
+/* Keeps `reason` as the actor's death reason unless one is kept already. */
+void aether_actor_claim_reason(ActorBase* actor, const char* reason);
+/* Why the actor ended, kept with its watch list: "normal", "killed", the
+ * panic's reason or a linked actor's; NULL while it lives. Set by whatever
+ * ended it first, before its death bit. */
+const char* aether_actor_death_reason(ActorBase* actor);
+/* An ended actor's death, finalized on the thread that owns it (an actor
+ * thread's own, at its loop's end). */
+void scheduler_actor_thread_finalize(ActorBase* actor);
+/* Tells the actor's watchers of its death (once), and lets go of the
+ * actors it watches. Any thread. */
+void aether_watch_notify(ActorBase* actor, const char* reason);
+/* Frees the actor's watch list and death reason (its block is ending). */
+void aether_watch_free(ActorBase* actor);
+/* A Down for `self` from a monitor `self` has since dropped (demonitor) is
+ * not handled: 0 for it, 1 for every other. Called by the generated step
+ * before a Down arm. */
+int aether_down_accept(ActorBase* self, Message* msg);
+
+/* The std.actors surface, from a handler (the actor stepping on this
+ * thread is `self`). On wasi a panic ends the program (it has no setjmp),
+ * so a death a monitor would be told of cannot be caught there: a call to
+ * these is refused at compile time on that target. */
+#if defined(__wasi__) && defined(__clang__)
+#define AETHER_NEEDS_PANIC_BARRIER \
+    __attribute__((unavailable("watching a death needs the step's panic barrier, and on wasi " \
+                               "a panic ends the program (no setjmp)")))
+#else
+#define AETHER_NEEDS_PANIC_BARRIER
+#endif
+int     aether_actor_monitor(void* ref) AETHER_NEEDS_PANIC_BARRIER;
+void    aether_actor_demonitor(int id);
+void    aether_actor_link(void* ref) AETHER_NEEDS_PANIC_BARRIER;
+void    aether_actor_unlink(void* ref);
+void    aether_actor_trap_exits(int on) AETHER_NEEDS_PANIC_BARRIER;
+void    aether_actor_stop(void);
+void    aether_actor_kill(void* ref);
+int64_t aether_actor_dead_sends(void);
+int64_t aether_actor_full_drops(void* ref);
+
+/* Restart in place (#2974): a supervisor reruns a child's factory, and the
+ * factory's spawn of the child's type takes the child's own block, so the
+ * ref its clients hold reaches the new incarnation. rebirth_begin claims an
+ * ended, finalized child with no message of it in flight (1; 0: not yet, try
+ * again; -1: alive, released, or not the scheduler's); the spawn then resets
+ * the block (its old state destroyed, its fields zeroed, its watch lists
+ * gone, incarnation + 1) and the generated spawn's state initializers run;
+ * scheduler_spawn_ready, the generated spawn's last line, brings it alive.
+ * rebirth_end says whether it is (1), or undoes a rebirth the factory did
+ * not finish (0: it spawned no actor of the type, or panicked), the child
+ * left ended. A send while it is dead is dropped and counted; one after the
+ * spawn returns reaches the new incarnation. */
+int  aether_actor_rebirth_begin(void* ref);
+int  aether_actor_rebirth_end(void* ref);
+int  aether_actor_incarnation(void* ref);
+/* The block scheduler_spawn_actor reuses for a rebirth on this thread, or
+ * NULL. */
+ActorBase* aether_rebirth_take(void (*step)(void*), size_t size);
+void scheduler_spawn_ready(ActorBase* actor);
+/* A panic left a rebirth half done on this thread: undone. */
+void aether_rebirth_abandon(void);
+/* The step barrier's part (#3389, aether_step_barrier.h): a step nested in
+ * another puts the thread's restart claim, reborn block and spawn brackets
+ * aside (1 when it held any), and gets them back when it ends; a step that
+ * panicked undoes the claim and closes the brackets it made itself. */
+typedef struct {
+    ActorBase* target;
+    ActorBase* reborn;
+    int capture_floor;
+} AetherSpawnAside;
+int  aether_spawn_put_aside(AetherSpawnAside* s);
+void aether_spawn_give_back(const AetherSpawnAside* s);
+void aether_spawn_step_panicked(void);
+/* The scheduler's part once a reborn actor is alive (wake its core). */
+void scheduler_actor_revived(ActorBase* actor);
+/* Live restart claims and spawn captures, on any thread, are counted in
+ * aether_caps_slow (aether_spawn_watched, aether_resource_caps.h). */
+/* The child a supervisor's factory spawned (#2974): the first actor that
+ * comes alive on this thread between begin and end (a fresh spawn or a
+ * rebirth), or NULL. Brackets nest. */
+void  aether_actor_capture_begin(void);
+void* aether_actor_capture_end(void);
+void  aether_actor_capture_note(ActorBase* actor);
+
 // #2527: a reference that knows which actor it was taken from. The block a
 // released actor leaves goes to the next spawn of its size, which gets an id
 // of its own; a send through a reference taken from the released actor is
@@ -422,6 +658,18 @@ void scheduler_send_ref(AetherActorRef ref, Message msg);
 // NULL (a reference whose block is another actor's now): the payload alone
 // is freed.
 void aether_message_drop(ActorBase* target, Message* msg);
+/* #3401: aether_message_drop of a message an ending actor leaves
+ * undelivered, as its finalize drains it on either scheduler: the release
+ * runs in a frame of its own, so a panic in it (a field's drop function is
+ * the program's code) is reported through the death hook, as the step
+ * barrier reports one in a release after a handler, and the end goes on. */
+void aether_message_drop_at_end(ActorBase* target, Message* msg);
+/* The drop alone, in its containment frame (#3403): 1 when the release
+ * panicked (what it left is freed; *reason and *reason_release are the
+ * panic's, the caller's to report and release), else 0. The step barrier
+ * drops the message a panicking handler ran on through it. */
+int aether_message_drop_contained(ActorBase* target, Message* msg, const char** reason,
+                                  void (**reason_release)(const void*));
 /* A thread that steps actors without being a core's scheduler thread
  * (aether_actor_thread, which inlines sends to actors of its core) takes
  * part in reclamation like a core (#2517): it registers before its first
@@ -448,8 +696,13 @@ int scheduler_actor_thread_park(ActorBase* actor);
  * step context of its own (the ask it handles, answered or failed when the
  * step ends), and the caller's given back after. What an auto_process
  * actor's thread steps it with. The caller holds what a core holds to step
- * it. */
-void scheduler_step_actor(ActorBase* actor);
+ * it. 1 when the step took a message, which the caller counts handled (#3464). */
+int scheduler_step_actor(ActorBase* actor);
+/* Around a step that fires a receive timeout (#3443): counted until its arm
+ * returns, so wait_for_idle() waits for the arm, which runs after the step
+ * disarmed the countdown. */
+void scheduler_countdown_enter(void);
+void scheduler_countdown_leave(void);
 /* Puts `msg` in an auto_process actor's inbox and wakes its thread if it
  * sleeps (#2598, #2592). From any thread; the message is counted as sent by
  * the caller. Every send to such an actor ends here. */
@@ -477,6 +730,8 @@ void* scheduler_ask_message(ActorBase* target, void* msg_data, size_t msg_size, 
 #define AETHER_ASK_DIED       3   /* the actor died handling the ask, before it replied */
 #define AETHER_ASK_NO_MEMORY  4   /* the ask could not be made */
 #define AETHER_ASK_NO_REPLY   5   /* the handler returned without replying */
+#define AETHER_ASK_KILLED     6   /* the asking actor was killed while it waited (#2974) */
+#define AETHER_ASK_FULL       7   /* the actor's mailbox bound was reached (#2974) */
 void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg_size,
                                    int timeout_ms, int* status);
 
@@ -503,10 +758,18 @@ int aether_scheduler_poll(int max_per_actor);
 int scheduler_io_register(int core_id, int fd, void* actor, uint32_t events);
 void scheduler_io_unregister(int core_id, int fd);
 
-// Thread-local reply slot set by the send path (sender) and step function (receiver).
-// g_pending_reply_slot: set before aether_send_message so the slot rides inside the Message.
-// g_current_reply_slot: set by the generated step function after mailbox_receive.
-extern AETHER_TLS void* g_pending_reply_slot;
+// The ask in hand: set by the generated step function after mailbox_receive
+// from the message's _reply_slot, read by the reply.
 extern AETHER_TLS void* g_current_reply_slot;
+
+// An ask's message (aether_send_message.c, #3387): the payload copied and
+// `reply_slot` in it, built by the ask itself, never handed over through a
+// thread-local (a send can step its target inline, and that handler's own
+// sends read it too, #3395). 0 when there was no memory for the copy: what
+// the message owns is released and nothing is sent. aether_send_built sends
+// a message built so, as aether_send_message routes one.
+int  aether_ask_message(void* actor, void* message_data, size_t message_size,
+                        void* reply_slot, Message* out);
+void aether_send_built(ActorBase* actor, Message msg);
 
 #endif

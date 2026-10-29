@@ -1,17 +1,16 @@
 // Validate the ECDSA-P384-SHA384 (SignatureScheme 0x0503) server
 // CertificateVerify path in std.cryptography.tls13_cert.
 //
-// This lives in its OWN test file (separate from test_tls13_cert) on purpose: a
-// pure-Aether P-384 ECDSA verify is ~12s, and folding it into the already-~90s
-// main cert test pushed the combined run over the CI gate's per-test 120s
-// budget on the slower Windows/MSYS2 runner. Split out, each file stays well
-// under budget. Coverage is unchanged — verify_cert_verify's negative /
-// wrong-transcript dispatch is exercised by the P-256 cases in test_tls13_cert.
+// It lives in its own file (separate from test_tls13_cert) because a pure-Aether
+// P-384 ECDSA verify used to take about 12 s on std.bignum, and folded into the
+// main cert test it pushed the run over the per-test budget on the slower
+// Windows/MSYS2 runner. Since #2600 a P-384 verify takes about a millisecond;
+// the split stays, each file covering its own scheme. verify_cert_verify's
+// negative / wrong-transcript dispatch is exercised by the P-256 cases in
+// test_tls13_cert.
 //
-// We do NOT keygen/sign at runtime (scalar_mult_base + ecdsa_sign are the two
-// slowest primitives in the suite). Instead we use a PRECOMPUTED (pubkey, r, s)
-// vector generated once by this module's own p384 over the `th` below, and do a
-// single verify.
+// The (pubkey, r, s) vector below was generated once by this module's own p384
+// over the `th` below; the test does a single verify.
 
 import std.cryptography.tls13_cert
 import std.bytes

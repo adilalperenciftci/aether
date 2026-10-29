@@ -1,9 +1,9 @@
 #!/bin/sh
 # Wycheproof adversarial vector suites — ECDSA secp256k1 (P1363 + DER), wave 6.
 #
-# The Bitcoin/Ethereum curve. Its own harness slot: a secp256k1 verify is two
-# 256-bit bignum scalar multiplications (~1-2s each at CI's -O0). Default stride
-# 10; WYCHEPROOF_FULL=1 (the nightly) sweeps all, WYCHEPROOF_STRIDE=N overrides.
+# The Bitcoin/Ethereum curve. Every vector of both files (252 + 476 cases),
+# about 4 s at the -O0 of `ae run` since #2600. WYCHEPROOF_STRIDE=N samples
+# every Nth case.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"

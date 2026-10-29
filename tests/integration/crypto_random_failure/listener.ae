@@ -1,0 +1,66 @@
+// The other end for rngfail.ae (#3293): accepts connections on 127.0.0.1
+// (its port to PORT_OUT) until none comes for three seconds, and prints
+// for each what the client sent before it closes it: "NOTHING", or
+// "CH random_zero=<0|1> sid_zero=<0|1>", whether the ClientHello's random
+// and legacy_session_id are all zero bytes.
+
+import std.os
+import std.fs
+import std.tcp
+import std.bytes
+
+extern exit(code: int)
+
+fn all_zero(b: ptr, off: int, n: int) -> int {
+    i = 0
+    while i < n {
+        if (bytes.get(b, off + i) & 0xFF) != 0 { return 0 }
+        i = i + 1
+    }
+    return 1
+}
+
+main() {
+    srv, lerr = tcp.listen_on("127.0.0.1", 0)
+    if lerr != "" {
+        println("FAIL: ${lerr}")
+        exit(1)
+    }
+    _w = fs.write(os.getenv("PORT_OUT"), "${tcp.server_port(srv)}")
+    buf = bytes.new(8192)
+    bytes.set(buf, 8191, 0)
+    while tcp.server_poll(srv, 3000) > 0 {
+        sock, aerr = tcp.accept(srv)
+        if aerr == "" {
+            total = 0
+            reading = 1
+            while reading == 1 && total < 8192 {
+                ready, perr = tcp.poll(sock, 2000)
+                if perr != "" || ready == false {
+                    reading = 0
+                } else {
+                    got, rerr = tcp.read_into(sock, bytes.view(buf)[total..8192])
+                    if rerr != "" || got <= 0 {
+                        reading = 0
+                    } else {
+                        total = total + got
+                        // A whole first record is enough.
+                        if total >= 5 && total >= 5 + (((bytes.get(buf, 3) & 0xFF) << 8) | (bytes.get(buf, 4) & 0xFF)) { reading = 0 }
+                    }
+                }
+            }
+            // record header 5, handshake header 4, legacy_version 2, then
+            // the random (32), the session id length and the session id.
+            if total == 0 {
+                println("NOTHING")
+            } else if total < 5 + 4 + 2 + 32 + 1 + 32 {
+                println("SHORT ${total}")
+            } else {
+                println("CH random_zero=${all_zero(buf, 11, 32)} sid_zero=${all_zero(buf, 44, 32)}")
+            }
+            tcp.close(sock)
+        }
+    }
+    bytes.free(buf)
+    _ = tcp.server_close(srv)
+}

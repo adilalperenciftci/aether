@@ -1,0 +1,591 @@
+// A scripted TLS 1.3 client for the pure server's checks of the client's
+// second flight (#3324): it runs a real handshake with server.ae (x25519,
+// the suite the server picks), then sends its Finished as PEER_CF says and
+// prints what the server answered: "ALERT <n> (app)" under the server's
+// application keys, "ALERT <n> (hs)" under its handshake keys,
+// "ALERT <n> (plain)", "CLOSED" or "OTHER".
+//
+//   ok         the right Finished
+//   split      the right Finished over two records
+//   badmac     verify_data with one bit flipped
+//   short      verify_data one byte short
+//   long       verify_data one byte long
+//   trailing   the right Finished and one byte more in its record
+//   wrongtype  an empty Certificate instead
+//   badrecord  the Finished in a record that does not authenticate
+//   plain      the Finished in a plaintext record
+//   appdata    application data under the handshake keys
+//
+// With PEER_CF=ok, PEER_POST says what to send after the handshake (see
+// post_session below). PEER_HRR has the server send a HelloRetryRequest
+// first (#3325; see the ClientHello it sends); PEER_GROUP=p256 offers
+// secp256r1 alone and PEER_EARLY=1 sends 0-RTT data the server must skip
+// (#3357).
+
+import std.os
+import std.tcp
+import std.bytes
+import std.string
+import std.cryptography
+import std.cryptography.x25519
+import std.cryptography.p256
+import std.cryptography.tls13_hs
+import std.cryptography.tls13_ks
+import std.cryptography.tls13_kdf
+import std.cryptography.tls13_record
+import std.cryptography.tls13_client
+
+extern exit(code: int)
+
+struct Reader {
+    sock: ptr
+    buf: ptr
+    len: int
+    off: int
+}
+
+// The next record (header included) as fresh bytes, or null at EOF.
+fn next_record(r: *Reader) -> ptr {
+    while 1 == 1 {
+        avail = r.len - r.off
+        if avail >= 5 {
+            plen = ((bytes.get(r.buf, r.off + 3) & 0xFF) << 8) | (bytes.get(r.buf, r.off + 4) & 0xFF)
+            if avail >= 5 + plen {
+                rec = bytes.new(5 + plen)
+                bytes.copy_from_bytes(rec, 0, r.buf, r.off, 5 + plen)
+                r.off = r.off + 5 + plen
+                return rec
+            }
+        }
+        chunk = bytes.new(16384)
+        bytes.set(chunk, 16383, 0)
+        got, err = tcp.read_into(r.sock, bytes.view(chunk)[0..16384])
+        if err != "" || got <= 0 {
+            bytes.free(chunk)
+            return null
+        }
+        bytes.copy_from_bytes(r.buf, r.len, chunk, 0, got)
+        r.len = r.len + got
+        bytes.free(chunk)
+    }
+}
+
+fn send_raw(sock: ptr, rec: ptr) {
+    _n, _e = tcp.write_all(sock, bytes.view(rec)[0..bytes.length(rec)])
+}
+
+fn send_plain(sock: ptr, ct: int, msg: ptr, off: int, n: int) {
+    rec = bytes.new(5 + n)
+    bytes.set(rec, 0, ct)
+    bytes.set(rec, 1, 3)
+    bytes.set(rec, 2, 3)
+    bytes.set(rec, 3, (n >> 8) & 0xFF)
+    bytes.set(rec, 4, n & 0xFF)
+    if n > 0 { bytes.copy_from_bytes(rec, 5, msg, off, n) }
+    send_raw(sock, rec)
+    bytes.free(rec)
+}
+
+fn send_sealed(sock: ptr, ctx: ptr, ct: int, msg: ptr, off: int, n: int) {
+    rec = tls13_record.seal_record(ctx, ct, bytes.view(msg)[off..off + n])
+    send_raw(sock, rec)
+    bytes.free(rec)
+}
+
+// (aead, key length, hash, hash length) of a TLS 1.3 suite.
+fn suite_params(cs: int) -> (int, int, string, int) {
+    if cs == tls13_hs.TLS_AES_256_GCM_SHA384 { return tls13_record.AEAD_AES_256_GCM, 32, "sha384", 48 }
+    if cs == tls13_hs.TLS_CHACHA20_POLY1305_SHA256 { return tls13_record.AEAD_CHACHA20_POLY1305, 32, "sha256", 32 }
+    return tls13_record.AEAD_AES_128_GCM, 16, "sha256", 32
+}
+
+// A record context for traffic `secret`.
+fn ctx_for(algo: string, hl: int, aead: int, klen: int, secret: ptr) -> ptr {
+    k = tls13_ks.write_key(algo, bytes.view(secret)[0..hl], klen)
+    iv = tls13_ks.write_iv(algo, secret)
+    ctx = tls13_record.new_aead(aead, bytes.view(k)[0..klen], iv)
+    bytes.free(k)
+    bytes.free(iv)
+    return ctx
+}
+
+// What the server sent back: an alert in the clear, or under `app` or `hs`.
+fn answer(r: *Reader, app: ptr, hs: ptr) -> string {
+    rec = next_record(r)
+    if rec == null { return "CLOSED" }
+    ct = bytes.get(rec, 0) & 0xFF
+    if ct == 0x15 {
+        d = bytes.get(rec, 6) & 0xFF
+        bytes.free(rec)
+        return "ALERT ${d} (plain)"
+    }
+    if ct != 0x17 {
+        bytes.free(rec)
+        return "OTHER"
+    }
+    rl = bytes.length(rec)
+    res = "OTHER"
+    o1 = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0, alert: 0 }
+    e1 = tls13_record.open_record(app, bytes.view(rec)[0..rl], &o1)
+    if e1 == "" {
+        if o1.content_type == tls13_record.CONTENT_ALERT && o1.plaintext_len >= 2 { res = "ALERT ${bytes.get(o1.plaintext, 1) & 0xFF} (app)" }
+        if o1.plaintext != null { bytes.free(o1.plaintext) }
+    } else {
+        o2 = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0, alert: 0 }
+        e2 = tls13_record.open_record(hs, bytes.view(rec)[0..rl], &o2)
+        if e2 == "" {
+            if o2.content_type == tls13_record.CONTENT_ALERT && o2.plaintext_len >= 2 { res = "ALERT ${bytes.get(o2.plaintext, 1) & 0xFF} (hs)" }
+            if o2.plaintext != null { bytes.free(o2.plaintext) }
+        }
+    }
+    bytes.free(rec)
+    return res
+}
+
+main() {
+    port, _perr = string.to_int(os.getenv("PEER_PORT"))
+    sock, derr = tcp.connect("127.0.0.1", port)
+    if derr != "" {
+        println("FAIL: connect: ${derr}")
+        exit(1)
+    }
+    r = Reader { sock: sock, buf: bytes.new(4096), len: 0, off: 0 }
+    rnd, _r1 = cryptography.random_buffer(32)
+    sid, _r2 = cryptography.random_buffer(32)
+    priv, _r3 = cryptography.random_buffer(32)
+    pub = x25519.base_point(priv)
+    empty = bytes.new(0)
+    ch = tls13_hs.client_hello_full(rnd, bytes.view(sid)[0..32], tls13_hs.GROUP_X25519, bytes.view(pub)[0..32], 0, bytes.view(empty)[0..0], 0, bytes.view(empty)[0..0], "peer.example")
+    // PEER_HRR (#3325): a first ClientHello naming secp384r1 and x25519 in
+    // supported_groups with a share for secp384r1 only, which the pure
+    // server does not take: it must ask for x25519 with a HelloRetryRequest.
+    hrr_mode = os.getenv("PEER_HRR")
+    p384pt = bytes.new(97)
+    bytes.set(p384pt, 0, 4)
+    k97 = 1
+    while k97 < 97 {
+        bytes.set(p384pt, k97, 0x11)
+        k97 = k97 + 1
+    }
+    if hrr_mode != "" {
+        bytes.free(ch)
+        both = tls13_hs.client_hello_full(rnd, bytes.view(sid)[0..32], 0x0018, bytes.view(p384pt)[0..97], tls13_hs.GROUP_X25519, bytes.view(pub)[0..32], 0, bytes.view(empty)[0..0], "peer.example")
+        pch = tls13_hs.PskCh { buf: null, buf_len: 0, binder_off: 0, truncated_len: 0 }
+        tls13_hs.client_hello_retry(bytes.view(both)[0..bytes.length(both)], 0x0018, bytes.view(p384pt)[0..97], bytes.view(empty)[0..0], &pch)
+        bytes.free(both)
+        ch = pch.buf
+    }
+    // PEER_GROUP=p256 (#3357): a share for secp256r1 alone, which the pure
+    // server must take (RFC 8446 9.1). PEER_EARLY=1: an early_data
+    // extension and a record of 0-RTT data the server cannot read, which it
+    // must skip (4.2.10).
+    p256_priv = null
+    if os.getenv("PEER_GROUP") == "p256" {
+        bytes.free(ch)
+        p256_priv, _r4 = cryptography.random_buffer(32)
+        bytes.set(p256_priv, 0, 1)
+        qx, qy = p256.scalar_mult_base(p256_priv)
+        qpt = bytes.new(65)
+        bytes.set(qpt, 0, 4)
+        bytes.copy_from_bytes(qpt, 1, qx, 0, 32)
+        bytes.copy_from_bytes(qpt, 33, qy, 0, 32)
+        bytes.free(qx)
+        bytes.free(qy)
+        ch = tls13_hs.client_hello_full(rnd, bytes.view(sid)[0..32], tls13_hs.GROUP_SECP256R1, bytes.view(qpt)[0..65], 0, bytes.view(empty)[0..0], 0, bytes.view(empty)[0..0], "peer.example")
+        bytes.free(qpt)
+    }
+    peer_early = os.getenv("PEER_EARLY") == "1"
+    if peer_early {
+        ch2 = with_early_data(ch)
+        bytes.free(ch)
+        ch = ch2
+    }
+    send_plain(sock, 22, ch, 0, bytes.length(ch))
+    if peer_early {
+        one = bytes.new(1)
+        bytes.set(one, 0, 1)
+        send_plain(sock, 20, one, 0, 1)
+        bytes.free(one)
+        junk, _r5 = cryptography.random_buffer(40)
+        send_plain(sock, 23, junk, 0, 40)
+        bytes.free(junk)
+    }
+    tr = tls13_client.transcript_new()
+    tls13_client.transcript_add(tr, bytes.view(ch)[0..bytes.length(ch)])
+
+    // The ServerHello, in one plaintext record.
+    shrec = next_record(&r)
+    if shrec == null || (bytes.get(shrec, 0) & 0xFF) != 0x16 {
+        println("FAIL: no ServerHello")
+        exit(1)
+    }
+    if hrr_mode != "" {
+        hl0 = bytes.length(shrec) - 5
+        hrr = bytes.new(hl0)
+        bytes.copy_from_bytes(hrr, 0, shrec, 5, hl0)
+        bytes.free(shrec)
+        hp = tls13_hs.ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null, key_share_len: 0, is_hello_retry: 0, psk_accepted: 0, alert: 0 }
+        herr = tls13_hs.parse_server_hello(bytes.view(hrr)[0..hl0], &hp)
+        if herr != "" || hp.is_hello_retry != 1 || hp.group != tls13_hs.GROUP_X25519 {
+            println("NO HRR: ${herr} retry=${hp.is_hello_retry} group=${hp.group}")
+            exit(0)
+        }
+        // Transcript: message_hash(ClientHello1), the HelloRetryRequest
+        // (RFC 8446 4.4.1), computed here apart from tls13_client.
+        _ha, _hk, halgo, hhl = suite_params(hp.cipher_suite)
+        th1 = tls13_client.transcript_hash_algo(tr, halgo)
+        tls13_client.transcript_free(tr)
+        tr = tls13_client.transcript_new()
+        mh = bytes.new(4 + hhl)
+        bytes.set(mh, 0, 254)
+        bytes.set(mh, 1, 0)
+        bytes.set(mh, 2, 0)
+        bytes.set(mh, 3, hhl)
+        bytes.copy_from_bytes(mh, 4, th1, 0, hhl)
+        tls13_client.transcript_add(tr, bytes.view(mh)[0..4 + hhl])
+        tls13_client.transcript_add(tr, bytes.view(hrr)[0..hl0])
+        bytes.free(mh)
+        bytes.free(th1)
+        bytes.free(hrr)
+        // The server's compatibility change_cipher_spec follows its first
+        // handshake message, the HelloRetryRequest (D.4), and only that one.
+        ccsr = next_record(&r)
+        if ccsr == null || (bytes.get(ccsr, 0) & 0xFF) != 0x14 {
+            println("FAIL: no change_cipher_spec after the HelloRetryRequest")
+            exit(1)
+        }
+        bytes.free(ccsr)
+        // The second ClientHello as PEER_HRR says: "ok" with the x25519
+        // share; "noshare" the first again; "sid" another session id;
+        // "suite" another cipher suite first; "ccs2" two change_cipher_spec
+        // records before it.
+        ch2 = null
+        if hrr_mode == "noshare" {
+            ch2 = bytes.new(bytes.length(ch))
+            bytes.copy_from_bytes(ch2, 0, ch, 0, bytes.length(ch))
+        } else {
+            pch2 = tls13_hs.PskCh { buf: null, buf_len: 0, binder_off: 0, truncated_len: 0 }
+            tls13_hs.client_hello_retry(bytes.view(ch)[0..bytes.length(ch)], tls13_hs.GROUP_X25519, bytes.view(pub)[0..32], bytes.view(empty)[0..0], &pch2)
+            ch2 = pch2.buf
+        }
+        if hrr_mode == "sid" { bytes.set(ch2, 39, (bytes.get(ch2, 39) ^ 1) & 0xFF) }
+        if hrr_mode == "suite" {
+            bytes.set(ch2, 73, 0x13)
+            bytes.set(ch2, 74, 0x02)
+        }
+        one = bytes.new(1)
+        bytes.set(one, 0, 1)
+        send_plain(sock, 20, one, 0, 1)
+        if hrr_mode == "ccs2" { send_plain(sock, 20, one, 0, 1) }
+        bytes.free(one)
+        send_plain(sock, 22, ch2, 0, bytes.length(ch2))
+        tls13_client.transcript_add(tr, bytes.view(ch2)[0..bytes.length(ch2)])
+        bytes.free(ch2)
+        if hrr_mode != "ok" {
+            println("HRR ${answer(&r, null, null)}")
+            tcp.close(sock)
+            exit(0)
+        }
+        shrec = next_record(&r)
+        if shrec == null || (bytes.get(shrec, 0) & 0xFF) != 0x16 {
+            println("FAIL: no ServerHello after the HelloRetryRequest")
+            exit(1)
+        }
+    }
+    shl = bytes.length(shrec) - 5
+    sh = bytes.new(shl)
+    bytes.copy_from_bytes(sh, 0, shrec, 5, shl)
+    shp = tls13_hs.ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null, key_share_len: 0, is_hello_retry: 0, psk_accepted: 0, alert: 0 }
+    serr = tls13_hs.parse_server_hello(bytes.view(sh)[0..shl], &shp)
+    want_ks = 32
+    if p256_priv != null { want_ks = 65 }
+    if serr != "" || shp.key_share_len != want_ks {
+        println("FAIL: ServerHello: ${serr}")
+        exit(1)
+    }
+    tls13_client.transcript_add(tr, bytes.view(sh)[0..shl])
+    aead, klen, algo, hl = suite_params(shp.cipher_suite)
+    shared = null
+    if p256_priv != null {
+        sx = bytes.new(32)
+        sy = bytes.new(32)
+        bytes.copy_from_bytes(sx, 0, shp.key_share, 1, 32)
+        bytes.copy_from_bytes(sy, 0, shp.key_share, 33, 32)
+        shared = p256.ecdh(p256_priv, sx, sy)
+        bytes.free(sx)
+        bytes.free(sy)
+    } else {
+        xs, _aerr = x25519.agree(priv, shp.key_share)
+        shared = xs
+    }
+    th = tls13_client.transcript_hash_algo(tr, algo)
+    early = tls13_ks.early_secret(algo)
+    hsec = tls13_ks.handshake_secret(algo, early, bytes.view(shared)[0..32])
+    c_hs = tls13_ks.traffic_secret(algo, hsec, "c hs traffic", bytes.view(th)[0..hl])
+    s_hs = tls13_ks.traffic_secret(algo, hsec, "s hs traffic", bytes.view(th)[0..hl])
+    srv_ctx = ctx_for(algo, hl, aead, klen, s_hs)
+    cli_ctx = ctx_for(algo, hl, aead, klen, c_hs)
+
+    // The server's flight, through its Finished, into the transcript.
+    fl = bytes.new(4096)
+    fll = 0
+    done = 0
+    while done == 0 {
+        rec = next_record(&r)
+        if rec == null {
+            println("FAIL: the server's flight ended early")
+            exit(1)
+        }
+        if (bytes.get(rec, 0) & 0xFF) == 0x17 {
+            o = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0, alert: 0 }
+            oe = tls13_record.open_record(srv_ctx, bytes.view(rec)[0..bytes.length(rec)], &o)
+            if oe != "" {
+                println("FAIL: flight: ${oe}")
+                exit(1)
+            }
+            bytes.copy_from_bytes(fl, fll, o.plaintext, 0, o.plaintext_len)
+            fll = fll + o.plaintext_len
+            bytes.free(o.plaintext)
+            p = 0
+            while p + 4 <= fll && done == 0 {
+                ml = ((bytes.get(fl, p + 1) & 0xFF) << 16) | ((bytes.get(fl, p + 2) & 0xFF) << 8) | (bytes.get(fl, p + 3) & 0xFF)
+                if p + 4 + ml <= fll {
+                    if (bytes.get(fl, p) & 0xFF) == 20 { done = 1 }
+                    p = p + 4 + ml
+                } else {
+                    p = fll + 1
+                }
+            }
+        }
+        bytes.free(rec)
+    }
+    tls13_client.transcript_add(tr, bytes.view(fl)[0..fll])
+    th_sf = tls13_client.transcript_hash_algo(tr, algo)
+    ms = tls13_ks.master_secret(algo, hsec)
+    s_ap = tls13_ks.traffic_secret(algo, ms, "s ap traffic", bytes.view(th_sf)[0..hl])
+    app_ctx = ctx_for(algo, hl, aead, klen, s_ap)
+
+    cvd = tls13_client.finished_verify_data_algo(c_hs, bytes.view(th_sf)[0..hl], algo, hl)
+    how = os.getenv("PEER_CF")
+    n = 4 + hl
+    if how == "short" { n = 4 + hl - 1 }
+    if how == "long" || how == "trailing" { n = 4 + hl + 1 }
+    fin = bytes.new(n)
+    bytes.set(fin, n - 1, 0)
+    bytes.set(fin, 0, 20)
+    vl = hl
+    if how == "short" { vl = hl - 1 }
+    if how == "long" { vl = hl + 1 }
+    bytes.set(fin, 3, vl)
+    if how == "short" {
+        bytes.copy_from_bytes(fin, 4, cvd, 0, hl - 1)
+    } else {
+        bytes.copy_from_bytes(fin, 4, cvd, 0, hl)
+    }
+    if how == "badmac" { bytes.set(fin, 4, (bytes.get(fin, 4) ^ 1) & 0xFF) }
+    if how == "wrongtype" {
+        bytes.free(fin)
+        fin = bytes.new(8)
+        bytes.set(fin, 7, 0)
+        bytes.set(fin, 0, 11)
+        bytes.set(fin, 3, 4)
+        n = 8
+    }
+    if how == "split" {
+        send_sealed(sock, cli_ctx, 22, fin, 0, 3)
+        send_sealed(sock, cli_ctx, 22, fin, 3, n - 3)
+    } else if how == "badrecord" {
+        rec2 = tls13_record.seal_record(cli_ctx, 22, bytes.view(fin)[0..n])
+        bytes.set(rec2, 6, (bytes.get(rec2, 6) ^ 1) & 0xFF)
+        send_raw(sock, rec2)
+        bytes.free(rec2)
+    } else if how == "plain" {
+        send_plain(sock, 22, fin, 0, n)
+    } else if how == "appdata" {
+        send_sealed(sock, cli_ctx, 23, fin, 0, n)
+    } else {
+        send_sealed(sock, cli_ctx, 22, fin, 0, n)
+    }
+    post = os.getenv("PEER_POST")
+    if post != "" && how == "ok" {
+        c_ap = tls13_ks.traffic_secret(algo, ms, "c ap traffic", bytes.view(th_sf)[0..hl])
+        k = Keys { algo: algo, hl: hl, aead: aead, klen: klen, c_sec: c_ap, s_sec: s_ap, c_ctx: ctx_for(algo, hl, aead, klen, c_ap), s_ctx: app_ctx }
+        post_session(sock, &r, &k, post)
+        tcp.close(sock)
+        exit(0)
+    }
+    println(answer(&r, app_ctx, srv_ctx))
+    tcp.close(sock)
+    exit(0)
+}
+
+// ---- after the handshake (PEER_POST): KeyUpdate and alerts to the pure
+// server (#3320, #3323), under the client's application keys, which the
+// peer computes itself with tls13_kdf, apart from tls13_ks:
+//   kuN, kuxN     N KeyUpdates (update_not_requested), then 2 bytes of
+//                 data (kuxN without them, for a count the server refuses)
+//   kureqN        N KeyUpdates (update_requested), then data
+//   kubad         a KeyUpdate whose request_update is 2
+//   kulong        a KeyUpdate whose body is two bytes
+//   kutrail       a KeyUpdate and the header of another message, one record
+//   nstx          a NewSessionTicket, which no client sends
+//   alerts:HEX    alert records (level, description pairs), then data
+//                 (alertsx:HEX without it)
+//   listen        nothing: what the server sends on its own
+// Then "POST <what the server sent>", record by record under its keys,
+// which move on at each KeyUpdate: "KU", "DATA <n>", "ALERT <n>", "CLOSED".
+
+struct Keys {
+    algo: string
+    hl: int
+    aead: int
+    klen: int
+    c_sec: ptr // this client's sending secret
+    s_sec: ptr // the server's sending secret
+    c_ctx: ptr
+    s_ctx: ptr
+}
+
+// The traffic secret after `s` (RFC 8446 7.2); `s` is freed.
+fn next_secret(algo: string, hl: int, s: ptr) -> ptr {
+    empty = bytes.new(0)
+    n = tls13_kdf.expand_label(algo, bytes.view(s)[0..hl], "traffic upd", bytes.view(empty)[0..0], hl)
+    bytes.free(empty)
+    bytes.free(s)
+    return n
+}
+
+fn send_ku(sock: ptr, k: *Keys, request: int) {
+    m = bytes.new(5)
+    bytes.set(m, 0, 24)
+    bytes.set(m, 1, 0)
+    bytes.set(m, 2, 0)
+    bytes.set(m, 3, 1)
+    bytes.set(m, 4, request)
+    send_sealed(sock, k.c_ctx, 22, m, 0, 5)
+    bytes.free(m)
+    k.c_sec = next_secret(k.algo, k.hl, k.c_sec)
+    tls13_record.free_ctx(k.c_ctx)
+    k.c_ctx = ctx_for(k.algo, k.hl, k.aead, k.klen, k.c_sec)
+}
+
+fn send_hex(sock: ptr, k: *Keys, ct: int, h: string) {
+    n = string.length(h) / 2
+    b = bytes.new(n)
+    i = 0
+    while i < n {
+        bytes.set(b, i, hexval(string_char_at(h, 2 * i)) * 16 + hexval(string_char_at(h, 2 * i + 1)))
+        i = i + 1
+    }
+    send_sealed(sock, k.c_ctx, ct, b, 0, n)
+    bytes.free(b)
+}
+
+extern string_char_at(str: string, index: int) -> int
+
+fn hexval(h: int) -> int {
+    if h >= 48 && h <= 57 { return h - 48 }
+    if h >= 97 && h <= 102 { return h - 87 }
+    return h - 55
+}
+
+fn post_session(sock: ptr, r: *Reader, k: *Keys, what: string) {
+    if string.starts_with(what, "kureq") == 1 {
+        count, _e = string.to_int(string.substring(what, 5, string.length(what)))
+        i = 0
+        while i < count {
+            send_ku(sock, k, 1)
+            i = i + 1
+        }
+        send_hex(sock, k, 23, "6869")
+    } else if what == "kubad" {
+        send_hex(sock, k, 22, "1800000102")
+    } else if what == "kulong" {
+        send_hex(sock, k, 22, "180000020000")
+    } else if what == "kutrail" {
+        send_hex(sock, k, 22, "180000010004000000")
+    } else if string.starts_with(what, "ku") == 1 {
+        from = 2
+        if string.starts_with(what, "kux") == 1 { from = 3 }
+        count2, _e2 = string.to_int(string.substring(what, from, string.length(what)))
+        j = 0
+        while j < count2 {
+            send_ku(sock, k, 0)
+            j = j + 1
+        }
+        if from == 2 { send_hex(sock, k, 23, "6869") }
+    } else if what == "nstx" {
+        send_hex(sock, k, 22, "0400000f0000012c0102030400000101aa0000")
+    } else if string.starts_with(what, "alerts") == 1 {
+        at = string.index_of(what, ":") + 1
+        al = string.substring(what, at, string.length(what))
+        p = 0
+        while p + 3 < string.length(al) {
+            send_hex(sock, k, 21, string.substring(al, p, p + 4))
+            p = p + 4
+        }
+        if string.starts_with(what, "alertsx:") != 1 { send_hex(sock, k, 23, "6869") }
+    }
+    println("POST ${session_answer(r, k)}")
+}
+
+// What the server sent from here on, record by record, until it closes or
+// sends data or an alert: "KU" for each KeyUpdate (its keys then move on).
+fn session_answer(r: *Reader, k: *Keys) -> string {
+    out = ""
+    while 1 == 1 {
+        rec = next_record(r)
+        if rec == null { return "${out}CLOSED" }
+        if (bytes.get(rec, 0) & 0xFF) != 0x17 {
+            bytes.free(rec)
+            return "${out}PLAIN"
+        }
+        o = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0, alert: 0 }
+        oe = tls13_record.open_record(k.s_ctx, bytes.view(rec)[0..bytes.length(rec)], &o)
+        bytes.free(rec)
+        if oe != "" { return "${out}UNREADABLE" }
+        t = o.content_type
+        n = o.plaintext_len
+        first = 0
+        if n > 0 { first = bytes.get(o.plaintext, 0) & 0xFF }
+        second = 0
+        if n > 1 { second = bytes.get(o.plaintext, 1) & 0xFF }
+        if o.plaintext != null { bytes.free(o.plaintext) }
+        if t == 22 && first == 24 {
+            out = "${out}KU "
+            k.s_sec = next_secret(k.algo, k.hl, k.s_sec)
+            tls13_record.free_ctx(k.s_ctx)
+            k.s_ctx = ctx_for(k.algo, k.hl, k.aead, k.klen, k.s_sec)
+        } else if t == 21 {
+            return "${out}ALERT ${second}"
+        } else if t == 23 {
+            return "${out}DATA ${n}"
+        } else {
+            return "${out}HANDSHAKE ${first}"
+        }
+    }
+}
+
+// The ClientHello `ch` with an empty early_data extension added at the
+// end of its extensions (#3357).
+fn with_early_data(ch: ptr) -> ptr {
+    n = bytes.length(ch)
+    out = bytes.new(n + 4)
+    bytes.copy_from_bytes(out, 0, ch, 0, n)
+    bytes.set(out, n, 0)
+    bytes.set(out, n + 1, 0x2a)
+    bytes.set(out, n + 2, 0)
+    bytes.set(out, n + 3, 0)
+    bl = n + 4 - 4
+    bytes.set(out, 1, (bl >> 16) & 0xFF)
+    bytes.set(out, 2, (bl >> 8) & 0xFF)
+    bytes.set(out, 3, bl & 0xFF)
+    p = 4 + 2 + 32
+    p = p + 1 + (bytes.get(ch, p) & 0xFF)
+    p = p + 2 + (((bytes.get(ch, p) & 0xFF) << 8) | (bytes.get(ch, p + 1) & 0xFF))
+    p = p + 1 + (bytes.get(ch, p) & 0xFF)
+    el = (((bytes.get(ch, p) & 0xFF) << 8) | (bytes.get(ch, p + 1) & 0xFF)) + 4
+    bytes.set(out, p, (el >> 8) & 0xFF)
+    bytes.set(out, p + 1, el & 0xFF)
+    return out
+}

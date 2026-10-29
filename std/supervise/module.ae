@@ -1,0 +1,360 @@
+// std.supervise: supervisors that restart actors (#2974).
+// Import with: import std.supervise
+//
+//     sup = supervise.start(strategy: "one_for_one", max_restarts: 3, within_secs: 60) {
+//         supervise.child("worker", || -> spawn(Worker()))
+//         supervise.child_restart("db", || -> spawn(Db()), "transient")
+//     }
+//
+// A supervisor is an ordinary actor on std.actors. It traps exits and links
+// each child, so a child's death reaches it as a Down, and its own death
+// takes the children with it. A child that dies is restarted in place, under
+// the ref its siblings and clients already hold (actors.rebirth_begin, the
+// child's factory, actors.rebirth_end), by its strategy:
+//
+//   one_for_one   the dead child alone;
+//   one_for_all   every child: the others are killed, newest first, and all
+//                 restart in start order once each one's Down has come;
+//   rest_for_one  the dead child and every child started after it.
+//
+// A death while a restart still waits for a Down joins it: each child is
+// restarted once, the ones of both deaths together in start order.
+//
+// A child's restart kind says whether it is restarted: "permanent" (always,
+// the default), "transient" (unless it ended "normal") or "temporary"
+// (never). More than max_restarts restarts within within_secs, or a factory
+// that fails (it spawns nothing, or panics), and the supervisor gives up: it
+// kills its children, newest first, and panics with the reason, so its own
+// watchers get a Down with it and a supervisor it is linked to takes the
+// failure in turn.
+
+import std.actors
+
+exports(
+    start, child, child_restart, which, restarts, stop,
+    SuperviseChild, SuperviseSpec,
+    MAX_CHILDREN
+)
+
+const MAX_CHILDREN = 31
+
+extern aether_actor_capture_begin()
+extern aether_actor_capture_end() -> actor_ref
+
+struct SuperviseChild {
+    name: string
+    factory: fn
+    restart: int // 0 permanent, 1 transient, 2 temporary
+    ref: actor_ref
+    phase: int // 0 not started, 1 alive, 2 ended (its Down came), 3 killed by the supervisor, its Down to come
+}
+
+struct SuperviseSpec {
+    count: int
+    kids: SuperviseChild[32]
+}
+
+message SuperviseStart {}
+message SuperviseRestart {}
+message SuperviseGiveUp { why: string }
+message SuperviseStop {}
+
+actor Supervisor {
+    state strategy = 0 // 0 one_for_one, 1 one_for_all, 2 rest_for_one
+    state max_restarts = 3
+    state within_ns: long = 0
+    state within_secs = 0
+    state kids: SuperviseChild[32]
+    state count = 0
+    // 1 for a child to restart: each one at most once, restarted in start
+    // order, whichever deaths asked for it (#3390).
+    state pending: int[32]
+    state times: long[64] // the last restarts, a ring
+    state tnext = 0
+    state tcount = 0
+    state total = 0
+    state stopping = 0
+
+    receive {
+        SuperviseStart() -> {
+            // Started by supervise.start; linked here, so a death reaches
+            // this actor as a Down (one that came first is taken at once).
+            actors.trap_exits(true)
+            i = 0
+            while i < count {
+                if kids[i].phase == 1 {
+                    actors.link(kids[i].ref)
+                }
+                i = i + 1
+            }
+        }
+
+        Down(ref, reason) -> {
+            if stopping == 0 {
+                i = 0
+                found = -1
+                while i < count && found < 0 {
+                    if kids[i].ref == ref && kids[i].phase != 0 {
+                        found = i
+                    }
+                    i = i + 1
+                }
+                if found >= 0 {
+                    if kids[found].phase == 3 {
+                        // Killed for a restart: it can be restarted now.
+                        kids[found].phase = 2
+                        self ! SuperviseRestart {}
+                    } else if kids[found].phase == 1 {
+                        kids[found].phase = 2
+                        again = kids[found].restart == 0 ||
+                        (kids[found].restart == 1 && reason != "normal")
+                        if again {
+                            // The restarts already made inside the window.
+                            now = clock_ns()
+                            recent = 0
+                            k = 0
+                            while k < tcount {
+                                if now - times[k] < within_ns {
+                                    recent = recent + 1
+                                }
+                                k = k + 1
+                            }
+                            if recent >= max_restarts {
+                                stopping = 1
+                                self ! SuperviseGiveUp {
+                                    why: "supervisor gave up: more than ${max_restarts} restarts within ${within_secs} s (${kids[found].name}: ${reason})"
+                                }
+                            } else {
+                                times[tnext] = now
+                                tnext = (tnext + 1) % 64
+                                if tcount < 64 {
+                                    tcount = tcount + 1
+                                }
+                                first = found
+                                if strategy == 1 {
+                                    first = 0
+                                }
+                                // The ones to restart with it are killed, newest first.
+                                if strategy != 0 {
+                                    j = count - 1
+                                    while j >= first {
+                                        if j != found && kids[j].phase == 1 {
+                                            kids[j].phase = 3
+                                            actors.kill(kids[j].ref)
+                                        }
+                                        j = j - 1
+                                    }
+                                }
+                                // And restarted in start order, together with
+                                // the children an earlier death left pending:
+                                // one already pending is not added again.
+                                j = first
+                                while j < count {
+                                    // A temporary sibling is not restarted with it.
+                                    if j == found || (strategy != 0 && kids[j].restart != 2) {
+                                        if kids[j].phase == 2 || kids[j].phase == 3 {
+                                            pending[j] = 1
+                                        }
+                                    }
+                                    j = j + 1
+                                }
+                                self ! SuperviseRestart {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        SuperviseRestart() -> {
+            busy = 1
+            while busy == 1 && stopping == 0 {
+                // The first pending child in start order.
+                i = 0
+                while i < count && pending[i] == 0 {
+                    i = i + 1
+                }
+                if i == count {
+                    busy = 0
+                } else if kids[i].phase == 3 {
+                    // Its Down is still to come; the Down goes on from here.
+                    busy = 0
+                } else {
+                    rc = actors.rebirth_begin(kids[i].ref)
+                    if rc == 0 {
+                        // A message from before its death is still on its way.
+                        self ! SuperviseRestart {}
+                        busy = 0
+                    } else if rc < 0 {
+                        stopping = 1
+                        self ! SuperviseGiveUp { why: "supervisor gave up: child ${kids[i].name} cannot be restarted" }
+                        busy = 0
+                    } else {
+                        failed = 0
+                        aether_actor_capture_begin()
+                        f = kids[i].factory
+                        try {
+                            call(f)
+                        } catch e {
+                            failed = 1
+                        }
+                        _c = aether_actor_capture_end()
+                        ok = actors.rebirth_end(kids[i].ref)
+                        if failed == 1 || ok != 1 {
+                            stopping = 1
+                            self ! SuperviseGiveUp { why: "supervisor gave up: the restart of ${kids[i].name} failed" }
+                            busy = 0
+                        } else {
+                            kids[i].phase = 1
+                            actors.link(kids[i].ref)
+                            total = total + 1
+                            pending[i] = 0
+                        }
+                    }
+                }
+            }
+        }
+
+        SuperviseGiveUp(why) -> {
+            stopping = 1
+            j = count - 1
+            while j >= 0 {
+                if kids[j].phase == 1 || kids[j].phase == 3 {
+                    actors.kill(kids[j].ref)
+                }
+                j = j - 1
+            }
+            panic(why)
+        }
+
+        SuperviseStop() -> {
+            stopping = 1
+            j = count - 1
+            while j >= 0 {
+                if kids[j].phase == 1 {
+                    actors.kill(kids[j].ref)
+                }
+                j = j - 1
+            }
+            actors.stop()
+        }
+    }
+}
+
+spec_new() -> *SuperviseSpec {
+    s = heap.new(SuperviseSpec)
+    s.count = 0
+    return s
+}
+
+spec_free(p: ptr) {
+    heap.free(p as *SuperviseSpec)
+}
+
+// Starts a supervisor with the children the block lists (supervise.child),
+// and returns its ref. Each child is started in order when the supervisor
+// runs; its factory is a closure that spawns it (`|| -> spawn(Worker())`),
+// and may configure it.
+builder start(strategy: string = "one_for_one", max_restarts: int = 3,
+    within_secs: int = 5): actor_ref[Supervisor] with spec_new {
+    st = 0
+    if strategy == "one_for_all" {
+        st = 1
+    } else if strategy == "rest_for_one" {
+        st = 2
+    } else if strategy != "one_for_one" {
+        panic("supervise.start: strategy \"${strategy}\" is not one_for_one, one_for_all or rest_for_one")
+    }
+    sup = spawn(Supervisor())
+    sup.strategy = st
+    sup.max_restarts = max_restarts
+    sup.within_secs = within_secs
+    sup.within_ns = (within_secs as long) * 1000000 * 1000
+    if _builder != null {
+        s = _builder as *SuperviseSpec
+        i = 0
+        while i < s.count {
+            sup.kids[i] = s.kids[i]
+            i = i + 1
+        }
+        sup.count = s.count
+        heap.free(s)
+    }
+    // Each child started here, in order: its ref is the supervisor's from
+    // now on, the same across its restarts.
+    i = 0
+    while i < sup.count {
+        failed = 0
+        aether_actor_capture_begin()
+        f = sup.kids[i].factory
+        try {
+            call(f)
+        } catch e {
+            failed = 1
+        }
+        r = aether_actor_capture_end()
+        if failed == 1 || r == null {
+            panic("supervise.start: child ${sup.kids[i].name} did not start")
+        }
+        sup.kids[i].ref = r
+        sup.kids[i].phase = 1
+        i = i + 1
+    }
+    sup ! SuperviseStart {}
+    return sup
+}
+
+// In a supervise.start block: a child named `name`, started by `factory`,
+// restarted after any end ("permanent").
+child(_ctx: ptr, name: string, factory: @keep fn) {
+    add_child(_ctx, name, factory, "permanent")
+}
+
+// As child, with its restart kind: "permanent" (restarted after any end),
+// "transient" (unless it ended "normal") or "temporary" (never).
+child_restart(_ctx: ptr, name: string, factory: @keep fn, restart: string) {
+    add_child(_ctx, name, factory, restart)
+}
+
+add_child(ctx: ptr, name: string, factory: @keep fn, restart: string) {
+    if ctx == null {
+        return
+    }
+    s = ctx as *SuperviseSpec
+    if s.count >= MAX_CHILDREN {
+        panic("supervise.child: more than ${MAX_CHILDREN} children")
+    }
+    k = 0
+    if restart == "transient" {
+        k = 1
+    } else if restart == "temporary" {
+        k = 2
+    } else if restart != "permanent" {
+        panic("supervise.child: restart \"${restart}\" is not permanent, transient or temporary")
+    }
+    s.kids[s.count] = SuperviseChild { name: name, factory: factory, restart: k, ref: null, phase: 0 }
+    s.count = s.count + 1
+}
+
+// The ref of the child named `name` (the same across its restarts), or null.
+which(sup: actor_ref[Supervisor], name: string) -> actor_ref {
+    i = 0
+    at = MAX_CHILDREN
+    while i < sup.count {
+        if sup.kids[i].name == name {
+            at = i
+        }
+        i = i + 1
+    }
+    return sup.kids[at].ref
+}
+
+// How many restarts the supervisor has made.
+restarts(sup: actor_ref[Supervisor]) -> int {
+    return sup.total
+}
+
+// Kills the children, newest first, and ends the supervisor normally.
+stop(sup: actor_ref) {
+    sup ! SuperviseStop {}
+}

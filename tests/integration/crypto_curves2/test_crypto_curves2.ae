@@ -1,8 +1,13 @@
-// Validate std.cryptography.secp256k1 (ECDSA/ECDH), x448 (RFC 7748),
-// and ed448 (RFC 8032) against published test vectors.
+// Validate std.cryptography.secp256k1 (ECDSA with RFC 6979 nonces, ECDH,
+// the off-curve refusal), x448 (RFC 7748, and agree refusing an all-zero
+// shared secret as x25519.agree does) and ed448 (RFC 8032) against
+// published test vectors.
 import std.cryptography.secp256k1
 import std.cryptography.x448
+import std.cryptography.x25519
 import std.cryptography.ed448
+import std.cryptography.sha2
+import std.bignum
 import std.bytes
 import std.string
 import std.io
@@ -11,6 +16,56 @@ hv(c: int) -> int { if c >= 48 { if c <= 57 { return c - 48 } } if c >= 97 { if 
 hb(h: string) -> ptr { n = string.length(h); b = bytes.new(n / 2); i = 0; while i < n { bytes.set(b, i / 2, hv(string_char_at_n(h, n, i)) * 16 + hv(string_char_at_n(h, n, i + 1))); i = i + 2 } return b }
 bh(b: ptr) -> string { d = "0123456789abcdef"; o = ""; n = bytes.length(b); i = 0; while i < n { v = bytes.get(b, i); o = string.concat(o, string.concat(string.substring(d, (v / 16) & 15, ((v / 16) & 15) + 1), string.substring(d, v & 15, (v & 15) + 1))); i = i + 1 } return o }
 ck(lbl: string, got: string, want: string) -> int { if got == want { println("ok   ${lbl}"); return 0 } println("FAIL ${lbl}"); println("  got:  ${got}"); println("  want: ${want}"); return 1 }
+
+fn sha256_str(msg: string) -> ptr {
+    n = string.length(msg)
+    m = bytes.new(n)
+    i = 0
+    while i < n {
+        bytes.set(m, i, string_char_at_n(msg, n, i))
+        i = i + 1
+    }
+    ctx, _e = sha2.new("sha256")
+    sha2.update(ctx, bytes.view(m))
+    bytes.free(m)
+    return sha2.final_bytes(ctx)
+}
+
+// s in Bitcoin's low-S form: n - s when s > n/2.
+fn low_s(s: ptr) -> string {
+    nb = hb("fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141")
+    n = bignum.from_bytes_unsigned(nb, 32)
+    bytes.free(nb)
+    half = bignum.shift_right(n, 1)
+    sn = bignum.from_bytes_unsigned(s, 32)
+    out = bh(s)
+    if bignum.compare(sn, half) > 0 {
+        t = bignum.subtract(n, sn)
+        tb = bignum.to_bytes_unsigned(t)
+        out = bh(tb)
+        while string.length(out) < 64 { out = string.concat("0", out) }
+        bytes.free(tb)
+        bignum.free(t)
+    }
+    bignum.free(n); bignum.free(half); bignum.free(sn)
+    return out
+}
+
+// Sign SHA-256(msg) under d (hex, left-padded to 32 bytes); compare r and the
+// low-S form of s, and verify.
+fn k1_vector(d_hex: string, msg: string, want_r: string, want_s: string) -> int {
+    dh = d_hex
+    while string.length(dh) < 64 { dh = string.concat("0", dh) }
+    d = hb(dh)
+    h = sha256_str(msg)
+    r, s = secp256k1.ecdsa_sign(d, h)
+    px, py = secp256k1.scalar_mult_base(d)
+    fails = ck("secp256k1 rfc6979 d=${d_hex} r", bh(r), want_r)
+    fails = fails + ck("secp256k1 rfc6979 d=${d_hex} low-s", low_s(s), want_s)
+    if secp256k1.ecdsa_verify(px, py, h, r, s) != 1 { println("FAIL secp256k1 d=${d_hex} does not verify"); fails = fails + 1 }
+    bytes.free(d); bytes.free(h); bytes.free(r); bytes.free(s); bytes.free(px); bytes.free(py)
+    return fails
+}
 
 main() {
     fails = 0
@@ -21,19 +76,66 @@ main() {
     fails = fails + ck("secp256k1 2G x", bh(g2x), "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5")
     fails = fails + ck("secp256k1 2G y", bh(g2y), "1ae168fea63dc339a3c58419466ceaeef7f632653266d0e1236431a950cfe52a")
 
-    // ECDSA sign/verify round-trip
+    // ECDSA with RFC 6979 nonces: the deterministic secp256k1 vectors of
+    // bitcoinjs-lib v3.3.2 (test/fixtures/ecdsa.json, "valid.ecdsa"; MIT),
+    // whose signatures are in Bitcoin's low-S form.
+    fails = fails + k1_vector("01", "Everything should be made as simple as possible, but not simpler.",
+        "33a69cd2065432a30f3d1ce4eb0d59b8ab58c74f27c41a7fdb5696ad4e6108c9", "6f807982866f785d3f6418d24163ddae117b7db4d5fdf0071de069fa54342262")
+    fails = fails + k1_vector("fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364140", "Equations are more important to me, because politics is for the present, but an equation is something for eternity.",
+        "54c4a33c6423d689378f160a7ff8b61330444abb58fb470f96ea16d99d4a2fed", "07082304410efa6b2943111b6a4e0aaa7b7db55a07e9861d1fb3cb1f421044a5")
+    fails = fails + k1_vector("fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364140", "Not only is the Universe stranger than we think, it is stranger than we can think.",
+        "ff466a9f1b7b273e2f4c3ffe032eb2e814121ed18ef84665d0f515360dab3dd0", "6fc95f5132e5ecfdc8e5e6e616cc77151455d46ed48f5589b7db7771a332b283")
+    fails = fails + k1_vector("0000000000000000000000000000000000000000000000000000000000000001", "How wonderful that we have met with a paradox. Now we have some hope of making progress.",
+        "c0dafec8251f1d5010289d210232220b03202cba34ec11fec58b3e93a85b91d3", "75afdc06b7d6322a590955bf264e7aaa155847f614d80078a90292fe205064d3")
+    fails = fails + k1_vector("69ec59eaa1f4f2e36b639716b7c30ca86d9a5375c7b38d8918bd9c0ebc80ba64", "Computer science is no more about computers than astronomy is about telescopes.",
+        "7186363571d65e084e7f02b0b77c3ec44fb1b257dee26274c38c928986fea45d", "0de0b38e06807e46bda1f1e293f4f6323e854c86d58abdd00c46c16441085df6")
+    fails = fails + k1_vector("00000000000000000000000000007246174ab1e92e9149c6e446fe194d072637", "...if you aren't, at any given time, scandalized by code you wrote five or even three years ago, you're not learning anywhere near enough",
+        "fbfe5076a15860ba8ed00e75e9bd22e05d230f02a936b653eb55b61c99dda487", "0e68880ebb0050fe4312b1b1eb0899e1b82da89baa5b895f612619edf34cbd37")
+    fails = fails + k1_vector("000000000000000000000000000000000000000000056916d0f9b31dc9b637f3", "The question of whether computers can think is like the question of whether submarines can swim.",
+        "cde1302d83f8dd835d89aef803c74a119f561fbaef3eb9129e45f30de86abbf9", "06ce643f5049ee1f27890467b77a6a8e11ec4661cc38cd8badf90115fbd03cef")
+
+    // Round trip, tamper, and the refusals (#3291).
     d = hb("c477f9f65c22cce20657faa5b2d1d8122336f851a508a1ed04e479c34985bf96")
     hash = hb("0102030405060708010203040506070801020304050607080102030405060708")
-    k = hb("7a1a7e52797fc8caaa435d2a4dace39158504bf204fbe19f14dbb427faee50ae")
     px, py = secp256k1.scalar_mult_base(d)
-    r, s = secp256k1.ecdsa_sign(d, hash, k)
+    r, s = secp256k1.ecdsa_sign(d, hash)
     if secp256k1.ecdsa_verify(px, py, hash, r, s) == 1 { println("ok   secp256k1 sign/verify") } else { println("FAIL secp256k1 sign/verify"); fails = fails + 1 }
+    bytes.set(hash, 31, 9)
+    if secp256k1.ecdsa_verify(px, py, hash, r, s) == 0 { println("ok   secp256k1 tamper rejected") } else { println("FAIL secp256k1 tamper accepted"); fails = fails + 1 }
+    offy = hb("1ae168fea63dc339a3c58419466ceaeef7f632653266d0e1236431a950cfe52b")
+    if secp256k1.ecdh(d, g2x, offy) == null && secp256k1.public_key_valid(g2x, offy) == 0 && secp256k1.public_key_valid(g2x, g2y) == 1 {
+        println("ok   secp256k1 refuses an off-curve point")
+    } else { println("FAIL secp256k1 accepted an off-curve point"); fails = fails + 1 }
+    // ECDH both ways: d * 2G = 2 * (d G).
+    e1 = secp256k1.ecdh(d, g2x, g2y)
+    e2 = secp256k1.ecdh(two, px, py)
+    fails = fails + ck("secp256k1 ecdh agrees both ways", bh(e1), bh(e2))
+    bytes.free(d); bytes.free(hash); bytes.free(px); bytes.free(py); bytes.free(r); bytes.free(s)
+    bytes.free(offy); bytes.free(e1); bytes.free(e2); bytes.free(two); bytes.free(g2x); bytes.free(g2y)
 
     // --- X448 RFC 7748 §6.2 Diffie-Hellman shared secret ---
     apriv = hb("9a8f4925d1519f5775cf46b04b5800d4ee9ee8bae8bc5565d498c28dd9c9baf574a9419744897391006382a6f127ab1d9ac2d8c0a598726b")
     bpub = hb("3eb7a829b0cd20f5bcfc0b599b6feccf6da4627107bdb0d4f345b43027d8b972fc3e34fb4232a13ca706dcb57aec3dae07bdc1c67bf33609")
     ss = x448.x448(apriv, bpub)
     fails = fails + ck("x448 dh", bh(ss), "07fff4181ac6cc95ec1c16a94a0f74d12da232ce40a77552281d282bb60c0b56fd2464c335543936521c24403085d59a449a5037514a879d")
+    // agree() runs the same check for both curves (#1298): the RFC 7748 6.2
+    // shared secret comes back, and an all-zero one (u = 0, small order) is
+    // refused, where the raw functions return the zeros.
+    ss2, _aerr = x448.agree(apriv, bpub)
+    fails = fails + ck("x448 agree", bh(ss2), "07fff4181ac6cc95ec1c16a94a0f74d12da232ce40a77552281d282bb60c0b56fd2464c335543936521c24403085d59a449a5037514a879d")
+    z56 = hb("0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000")
+    z32 = hb("0000000000000000000000000000000000000000000000000000000000000000")
+    s32 = hb("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4")
+    raw448 = x448.x448(apriv, z56)
+    raw25519, _rerr = x25519.scalar_mult(s32, z32)
+    zs448, zerr448 = x448.agree(apriv, z56)
+    zs25519, zerr25519 = x25519.agree(s32, z32)
+    if zs448 == null && string.contains(zerr448, "all-zero") == 1 && zs25519 == null && string.contains(zerr25519, "all-zero") == 1 {
+        println("ok   x448.agree and x25519.agree both refuse an all-zero shared secret")
+    } else { println("FAIL an all-zero shared secret was accepted"); fails = fails + 1 }
+    fails = fails + ck("x448 raw zero", bh(raw448), "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000")
+    fails = fails + ck("x25519 raw zero", bh(raw25519), "0000000000000000000000000000000000000000000000000000000000000000")
+    bytes.free(ss2); bytes.free(z56); bytes.free(z32); bytes.free(s32); bytes.free(raw448); bytes.free(raw25519)
 
     // --- Ed448 RFC 8032 §7.4 Blank (empty message) ---
     seed = hb("6c82a562cb808d10d632be89c8513ebf6c929f34ddfa8c9f63c9960ef6e348a3528c8a3fcc2f044e39a3fc5b94492f8f032e7549a20098f95b")

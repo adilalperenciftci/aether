@@ -1,0 +1,20 @@
+// The library app.ae imports in binary form (#3388), built with a runtime
+// of its own: results.ae's string export and test hooks, without the
+// struct of strings an importer of a static library refuses.
+import std.string
+
+extern aether_test_fail_alloc_after(n: int)
+extern aether_caps_used_bytes() -> long
+
+used() -> long {
+    return aether_caps_used_bytes()
+}
+
+fail_next(n: int) {
+    aether_test_fail_alloc_after(n)
+}
+
+greet(n: int) -> string {
+    _x = string.from_int(n)
+    return string.concat("hello", string.from_int(n))
+}

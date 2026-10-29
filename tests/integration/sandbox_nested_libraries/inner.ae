@@ -1,0 +1,30 @@
+// The inner library (#2955): its exports read PATH, on their own and inside
+// an enforce block of their own that grants everything.
+import std.sandbox
+import std.os
+
+extern host_note(which: int, got: int)
+
+fn inner_read_path() -> int {
+    v = os.os_getenv("PATH")
+    if v == null {
+        return 0
+    }
+    return 1
+}
+
+inner_read() -> int {
+    return inner_read_path()
+}
+
+// Note 1: inside an enforce that grants everything.
+inner_read_granted() -> int {
+    everything = sandbox.new("everything") {
+        grant_all()
+    }
+    sandbox.enforce(everything) callback {
+        host_note(1, inner_read_path())
+    }
+    sandbox.free(everything)
+    return 0
+}

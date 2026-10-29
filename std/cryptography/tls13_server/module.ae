@@ -6,11 +6,18 @@
 //
 // CONSTRAINTS, so they are found here rather than in a failed handshake:
 //
-//   - The server key must be ECDSA P-256. CertificateVerify is signed with
-//     sign_server_cert_verify_ecdsa_p256 and there is no RSA path, so an RSA
-//     key fails at the signature step and the peer just sees the connection
-//     drop. Generate with:
-//       openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1
+//   - The server key (load_private_key: PKCS#8, SEC1 or PKCS#1 PEM) is
+//     ECDSA P-256, P-384 or P-521, Ed25519, or RSA of 2048 to 16384 bits
+//     (#3326). CertificateVerify is signed with the key's scheme (0x0403,
+//     0x0503, 0x0603, 0x0807, or rsa_pss_rsae_sha256 0x0804) when the
+//     client offers it; a client that offers none gets handshake_failure.
+//     An encrypted key is refused. std.http's server_set_tls checks that
+//     the key and the certificate are a pair when the server is set up
+//     (#3328). Every signature is checked against the leaf's key before it
+//     is sent; one that does not verify ends the handshake with
+//     internal_error instead. The key is kept shielded
+//     (std.cryptography.shield), in the clear only for each signature, and
+//     a key whose shielded form changed in memory is not used (#3376).
 //   - Key exchange: X25519MLKEM768 (post-quantum hybrid) and X25519.
 //   - Buffer arguments are std.bytes HANDLES, never bytes.data(b) -- see the
 //     header of tls13_client for why that distinction bites.
@@ -19,14 +26,17 @@ import std.bytes
 import std.string
 import std.list
 import std.list(list_new, list_free, list_size)
-import std.mem(copy)
-import std.fs
+import std.mem(copy, ptr_to_long, long_to_ptr)
 import std.tcp
 import std.cryptography.sha2
 import std.cryptography.hmac
 import std.cryptography.x25519
 import std.cryptography.mlkem
 import std.cryptography.p256
+import std.cryptography.p384
+import std.cryptography.p521
+import std.cryptography.rsa
+import std.cryptography.shield
 import std.cryptography.tls13_kdf
 import std.cryptography.tls13_client
 import std.cryptography.tls13_ks
@@ -44,10 +54,10 @@ extern string_length(s: string) -> int
 extern tcp_socket_from_fd_owned(fd: int) -> ptr
 
 exports(
-    accept, conn_send, conn_recv, close_conn,
+    accept, conn_send, conn_recv, close_conn, conn_key_update,
     ServerConn,
-    parse_cert_chain_pem, parse_ec_private_key_pem,
-    pure_tls_server_accept, pure_tls_server_send, pure_tls_server_recv, pure_tls_server_close
+    parse_cert_chain_pem, parse_cert_chain_pem_checked, parse_ec_private_key_pem, load_private_key, free_private_key, ServerKey,
+    pure_tls_server_check, pure_tls_server_accept, pure_tls_server_send, pure_tls_server_recv, pure_tls_server_pending, pure_tls_server_close
 )
 
 struct ServerConn {
@@ -55,6 +65,27 @@ struct ServerConn {
     rio: ptr // *RecordIO
     app_send: ptr // *tls13_record.RecordCtx
     app_recv: ptr // *tls13_record.RecordCtx
+    suite: int // the negotiated cipher suite
+    // The application traffic secrets the record contexts are keyed from;
+    // each KeyUpdate moves one on (RFC 8446 7.2, #3320).
+    send_secret: ptr
+    recv_secret: ptr
+    // Post-handshake handshake bytes of a message not yet whole, or null.
+    hs_pend: ptr
+    hs_pend_len: int
+    empties: int // empty application-data records in a row (#3317)
+    key_updates: int // KeyUpdates since the last application data (#3320)
+    warnings: int // user_canceled alerts since the last application data (#3323)
+    ku_pending: int // 1 when the client asked for a KeyUpdate not yet sent (#3320)
+    closed: int // 0 open, 1 after the client's close_notify, 2 after an error
+    // What pure_tls_server_recv has decrypted but not yet handed over: the
+    // tail of a record larger than the caller's buffer (#3381), or null.
+    recv_pend: ptr
+    recv_pend_len: int
+    recv_pend_off: int
+    // 1 while the pending check (#3405) runs conn_recv: it handles only the
+    // records already read, and returns instead of reading the socket.
+    buffered_only: int
 }
 
 // RecordIO framing over a raw TCP socket.
@@ -63,6 +94,13 @@ struct RecordIO {
     buf: ptr // std.bytes accumulator
     len: int
     off: int
+    alert: int // the alert recio_next says to send, when it refuses a record
+    ccs: int // dummy change_cipher_spec records read so far
+    hs_seen: int // 1 once the ClientHello has been read
+    // 1 once the connection is established (#3405): a read that times out
+    // is then the socket's timeout, which the caller set (std.http's wait
+    // for a next request), so it is reported, not retried.
+    after_hs: int
 }
 
 fn recio_new(sock: @keep ptr) -> *RecordIO {
@@ -72,15 +110,44 @@ fn recio_new(sock: @keep ptr) -> *RecordIO {
     bytes.set(r.buf, 0, 0)
     r.len = 0
     r.off = 0
+    r.alert = 0
+    r.ccs = 0
+    r.hs_seen = 0
+    r.after_hs = 0
     return r
 }
 
 fn recio_free(r: *RecordIO) {
-    bytes.free(r.buf)
+    bytes.wipe_free(r.buf)
     libc_free(r as ptr)
 }
 
+// Drop what has been consumed before reading more (#3379): back to the
+// start when everything was consumed, else, once the consumed part is
+// past RECIO_COMPACT_AT bytes and at least half of what is held, the rest
+// moved to a fresh buffer. A connection then holds about one record and
+// one read however long it lives, not everything it ever received.
+const RECIO_COMPACT_AT = 16384
+
+fn recio_compact(r: *RecordIO) {
+    if r.off == 0 { return }
+    if r.off >= r.len {
+        r.off = 0
+        r.len = 0
+        return
+    }
+    if r.off < RECIO_COMPACT_AT || r.off * 2 < r.len { return }
+    rest = r.len - r.off
+    nb = bytes.new(rest + 4096)
+    bytes.copy_from_bytes(nb, 0, r.buf, r.off, rest)
+    bytes.wipe_free(r.buf)
+    r.buf = nb
+    r.off = 0
+    r.len = rest
+}
+
 fn recio_fill(r: *RecordIO) -> int {
+    recio_compact(r)
     tries = 0
     filling = 1
     result = -1
@@ -94,7 +161,12 @@ fn recio_fill(r: *RecordIO) -> int {
                 filling = 0
             }
         } else {
-            if string.equals(err, "timeout") == 1 {
+            if string.equals(err, "timeout") == 1 && r.after_hs == 1 {
+                // The socket's own timeout, which its owner set: reported,
+                // so a wait for a next request can end (#3405).
+                result = -2
+                filling = 0
+            } else if string.equals(err, "timeout") == 1 {
                 tries = tries + 1
                 if tries >= 500 {
                     result = -1
@@ -116,6 +188,12 @@ fn recio_next(r: *RecordIO) -> (ptr, int, string) {
     while loop == 1 {
         avail = r.len - r.off
         if avail >= 5 {
+            // The header alone says whether to read on (#3317).
+            ha, herr = tls13_record.check_header(bytes.view(r.buf)[r.off..r.off + 5])
+            if ha != 0 {
+                r.alert = ha
+                return null, 0, herr
+            }
             plen = ((bytes.get(r.buf, r.off + 3) & 0xFF) << 8) | (bytes.get(r.buf, r.off + 4) & 0xFF)
             total = 5 + plen
             if avail >= total {
@@ -127,11 +205,99 @@ fn recio_next(r: *RecordIO) -> (ptr, int, string) {
             }
         }
         got = recio_fill(r)
+        // What was read of a record stays in the buffer for the next call.
+        if got == -2 { return null, 0, "timeout" }
         if got <= 0 {
             return null, 0, "record: connection closed before a full record"
         }
     }
     return null, 0, "unreachable"
+}
+
+// The ClientHello, whatever records it came in, as one record: a 5-byte
+// header, then the message (RFC 8446 5.1: a handshake message may be split
+// across records, #3321). A change_cipher_spec before it, any record type
+// other than handshake, bytes after the message in its last record (only
+// early data, which this server does not take, may follow it) and a
+// message over 2^16 bytes are unexpected_message; an alert record is the
+// client giving up. r.alert says what to send on an error. `second` is 1
+// for the ClientHello after a HelloRetryRequest, which the client's one
+// compatibility change_cipher_spec may come before (D.4, #3325), and 2 for
+// one after a first ClientHello that offered early data: the 0-RTT records
+// before it are read past, up to MAX_EARLY_SKIP bytes (4.2.10, #3357);
+// application data anywhere else, an empty record included, is
+// unexpected_message (#3379).
+fn recio_next_client_hello(r: *RecordIO, second: int) -> (ptr, int, string) {
+    skip = 0
+    if second == 2 { skip = MAX_EARLY_SKIP }
+    acc = bytes.new(0)
+    alen = 0
+    while 1 == 1 {
+        rec, rlen, err = recio_next(r)
+        if string.equals(err, "") != 1 {
+            bytes.wipe_free(acc)
+            return null, 0, err
+        }
+        ct = bytes.get(rec, 0) & 0xFF
+        if second == 2 && ct == 0x17 && alen == 0 && rlen - 5 >= MIN_PROTECTED && skip >= rlen - 5 {
+            // The 0-RTT data a first ClientHello sent, which a
+            // HelloRetryRequest refused: read past (RFC 8446 4.2.10, #3357).
+            // Only then, and only records a protected one can be: an empty
+            // one cost nothing against `skip`, so any number of them went by,
+            // before a first ClientHello too (#3379).
+            bytes.wipe_free(rec)
+            skip = skip - (rlen - 5)
+        } else if ct == 0x14 && second >= 1 && alen == 0 && r.ccs == 0 && rlen == 6 && (bytes.get(rec, 5) & 0xFF) == 1 {
+            bytes.wipe_free(rec)
+            r.ccs = 1
+        } else if ct == 0x14 {
+            bytes.wipe_free(rec)
+            bytes.wipe_free(acc)
+            r.alert = tls13_record.ALERT_UNEXPECTED_MESSAGE
+            if second >= 1 { return null, 0, "record: a change_cipher_spec other than the one compatibility mode allows" }
+            return null, 0, "record: a change_cipher_spec before the ClientHello"
+        } else if ct == 0x15 {
+            // The client sent an alert instead of a ClientHello.
+            aerr = "the client sent an alert instead of a ClientHello"
+            bytes.wipe_free(rec)
+            bytes.wipe_free(acc)
+            return null, 0, aerr
+        } else if ct != 0x16 {
+            bytes.wipe_free(rec)
+            bytes.wipe_free(acc)
+            r.alert = tls13_record.ALERT_UNEXPECTED_MESSAGE
+            return null, 0, "record: a record of type ${ct} where the ClientHello belongs"
+        } else {
+            bytes.copy_from_bytes(acc, alen, rec, 5, rlen - 5)
+            alen = alen + rlen - 5
+            bytes.wipe_free(rec)
+            if alen >= 4 {
+                ml = ((bytes.get(acc, 1) & 0xFF) << 16) | ((bytes.get(acc, 2) & 0xFF) << 8) | (bytes.get(acc, 3) & 0xFF)
+                if ml > 65536 {
+                    bytes.wipe_free(acc)
+                    r.alert = tls13_record.ALERT_UNEXPECTED_MESSAGE
+                    return null, 0, "handshake: a ClientHello over 2^16 bytes"
+                }
+                if alen >= 4 + ml {
+                    if alen != 4 + ml {
+                        bytes.wipe_free(acc)
+                        r.alert = tls13_record.ALERT_UNEXPECTED_MESSAGE
+                        return null, 0, "handshake: data after the ClientHello in its record"
+                    }
+                    out = bytes.new(5 + alen)
+                    bytes.set(out, 0, 0x16)
+                    bytes.set(out, 1, 0x03)
+                    bytes.set(out, 2, 0x03)
+                    bytes.set(out, 3, (alen >> 8) & 0xFF)
+                    bytes.set(out, 4, alen & 0xFF)
+                    bytes.copy_from_bytes(out, 5, acc, 0, alen)
+                    bytes.wipe_free(acc)
+                    r.hs_seen = 1
+                    return out, 5 + alen, ""
+                }
+            }
+        }
+    }
 }
 
 fn recio_next_hs(r: *RecordIO) -> (ptr, int, string) {
@@ -143,8 +309,19 @@ fn recio_next_hs(r: *RecordIO) -> (ptr, int, string) {
         rec, rlen, err = recio_next(r)
         if string.equals(err, "") != 1 { looking = 0 } else {
             if (bytes.get(rec, 0) & 0xFF) == 0x14 {
-                bytes.free(rec) // skip ChangeCipherSpec
+                // One dummy change_cipher_spec, the single byte 1, between
+                // the ClientHello and the client Finished (RFC 8446 5,
+                // #3317); any other is unexpected_message.
+                r.ccs = r.ccs + 1
+                bad = 0
+                if rlen != 6 || (bytes.get(rec, 5) & 0xFF) != 1 || r.ccs > 1 || r.hs_seen == 0 { bad = 1 }
+                bytes.wipe_free(rec)
+                if bad == 1 {
+                    r.alert = tls13_record.ALERT_UNEXPECTED_MESSAGE
+                    return null, 0, "record: a change_cipher_spec other than the one compatibility mode allows"
+                }
             } else {
+                r.hs_seen = 1
                 looking = 0
             }
         }
@@ -177,16 +354,28 @@ fn send_plaintext_handshake(sock: ptr, msg: byte[]) -> string {
     bytes.set(rec, 4, msg_len & 0xFF)
     bytes.copy_from_slice(rec, 5, msg[0..msg_len])
     n = srv_send_view(sock, bytes.view(rec)[0..total])
-    bytes.free(rec)
+    bytes.wipe_free(rec)
     if n != total { return "failed to send handshake record" }
     return ""
 }
 
+// Send the record(s) `rec`; null (a record that could not be sealed) is an
+// error like a failed send, never a slice of nothing (#3380).
 fn send_record_raw(sock: ptr, rec: ptr) -> string {
+    if rec == null { return "a record could not be sealed" }
     rlen = bytes.length(rec)
     n = srv_send_view(sock, bytes.view(rec)[0..rlen])
     if n != rlen { return "failed to send record" }
     return ""
+}
+
+// `msg` of `content_type` under `ctx`, in as many records as it takes
+// (tls13_record.seal_records), sent: "" or why not (#3380).
+fn send_sealed(sock: ptr, ctx: ptr, content_type: int, msg: byte[]) -> string {
+    recs = tls13_record.seal_records(ctx, content_type, msg)
+    err = send_record_raw(sock, recs)
+    if recs != null { bytes.wipe_free(recs) }
+    return err
 }
 
 // The alert for a ClientHello parse_client_hello refused: illegal_parameter
@@ -213,23 +402,32 @@ fn send_plaintext_alert(sock: ptr, level: int, desc: int) {
     bytes.set(b, 5, level & 0xFF)
     bytes.set(b, 6, desc & 0xFF)
     srv_send_view(sock, bytes.view(b)[0..7])
-    bytes.free(b)
+    bytes.wipe_free(b)
 }
 
 // Fresh randomness, or null. Returning null on failure is deliberate and the
 // callers MUST check: every use here is security-critical -- the server
-// random, the ECDSA-P256 signing nonce, and the X25519 private key. Silently
-// handing back a zero-filled buffer when the CSPRNG fails would make the
-// nonce predictable, and a predictable ECDSA nonce discloses the private key
-// outright (RFC 6979 s1). Failing the handshake is the only safe answer.
+// random and the X25519 private key. Silently handing back a zero-filled
+// buffer when the CSPRNG fails would make the key predictable, and with it
+// every session's secrets. Failing the handshake is the only safe answer.
+// (The ECDSA signing nonce used to come from here too; it is RFC 6979's now,
+// derived inside p256.ecdsa_sign, because a predictable or repeated nonce
+// discloses the private key outright.)
 fn rand_into(n: int) -> ptr {
-    s, sn, err = cryptography.random_bytes(n)
+    b, err = cryptography.random_buffer(n)
     if string.equals(err, "") != 1 { return null }
-    if sn < n { return null }
-    b = bytes.new(n)
-    if n > 0 { bytes.set(b, n - 1, 0) }
-    bytes.copy_from_string(b, 0, s, n)
     return b
+}
+
+// A fresh secp256r1 private scalar in [1, n-1], or null without randomness
+// (32 random bytes fall outside it with probability about 2^-32: draw again).
+fn fresh_p256_scalar() -> ptr {
+    while true {
+        k = rand_into(32)
+        if k == null { return null }
+        if p256.private_key_valid(k) == 1 { return k }
+        bytes.wipe_free(k)
+    }
 }
 
 fn bytes_equal(a: ptr, b: byte[]) -> int {
@@ -282,7 +480,7 @@ fn derive_handshake_keys_algo(ecdhe: byte[], th: byte[], key_len: int, hash_algo
     k.server_iv = siv
     k.handshake_secret = hs
 
-    bytes.free(early)
+    bytes.wipe_free(early)
     return k as ptr
 }
 
@@ -303,6 +501,83 @@ fn transcript_hash_algo(tr: ptr, algo: string) -> ptr {
     return tls13_client.transcript_hash_algo(tr, algo)
 }
 
+// The dummy change_cipher_spec record of middlebox compatibility mode (RFC
+// 8446 D.4): 14 03 03 00 01 01.
+fn send_ccs(sock: ptr) {
+    ccs = bytes.new(6)
+    bytes.set(ccs, 0, 0x14)
+    bytes.set(ccs, 1, 0x03)
+    bytes.set(ccs, 2, 0x03)
+    bytes.set(ccs, 3, 0x00)
+    bytes.set(ccs, 4, 0x01)
+    bytes.set(ccs, 5, 0x01)
+    send_record_raw(sock, ccs)
+    bytes.wipe_free(ccs)
+}
+
+// The HelloRetryRequest step (RFC 8446 4.1.4, 4.2.8, #3325) for the first
+// ClientHello `ch1`, parsed in `p`, its transcript `tr`: ask for
+// p.retry_group with the suite already chosen, send the compatibility
+// change_cipher_spec after it, read the
+// second ClientHello and hold it to the rules, each illegal_parameter: the
+// same cipher suite, a share for the group asked for (no second
+// HelloRetryRequest is ever sent), the same session id. (Early data after
+// it is not skipped: it fails to open, bad_record_mac, as on BoringSSL.)
+// Returns (alert, why, transcript, message): on success the transcript is
+// message_hash(ch1), the HelloRetryRequest and the second ClientHello, the
+// message is that ClientHello and `p` its parse. `tr` and `ch1` are taken
+// either way; what comes back is the caller's to free.
+fn hello_retry(sock: ptr, rio: *RecordIO, tr: @frees ptr, p: *ChParsed, ch1: @frees ptr) -> (int, string, ptr, ptr) {
+    suite = p.cipher_suite
+    group = p.retry_group
+    _a, _k, algo, _h, _e = suite_params(suite)
+    sid_len = p.session_id_len
+    sid = bytes.new(sid_len)
+    if sid_len > 0 { bytes.copy_from_bytes(sid, 0, p.session_id, 0, sid_len) }
+    hrr = tls13_hs.hello_retry_request(bytes.view(sid)[0..sid_len], suite, group)
+    hrr_len = bytes.length(hrr)
+    serr = send_plaintext_handshake(sock, bytes.view(hrr)[0..hrr_len])
+    tr2 = tls13_client.transcript_retry(tr, bytes.view(ch1)[0..bytes.length(ch1)], bytes.view(hrr)[0..hrr_len], algo)
+    bytes.wipe_free(hrr)
+    bytes.wipe_free(ch1)
+    if serr != "" {
+        bytes.wipe_free(sid)
+        return 0, serr, tr2, bytes.new(0)
+    }
+    send_ccs(sock)
+    second = 1
+    if p.has_early_data == 1 { second = 2 }
+    rec, rlen, rerr = recio_next_client_hello(rio, second)
+    if rerr != "" {
+        bytes.wipe_free(sid)
+        return rio.alert, rerr, tr2, bytes.new(0)
+    }
+    ml = rlen - 5
+    ch2 = bytes.new(ml)
+    bytes.copy_from_bytes(ch2, 0, rec, 5, ml)
+    bytes.wipe_free(rec)
+    tls13_hs.free_ch(p)
+    perr = tls13_hs.parse_client_hello(bytes.view(ch2)[0..ml], p)
+    alert = 0
+    if perr != "" {
+        alert = p.alert
+        if alert == 0 { alert = ch_error_alert(perr) }
+    } else if p.cipher_suite != suite {
+        alert = 47
+        perr = "second client hello: a cipher suite other than the HelloRetryRequest's"
+    } else if p.group != group {
+        alert = 47
+        perr = "second client hello: no key share for group ${group}, which the HelloRetryRequest asked for"
+    } else if p.session_id_len != sid_len || (sid_len > 0 && bytes_equal(sid, bytes.view(p.session_id)[0..sid_len]) != 1) {
+        alert = 47
+        perr = "second client hello: a legacy_session_id other than the first's"
+    }
+    bytes.wipe_free(sid)
+    if perr != "" { return alert, perr, tr2, ch2 }
+    tls13_client.transcript_add(tr2, bytes.view(ch2)[0..ml])
+    return 0, "", tr2, ch2
+}
+
 // Perform the TLS 1.3 server handshake over `sock`.
 accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_priv: ptr) -> (ptr, string) {
     if sock == null { return null, "socket is null" }
@@ -313,28 +588,52 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
     rio = recio_new(sock)
 
     // 1. Read ClientHello
-    chrec, chlen, cherr = recio_next_hs(rio)
+    chrec, chlen, cherr = recio_next_client_hello(rio, 0)
     if string.equals(cherr, "") != 1 {
+        if rio.alert != 0 { send_plaintext_alert(sock, 2, rio.alert) }
         recio_free(rio)
         return null, cherr
     }
     ch_msg_len = chlen - 5
     ch_msg = bytes.new(ch_msg_len)
     bytes.copy_from_bytes(ch_msg, 0, chrec, 5, ch_msg_len)
-    bytes.free(chrec)
+    bytes.wipe_free(chrec)
 
     ch_parsed = tls13_hs.ChParsed { random: null, session_id: null, session_id_len: 0,
         cipher_suite: 0, group: 0, key_share: null, key_share_len: 0,
         has_sni: 0, saw_supported_versions: 0 }
     perr = tls13_hs.parse_client_hello(bytes.view(ch_msg)[0..ch_msg_len], &ch_parsed)
     if string.equals(perr, "") != 1 {
-        send_plaintext_alert(sock, 2, ch_error_alert(perr))
-        tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); recio_free(rio)
+        ca = ch_parsed.alert
+        if ca == 0 { ca = ch_error_alert(perr) }
+        send_plaintext_alert(sock, 2, ca)
+        tls13_hs.free_ch(&ch_parsed); bytes.wipe_free(ch_msg); recio_free(rio)
         return null, perr
     }
 
     tr = tls13_client.transcript_new()
     tls13_client.transcript_add(tr, bytes.view(ch_msg)[0..ch_msg_len])
+
+    // No share for a group the server takes, but supported_groups names
+    // one: a HelloRetryRequest asks for it (RFC 8446 4.2.8, #3325), and the
+    // handshake goes on with the second ClientHello.
+    ccs_sent = 0
+    // 0-RTT data this server never takes (it issues no tickets) is read
+    // past: before the client Finished, or before a second ClientHello.
+    skip_early = ch_parsed.has_early_data
+    if ch_parsed.group == 0 {
+        rt_alert, rt_err, tr2, ch2 = hello_retry(sock, rio, tr, &ch_parsed, ch_msg)
+        tr = tr2
+        ch_msg = ch2
+        if rt_err != "" {
+            if rt_alert != 0 { send_plaintext_alert(sock, 2, rt_alert) }
+            tls13_hs.free_ch(&ch_parsed); bytes.wipe_free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
+            return null, rt_err
+        }
+        ch_msg_len = bytes.length(ch_msg)
+        ccs_sent = 1
+        skip_early = 0
+    }
 
     // 2. Compute shared secret & server key share
     shared = null
@@ -345,7 +644,7 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
     if ch_parsed.group == tls13_hs.GROUP_X25519MLKEM768 {
         if ch_parsed.key_share_len != 1216 {
             send_plaintext_alert(sock, 2, 47)
-            tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
+            tls13_hs.free_ch(&ch_parsed); bytes.wipe_free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
             return null, "X25519MLKEM768 key share wrong length"
         }
         ek = bytes.new(1184)
@@ -354,23 +653,23 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
         bytes.copy_from_bytes(cxpub, 0, ch_parsed.key_share, 1184, 32)
 
         ct, mlk_ss, merr = mlkem.mlkem768_encaps(ek)
-        bytes.free(ek)
+        bytes.wipe_free(ek)
         if string.equals(merr, "") != 1 || ct == null || mlk_ss == null {
-            if ct != null { bytes.free(ct) }
-            if mlk_ss != null { bytes.free(mlk_ss) }
-            bytes.free(cxpub)
+            if ct != null { bytes.wipe_free(ct) }
+            if mlk_ss != null { bytes.wipe_free(mlk_ss) }
+            bytes.wipe_free(cxpub)
             send_plaintext_alert(sock, 2, 47) // illegal_parameter (RFC 10024 §4.2)
-            tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
+            tls13_hs.free_ch(&ch_parsed); bytes.wipe_free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
             return null, string.concat("X25519MLKEM768 encapsulation failed: ", merr)
         }
 
         x_ss, xerr = x25519.agree(x25519_priv, cxpub)
-        bytes.free(cxpub)
+        bytes.wipe_free(cxpub)
         if string.equals(xerr, "") != 1 || x_ss == null {
-            if x_ss != null { bytes.free(x_ss) }
-            bytes.free(ct); bytes.free(mlk_ss)
+            if x_ss != null { bytes.wipe_free(x_ss) }
+            bytes.wipe_free(ct); bytes.wipe_free(mlk_ss)
             send_plaintext_alert(sock, 2, 47)
-            tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
+            tls13_hs.free_ch(&ch_parsed); bytes.wipe_free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
             return null, xerr
         }
 
@@ -379,19 +678,19 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
         bytes.copy_from_bytes(server_ks, 0, ct, 0, 1088)
         bytes.copy_from_bytes(server_ks, 1088, sxpub, 0, 32)
         server_ks_len = 1120
-        bytes.free(ct); bytes.free(sxpub)
+        bytes.wipe_free(ct); bytes.wipe_free(sxpub)
 
         shared = bytes.new(64)
         bytes.copy_from_bytes(shared, 0, mlk_ss, 0, 32)
         bytes.copy_from_bytes(shared, 32, x_ss, 0, 32)
         shared_len = 64
-        bytes.free(mlk_ss); bytes.free(x_ss)
+        bytes.wipe_free(mlk_ss); bytes.wipe_free(x_ss)
     } else if ch_parsed.group == tls13_hs.GROUP_X25519 {
         x_ss, xerr = x25519.agree(x25519_priv, ch_parsed.key_share)
         if string.equals(xerr, "") != 1 || x_ss == null {
-            if x_ss != null { bytes.free(x_ss) }
+            if x_ss != null { bytes.wipe_free(x_ss) }
             send_plaintext_alert(sock, 2, 47) // illegal_parameter (RFC 8446 §7.4.2)
-            tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
+            tls13_hs.free_ch(&ch_parsed); bytes.wipe_free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
             return null, xerr
         }
         sxpub = x25519.base_point(x25519_priv)
@@ -399,124 +698,170 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
         server_ks_len = 32
         shared = x_ss
         shared_len = 32
+    } else if ch_parsed.group == tls13_hs.GROUP_SECP256R1 {
+        // secp256r1, which RFC 8446 9.1 says a TLS implementation MUST
+        // support (#3357): a fresh scalar, the client's point checked to be
+        // on the curve by p256.ecdh (illegal_parameter otherwise, 7.4.2).
+        pk = fresh_p256_scalar()
+        cx = bytes.new(32)
+        cy = bytes.new(32)
+        bytes.copy_from_bytes(cx, 0, ch_parsed.key_share, 1, 32)
+        bytes.copy_from_bytes(cy, 0, ch_parsed.key_share, 33, 32)
+        p_ss = null
+        if pk != null { p_ss = p256.ecdh(pk, cx, cy) }
+        bytes.wipe_free(cx); bytes.wipe_free(cy)
+        if p_ss == null {
+            if pk != null { wipe_free(pk) }
+            send_plaintext_alert(sock, 2, 47)
+            tls13_hs.free_ch(&ch_parsed); bytes.wipe_free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
+            return null, "secp256r1 key share refused (not on the curve), or no randomness"
+        }
+        px, py = p256.scalar_mult_base(pk)
+        wipe_free(pk)
+        server_ks = bytes.new(65)
+        bytes.set(server_ks, 0, 4)
+        bytes.copy_from_bytes(server_ks, 1, px, 0, 32)
+        bytes.copy_from_bytes(server_ks, 33, py, 0, 32)
+        bytes.wipe_free(px); bytes.wipe_free(py)
+        server_ks_len = 65
+        shared = p_ss
+        shared_len = 32
     } else {
         send_plaintext_alert(sock, 2, 40)
-        tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
+        tls13_hs.free_ch(&ch_parsed); bytes.wipe_free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
         return null, "unsupported group in client hello"
     }
 
     // 3. Build and send ServerHello (plaintext)
     srnd = rand_into(32)
     if srnd == null {
-        tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg)
+        tls13_hs.free_ch(&ch_parsed); bytes.wipe_free(ch_msg)
         tls13_client.transcript_free(tr); recio_free(rio)
-        bytes.free(server_ks); bytes.free(shared)
+        bytes.wipe_free(server_ks); bytes.wipe_free(shared)
         return null, "no randomness available for the server random"
     }
     sh = tls13_hs.server_hello(srnd, bytes.view(ch_parsed.session_id)[0..ch_parsed.session_id_len], ch_parsed.cipher_suite, ch_parsed.group, bytes.view(server_ks)[0..server_ks_len])
-    bytes.free(server_ks)
+    bytes.wipe_free(server_ks)
     sh_len = bytes.length(sh)
     sherr = send_plaintext_handshake(sock, bytes.view(sh)[0..sh_len])
     if string.equals(sherr, "") != 1 {
-        bytes.free(srnd); bytes.free(shared); bytes.free(sh)
-        tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
+        bytes.wipe_free(srnd); bytes.wipe_free(shared); bytes.wipe_free(sh)
+        tls13_hs.free_ch(&ch_parsed); bytes.wipe_free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
         return null, sherr
     }
     tls13_client.transcript_add(tr, bytes.view(sh)[0..sh_len])
+    // Middlebox compatibility (RFC 8446 D.4, #3322): a dummy
+    // change_cipher_spec right after the server's first handshake message,
+    // the ServerHello or the HelloRetryRequest (#3325), whatever the session
+    // id, as BoringSSL sends it (a client drops it at any point, 5; #3357).
+    if ccs_sent == 0 { send_ccs(sock) }
 
     // 4. Key Schedule
     rec_aead, rec_key_len, hash_algo, hash_len, suite_err = suite_params(ch_parsed.cipher_suite)
     if string.equals(suite_err, "") != 1 {
-        bytes.free(srnd); bytes.free(shared); bytes.free(sh)
-        tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
+        bytes.wipe_free(srnd); bytes.wipe_free(shared); bytes.wipe_free(sh)
+        tls13_hs.free_ch(&ch_parsed); bytes.wipe_free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
         return null, suite_err
     }
 
     th_chsh = transcript_hash_algo(tr, hash_algo)
     keys = derive_handshake_keys_algo(bytes.view(shared)[0..shared_len], bytes.view(th_chsh)[0..hash_len], rec_key_len, hash_algo)
-    bytes.free(shared)
+    bytes.wipe_free(shared)
 
     srv_hs_ctx = tls13_record.new_aead(rec_aead, bytes.view(hs_server_key(keys))[0..rec_key_len], hs_server_iv(keys))
     cli_hs_ctx = tls13_record.new_aead(rec_aead, bytes.view(hs_client_key(keys))[0..rec_key_len], hs_client_iv(keys))
 
     // 5. Send Encrypted Flight
+    // Each message in as many records as it takes (a chain over 16 KiB
+    // fills several, RFC 8446 5.1); the first one that cannot be sealed or
+    // sent ends the handshake (#3380).
     // a. EncryptedExtensions
     ee = tls13_hs.encrypted_extensions()
-    ee_rec = tls13_record.seal_record(srv_hs_ctx, tls13_record.CONTENT_HANDSHAKE, bytes.view(ee))
-    send_record_raw(sock, ee_rec)
+    fl_err = send_sealed(sock, srv_hs_ctx, tls13_record.CONTENT_HANDSHAKE, bytes.view(ee))
     tls13_client.transcript_add(tr, bytes.view(ee))
-    bytes.free(ee); bytes.free(ee_rec)
+    bytes.wipe_free(ee)
 
     // b. Certificate
     cert_msg = tls13_hs.certificate_msg(cert_chain, cert_lens, 0)
-    cert_rec = tls13_record.seal_record(srv_hs_ctx, tls13_record.CONTENT_HANDSHAKE, bytes.view(cert_msg))
-    send_record_raw(sock, cert_rec)
+    if fl_err == "" { fl_err = send_sealed(sock, srv_hs_ctx, tls13_record.CONTENT_HANDSHAKE, bytes.view(cert_msg)) }
     tls13_client.transcript_add(tr, bytes.view(cert_msg))
-    bytes.free(cert_msg); bytes.free(cert_rec)
+    bytes.wipe_free(cert_msg)
 
-    // c. CertificateVerify
+    // c. CertificateVerify, with the scheme of the server's key when the
+    // client's signature_algorithms offers it (RFC 8446 4.4.3, #3326). An
+    // ECDSA nonce is RFC 6979's hedged with 32 fresh random bytes (section
+    // 3.6), and an Ed25519 r is hedged the same way, so the handshake needs
+    // randomness, as its key share does; an RSA-PSS signature is constant
+    // time and blinded. The signature is checked against the leaf's key
+    // before it is sent (#3376).
+    skey = priv_key as *ServerKey
+    scheme = key_scheme(skey, ch_parsed.sig_algs)
     th_cert = transcript_hash_algo(tr, hash_algo)
-    knonce = rand_into(32)
-    if knonce == null {
-        // Signing with a predictable nonce would disclose the private key;
-        // there is no safe fallback, so the handshake ends here.
-        bytes.free(th_cert)
-        return null, "no randomness available for the signing nonce"
+    var sig: ptr = null
+    cv_alert = 0
+    cv_err = ""
+    if scheme == 0 {
+        // RFC 8446 9.2: missing_extension when the client sent no
+        // signature_algorithms; handshake_failure when nothing it offers is
+        // the key's scheme.
+        cv_alert = 40
+        if ch_parsed.saw_sig_algs == 0 { cv_alert = 109 }
+        cv_err = "the client offers no signature scheme the server's key signs with"
+    } else {
+        leaf = tls13_cert.LeafCert { tbs: null }
+        tls13_cert.init_leaf(&leaf)
+        lerr = "the chain has no certificate"
+        if list_size(cert_chain) > 0 {
+            leaf_der = list.at(cert_chain, 0) as ptr
+            lerr = tls13_cert.parse_certificate(bytes.view(leaf_der)[0..bytes.length(leaf_der)], &leaf)
+        }
+        if string.equals(lerr, "") != 1 {
+            cv_alert = 80
+            cv_err = "the server's certificate does not parse: ${lerr}"
+        } else {
+            signed, why = sign_cert_verify(skey, &leaf, scheme, bytes.view(th_cert)[0..hash_len])
+            sig = signed
+            if sig == null {
+                cv_alert = 80
+                cv_err = why
+            }
+        }
+        tls13_cert.free_leaf(&leaf)
     }
-    sig = tls13_cert.sign_server_cert_verify_ecdsa_p256(priv_key, bytes.view(th_cert)[0..hash_len], knonce)
-    cv_msg = tls13_hs.certificate_verify_msg(0x0403, bytes.view(sig))
-    cv_rec = tls13_record.seal_record(srv_hs_ctx, tls13_record.CONTENT_HANDSHAKE, bytes.view(cv_msg))
-    send_record_raw(sock, cv_rec)
+    if cv_alert != 0 {
+        send_hs_alert(sock, srv_hs_ctx, cv_alert)
+        bytes.wipe_free(th_cert); bytes.wipe_free(srnd); bytes.wipe_free(sh)
+        tls13_hs.free_ch(&ch_parsed); bytes.wipe_free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
+        tls13_record.free_ctx(srv_hs_ctx); tls13_record.free_ctx(cli_hs_ctx)
+        tls13_client.free_hs_keys(keys); bytes.wipe_free(th_chsh)
+        return null, cv_err
+    }
+    cv_msg = tls13_hs.certificate_verify_msg(scheme, bytes.view(sig))
+    if fl_err == "" { fl_err = send_sealed(sock, srv_hs_ctx, tls13_record.CONTENT_HANDSHAKE, bytes.view(cv_msg)) }
     tls13_client.transcript_add(tr, bytes.view(cv_msg))
-    bytes.free(th_cert); bytes.free(knonce); bytes.free(sig); bytes.free(cv_msg); bytes.free(cv_rec)
+    bytes.wipe_free(th_cert); bytes.wipe_free(sig); bytes.wipe_free(cv_msg)
 
     // d. Server Finished
     th_cv = transcript_hash_algo(tr, hash_algo)
     svd = finished_verify_data_algo(hs_server_secret(keys), bytes.view(th_cv)[0..hash_len], hash_algo, hash_len)
     fin_msg = tls13_hs.finished_msg(svd, hash_len)
-    fin_rec = tls13_record.seal_record(srv_hs_ctx, tls13_record.CONTENT_HANDSHAKE, bytes.view(fin_msg))
-    send_record_raw(sock, fin_rec)
+    if fl_err == "" { fl_err = send_sealed(sock, srv_hs_ctx, tls13_record.CONTENT_HANDSHAKE, bytes.view(fin_msg)) }
     tls13_client.transcript_add(tr, bytes.view(fin_msg))
-    bytes.free(th_cv); bytes.free(svd); bytes.free(fin_msg); bytes.free(fin_rec)
-
-    // 6. Read and verify Client Finished
-    th_sf = transcript_hash_algo(tr, hash_algo)
-
-    cf_rec, cf_rec_len, cf_err = recio_next_hs(rio)
-    if string.equals(cf_err, "") != 1 {
-    }
-    fin_ok = 0
-    if string.equals(cf_err, "") == 1 {
-        opened = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0 }
-        oerr = tls13_record.open_record(cli_hs_ctx, bytes.view(cf_rec)[0..cf_rec_len], &opened)
-        bytes.free(cf_rec)
-        if string.equals(oerr, "") == 1 {
-            if opened.content_type == 22 && opened.plaintext_len >= 4 {
-                if (bytes.get(opened.plaintext, 0) & 0xFF) == tls13_hs.HS_FINISHED {
-                    cvd_len = opened.plaintext_len - 4
-                    cvd = bytes.new(cvd_len)
-                    bytes.copy_from_bytes(cvd, 0, opened.plaintext, 4, cvd_len)
-                    expected_cvd = finished_verify_data_algo(hs_client_secret(keys), bytes.view(th_sf)[0..hash_len], hash_algo, hash_len)
-                    if bytes_equal(expected_cvd, bytes.view(cvd)[0..hash_len]) == 1 {
-                        fin_ok = 1
-                        tls13_client.transcript_add(tr, bytes.view(opened.plaintext)[0..opened.plaintext_len])
-                    }
-                    bytes.free(cvd); bytes.free(expected_cvd)
-                }
-            }
-            if opened.plaintext != null { bytes.free(opened.plaintext) }
-        }
-    }
-
-    if fin_ok == 0 {
-        bytes.free(th_sf); bytes.free(srnd); bytes.free(sh)
-        tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
+    bytes.wipe_free(th_cv); bytes.wipe_free(svd); bytes.wipe_free(fin_msg)
+    if fl_err != "" {
+        bytes.wipe_free(srnd); bytes.wipe_free(sh)
+        tls13_hs.free_ch(&ch_parsed); bytes.wipe_free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
         tls13_record.free_ctx(srv_hs_ctx); tls13_record.free_ctx(cli_hs_ctx)
-        tls13_client.free_hs_keys(keys); bytes.free(th_chsh)
-        return null, "client Finished MAC verification failed"
+        tls13_client.free_hs_keys(keys); bytes.wipe_free(th_chsh)
+        return null, "handshake: ${fl_err}"
     }
 
-    // 7. Derive Application Traffic Keys
+    // 6. Derive Application Traffic Keys, over the transcript through the
+    // server Finished (RFC 8446 7.1). They come before the client Finished
+    // is read: the client reads the server's records under them from its
+    // Finished on, so an alert about the client Finished goes under them
+    // too (#3324).
+    th_sf = transcript_hash_algo(tr, hash_algo)
     ms = tls13_ks.master_secret(hash_algo, hs_handshake_secret(keys))
     c_ap = tls13_ks.traffic_secret(hash_algo, ms, "c ap traffic", bytes.view(th_sf)[0..hash_len])
     s_ap = tls13_ks.traffic_secret(hash_algo, ms, "s ap traffic", bytes.view(th_sf)[0..hash_len])
@@ -528,73 +873,377 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
 
     app_send = tls13_record.new_aead(rec_aead, bytes.view(sk)[0..rec_key_len], siv)
     app_recv = tls13_record.new_aead(rec_aead, bytes.view(ck)[0..rec_key_len], civ)
+    tls13_ks.free_secret(ck); tls13_ks.free_secret(civ); tls13_ks.free_secret(sk); tls13_ks.free_secret(siv)
+    tls13_ks.free_secret(ms)
+
+    // 7. Read and verify the client Finished.
+    cf_alert, cf_err = read_client_finished(rio, cli_hs_ctx, tr, hs_client_secret(keys), th_sf, hash_algo, hash_len, skip_early)
+    if string.equals(cf_err, "") != 1 {
+        if cf_alert != 0 { send_hs_alert(sock, app_send as ptr, cf_alert) }
+        tls13_record.free_ctx(app_send as ptr); tls13_record.free_ctx(app_recv as ptr)
+        tls13_ks.free_secret(c_ap); tls13_ks.free_secret(s_ap)
+        bytes.wipe_free(th_sf); bytes.wipe_free(srnd); bytes.wipe_free(sh)
+        tls13_hs.free_ch(&ch_parsed); bytes.wipe_free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
+        tls13_record.free_ctx(srv_hs_ctx); tls13_record.free_ctx(cli_hs_ctx)
+        tls13_client.free_hs_keys(keys); bytes.wipe_free(th_chsh)
+        return null, cf_err
+    }
 
     // Cleanup handshake state
-    bytes.free(ck); bytes.free(civ); bytes.free(sk); bytes.free(siv)
-    bytes.free(ms); bytes.free(c_ap); bytes.free(s_ap); bytes.free(th_sf)
-    bytes.free(srnd); bytes.free(sh)
-    tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr)
+    bytes.wipe_free(th_sf)
+    bytes.wipe_free(srnd); bytes.wipe_free(sh)
+    suite = ch_parsed.cipher_suite
+    tls13_hs.free_ch(&ch_parsed); bytes.wipe_free(ch_msg); tls13_client.transcript_free(tr)
     tls13_record.free_ctx(srv_hs_ctx); tls13_record.free_ctx(cli_hs_ctx)
-    tls13_client.free_hs_keys(keys); bytes.free(th_chsh)
+    tls13_client.free_hs_keys(keys); bytes.wipe_free(th_chsh)
 
+    // The connection keeps c_ap and s_ap for KeyUpdate (#3320).
     conn = malloc(sizeof(ServerConn)) as *ServerConn
     conn.sock = sock
     conn.rio = rio as ptr
+    rio.after_hs = 1
     conn.app_send = app_send as ptr
     conn.app_recv = app_recv as ptr
+    conn.suite = suite
+    conn.send_secret = s_ap
+    conn.recv_secret = c_ap
+    conn.hs_pend = null
+    conn.hs_pend_len = 0
+    conn.recv_pend = null
+    conn.recv_pend_len = 0
+    conn.recv_pend_off = 0
+    conn.buffered_only = 0
+    conn.empties = 0
+    conn.key_updates = 0
+    conn.warnings = 0
+    conn.ku_pending = 0
+    conn.closed = 0
 
     return conn as ptr, ""
 }
 
-// Send application data as one encrypted record.
-conn_send(conn: ptr, data: byte[]) -> string {
-    if data.len < 0 { panic("tls13_server.conn_send: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
-    c = conn as *ServerConn
-    rec = tls13_record.seal_record(c.app_send as ptr, tls13_record.CONTENT_APPLICATION_DATA, data)
-    n = srv_send_view(c.sock, bytes.view(rec))
-    tot = bytes.length(rec)
-    bytes.free(rec)
-    if n != tot { return "send failed" }
-    return ""
-}
-
-// Receive application data record.
-conn_recv(conn: ptr) -> (ptr, int, string) {
-    c = conn as *ServerConn
-    rio = c.rio as *RecordIO
-    looking = 1
-    out = null
-    outlen = 0
-    rerr = ""
-    while looking == 1 {
-        rec, rlen, e = recio_next(rio)
-        if string.equals(e, "") != 1 { rerr = e; looking = 0 } else {
-            ct = bytes.get(rec, 0) & 0xFF
-            if ct == 0x14 { bytes.free(rec) } else {
-                opened = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0 }
-                oerr = tls13_record.open_record(c.app_recv as ptr, bytes.view(rec)[0..rlen], &opened)
-                bytes.free(rec)
-                if string.equals(oerr, "") != 1 { rerr = oerr; looking = 0 } else {
-                    if opened.content_type == tls13_record.CONTENT_APPLICATION_DATA {
-                        out = opened.plaintext
-                        outlen = opened.plaintext_len
-                        looking = 0
-                    } else {
-                        if opened.content_type == tls13_record.CONTENT_ALERT {
-                            desc = 0
-                            if opened.plaintext_len >= 2 { desc = bytes.get(opened.plaintext, 1) & 0xFF }
-                            if desc != tls13_client.ALERT_CLOSE_NOTIFY {
-                                rerr = string.concat("tls alert: ", tls13_client.alert_name(desc))
-                            }
-                            looking = 0
-                        }
-                        if opened.plaintext != null { bytes.free(opened.plaintext) }
-                    }
+// Read the client's second flight, its Finished alone (this server asks for
+// no certificate), under the client handshake keys `cli_hs_ctx`, and check
+// it against `th_sf`, the transcript through the server Finished; on
+// success it joins the transcript `tr`. (0, "") or the alert to send and
+// why (#3324): bad_record_mac for a record that does not open,
+// unexpected_message for a plaintext record, another record type or another
+// message (a Finished may span records but not share its last one, RFC
+// 8446 5.1), decrypt_error for verify_data that is not the hash's length
+// or a MAC that does not match (4.4.4: the Finished is wrong, #3357). With
+// `early` 1, records that do not open before the first that does are 0-RTT
+// data the server did not take, skipped up to MAX_EARLY_SKIP bytes
+// (4.2.10). An alert from the
+// client ends the read with its name and no answer.
+fn read_client_finished(rio: *RecordIO, cli_hs_ctx: ptr, tr: ptr, client_hs_secret: ptr, th_sf: ptr, hash_algo: string, hash_len: int, early: int) -> (int, string) {
+    // Early data offered and not taken is skipped (#3357).
+    skip_early = 0
+    if early == 1 { skip_early = MAX_EARLY_SKIP }
+    opened_one = 0
+    want = 4 + hash_len
+    msg = bytes.new(want)
+    mlen = 0
+    while mlen < want {
+        rec, rlen, err = recio_next_hs(rio)
+        if string.equals(err, "") != 1 {
+            bytes.wipe_free(msg)
+            return rio.alert, err
+        }
+        ct = bytes.get(rec, 0) & 0xFF
+        if ct != 0x17 {
+            bytes.wipe_free(rec); bytes.wipe_free(msg)
+            return tls13_record.ALERT_UNEXPECTED_MESSAGE, "handshake: a plaintext record of type ${ct} where the client Finished belongs"
+        }
+        opened = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0, alert: 0 }
+        oerr = tls13_record.open_record(cli_hs_ctx, bytes.view(rec)[0..rlen], &opened)
+        bytes.wipe_free(rec)
+        if string.equals(oerr, "") != 1 && opened_one == 0 && skip_early >= rlen - 5 {
+            // 0-RTT data this server did not take, under keys it does not
+            // have: skipped, up to MAX_EARLY_SKIP bytes, until the first
+            // record that opens (RFC 8446 4.2.10, #3357).
+            skip_early = skip_early - (rlen - 5)
+        } else if string.equals(oerr, "") != 1 {
+            bytes.wipe_free(msg)
+            return opened.alert, oerr
+        } else {
+            opened_one = 1
+            t = opened.content_type
+            n = opened.plaintext_len
+            if t == tls13_record.CONTENT_ALERT && n >= 2 {
+                d = bytes.get(opened.plaintext, 1) & 0xFF
+                bytes.wipe_free(opened.plaintext); bytes.wipe_free(msg)
+                return 0, "the client sent alert ${tls13_client.alert_name(d)}"
+            }
+            if t != tls13_record.CONTENT_HANDSHAKE || n == 0 {
+                if opened.plaintext != null { bytes.wipe_free(opened.plaintext) }
+                bytes.wipe_free(msg)
+                return tls13_record.ALERT_UNEXPECTED_MESSAGE, "handshake: a record of type ${t} (or an empty one) where the client Finished belongs"
+            }
+            // The record joins what came before (#3321); the buffer grows to
+            // hold it, and is judged as soon as the header is in.
+            bytes.copy_from_bytes(msg, mlen, opened.plaintext, 0, n)
+            mlen = mlen + n
+            bytes.wipe_free(opened.plaintext)
+            if mlen >= 4 {
+                mt = bytes.get(msg, 0) & 0xFF
+                ml = ((bytes.get(msg, 1) & 0xFF) << 16) | ((bytes.get(msg, 2) & 0xFF) << 8) | (bytes.get(msg, 3) & 0xFF)
+                fa = 0
+                fe = ""
+                if mt != tls13_hs.HS_FINISHED {
+                    fa = tls13_record.ALERT_UNEXPECTED_MESSAGE
+                    fe = "handshake: a message of type ${mt} where the client Finished belongs"
+                } else if ml != hash_len {
+                    fa = ALERT_DECRYPT_ERROR
+                    fe = "finished: verify_data is ${ml} bytes, not ${hash_len}"
+                } else if mlen > want {
+                    fa = tls13_record.ALERT_UNEXPECTED_MESSAGE
+                    fe = "handshake: data after the client Finished in its record"
+                }
+                if fa != 0 {
+                    bytes.wipe_free(msg)
+                    return fa, fe
                 }
             }
         }
     }
-    return out, outlen, rerr
+    expected = finished_verify_data_algo(client_hs_secret, bytes.view(th_sf)[0..hash_len], hash_algo, hash_len)
+    ok = bytes_equal(expected, bytes.view(msg)[4..want])
+    bytes.wipe_free(expected)
+    if ok != 1 {
+        bytes.wipe_free(msg)
+        return ALERT_DECRYPT_ERROR, "client Finished MAC verification failed"
+    }
+    tls13_client.transcript_add(tr, bytes.view(msg)[0..want])
+    bytes.wipe_free(msg)
+    return 0, ""
+}
+
+// Send application data, in encrypted records of at most 2^14 bytes each
+// (#3380). A KeyUpdate the client asked for goes first (RFC 8446 4.6.3,
+// #3320).
+conn_send(conn: ptr, data: byte[]) -> string {
+    if data.len < 0 { panic("tls13_server.conn_send: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    c = conn as *ServerConn
+    if c.closed == 2 { return "send: the connection failed earlier" }
+    if c.ku_pending == 1 {
+        kerr = send_key_update(c, tls13_hs.KEY_UPDATE_NOT_REQUESTED)
+        if kerr != "" { return kerr }
+    }
+    // Data over 2^14 bytes goes in several records (#3380).
+    rec = tls13_record.seal_records(c.app_send as ptr, tls13_record.CONTENT_APPLICATION_DATA, data)
+    if rec == null { return "send: the record could not be sealed" }
+    n = srv_send_view(c.sock, bytes.view(rec))
+    tot = bytes.length(rec)
+    bytes.wipe_free(rec)
+    if n != tot { return "send failed" }
+    return ""
+}
+
+// Send a KeyUpdate asking (`request` 1) or not (0) for the client's, under
+// the current sending keys, then move them on (RFC 8446 4.6.3, 7.2).
+fn send_key_update(c: *ServerConn, request: int) -> string {
+    m = tls13_hs.key_update_msg(request)
+    rec = tls13_record.seal_record(c.app_send as ptr, tls13_record.CONTENT_HANDSHAKE, bytes.view(m)[0..5])
+    bytes.wipe_free(m)
+    if rec == null { return "key update: the record could not be sealed" }
+    n = srv_send_view(c.sock, bytes.view(rec))
+    tot = bytes.length(rec)
+    bytes.wipe_free(rec)
+    if n != tot { return "key update: send failed" }
+    _a, _k, algo, _h, _e = suite_params(c.suite)
+    c.send_secret = tls13_ks.key_update(algo, c.app_send, c.send_secret)
+    c.ku_pending = 0
+    return ""
+}
+
+// conn_key_update(conn, request) -> "" or why: update the connection's
+// sending keys now with a KeyUpdate (RFC 8446 4.6.3, #3320); `request`
+// tls13_hs.KEY_UPDATE_REQUESTED (1) asks the client to update its own,
+// which the next conn_recv takes in its stride, KEY_UPDATE_NOT_REQUESTED
+// (0) does not.
+conn_key_update(conn: ptr, request: int) -> string {
+    c = conn as *ServerConn
+    if request != tls13_hs.KEY_UPDATE_NOT_REQUESTED && request != tls13_hs.KEY_UPDATE_REQUESTED {
+        return "key update: request ${request} is neither KEY_UPDATE_NOT_REQUESTED nor KEY_UPDATE_REQUESTED"
+    }
+    if c.closed != 0 { return "key update: the connection is closed" }
+    return send_key_update(c, request)
+}
+
+// Empty application-data records the server reads past in a row before it
+// refuses the stream as a denial of service (#3317), as BoringSSL bounds them.
+const MAX_EMPTY_RECORDS = 32
+
+// The early data the server reads past when it does not take a ClientHello's
+// 0-RTT data (RFC 8446 4.2.10 bounds it by max_early_data_size; this server
+// issues no tickets, so this is the bound BoringSSL keeps), #3357.
+const MAX_EARLY_SKIP = 16384
+
+// The smallest protected record: its content type byte and the AEAD tag
+// (RFC 8446 5.2).
+const MIN_PROTECTED = 17 // 1 + tls13_record.TAG_LEN
+
+// KeyUpdates without application data between them the server reads past
+// before it refuses the stream (#3320), as BoringSSL bounds them.
+const MAX_KEY_UPDATES = 32
+
+// decrypt_error (RFC 8446 6.2): a Finished whose MAC does not match.
+const ALERT_DECRYPT_ERROR = 51
+
+// A fatal alert under `ctx`: the server's handshake-traffic keys after
+// ServerHello (#3326), its application-traffic keys after its Finished
+// (#3324). Best effort, as send_plaintext_alert.
+fn send_hs_alert(sock: ptr, ctx: ptr, desc: int) {
+    a = bytes.new(2)
+    bytes.set(a, 0, 2)
+    bytes.set(a, 1, desc)
+    rec = tls13_record.seal_record(ctx, tls13_record.CONTENT_ALERT, bytes.view(a))
+    send_record_raw(sock, rec)
+    bytes.wipe_free(a)
+    if rec != null { bytes.wipe_free(rec) }
+}
+
+// A fatal alert under the connection's application-traffic keys.
+fn send_alert_app(c: *ServerConn, desc: int) {
+    body = bytes.new(2)
+    bytes.set(body, 0, 2)
+    bytes.set(body, 1, desc & 0xFF)
+    rec = tls13_record.seal_record(c.app_send as ptr, tls13_record.CONTENT_ALERT, bytes.view(body)[0..2])
+    send_record_raw(c.sock, rec)
+    bytes.wipe_free(body)
+    if rec != null { bytes.wipe_free(rec) }
+}
+
+// Send fatal alert `desc`, mark the connection failed, and return (null,
+// 0, why) as conn_recv does.
+fn conn_fail(c: *ServerConn, desc: int, why: string) -> (ptr, int, string) {
+    send_alert_app(c, desc)
+    c.closed = 2
+    return null, 0, why
+}
+
+// Receive the next application-data record's plaintext (fresh bytes; caller
+// frees via bytes.free): (data, len, ""), (null, 0, "") at the client's
+// close_notify, (null, 0, "timeout") when a receive timeout set on the socket
+// fires before a record is whole (the connection is kept, and what was read
+// of the record waits for the next call, #3405), or (null, 0, error). RFC
+// 8446 5 (#3317): a change_cipher_spec
+// or a plaintext record after the handshake, a record that does not open
+// or is too long, an empty handshake record, and more than
+// MAX_EMPTY_RECORDS empty application-data records in a row are each
+// refused, with their alert sent before the error returns; so is a record
+// of another type inside a handshake message that spans records (5.1).
+// Alerts as tls13_client.alert_event says (#3323). The one handshake
+// message a client sends after the handshake is a KeyUpdate (#3320): it
+// moves the receiving keys on, has the next send update the sending keys
+// first when it asks, must end its record, and comes at most
+// MAX_KEY_UPDATES times without application data; any other is
+// unexpected_message.
+conn_recv(conn: ptr) -> (ptr, int, string) {
+    c = conn as *ServerConn
+    rio = c.rio as *RecordIO
+    if c.closed == 1 { return null, 0, "" }
+    if c.closed == 2 { return null, 0, "recv: the connection failed earlier" }
+    while 1 == 1 {
+        // The pending check reads nothing new: with no whole record held,
+        // it has its answer (#3405).
+        if c.buffered_only == 1 && recio_whole_record(rio) == 0 { return null, 0, "" }
+        rec, rlen, e = recio_next(rio)
+        // The socket's timeout: nothing more yet, and the connection stays
+        // as it was, so a later call goes on where this one stopped (#3405).
+        if string.equals(e, "timeout") == 1 { return null, 0, "timeout" }
+        if string.equals(e, "") != 1 {
+            if rio.alert != 0 { send_alert_app(c, rio.alert) }
+            c.closed = 2
+            return null, 0, e
+        }
+        ct = bytes.get(rec, 0) & 0xFF
+        if ct != 0x17 {
+            bytes.wipe_free(rec)
+            return conn_fail(c, tls13_record.ALERT_UNEXPECTED_MESSAGE, "record: a plaintext record of type ${ct} after the handshake")
+        }
+        opened = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0, alert: 0 }
+        oerr = tls13_record.open_record(c.app_recv as ptr, bytes.view(rec)[0..rlen], &opened)
+        bytes.wipe_free(rec)
+        if string.equals(oerr, "") != 1 {
+            return conn_fail(c, opened.alert, oerr)
+        }
+        t = opened.content_type
+        n = opened.plaintext_len
+        if t != tls13_record.CONTENT_HANDSHAKE && c.hs_pend_len > 0 {
+            if opened.plaintext != null { bytes.wipe_free(opened.plaintext) }
+            return conn_fail(c, tls13_record.ALERT_UNEXPECTED_MESSAGE, "record: a record of type ${t} inside a handshake message")
+        }
+        if t == tls13_record.CONTENT_APPLICATION_DATA {
+            if n > 0 {
+                c.empties = 0
+                c.key_updates = 0
+                c.warnings = 0
+                return opened.plaintext, n, ""
+            }
+            if opened.plaintext != null { bytes.wipe_free(opened.plaintext) }
+            c.empties = c.empties + 1
+            if c.empties > MAX_EMPTY_RECORDS {
+                return conn_fail(c, tls13_record.ALERT_UNEXPECTED_MESSAGE, "record: more than ${MAX_EMPTY_RECORDS} empty records in a row")
+            }
+        } else if t == tls13_record.CONTENT_ALERT {
+            level = -1
+            desc = 0
+            if n == 2 {
+                level = bytes.get(opened.plaintext, 0) & 0xFF
+                desc = bytes.get(opened.plaintext, 1) & 0xFF
+            }
+            if opened.plaintext != null { bytes.wipe_free(opened.plaintext) }
+            if level < 0 { return conn_fail(c, tls13_record.ALERT_DECODE_ERROR, "alert: a record that is not two bytes") }
+            ev, a, why = tls13_client.alert_event(level, desc, c.warnings)
+            if ev == tls13_client.EV_CLOSED {
+                c.closed = 1
+                return null, 0, ""
+            }
+            if ev == tls13_client.EV_ERROR {
+                if a != 0 { send_alert_app(c, a) }
+                c.closed = 2
+                return null, 0, why
+            }
+            c.warnings = c.warnings + 1
+        } else {
+            // A handshake record: an empty one is no message at all.
+            if n == 0 {
+                if opened.plaintext != null { bytes.wipe_free(opened.plaintext) }
+                return conn_fail(c, tls13_record.ALERT_UNEXPECTED_MESSAGE, "record: an empty handshake record after the handshake")
+            }
+            if c.hs_pend == null {
+                c.hs_pend = bytes.new(n)
+                c.hs_pend_len = 0
+            }
+            bytes.copy_from_bytes(c.hs_pend, c.hs_pend_len, opened.plaintext, 0, n)
+            c.hs_pend_len = c.hs_pend_len + n
+            bytes.wipe_free(opened.plaintext)
+            if c.hs_pend_len >= 4 {
+                mt = bytes.get(c.hs_pend, 0) & 0xFF
+                ml = ((bytes.get(c.hs_pend, 1) & 0xFF) << 16) | ((bytes.get(c.hs_pend, 2) & 0xFF) << 8) | (bytes.get(c.hs_pend, 3) & 0xFF)
+                if mt != tls13_hs.HS_KEY_UPDATE {
+                    return conn_fail(c, tls13_record.ALERT_UNEXPECTED_MESSAGE, "handshake: a message of type ${mt} after the handshake")
+                }
+                if ml != 1 { return conn_fail(c, tls13_record.ALERT_DECODE_ERROR, "key update: the body is not one byte") }
+                if c.hs_pend_len >= 5 {
+                    req, ka, kerr = tls13_hs.key_update_request(bytes.view(c.hs_pend)[4..5])
+                    if ka != 0 { return conn_fail(c, ka, kerr) }
+                    if c.hs_pend_len != 5 { return conn_fail(c, tls13_record.ALERT_UNEXPECTED_MESSAGE, "handshake: data after a KeyUpdate in its record") }
+                    bytes.wipe_free(c.hs_pend)
+                    c.hs_pend = null
+                    c.hs_pend_len = 0
+                    c.key_updates = c.key_updates + 1
+                    if c.key_updates > MAX_KEY_UPDATES {
+                        return conn_fail(c, tls13_record.ALERT_UNEXPECTED_MESSAGE, "key update: more than ${MAX_KEY_UPDATES} without application data")
+                    }
+                    _sa, _sk, algo, _sh, _se = suite_params(c.suite)
+                    c.recv_secret = tls13_ks.key_update(algo, c.app_recv, c.recv_secret)
+                    if req == tls13_hs.KEY_UPDATE_REQUESTED { c.ku_pending = 1 }
+                }
+            }
+        }
+    }
 }
 
 close_conn(conn: ptr) {
@@ -602,44 +1251,107 @@ close_conn(conn: ptr) {
     if c == null { return }
     tls13_record.free_ctx(c.app_send as ptr)
     tls13_record.free_ctx(c.app_recv as ptr)
+    tls13_ks.free_secret(c.send_secret)
+    tls13_ks.free_secret(c.recv_secret)
+    if c.hs_pend != null { bytes.wipe_free(c.hs_pend) }
+    if c.recv_pend != null { bytes.wipe_free(c.recv_pend) }
     recio_free(c.rio as *RecordIO)
-    tcp.close(c.sock)
+    // A connection that failed sent its alert, and may hold what the client
+    // sent after: drained first, so the alert is not lost to the reset a
+    // close with bytes unread sends (tcp.close_drained).
+    if c.closed == 2 {
+        tcp.close_drained(c.sock)
+    } else {
+        tcp.close(c.sock)
+    }
     libc_free(conn)
 }
 
 // ---- PEM helpers ----
 
+// The certificate chain in `pem_text`, the leaf first: the DER of every
+// BEGIN CERTIFICATE block, in order (#3378). Every other block (the private
+// key of a combined file, EC parameters) is skipped, as OpenSSL skips it,
+// and never goes into the chain: the chain is what the server sends every
+// client. (chain, lens) or (null, null); parse_cert_chain_pem_checked says
+// why.
 parse_cert_chain_pem(pem_text: string) -> (ptr, ptr) {
-    chain = list_new()
-    lens = list_new()
-    end_marker = "-----END CERTIFICATE-----"
-    tlen = string_length(pem_text)
-    mlen = string_length(end_marker)
-    pos = 0
-    while pos < tlen {
-        e = string.index_of_from(pem_text, end_marker, pos)
-        if e < 0 { break }
-        block_end = e + mlen
-        block = string.substring_n(pem_text, tlen, pos, block_end)
-        der, _label, perr = pem.parse(block)
-        if string.equals(perr, "") == 1 && der != null {
-            list.add(chain, der)
-            list.add(lens, null)
-        }
-        pos = block_end
-    }
-    if list_size(chain) == 0 {
-        list_free(chain)
-        list_free(lens)
-        return null, null
-    }
+    chain, lens, _err = parse_cert_chain_pem_checked(pem_text)
     return chain, lens
 }
 
+// parse_cert_chain_pem, and why the text gives no chain: no certificate, a
+// block without its END line, or a certificate block that does not decode
+// or does not parse as a certificate, which refuses the whole text. Each
+// entry is parsed here, once, when the chain is loaded.
+parse_cert_chain_pem_checked(pem_text: string) -> (ptr, ptr, string) {
+    chain = list_new()
+    lens = list_new()
+    begin = "-----BEGIN "
+    dashes = "-----"
+    tlen = string_length(pem_text)
+    pos = 0
+    err = ""
+    going = 1
+    while going == 1 && pos < tlen {
+        b = string.index_of_from(pem_text, begin, pos)
+        if b < 0 {
+            going = 0
+        } else {
+            ls = b + string_length(begin)
+            le = string.index_of_from(pem_text, dashes, ls)
+            if le < 0 {
+                err = "a PEM BEGIN line has no closing dashes"
+                going = 0
+            } else {
+                label = string.substring_n(pem_text, tlen, ls, le)
+                end_line = "-----END ${label}-----"
+                e = string.index_of_from(pem_text, end_line, le + string_length(dashes))
+                if e < 0 {
+                    err = "the PEM block ${label} has no END line"
+                    going = 0
+                } else {
+                    block_end = e + string_length(end_line)
+                    if string.equals(label, "CERTIFICATE") == 1 {
+                        n = list_size(chain) + 1
+                        der, _label, perr = pem.parse_at(pem_text, b)
+                        if string.equals(perr, "") != 1 || der == null {
+                            err = "certificate ${n} of the chain does not decode: ${perr}"
+                            going = 0
+                        } else {
+                            leaf = tls13_cert.LeafCert { tbs: null }
+                            tls13_cert.init_leaf(&leaf)
+                            cerr = tls13_cert.parse_certificate(bytes.view(der)[0..bytes.length(der)], &leaf)
+                            tls13_cert.free_leaf(&leaf)
+                            if string.equals(cerr, "") != 1 {
+                                bytes.wipe_free(der)
+                                err = "certificate ${n} of the chain does not parse: ${cerr}"
+                                going = 0
+                            } else {
+                                list.add(chain, der)
+                                list.add(lens, null)
+                            }
+                        }
+                    }
+                    pos = block_end
+                }
+            }
+        }
+    }
+    if string.equals(err, "") == 1 && list_size(chain) == 0 { err = "no certificate (no BEGIN CERTIFICATE block)" }
+    if string.equals(err, "") != 1 {
+        free_cert_chain(chain)
+        list_free(lens)
+        return null, null, err
+    }
+    return chain, lens, ""
+}
+
+// The key's DER and its SEQUENCE copies are wiped as they are freed (#3382).
 parse_ec_private_key_pem(pem_text: string) -> ptr {
     der, label, err = pem.parse(pem_text)
     if string.equals(err, "") != 1 || der == null {
-        if der != null { bytes.free(der) }
+        if der != null { wipe_free(der) }
         return null
     }
     dlen = bytes.length(der)
@@ -648,14 +1360,14 @@ parse_ec_private_key_pem(pem_text: string) -> ptr {
     r = asn1.reader_new(der)
     sub, body, serr = asn1.read_sequence(r)
     if string.equals(serr, "") != 1 {
-        asn1.reader_free(r); bytes.free(der)
+        asn1.reader_free(r); wipe_free(der)
         return null
     }
 
     // Check version
     ver_bn, verr = asn1.read_integer(sub)
     if string.equals(verr, "") != 1 {
-        asn1.reader_free(sub); asn1.reader_free(r); bytes.free(der); bytes.free(body)
+        asn1.reader_free(sub); asn1.reader_free(r); wipe_free(der); wipe_free(body)
         return null
     }
     bignum.free(ver_bn)
@@ -669,7 +1381,7 @@ parse_ec_private_key_pem(pem_text: string) -> ptr {
         if string.equals(label, "PRIVATE KEY") == 1 {
             // PKCS#8 PrivateKeyInfo ::= SEQUENCE { version INTEGER, privateKeyAlgorithm AlgId, privateKey OCTET STRING }
             sa, saerr = asn1.read_tlv(sub)
-            if string.equals(saerr, "") == 1 { bytes.free(sa) }
+            if string.equals(saerr, "") == 1 { bytes.wipe_free(sa) }
             inner_oct, ioerr = asn1.read_octet_string(sub)
             if string.equals(ioerr, "") == 1 {
                 // Parse inner ECPrivateKey
@@ -680,15 +1392,363 @@ parse_ec_private_key_pem(pem_text: string) -> ptr {
                     if string.equals(iverr, "") == 1 { bignum.free(iver_bn) }
                     poct, poerr = asn1.read_octet_string(isub)
                     if string.equals(poerr, "") == 1 { priv = poct }
-                    asn1.reader_free(isub); bytes.free(ibody)
+                    asn1.reader_free(isub); wipe_free(ibody)
                 }
-                asn1.reader_free(ir); bytes.free(inner_oct)
+                asn1.reader_free(ir); wipe_free(inner_oct)
             }
         }
     }
 
-    asn1.reader_free(sub); asn1.reader_free(r); bytes.free(der); bytes.free(body)
+    asn1.reader_free(sub); asn1.reader_free(r); wipe_free(der); wipe_free(body)
     return priv
+}
+
+// ---- the server's private key (#3326) ----
+
+// A server private key, of any kind the server signs a CertificateVerify
+// with: ECDSA P-256, P-384 or P-521 (0x0403, 0x0503, 0x0603), Ed25519
+// (0x0807) or RSA (rsa_pss_rsae_sha256, 0x0804). load_private_key makes
+// one, free_private_key frees it (wiping the secret).
+//
+// The secret is kept shielded (std.cryptography.shield, #3376): sealed
+// behind a 16 KiB random pre-key for as long as the server keeps the key,
+// in the clear only for each signature, and refused if a bit of it changed
+// in memory.
+struct ServerKey {
+    kind: int // tls13_cert.KEY_P256, KEY_P384, KEY_P521, KEY_ED25519 or KEY_RSA
+    shielded: ptr // the shield handle of the EC scalar (its curve's size), the Ed25519 seed (32 bytes) or the RSA key's PKCS#1 RSAPrivateKey DER
+}
+
+// A ServerKey of `kind` holding `secret` (consumed: shielded, and its
+// plaintext wiped), or (null, why).
+fn shielded_key(kind: int, secret: @frees ptr) -> (ptr, string) {
+    h, herr = shield.wrap(secret)
+    if h == null { return null, "the private key cannot be shielded: ${herr}" }
+    k = heap.new(ServerKey)
+    k.kind = kind
+    k.shielded = h
+    return k as ptr, ""
+}
+
+// A copy of a secret buffer in one of its exact size, so no growth leaves
+// a stray copy behind (#3382).
+fn secret_copy(b: @keep ptr) -> ptr {
+    n = bytes.length(b)
+    out = bytes.new(n)
+    bytes.copy_from_bytes(out, 0, b, 0, n)
+    return out
+}
+
+// The PEM labels a private key can have, in the order looked for.
+const KEY_LABEL_PKCS8 = "-----BEGIN PRIVATE KEY-----"
+const KEY_LABEL_SEC1 = "-----BEGIN EC PRIVATE KEY-----"
+const KEY_LABEL_PKCS1 = "-----BEGIN RSA PRIVATE KEY-----"
+const KEY_LABEL_ENCRYPTED = "-----BEGIN ENCRYPTED PRIVATE KEY-----"
+
+// Zero a secret before giving it back.
+fn wipe_free(b: @frees ptr) {
+    bytes.wipe_free(b)
+}
+
+// The KEY_* a namedCurve OID names; KEY_NONE for any other.
+fn curve_kind(oid: string) -> int {
+    if string.equals(oid, "1.2.840.10045.3.1.7") == 1 { return tls13_cert.KEY_P256 }
+    if string.equals(oid, "1.3.132.0.34") == 1 { return tls13_cert.KEY_P384 }
+    if string.equals(oid, "1.3.132.0.35") == 1 { return tls13_cert.KEY_P521 }
+    return tls13_cert.KEY_NONE
+}
+
+// The scalar size of a curve KEY_*, 0 for another kind.
+fn curve_size(kind: int) -> int {
+    if kind == tls13_cert.KEY_P256 { return 32 }
+    if kind == tls13_cert.KEY_P384 { return 48 }
+    if kind == tls13_cert.KEY_P521 { return 66 }
+    return 0
+}
+
+// The curve an unnamed scalar's size implies, KEY_NONE for none.
+fn kind_of_size(n: int) -> int {
+    if n == 32 { return tls13_cert.KEY_P256 }
+    if n == 48 { return tls13_cert.KEY_P384 }
+    if n == 66 { return tls13_cert.KEY_P521 }
+    return tls13_cert.KEY_NONE
+}
+
+// An ECPrivateKey (RFC 5915), for the curve `want` names, or (KEY_NONE)
+// the curve its own parameters name, else the one its scalar's size implies:
+// (kind, scalar of the curve's size) or (KEY_NONE, null).
+fn parse_sec1(der: @keep ptr, want: int) -> (int, ptr) {
+    r = asn1.reader_new(der)
+    sub, body, serr = asn1.read_sequence(r)
+    if string.equals(serr, "") != 1 {
+        asn1.reader_free(r)
+        return tls13_cert.KEY_NONE, null
+    }
+    ver, verr = asn1.read_integer(sub)
+    if string.equals(verr, "") == 1 { bignum.free(ver) }
+    oct, oerr = asn1.read_octet_string(sub)
+    kind = want
+    if string.equals(oerr, "") == 1 && kind == tls13_cert.KEY_NONE && asn1.reader_eof(sub) == 0 {
+        // parameters [0] EXPLICIT ECParameters: a namedCurve OID.
+        params, perr = asn1.read_tagged_ext(sub, 1, 0x80, 0)
+        if string.equals(perr, "") == 1 {
+            pr = asn1.reader_new(params)
+            curve, cerr = asn1.read_oid(pr)
+            if string.equals(cerr, "") == 1 {
+                kind = curve_kind(curve)
+                string.release(curve)
+            }
+            asn1.reader_free(pr)
+            bytes.wipe_free(params)
+        }
+    }
+    // body is the key's SEQUENCE: the scalar is in it (#3382).
+    asn1.reader_free(sub); wipe_free(body); asn1.reader_free(r)
+    if string.equals(oerr, "") != 1 || oct == null { return tls13_cert.KEY_NONE, null }
+    olen = bytes.length(oct)
+    if kind == tls13_cert.KEY_NONE { kind = kind_of_size(olen) }
+    size = curve_size(kind)
+    if size == 0 || olen > size || olen == 0 {
+        wipe_free(oct)
+        return tls13_cert.KEY_NONE, null
+    }
+    // RFC 5915 fixes the length; an encoder that dropped leading zeros is
+    // padded back.
+    scalar = bytes.new(size)
+    bytes.set(scalar, size - 1, 0)
+    bytes.copy_from_bytes(scalar, size - olen, oct, 0, olen)
+    wipe_free(oct)
+    return kind, scalar
+}
+
+// 1 when `scalar` is a valid private key of curve `kind`.
+fn scalar_ok(kind: int, scalar: ptr) -> int {
+    if kind == tls13_cert.KEY_P256 { return p256.private_key_valid(scalar) }
+    if kind == tls13_cert.KEY_P384 { return p384.private_key_valid(scalar) }
+    if kind == tls13_cert.KEY_P521 { return p521.private_key_valid(scalar) }
+    return 0
+}
+
+// Why an RSA key cannot be the server's, "" when it can: under 2048 bits
+// (the OpenSSL backend refuses it too, #3312) or over 16384.
+fn rsa_key_problem(k: ptr) -> string {
+    bits = rsa.modulus_bits(k)
+    if bits < 2048 || bits > 16384 { return "an RSA key needs 2048 bits or more (16384 at most)" }
+    return ""
+}
+
+// Why an EC scalar of curve `kind` cannot be the server's key, "" when it
+// can: it must be in [1, n-1] for its curve.
+fn ec_key_problem(kind: int, scalar: ptr) -> string {
+    if scalar == null { return "not an EC private key of P-256, P-384 or P-521" }
+    if scalar_ok(kind, scalar) != 1 { return "the EC private key is not in [1, n-1]" }
+    return ""
+}
+
+// A PKCS#8 PrivateKeyInfo (RFC 5208 / 5958): an EC, Ed25519 or RSA key.
+fn parse_pkcs8(der: @keep ptr) -> (ptr, string) {
+    r = asn1.reader_new(der)
+    sub, body, serr = asn1.read_sequence(r)
+    if string.equals(serr, "") != 1 {
+        asn1.reader_free(r)
+        return null, "not a PKCS#8 private key"
+    }
+    ver, verr = asn1.read_integer(sub)
+    if string.equals(verr, "") == 1 { bignum.free(ver) }
+    alg, abody, aerr = asn1.read_sequence(sub)
+    oid = ""
+    curve = tls13_cert.KEY_NONE
+    if string.equals(aerr, "") == 1 {
+        o, oerr = asn1.read_oid(alg)
+        if string.equals(oerr, "") == 1 {
+            oid = string.concat(o, "")
+            string.release(o)
+            if string.equals(oid, "1.2.840.10045.2.1") == 1 {
+                c, cerr = asn1.read_oid(alg)
+                if string.equals(cerr, "") == 1 {
+                    curve = curve_kind(c)
+                    string.release(c)
+                }
+            }
+        }
+        asn1.reader_free(alg); wipe_free(abody)
+    }
+    inner, ierr = asn1.read_octet_string(sub)
+    // body is the PrivateKeyInfo's SEQUENCE, the key inside it (#3382).
+    asn1.reader_free(sub); wipe_free(body); asn1.reader_free(r)
+    if string.equals(ierr, "") != 1 || inner == null { return null, "not a PKCS#8 private key" }
+
+    if string.equals(oid, "1.2.840.10045.2.1") == 1 {
+        if curve == tls13_cert.KEY_NONE {
+            wipe_free(inner)
+            return null, "an EC key on a curve other than P-256, P-384 or P-521"
+        }
+        kind, scalar = parse_sec1(inner, curve)
+        wipe_free(inner)
+        why = ec_key_problem(kind, scalar)
+        if string.equals(why, "") != 1 {
+            if scalar != null { wipe_free(scalar) }
+            return null, why
+        }
+        return shielded_key(kind, scalar)
+    }
+    if string.equals(oid, "1.3.101.112") == 1 {
+        // CurvePrivateKey ::= OCTET STRING, the 32-byte seed (RFC 8410).
+        ir = asn1.reader_new(inner)
+        seed, serr2 = asn1.read_octet_string(ir)
+        asn1.reader_free(ir)
+        wipe_free(inner)
+        if string.equals(serr2, "") != 1 || seed == null || bytes.length(seed) != 32 {
+            if seed != null { wipe_free(seed) }
+            return null, "not an Ed25519 private key"
+        }
+        return shielded_key(tls13_cert.KEY_ED25519, seed)
+    }
+    if string.equals(oid, "1.2.840.113549.1.1.1") == 1 {
+        rk, rwhy = rsa_shielded_key(inner)
+        wipe_free(inner)
+        return rk, rwhy
+    }
+    wipe_free(inner)
+    return null, "a private key of an algorithm the server cannot sign with (${oid})"
+}
+
+// The server's private key from PEM text (#3326): a PKCS#8 "PRIVATE KEY"
+// (EC P-256, P-384, P-521, Ed25519 or RSA), a SEC1 "EC PRIVATE KEY" (an
+// `openssl ecparam -genkey` file's EC PARAMETERS block before it is
+// skipped) or a PKCS#1 "RSA PRIVATE KEY". An encrypted key is refused with
+// how to decrypt it. (key, "") or (null, why); free_private_key frees it.
+load_private_key(pem_text: string) -> (ptr, string) {
+    if string.index_of(pem_text, KEY_LABEL_ENCRYPTED) >= 0 {
+        return null, "the private key is encrypted; decrypt it first (openssl pkey -in key.pem -out plain.pem)"
+    }
+    at = string.index_of(pem_text, KEY_LABEL_PKCS8)
+    if at < 0 { at = string.index_of(pem_text, KEY_LABEL_SEC1) }
+    if at < 0 { at = string.index_of(pem_text, KEY_LABEL_PKCS1) }
+    if at < 0 { return null, "no private key in the PEM text" }
+    // Decoded where it lies in the text, never copied out as a string: a
+    // string cannot be wiped (#3382).
+    der, label, err = pem.parse_at(pem_text, at)
+    if string.equals(err, "") != 1 || der == null {
+        if der != null { wipe_free(der) }
+        return null, "the private key's PEM does not decode: ${err}"
+    }
+    if string.equals(label, "PRIVATE KEY") == 1 {
+        k, kerr = parse_pkcs8(der)
+        wipe_free(der)
+        return k, kerr
+    }
+    if string.equals(label, "EC PRIVATE KEY") == 1 {
+        kind, scalar = parse_sec1(der, tls13_cert.KEY_NONE)
+        wipe_free(der)
+        why = ec_key_problem(kind, scalar)
+        if string.equals(why, "") != 1 {
+            if scalar != null { wipe_free(scalar) }
+            return null, why
+        }
+        return shielded_key(kind, scalar)
+    }
+    rk, rwhy = rsa_shielded_key(der)
+    wipe_free(der)
+    return rk, rwhy
+}
+
+// An RSA ServerKey from a PKCS#1 RSAPrivateKey DER (borrowed): the key is
+// built once to check it can sign, then freed, and its DER is what is
+// shielded; each signature builds the key from it again (#3376).
+fn rsa_shielded_key(der: @keep ptr) -> (ptr, string) {
+    k, kerr = rsa.key_from_pkcs1_der(der)
+    if string.equals(kerr, "") != 1 || k == null { return null, "not an RSA private key" }
+    rwhy = rsa_key_problem(k)
+    rsa.key_free(k)
+    if string.equals(rwhy, "") != 1 { return null, rwhy }
+    return shielded_key(tls13_cert.KEY_RSA, secret_copy(der))
+}
+
+// Free a key load_private_key made, its secret wiped first.
+free_private_key(key: @frees ptr) {
+    if key == null { return }
+    k = key as *ServerKey
+    shield.free(k.shielded)
+    heap.free(k)
+}
+
+// The SignatureScheme the server signs CertificateVerify with: its key's
+// own, when the client offered it in signature_algorithms (`offered`,
+// tls13_hs.SIGBIT_*); 0 when it did not.
+fn key_scheme(k: *ServerKey, offered: int) -> int {
+    if k.kind == tls13_cert.KEY_P256 && (offered & tls13_hs.SIGBIT_ECDSA_P256) != 0 { return tls13_cert.SCHEME_ECDSA_P256_SHA256 }
+    if k.kind == tls13_cert.KEY_P384 && (offered & tls13_hs.SIGBIT_ECDSA_P384) != 0 { return tls13_cert.SCHEME_ECDSA_P384_SHA384 }
+    if k.kind == tls13_cert.KEY_P521 && (offered & tls13_hs.SIGBIT_ECDSA_P521) != 0 { return tls13_cert.SCHEME_ECDSA_P521_SHA512 }
+    if k.kind == tls13_cert.KEY_ED25519 && (offered & tls13_hs.SIGBIT_ED25519) != 0 { return tls13_cert.SCHEME_ED25519 }
+    if k.kind == tls13_cert.KEY_RSA && (offered & tls13_hs.SIGBIT_RSA_PSS_SHA256) != 0 { return tls13_cert.SCHEME_RSA_PSS_RSAE_SHA256 }
+    if k.kind == tls13_cert.KEY_RSA && (offered & tls13_hs.SIGBIT_RSA_PSS_SHA384) != 0 { return tls13_cert.SCHEME_RSA_PSS_RSAE_SHA384 }
+    if k.kind == tls13_cert.KEY_RSA && (offered & tls13_hs.SIGBIT_RSA_PSS_SHA512) != 0 { return tls13_cert.SCHEME_RSA_PSS_RSAE_SHA512 }
+    return 0
+}
+
+// The CertificateVerify signature with the key under `scheme` (key_scheme's)
+// over `transcript_hash`, checked against the public key of the parsed
+// certificate `leaf` before it is given back: a signature computed wrongly
+// (a fault in the arithmetic, a bit that flipped in memory) can disclose the
+// key, one faulty RSA-CRT signature or two of one message under a
+// deterministic nonce being enough, so one that does not verify is wiped
+// and never sent (#3376). OpenSSL checks its RSA-CRT signatures the same
+// way. The signature and "", or null and why.
+fn sign_cert_verify(k: *ServerKey, leaf: *tls13_cert.LeafCert, scheme: int, transcript_hash: byte[]) -> (ptr, string) {
+    // The secret in the clear for this one signature only (#3376).
+    secret, uerr = shield.unwrap(k.shielded)
+    if secret == null { return null, "the server's private key cannot be used: ${uerr}" }
+    var sig: ptr = null
+    if k.kind == tls13_cert.KEY_ED25519 {
+        sig = tls13_cert.sign_server_cert_verify_ed25519(secret, transcript_hash)
+    } else if k.kind == tls13_cert.KEY_RSA {
+        rk, _rerr = rsa.key_from_pkcs1_der(secret)
+        if rk != null {
+            sig = tls13_cert.sign_server_cert_verify_rsa_pss_scheme(rk, scheme, transcript_hash)
+            rsa.key_free(rk)
+        }
+    } else {
+        sig = tls13_cert.sign_server_cert_verify_ecdsa(k.kind, secret, transcript_hash)
+    }
+    bytes.wipe_free(secret)
+    if sig == null { return null, "the server's private key could not sign (a scalar out of range, or no randomness)" }
+    if tls13_cert.leaf_signature_holds(leaf, scheme, transcript_hash, bytes.view(sig)) != 1 {
+        bytes.wipe_free(sig)
+        return null, "the server's signature does not verify with its certificate's key, so it was not sent (a fault while signing, or a key that is not the certificate's)"
+    }
+    return sig, ""
+}
+
+// "" when `key` and the certificate `leaf_der` are a pair, else why not:
+// the key signs a test CertificateVerify that the certificate's public key
+// verifies, with the functions a handshake uses (OpenSSL's
+// SSL_CTX_check_private_key does the same check another way).
+fn key_matches_cert(k: *ServerKey, leaf_der: ptr) -> string {
+    leaf = tls13_cert.LeafCert { tbs: null }
+    tls13_cert.init_leaf(&leaf)
+    perr = tls13_cert.parse_certificate(bytes.view(leaf_der)[0..bytes.length(leaf_der)], &leaf)
+    if string.equals(perr, "") != 1 {
+        tls13_cert.free_leaf(&leaf)
+        return "the certificate does not parse: ${perr}"
+    }
+    if leaf.key_kind != k.kind {
+        tls13_cert.free_leaf(&leaf)
+        return "the private key is not of the certificate's key type"
+    }
+    th = bytes.new(32)
+    i = 0
+    while i < 32 {
+        bytes.set(th, i, 0x5a)
+        i = i + 1
+    }
+    // Any scheme the key signs with: an RSA key's pair check is rsa_pss_rsae_sha256.
+    sig, _why = sign_cert_verify(k, &leaf, key_scheme(k, 0x7FFFFFFF), bytes.view(th)[0..32])
+    bytes.wipe_free(th)
+    tls13_cert.free_leaf(&leaf)
+    if sig == null { return "the private key does not match the certificate" }
+    bytes.wipe_free(sig)
+    return ""
 }
 
 fn free_cert_chain(chain: ptr) {
@@ -697,7 +1757,7 @@ fn free_cert_chain(chain: ptr) {
     i = 0
     while i < n {
         c = list.at(chain, i) as ptr
-        if c != null { bytes.free(c) }
+        if c != null { bytes.wipe_free(c) }
         i = i + 1
     }
     list_free(chain)
@@ -705,57 +1765,108 @@ fn free_cert_chain(chain: ptr) {
 
 // ---- @extern C entry points ----
 
-// Consumes fd on every path; a successful connection owns it until close_conn.
-@c_callback("aether_pure_tls_server_accept")
-pure_tls_server_accept(fd: int, cert_path: string, key_path: string) -> ptr {
-    sock = tcp_socket_from_fd_owned(fd)
-    if sock == null { return null }
+// Linked in: std.http's server_set_tls_backend(server, "aether") asks
+// this before choosing the pure server, so a program that forgot the import
+// gets an error then instead of a failed handshake per connection (#1298).
+@c_callback("aether_pure_tls_server_available")
+pure_tls_server_available() -> int {
+    return 1
+}
 
-    cert_text, cerr = fs.read(cert_path)
-    if string.equals(cerr, "") != 1 { tcp.close(sock); return null }
-    key_text, kerr = fs.read(key_path)
-    if string.equals(kerr, "") != 1 { tcp.close(sock); return null }
+// Why a load is refused, for the C that asked (std.http): the callback
+// registry's reason (#3426), so this module links nothing of the HTTP server.
+extern aether_callback_set_reason(reason: string)
 
-    chain_list, lens_list = parse_cert_chain_pem(cert_text)
+// A server's certificate chain and private key, parsed and checked once when
+// the server is configured (#3362) and shared by every connection after:
+// accept and its signing only read them (the EC scalar or Ed25519 seed, the
+// RSA key's numbers; RSA blinding draws fresh values for each signature).
+struct ServerCreds {
+    chain: ptr // std.list of certificate DER bytes, the leaf first
+    lens: ptr // their lengths
+    key: ptr // *ServerKey
+}
+
+// What std.http's server_set_tls and server_set_tls_pem give the pure server
+// (#3328, #3362): the chain and the key as PEM text. They must load and be a
+// pair, so a server that cannot complete a handshake is refused when it is
+// configured, as the OpenSSL backend refuses it, instead of dropping every
+// connection. The creds, or null with why given to aether_callback_set_reason.
+// The text is the caller's; nothing here keeps it.
+@c_callback("aether_pure_tls_server_load")
+pure_tls_server_load(cert_pem: string, key_pem: string) -> ptr {
+    chain_list, lens_list, cerr = parse_cert_chain_pem_checked(cert_pem)
     if chain_list == null {
-        tcp.close(sock)
+        aether_callback_set_reason("the TLS certificate (PEM): ${cerr}")
         return null
     }
-
-    // EC P-256 keys only. The handshake signs CertificateVerify with
-    // sign_server_cert_verify_ecdsa_p256, so an RSA key cannot be used even
-    // though the certificate would otherwise be valid -- the handshake fails
-    // at the signature step and the peer sees a dropped connection. Generate
-    // the pair with:
-    //   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1
-    priv_key = parse_ec_private_key_pem(key_text)
-    if priv_key == null {
+    key, perr = load_private_key(key_pem)
+    if key == null {
         free_cert_chain(chain_list)
         list_free(lens_list)
+        aether_callback_set_reason("the TLS private key cannot be used: ${perr}")
+        return null
+    }
+    merr = key_matches_cert(key as *ServerKey, list.at(chain_list, 0) as ptr)
+    if string.equals(merr, "") != 1 {
+        free_private_key(key)
+        free_cert_chain(chain_list)
+        list_free(lens_list)
+        aether_callback_set_reason(merr)
+        return null
+    }
+    c = heap.new(ServerCreds)
+    c.chain = chain_list
+    c.lens = lens_list
+    c.key = key
+    return c as ptr
+}
+
+// Gives back what pure_tls_server_load made, the key's secret wiped.
+@c_callback("aether_pure_tls_server_free_creds")
+pure_tls_server_free_creds(creds: @frees ptr) {
+    if creds == null { return }
+    c = creds as *ServerCreds
+    free_private_key(c.key)
+    free_cert_chain(c.chain)
+    list_free(c.lens)
+    heap.free(c)
+}
+
+// Consumes fd on every path; a successful connection owns it until
+// close_conn. `creds` are the server's (pure_tls_server_load): borrowed, and
+// still the server's after.
+@c_callback("aether_pure_tls_server_accept_creds")
+pure_tls_server_accept_creds(fd: int, creds: ptr) -> ptr {
+    sock = tcp_socket_from_fd_owned(fd)
+    if sock == null { return null }
+    if creds == null {
         tcp.close(sock)
         return null
     }
+    c = creds as *ServerCreds
 
     x25519_priv = rand_into(32)
     if x25519_priv == null {
         // An all-zeros X25519 private key would make the shared secret
         // trivially recoverable, so refuse rather than fall back.
-        bytes.free(priv_key)
-        free_cert_chain(chain_list)
-        list_free(lens_list)
         tcp.close(sock)
         return null
     }
 
-    sconn, err = accept(sock, chain_list, lens_list, priv_key, x25519_priv)
-
-    bytes.free(priv_key)
-    bytes.free(x25519_priv)
-    free_cert_chain(chain_list)
-    list_free(lens_list)
+    sconn, err = accept(sock, c.chain, c.lens, c.key, x25519_priv)
+    bytes.wipe_free(x25519_priv)
 
     if err != "" {
-        if sconn != null { close_conn(sconn) } else { tcp.close(sock) }
+        // A handshake that failed sent its alert: the socket is drained
+        // before it closes, so the client reads the alert, not a reset.
+        if sconn != null {
+            failed = sconn as *ServerConn
+            failed.closed = 2
+            close_conn(sconn)
+        } else {
+            tcp.close_drained(sock)
+        }
         return null
     }
     return sconn
@@ -768,7 +1879,7 @@ pure_tls_server_send(sconn: ptr, buf: ptr, len: int) -> int {
     bytes.set(b, len - 1, 0)
     mem.copy(bytes.data(b), buf, len as long)
     err = conn_send(sconn, bytes.view(b)[0..len])
-    bytes.free(b)
+    bytes.wipe_free(b)
     if err != "" { return -1 }
     return len
 }
@@ -776,16 +1887,95 @@ pure_tls_server_send(sconn: ptr, buf: ptr, len: int) -> int {
 @c_callback("aether_pure_tls_server_recv")
 pure_tls_server_recv(sconn: ptr, buf: ptr, len: int) -> int {
     if sconn == null || buf == null || len <= 0 { return -1 }
+    c = sconn as *ServerConn
+    // The tail of the last record first: a record larger than the caller's
+    // buffer keeps what did not fit for the next call, as the client
+    // bridge does (#3381). The HTTP server reads with less than a whole
+    // record's room (16383 bytes), and its Content-Length loop asks for just
+    // what the body still lacks, so a dropped tail was a body byte or a
+    // pipelined request.
+    if c.recv_pend != null {
+        avail = c.recv_pend_len - c.recv_pend_off
+        take = avail
+        if take > len { take = len }
+        src = long_to_ptr(ptr_to_long(bytes.data(c.recv_pend)) + (c.recv_pend_off as long))
+        copy(buf, src, take as long)
+        c.recv_pend_off = c.recv_pend_off + take
+        if c.recv_pend_off >= c.recv_pend_len {
+            bytes.wipe_free(c.recv_pend)
+            c.recv_pend = null
+            c.recv_pend_len = 0
+            c.recv_pend_off = 0
+        }
+        return take
+    }
     p, n, err = conn_recv(sconn)
+    // -2: the socket's timeout fired with no data yet, and the connection
+    // is kept; std.http takes it as its wait for a next request ending
+    // (#3405). -1: the end or an error.
+    if err == "timeout" { return -2 }
     if err != "" || n <= 0 {
-        if p != null { bytes.free(p) }
+        if p != null { bytes.wipe_free(p) }
         return -1
     }
-    copy_n = n
-    if copy_n > len { copy_n = len }
-    mem.copy(buf, bytes.data(p), copy_n as long)
-    bytes.free(p)
-    return copy_n
+    take = n
+    if take > len { take = len }
+    copy(buf, bytes.data(p), take as long)
+    if take < n {
+        c.recv_pend = p
+        c.recv_pend_len = n
+        c.recv_pend_off = take
+    } else {
+        bytes.wipe_free(p)
+    }
+    return take
+}
+
+// Is there application data to read without waiting on the socket (#3384)?
+// std.http asks before it parks a connection or waits on its descriptor:
+// what the record reader already holds does not show on poll(2), as
+// OpenSSL's buffered plaintext does not, which SSL_pending answers there.
+// The bytes not yet handed over, after handling the whole records the reader
+// holds as conn_recv does: a KeyUpdate, an empty record or a warning is
+// handled and is not data (#3405), so a connection with only those left is
+// parked, not read from. A record that ends the connection or fails it
+// answers 1, so the next read reports that at once. Else 0.
+@c_callback("aether_pure_tls_server_pending")
+pure_tls_server_pending(sconn: ptr) -> int {
+    if sconn == null { return 0 }
+    c = sconn as *ServerConn
+    if c.recv_pend != null { return c.recv_pend_len - c.recv_pend_off }
+    if c.closed != 0 { return 1 }
+    r = c.rio as *RecordIO
+    // What the socket already holds, taken without waiting: each read takes
+    // no more than FIONREAD counts, and they go on until a record is whole
+    // or the socket has nothing left (#3405).
+    while recio_whole_record(r) == 0 && tcp.available(r.sock) > 0 {
+        if recio_fill(r) <= 0 { return 1 }
+    }
+    if recio_whole_record(r) == 0 { return 0 }
+    c.buffered_only = 1
+    p, n, _err = conn_recv(sconn)
+    c.buffered_only = 0
+    if p != null && n > 0 {
+        c.recv_pend = p
+        c.recv_pend_len = n
+        c.recv_pend_off = 0
+        return n
+    }
+    if p != null { bytes.wipe_free(p) }
+    if c.closed != 0 { return 1 }
+    return 0
+}
+
+// 1 when the record reader holds a whole record it has already read from
+// the socket: its 5-byte header and the length the header gives.
+fn recio_whole_record(r: *RecordIO) -> int {
+    avail = r.len - r.off
+    if avail < 5 { return 0 }
+    plen = ((bytes.get(r.buf, r.off + 3) & 0xFF) << 8) | (bytes.get(r.buf, r.off + 4) & 0xFF)
+    if avail >= 5 + plen { return 1 }
+    return 0
 }
 
 @c_callback("aether_pure_tls_server_close")

@@ -79,6 +79,18 @@ main() {
 }
 AE
 
+# The same under a program's own `extern free(p: ptr)` (#3450).
+refused sub_local_extern_free "cannot free 's': $view" 6:5 <<'AE'
+extern free(p: ptr)
+
+main() {
+    b = make([]byte, 8)
+    s = b[2..4]
+    free(s)
+    free(b)
+}
+AE
+
 refused sub_at_start "cannot free this value: $view" 3:5 <<'AE'
 main() {
     b = make([]byte, 8)

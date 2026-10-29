@@ -6,7 +6,7 @@ file(STRINGS "${AE}/runtime/coop_runtime_sources.txt" AE_RUNTIME REGEX "^[^#]")
 list(TRANSFORM AE_RUNTIME PREPEND "${AE}/")
 idf_component_register(
     SRCS "/gen/${AE_PROG}.c" ${AE_RUNTIME}
-    INCLUDE_DIRS "${AE}/runtime" "${AE}/runtime/actors" "${AE}/runtime/scheduler"
+    INCLUDE_DIRS "${AE}/include" "${AE}/runtime" "${AE}/runtime/actors" "${AE}/runtime/scheduler"
                  "${AE}/runtime/utils" "${AE}/runtime/memory" "${AE}/runtime/config"
                  "${AE}/std" "${AE}/std/string" "${AE}/std/io" "${AE}/std/math"
                  "${AE}/std/net" "${AE}/std/collections" "${AE}/std/json")

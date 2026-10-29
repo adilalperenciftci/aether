@@ -261,6 +261,22 @@ const char* aether_caller_identity(void);
 const char* aether_caller_attribute(const char* key);
 int64_t     aether_caller_deadline_ms(void);
 
+/* Nesting (#2955): each execution (a call into an export, runtime/
+ * aether_exec.h) sees the caller info that was set when it was entered.
+ * A host service the execution calls may set another for the executions
+ * it enters in turn; the running one keeps its own, and when it returns
+ * the setting it was entered with is back. aether_exec.c calls this as an
+ * execution at `depth` returns. */
+void aether_caller_leave(int depth);
+
+/* An actor step inside an execution (#3396, aether_step_barrier.h): the
+ * setting is put away for the step, which reads none and sets its own,
+ * and is back when the step ends. The token is NULL for an empty setting.
+ * With no memory to keep it, the step still reads none, and a setting it
+ * makes is refused (-1), so the enclosing one is never lost. */
+void* aether_caller_put_aside(void);
+void  aether_caller_give_back(void* token);
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif

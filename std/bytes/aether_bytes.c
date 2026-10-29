@@ -1,6 +1,7 @@
 #include "aether_bytes.h"
 #include "../string/aether_string.h"
 #include "../../runtime/aether_resource_caps.h"
+#include "../../runtime/utils/aether_wipe.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -464,4 +465,17 @@ void aether_bytes_free(AetherBytes* b) {
      * aether_caps_realloc above. */
     aether_caps_free(b->data, b->capacity);
     aether_caps_free(b, sizeof(AetherBytes));
+}
+
+void aether_bytes_wipe(AetherBytes* b) {
+    if (is_aether_string(b)) return;
+    if (!b) return;
+    aether_wipe(b->data, b->capacity);
+}
+
+void aether_bytes_wipe_free(AetherBytes* b) {
+    if (is_aether_string(b)) return;
+    if (!b) return;
+    aether_wipe(b->data, b->capacity);
+    aether_bytes_free(b);
 }

@@ -37,6 +37,7 @@
 
 import std.bits
 import std.bytes
+import std.mem
 
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
@@ -446,13 +447,13 @@ finalize_to_bytes(c: *Blake2Ctx) -> ptr {
         bytes.set(out, i, bytes.get(full, i))
         i = i + 1
     }
-    bytes.free(full)
+    bytes.wipe_free(full)
     return out
 }
 
 free_internals(c: *Blake2Ctx) {
     if c.block != null {
-        bytes.free(c.block)
+        bytes.wipe_free(c.block)
         c.block = null
     }
 }
@@ -465,6 +466,7 @@ final_bytes(ctx: ptr) -> ptr {
     out = finalize_to_bytes(c)
     s = bytes.finish(out, n)
     free_internals(c)
+    mem.wipe(ctx, sizeof(Blake2Ctx))
     free(ctx)
     res = bytes.new(n)
     bytes.copy_from_string(res, 0, s, n)
@@ -495,9 +497,10 @@ final_hex(ctx: ptr) -> string {
         bytes.set(hexbuf, i * 2 + 1, c_lo)
         i = i + 1
     }
-    bytes.free(out)
+    bytes.wipe_free(out)
     s = bytes.finish(hexbuf, n * 2)
     free_internals(c)
+    mem.wipe(ctx, sizeof(Blake2Ctx))
     free(ctx)
     return s
 }
@@ -511,6 +514,7 @@ free_ctx(ctx: ptr) {
     }
     c = ctx as *Blake2Ctx
     free_internals(c)
+    mem.wipe(ctx, sizeof(Blake2Ctx))
     free(ctx)
 }
 

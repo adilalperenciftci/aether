@@ -1,0 +1,152 @@
+// A running TLS server re-loads its certificate while it accepts, for
+// test_https_tls_reload.sh (#3371).
+//
+//   BACKEND               "aether" or "openssl"
+//   ROOT_CA               the root both leaves are signed by
+//   CERT_A, KEY_A, CERT_B, KEY_B   two certificates for localhost and keys
+//   GATEWAY               "1": the TLS server is a proxy gateway to a plain
+//                         upstream, whose connections the event loop takes
+//                         on the OpenSSL backend (Linux and macOS)
+//
+// Two actors at once each set the server's TLS 100 times, A and B in turn,
+// while main fetches 100 times. Prints "OK <fetched> of 100 after <loads> loads,
+// <taken> on the loop", or "FAIL: ..." and exits 1.
+
+import std.fs
+import std.http
+import std.http.client
+import std.http.proxy
+import std.os
+import std.cryptography.tls13_client
+import std.cryptography.tls13_server
+
+extern exit(code: int)
+extern http_server_evloop_connections(server: ptr) -> int
+
+handle_root(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_body(res, "reload-ok")
+}
+
+start(server: ptr) -> int {
+    if http.server_bind(server, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    serr = http.server_start_background(server)
+    if serr != "" {
+        println("FAIL: start: ${serr}")
+        exit(1)
+    }
+    return http.server_port(server)
+}
+
+message Reload { server: ptr, n: int }
+message Loads {}
+
+actor Reloader {
+    state done = 0
+    state failed = ""
+    receive {
+        Reload(server, n) -> {
+            ca, _e1 = fs.read(os.getenv("CERT_A"))
+            ka, _e2 = fs.read(os.getenv("KEY_A"))
+            cb, _e3 = fs.read(os.getenv("CERT_B"))
+            kb, _e4 = fs.read(os.getenv("KEY_B"))
+            i = 0
+            while i < n {
+                err = ""
+                if i % 2 == 0 {
+                    err = http.server_set_tls_pem(server, cb, kb)
+                } else {
+                    err = http.server_set_tls_pem(server, ca, ka)
+                }
+                if err != "" && failed == "" {
+                    failed = err
+                }
+                done = done + 1
+                i = i + 1
+            }
+        }
+        Loads() -> {
+            if failed != "" {
+                reply 0 - 1
+            } else {
+                reply done
+            }
+        }
+    }
+}
+
+main() {
+    gateway = os.getenv("GATEWAY") == "1"
+    upstream = http.server_create(0)
+    raw = http.server_create(0)
+    http.server_set_host(raw, "127.0.0.1")
+    if gateway {
+        http.server_set_host(upstream, "127.0.0.1")
+        http.server_get(upstream, "/", handle_root, 0)
+        up_url = "http://127.0.0.1:${start(upstream)}"
+        merr = proxy.mount_simple(raw, "/", up_url, 5)
+        if merr != "" {
+            println("FAIL: mount: ${merr}")
+            exit(1)
+        }
+    } else {
+        http.server_get(raw, "/", handle_root, 0)
+    }
+    berr = http.server_set_tls_backend(raw, os.getenv("BACKEND"))
+    if berr != "" {
+        println("FAIL: server_set_tls_backend: ${berr}")
+        exit(1)
+    }
+    terr = http.server_set_tls(raw, os.getenv("CERT_A"), os.getenv("KEY_A"))
+    if terr != "" {
+        println("FAIL: server_set_tls: ${terr}")
+        exit(1)
+    }
+    port = start(raw)
+    sleep(100)
+
+    // Two re-loaders at once: each call replaces the server's stored copies
+    // of the certificate and key, so two calls together must not free the
+    // same old copy twice.
+    r1 = spawn(Reloader())
+    r2 = spawn(Reloader())
+    r1 ! Reload { server: raw, n: 100 }
+    r2 ! Reload { server: raw, n: 100 }
+    fetched = 0
+    k = 0
+    while k < 100 {
+        req = client.request("GET", "https://localhost:${port}/")
+        client.set_timeout(req, 10s)
+        client.set_cafile(req, os.getenv("ROOT_CA"))
+        resp, err = client.send_request(req)
+        client.request_free(req)
+        if err == "" {
+            if client.response_status(resp) == 200 {
+                fetched = fetched + 1
+            }
+            client.response_free(resp)
+        }
+        k = k + 1
+    }
+    wait_for_idle()
+    int loads1 = r1 ? Loads {}
+    int loads2 = r2 ? Loads {}
+    taken = http_server_evloop_connections(raw)
+    http.server_stop(raw)
+    if gateway {
+        http.server_stop(upstream)
+    }
+    loads = loads1 + loads2
+    if loads1 < 0 || loads2 < 0 {
+        println("FAIL: a re-load was refused")
+        exit(1)
+    }
+    if fetched != 100 {
+        println("FAIL: ${fetched} of 100 fetched while the server re-loaded")
+        exit(1)
+    }
+    println("OK ${fetched} of 100 after ${loads} loads, ${taken} on the loop")
+}

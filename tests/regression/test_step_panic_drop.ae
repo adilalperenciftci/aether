@@ -1,0 +1,146 @@
+// A panic in what a step does after its handler panicked stays in the step
+// (#3403).
+//
+// When a handler panics, its step barrier drops the message the handler was
+// running on (its owned fields' drop functions are the program's code) and
+// fires the death hook, and it gives the thread's context back after both.
+// Neither ran under a frame: a drop that panicked there jumped past the
+// barrier's end, to the nearest frame below it, or out of the program. On a
+// core's own thread the program ended. Stepped inline inside another
+// handler, the panic landed in that handler, with the inner step's context
+// still put aside: the step lock held, and an enclosing enforce block's
+// levels, so a `try` in the block that caught it ran on unenforced.
+//
+// Each drop now runs in a frame of its own (a panic in it is reported
+// through the death hook, as a drop at an actor's end is, #3401), and the
+// step gives its context back whatever happens.
+
+import std.bytes
+import std.os
+import std.sandbox
+import std.sync
+
+extern exit(code: int)
+
+var g_drops: ptr = null
+
+// The drop of a Bomb: counted, then a panic.
+bomb_drop(p: @frees ptr) {
+    sync.atomic_add(g_drops, 1)
+    bytes.free(p)
+    panic("the bomb went off in its drop")
+}
+
+type Bomb = owned ptr drop bomb_drop
+
+message Hit { a: int, b: Bomb }
+message Go {}
+message GoBlocked {}
+message Count {}
+
+fn bomb() -> Bomb {
+    return bytes.new(4) as Bomb
+}
+
+fn readable(name: string) -> int {
+    v = os.os_getenv(name)
+    if v == null {
+        return 0
+    }
+    return 1
+}
+
+// Panics on a Hit without binding its Bomb: the barrier drops it.
+actor Target {
+    state hits = 0
+    receive {
+        Hit(a) -> {
+            hits = hits + a
+            panic("hit")
+        }
+        Count() -> { reply hits }
+    }
+}
+
+// Hits a Target idle on its own core, so the Target is stepped inline, inside
+// this handler; replies what happened after.
+actor Sender {
+    state target: actor_ref = null
+    receive {
+        Go() -> {
+            t = target
+            t ! Hit { a: 1, b: bomb() }
+            reply 1 // reached: the send returned
+        }
+        // The same inside a deny-all block with a try around the send: the
+        // block's levels are in force after it, whatever the Target did.
+        GoBlocked() -> {
+            nothing = sandbox.new("nothing") {
+            }
+            t = target
+            caught = ref(0)
+            inside = ref(-1)
+            sandbox.enforce(nothing) callback {
+                try {
+                    t ! Hit { a: 1, b: bomb() }
+                } catch e {
+                    ref_set(caught, 1)
+                }
+                ref_set(inside, readable("PATH"))
+            }
+            sandbox.free(nothing)
+            int seen = ref_get(caught) * 10 + ref_get(inside)
+            ref_free(caught)
+            ref_free(inside)
+            reply seen
+        }
+    }
+}
+
+check(label: string, ok: bool) -> int {
+    if !ok {
+        println("  FAIL ${label}")
+        return 1
+    }
+    println("  PASS ${label}")
+    return 0
+}
+
+main() {
+    println("=== a panic in a step's after-panic work stays in the step (#3403) ===")
+    g_drops = sync.atomic_new(0)
+    fails = 0
+
+    // Inline: the Target stepped inside the Sender's handler.
+    s = spawn(Sender(), core: 0)
+    t = spawn(Target(), core: 0)
+    s.target = t
+    int got = s ? Go {}
+    wait_for_idle()
+    fails = fails + check("inline: the send returned in the sender's handler, got ${got}", got == 1)
+    fails = fails + check("inline: the bomb's drop ran once, got ${sync.atomic_load(g_drops)}",
+        sync.atomic_load(g_drops) == 1)
+
+    // Inline inside an enforce block.
+    s2 = spawn(Sender(), core: 0)
+    t2 = spawn(Target(), core: 0)
+    s2.target = t2
+    int blocked = s2 ? GoBlocked {}
+    wait_for_idle()
+    fails = fails + check("in a block: nothing reached the block's try, got ${blocked / 10}", blocked / 10 == 0)
+    fails = fails + check("in a block: PATH still refused after the send, got ${blocked % 10}", blocked % 10 == 0)
+
+    // On a core's own thread: the program goes on.
+    t3 = spawn(Target())
+    t3 ! Hit { a: 1, b: bomb() }
+    wait_for_idle()
+    fails = fails + check("own thread: the program went on, the drops ran ${sync.atomic_load(g_drops)} times",
+        sync.atomic_load(g_drops) == 3)
+
+    sync.atomic_free(g_drops)
+    if fails > 0 {
+        println("FAIL: ${fails} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

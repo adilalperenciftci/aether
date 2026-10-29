@@ -52,8 +52,9 @@ behind each step; every row below links the part it builds on.
 | [07-worker-pool.ae](02-actors/07-worker-pool.ae) | fan-out to workers, fan-in to a collector | [Actor runtime](../docs/actor-concurrency.md) |
 | [08-state-machine.ae](02-actors/08-state-machine.ae) | an enum as state, a transition table | [Enums](../docs/language-reference.md#enums) |
 | [09-timeouts.ae](02-actors/09-timeouts.ae) | `receive ... after`, a watchdog | [Actor timeouts](../docs/actor-concurrency.md#actor-timeouts) |
-| [10-crash-isolation.ae](02-actors/10-crash-isolation.ae) | a panic stays in its actor; supervision today | [Panics](../docs/actor-concurrency.md#panic-and-stack-traces) |
+| [10-crash-isolation.ae](02-actors/10-crash-isolation.ae) | a panic stays in its actor, and the others go on | [Panics](../docs/actor-concurrency.md#panic-and-stack-traces) |
 | [11-sharded-map.ae](02-actors/11-sharded-map.ae) | keys split over owner actors instead of a lock | [Sharded actor map](../docs/design/sharded-actor-map.md) |
+| [12-supervisor.ae](02-actors/12-supervisor.ae) | a crashed actor restarted under the same ref, and a supervisor that gives up | [Supervisors](../docs/actor-concurrency.md#supervisors) |
 
 ## 3. The standard library
 

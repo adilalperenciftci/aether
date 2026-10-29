@@ -227,9 +227,12 @@ shared; its retain and release are atomic from then on, every other count is
 plain. `aether_string_publish` sets it and leaves pinned strings alone.
 Published where it is stored: a module variable, a closure's captured string
 or shared cell, a container element (list, map, string sequence, strarr:
-`string_retain_shared`), and a struct field reached through a pointer. A
-message does not share: a send deep-copies its strings (#466), so it needs no
-publish. A value read from a published place carries the bit with it.
+`string_retain_shared`), and any part of a value reached through a pointer, a
+slice or an actor's reference, by one rule for every store (#3398: only
+the string fields were, and a struct, an element, a whole array or a nested
+optional took its strings plain). A message does not share: a send
+deep-copies its strings (#466), so it needs no publish. A value read from a
+published place carries the bit with it.
 
 **Within the budgets (#2925).** Measured on an Apple M1 Pro, each
 `benchmarks/ownership/` program built by #2916's merge (c5f20025) and by its
@@ -614,6 +617,29 @@ where it is declared or first set, with the address of its ownership flag;
 a drain releases what the place holds then and empties it. Stores, moves and
 releases never touch the journal; a scope exit forgets the place. The drain
 takes its entries off the journal before it runs any release.
+
+**Every owned place a panic can skip is journaled (#3406).** R2 says a place
+holds one reference and its exit gives it back; a panic skips the exit, so the
+journal must stand for it at every place that owns. Owned pointers (#3142,
+`type T = owned ptr drop f`) were the exception: an owned local and an arm's
+binding of an owned message field (the arm takes the field out of the message,
+so the barrier's drop of the message no longer holds it) were released at
+their exits only, and a panic leaked them, their drop never run. One codegen
+rule now covers every such place (`push_owned_place_drop`): its exit release,
+and a journal entry written where it begins (`aether_unwind_track_owned_place`).
+The entry holds a thunk of the drop, one per drop function
+(`_ae_owned_drop_<f>`, written at the end of the program where every drop is
+declared), which calls it as the exit release does: the checker takes any
+one-parameter `@frees ptr` function as a drop, whatever it returns and however
+its C prototype types the pointer (`int fclose(FILE*)`), and passing the drop
+itself as a `void (*)(void*)` did not compile for those (#3413). The entry is written
+only while a frame that can unwind is live, and its token tells the exit
+whether there is one to forget; outside every frame the place costs one call
+that returns at the depth check. Measured on a function whose only work is one
+owned buffer (5,000,000 calls, medians of 11 interleaved runs): 289 against
+295 ms outside any frame, 288 against 302 ms inside a `try`: an owned local or
+binding costs one journal entry while a frame is live (a `try` or an actor
+step), about 3 ns at most, and one depth check outside one.
 
 **Temporaries live to the end of their statement when a view may point into
 them.** `string.bytes(s)` returns a view of `s`; given a temporary

@@ -1,0 +1,45 @@
+// cryptography.random_buffer: n CSPRNG bytes in a std.bytes buffer, or an
+// error, never a buffer of zeros (#3293, #2600).
+import std.bytes
+import std.cryptography
+
+extern exit(code: int)
+
+fn ck(cond: bool, msg: string) -> int {
+    if cond {
+        println("ok   ${msg}")
+        return 0
+    }
+    println("FAIL ${msg}")
+    return 1
+}
+
+main() {
+    fails = 0
+    a, aerr = cryptography.random_buffer(32)
+    b, berr = cryptography.random_buffer(32)
+    fails = fails + ck(aerr == "" && berr == "" && a != null && b != null, "two 32-byte draws succeed")
+    fails = fails + ck(bytes.length(a) == 32 && bytes.length(b) == 32, "each is 32 bytes long")
+    same = 1
+    nonzero = 0
+    i = 0
+    while i < 32 {
+        if bytes.get(a, i) != bytes.get(b, i) { same = 0 }
+        if bytes.get(a, i) != 0 { nonzero = 1 }
+        i = i + 1
+    }
+    fails = fails + ck(same == 0, "two draws differ")
+    fails = fails + ck(nonzero == 1, "a draw is not all zeros")
+    z, zerr = cryptography.random_buffer(0)
+    fails = fails + ck(zerr == "" && z != null && bytes.length(z) == 0, "n = 0 gives an empty buffer")
+    n, nerr = cryptography.random_buffer(-1)
+    fails = fails + ck(n == null && nerr != "", "a negative n is an error")
+    bytes.free(a)
+    bytes.free(b)
+    bytes.free(z)
+    if fails > 0 {
+        println("${fails} FAILED")
+        exit(1)
+    }
+    println("ALL PASS")
+}

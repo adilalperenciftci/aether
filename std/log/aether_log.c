@@ -1,4 +1,5 @@
 #include "aether_log.h"
+#include "../../runtime/utils/aether_fatal.h"   /* aether_fatal_flush (#3435) */
 #include <time.h>
 #include <string.h>
 #include <stdlib.h>
@@ -172,6 +173,7 @@ void log_writef(LogLevel level, const char* fmt, ...) {
 
     // If fatal, abort
     if (level == LOG_LEVEL_FATAL) {
+        aether_fatal_flush();   /* the program's lines first (#3435, aether_fatal.h) */
         abort();
     }
 }
@@ -230,6 +232,7 @@ void log_with_location(LogLevel level, const char* file, int line,
 
     // If fatal, abort
     if (level == LOG_LEVEL_FATAL) {
+        aether_fatal_flush();   /* the program's lines first (#3435, aether_fatal.h) */
         abort();
     }
 }

@@ -56,6 +56,10 @@
     <li><a href="#server_free">server_free</a></li>
     <li><a href="#server_set_tls_raw">server_set_tls_raw</a></li>
     <li><a href="#server_set_tls">server_set_tls</a></li>
+    <li><a href="#server_set_tls_pem_raw">server_set_tls_pem_raw</a></li>
+    <li><a href="#server_set_tls_pem">server_set_tls_pem</a></li>
+    <li><a href="#server_set_tls_backend_raw">server_set_tls_backend_raw</a></li>
+    <li><a href="#server_set_tls_backend">server_set_tls_backend</a></li>
     <li><a href="#server_set_keepalive_raw">server_set_keepalive_raw</a></li>
     <li><a href="#server_set_keepalive">server_set_keepalive</a></li>
     <li><a href="#server_set_h2_raw">server_set_h2_raw</a></li>
@@ -232,7 +236,9 @@
     <li><a href="spec.html">spec</a></li>
     <li><a href="strarr.html">strarr</a></li>
     <li><a href="strbuilder.html">strbuilder</a></li>
+    <li><a href="stream.html">stream</a></li>
     <li><a href="string.html">string</a></li>
+    <li><a href="supervise.html">supervise</a></li>
     <li><a href="sync.html">sync</a></li>
     <li><a href="tar.html">tar</a></li>
     <li><a href="tcp.html">tcp</a></li>
@@ -477,6 +483,28 @@
       <pre class="usage"><code>server_set_tls(server, cert_path, key_path) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">server: ptr, cert_path: string, key_path: string</span></p>
       <p class="doc">Enable TLS termination on an HTTP server. Both paths must point at PEM-encoded files; the cert and key are validated to match before the server is marked TLS-enabled. Returns &quot;&quot; on success, an error string on failure (file unreadable, parse error, mismatched key, build without OpenSSL). Idempotent — calling twice with the same files is a no-op success; calling with different files re-loads. Example: server = http.server_create(443) err = http.server_set_tls(server, &quot;/etc/ssl/cert.pem&quot;, &quot;/etc/ssl/key.pem&quot;) if err != &quot;&quot; { println(&quot;TLS setup failed: ${err}&quot;); exit(1) } http.server_start(server)</p>
+    </div>
+    <div class="function" id="server_set_tls_pem_raw" data-name="server_set_tls_pem_raw">
+      <h3 class="function-name">server_set_tls_pem_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_set_tls_pem_raw(server, cert_pem, key_pem) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, cert_pem: string, key_pem: string</span></p>
+    </div>
+    <div class="function" id="server_set_tls_pem" data-name="server_set_tls_pem">
+      <h3 class="function-name">server_set_tls_pem <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_set_tls_pem(server, cert_pem, key_pem) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, cert_pem: string, key_pem: string</span></p>
+      <p class="doc">server_set_tls with the certificate chain and private key as PEM text, for a program that holds them in memory and should not write the key to disk (#3362). The first certificate is the leaf, the rest its chain; the same checks as server_set_tls, the same results, on both backends. The server keeps its own copy of the text, wiped when it is replaced or the server is freed. Returns &quot;&quot; or why not. Example: err = http.server_set_tls_pem(server, cert_pem, key_pem) if err != &quot;&quot; { println(&quot;TLS setup failed: ${err}&quot;); exit(1) }</p>
+    </div>
+    <div class="function" id="server_set_tls_backend_raw" data-name="server_set_tls_backend_raw">
+      <h3 class="function-name">server_set_tls_backend_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_set_tls_backend_raw(server, name) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, name: string</span></p>
+      <p class="doc">Choose the server's TLS backend (#1298): &quot;openssl&quot;, or &quot;aether&quot;, the pure-Aether TLS 1.3 server (std.cryptography.tls13_server); &quot;&quot; returns to the default, which is OpenSSL wherever it is built in and the pure server where it is not or when AETHER_PURE_TLS=1. A choice made here wins over both. Call it before server_start, before or after server_set_tls (it re-applies the certificate and key). The pure server must be linked: `import std.cryptography.tls13_server` in the program. Returns &quot;&quot; or why the backend cannot be used. err = http.server_set_tls_backend(server, &quot;aether&quot;) if err != &quot;&quot; { println(&quot;TLS backend: ${err}&quot;); exit(1) }</p>
+    </div>
+    <div class="function" id="server_set_tls_backend" data-name="server_set_tls_backend">
+      <h3 class="function-name">server_set_tls_backend <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_set_tls_backend(server, backend) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, backend: string</span></p>
     </div>
     <div class="function" id="server_set_keepalive_raw" data-name="server_set_keepalive_raw">
       <h3 class="function-name">server_set_keepalive_raw <span class="kind">extern</span></h3>

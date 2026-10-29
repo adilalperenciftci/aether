@@ -81,8 +81,10 @@ call's result, another local, a field read. `string.free(s)` or
 empty; on a parameter it is refused (E0901), since the function does not own
 it. Strings are immutable once made, so two places sharing one counted
 string is safe; a string stored where other threads can read it (a module
-`var`, a closure environment, a value reached through a pointer) is
-published, and its count becomes atomic from then on.
+`var`, a closure environment, any part of a value reached through a
+pointer, a slice or another actor's reference: a field, an element, a whole
+array, an optional, at any depth) is published, and its count becomes
+atomic from then on.
 
 ### Reading a string out of a container or a `ptr`
 
@@ -147,7 +149,12 @@ are its variants: a sum owns when one of its variant structs does, and its
 retain and drop are that variant's, for the variant its tag names. A struct
 parameter is borrowed; one its body writes into is copied on entry. A
 struct boxed with `heap.new(T)` owns its fields as a local struct does, and
-`heap.free(p)` releases them before it frees the box. A
+`heap.free(p)` releases them before it frees the box. Out of memory,
+`heap.new`, like every allocation the compiler makes for the program (a
+captured variable's cell, `ref`, `lazy`, a closure's environment or box),
+is a panic naming what ran out, and inside a library call it ends the call
+with `AETHER_OUT_OF_MEMORY` (#3377); a `malloc` the program calls itself
+returns NULL. A
 fixed-size array is held by value wherever it goes: a local, a field, a
 message field, an optional's payload, a function's result (returned in a
 struct of its own), a temporary passed as an argument.
@@ -159,7 +166,11 @@ closure, released when the element leaves (`list.remove`, `list.clear`, a
 store over it, `map.remove`, `free`); a `list.set` that fails gives back what
 it was handed. A module `var` and an actor's state field take what is stored
 and release what they replace; the actor's state is released when the actor
-is destroyed. A message owns its fields: the send takes them, a receive arm
+is destroyed. So does a store into another actor's state through its
+reference (`w.label = s`, `w.items[i] = v`, a part of one such as
+`w.items[i].name = s`): the actor's state holds a reference of its own, and
+since the actor reads it on its own thread, a string it takes is published,
+as one stored through a pointer is. A message owns its fields: the send takes them, a receive arm
 reads them in place, and the message is released after the arm. What the
 arm keeps (in state, in a container) it takes.
 
@@ -229,6 +240,10 @@ A panic caught by a `try` releases what the scopes it leaves hold, as their
 exits would have: every owning local, temporary and argument is recorded in
 an unwind journal while it is live, and every plain `defer` of those scopes
 runs, newest first. `defer try` and `defer catch` do not run on a panic.
+That includes an owned pointer (`type T = owned ptr drop f`) in a local or
+bound from a message field by a handler (#3406): while a frame that can
+unwind is live (a `try`, an actor step) it costs one journal entry, about
+3 ns at most, and outside one a single depth check.
 
 ### Cycles
 

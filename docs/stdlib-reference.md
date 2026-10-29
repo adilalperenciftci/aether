@@ -7,11 +7,11 @@ cannot leave the index behind. The sections after it cover the most-used
 modules in depth; for the others the index links to the module source, whose
 header comment is the authoritative description.
 
-## Module index (88 modules)
+## Module index (90 modules)
 
 | Module | Purpose | Exports | Detail |
 |---|---|---:|---|
-| `std.actors` | Process-global registry mapping names to actor references. | 6 | [guide](../std/actors/README.md) · [source](../std/actors/module.ae) |
+| `std.actors` | Name registry, death notices, links, and ending and restarting actors. | 18 | [guide](../std/actors/README.md) · [source](../std/actors/module.ae) |
 | `std.alloc` | Allocator handles the containers accept, so a structure can allocate from an arena instead of the system. | 6 | [guide](../std/alloc/README.md) · [source](../std/alloc/module.ae) |
 | `std.arena` | Bulk allocator: many allocations, released in one shot. | 7 | [guide](../std/arena/README.md) · [source](../std/arena/module.ae) |
 | `std.audio` | Audio playback: WAV and PCM loading, device control, volume; pan, pitch, looping, groups, a queue source and a headless engine for the game-engine mixer. | 46 | [guide](../std/audio/README.md) · [source](../std/audio/module.ae) |
@@ -19,7 +19,7 @@ header comment is the authoritative description.
 | `std.bignum` | Arbitrary-precision integers. | 29 | [guide](../std/bignum/README.md) · [source](../std/bignum/module.ae) |
 | `std.bits` | Unsigned bit operations: rotates, shifts, popcount, leading zeros, unsigned divide. | 17 | [guide](../std/bits/README.md) · [source](../std/bits/module.ae) |
 | `std.brotli` | Brotli encoding and capped decoding, streaming and one-shot, for `Content-Encoding: br`. | 34 | [guide](../std/brotli/README.md) · [source](../std/brotli/module.ae) |
-| `std.bytes` | Mutable byte buffer with random access and overlap-safe copies. | 32 | [guide](../std/bytes/README.md) · [source](../std/bytes/module.ae) |
+| `std.bytes` | Mutable byte buffer with random access and overlap-safe copies. | 34 | [guide](../std/bytes/README.md) · [source](../std/bytes/module.ae) |
 | `std.capsicum` | FreeBSD Capsicum capability-mode bindings. | 28 | [guide](../std/capsicum/README.md) · [source](../std/capsicum/module.ae) |
 | `std.cas` | Content-addressed store keyed by the sha256 of file contents. | 7 | [guide](../std/cas/README.md) · [source](../std/cas/module.ae) |
 | `std.casper` | FreeBSD Casper service delegation. | 8 | [guide](../std/casper/README.md) · [source](../std/casper/module.ae) |
@@ -27,7 +27,7 @@ header comment is the authoritative description.
 | `std.clapae` | Command-line argument parser, modelled on clap. | 32 | [guide](../std/clapae/README.md) · [source](../std/clapae/module.ae) |
 | `std.collections` | Dynamic list, hash map and packed int array, with the raw externs the alias modules re-export. | 44 | [guide](../std/collections/README.md) · [source](../std/collections/module.ae) |
 | `std.config` | Process-global immutable string to string store. | 6 | [guide](../std/config/README.md) · [source](../std/config/module.ae) |
-| `std.cryptography` | Cryptographic hashes, HMAC, and the Base64 codec. | 34 | [full section](#cryptography-stdcryptography) |
+| `std.cryptography` | Cryptographic hashes, HMAC, and the Base64 codec. | 35 | [full section](#cryptography-stdcryptography) |
 | `std.decimal` | Arbitrary-precision decimal fixed-point arithmetic with explicit rounding modes, for money math. | 43 | [guide](../std/decimal/README.md) · [source](../std/decimal/module.ae) |
 | `std.deque` | Fixed-capacity double-ended queue over `long` values. | 16 | [guide](../std/deque/README.md) · [source](../std/deque/module.ae) |
 | `std.dir` | Directory operations, re-exported from `std.fs`. | 11 | [guide](../std/dir/README.md) · [source](../std/dir/module.ae) |
@@ -37,8 +37,8 @@ header comment is the authoritative description.
 | `std.floatarr` | Fixed-size packed-double buffer. | 15 | [guide](../std/floatarr/README.md) · [source](../std/floatarr/module.ae) |
 | `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 150 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
 | `std.hash` | Fast non-cryptographic hashes and checksums: FNV, MurmurHash3, SipHash, CRC-32. | 6 | [guide](../std/hash/README.md) · [source](../std/hash/module.ae) |
-| `std.host` | Primitives for Aether scripts embedded in a host application. | 14 | [guide](../std/host/README.md) · [source](../std/host/module.ae) |
-| `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 144 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
+| `std.host` | Primitives for Aether scripts embedded in a host application. | 33 | [guide](../std/host/README.md) · [source](../std/host/module.ae) |
+| `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 148 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
 | `std.http1` | Pure-Aether HTTP/1.1 response reader (RFC 9112). | 14 | [guide](../std/http1/README.md) · [source](../std/http1/module.ae) |
 | `std.intarr` | Fixed-size packed-int buffer. | 15 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
 | `std.intmap` | Hash map from `long` keys to `long` values, for integer-keyed counting and lookup. | 12 | [guide](../std/intmap/README.md) · [source](../std/intmap/module.ae) |
@@ -55,7 +55,7 @@ header comment is the authoritative description.
 | `std.lzf` | One-shot LZF compression and decompression. | 9 | [guide](../std/lzf/README.md) · [source](../std/lzf/module.ae) |
 | `std.map` | Hash map, re-exported from `std.collections`, with readable key snapshots. | 20 | [guide](../std/map/README.md) · [source](../std/map/module.ae) |
 | `std.math` | Arithmetic, trigonometry, rounding and floating-point helpers. | 45 | [full section](#math-stdmath) |
-| `std.mem` | Byte-level reads and writes over caller-allocated raw pointers. | 98 | [guide](../std/mem/README.md) · [source](../std/mem/module.ae) |
+| `std.mem` | Byte-level reads and writes over caller-allocated raw pointers. | 99 | [guide](../std/mem/README.md) · [source](../std/mem/module.ae) |
 | `std.message` | ICU MessageFormat formatting and message catalogues. | 8 | [guide](../std/message/README.md) · [source](../std/message/module.ae) |
 | `std.msgpack` | MessagePack serialisation and deserialisation. | 39 | [guide](../std/msgpack/README.md) · [source](../std/msgpack/module.ae) |
 | `std.mutation` | Text-based mutation-testing driver for `std.spec` suites. | 1 | [guide](../std/mutation/README.md) · [source](../std/mutation/module.ae) |
@@ -80,10 +80,12 @@ header comment is the authoritative description.
 | `std.spec` | BDD test framework: describe and it, hooks, assertions, structured reports. | 46 | [guide](../std/spec/README.md) · [source](../std/spec/module.ae) |
 | `std.strarr` | Growable string array whose backing is a `string[]`, for sorting runtime-built lists. | 15 | [guide](../std/strarr/README.md) · [source](../std/strarr/module.ae) |
 | `std.strbuilder` | Amortised-O(1) string building. | 18 | [guide](../std/strbuilder/README.md) · [source](../std/strbuilder/module.ae) |
+| `std.stream` | Credit-windowed streams between actors: memory stays bounded however fast the producer is. | 11 | [guide](../std/stream/README.md) · [source](../std/stream/module.ae) |
 | `std.string` | Managed strings: construction, search, slicing, case, split and join. | 100 | [full section](#strings-stdstring) |
+| `std.supervise` | Supervisors that restart dead actors in place, by strategy and within a restart budget. | 9 | [guide](../std/supervise/README.md) · [source](../std/supervise/module.ae) |
 | `std.sync` | Atomic 64-bit integer cell (load, store, add, sub, compare-and-swap) for refcounts and lock-free reclamation. | 7 | [guide](../std/sync/README.md) · [source](../std/sync/module.ae) |
 | `std.tar` | Streaming tar archives: a ustar writer, a ustar, pax and GNU reader. | 24 | [full section](#posix-ustar-archives-stdtar) |
-| `std.tcp` | TCP sockets, re-exported from `std.net`. | 38 | [guide](../std/tcp/README.md) · [source](../std/tcp/module.ae) |
+| `std.tcp` | TCP sockets, re-exported from `std.net`. | 43 | [guide](../std/tcp/README.md) · [source](../std/tcp/module.ae) |
 | `std.udp` | Datagram sockets for game networking: non-blocking bind, send_to, recv_from, poll, and address values. | 40 | [guide](../std/udp/README.md) · [source](../std/udp/module.ae) |
 | `std.time` | Civil date and time over Unix epoch seconds (UTC). | 22 | [guide](../std/time/README.md) · [source](../std/time/module.ae) |
 | `std.tracking` | Leak-detecting allocator wrapper. | 5 | [guide](../std/tracking/README.md) · [source](../std/tracking/module.ae) |
@@ -691,6 +693,8 @@ out = bytes.finish(b, 6)                  // "ABABAB"
 - `bytes.copy_within(b, dst, src, length)` → `int` - Self-copy, forward byte-by-byte (RLE-safe)
 - `bytes.finish(b, length)` → `string` - Hand off to refcounted AetherString; buffer is consumed
 - `bytes.free(b)` - Discard without finishing (idempotent on null)
+- `bytes.wipe(b)` - Zero every byte of the buffer's capacity, so that the writes happen even right before a free (a loop of `set` calls is a dead store the C compiler may drop once it inlines them). The buffer stays valid and keeps its length. For secrets: key material, nonces, the text of a private key. Nothing on null or a string. A buffer that grew left its earlier contents in the memory it moved out of, so give a secret a buffer of its final size (#3376).
+- `bytes.wipe_free(b)` - `wipe`, then `free` (idempotent on null).
 - `bytes.data(b)` → `ptr` - Borrowed pointer to the buffer's own memory, for handing the region to a foreign runtime (a WebAssembly `HEAPU8.set`, a C API) without copying it byte by byte. Valid until the next call that can grow the buffer, which may move the allocation and invalidate it.
 - `bytes.capacity(b)` → `int` - Bytes reserved, which is at least `length` and may be more.
 - `bytes.set_length(b, n)` → `int` - Publish how many bytes a direct write into `data()`'s region made live. Clamped to the capacity, and returns the length actually set.
@@ -1941,6 +1945,7 @@ main() {
 
 **Cryptographically-secure random** (OS CSPRNG, `getrandom(2)` / `/dev/urandom` on Linux, `arc4random_buf(3)` on macOS/BSD):
 - `cryptography.random_bytes(n)` → `(string, int, string)` - `n` random bytes as `(bytes, length, error)`; `bytes` preserves embedded NULs.
+- `cryptography.random_buffer(n)` → `(ptr, string)` - `n` random bytes in a fresh `std.bytes` buffer, or `(null, error)`. The shape for key material: the bytes go from the OS into the buffer without passing through a string.
 - `cryptography.random_hex(n)` → `(string, string)` - `n` random bytes as a `2*n`-char lowercase-hex string. For opaque bearer-token / API-key minting.
 - `cryptography.random_base64(n)` → `(string, string)` - `n` random bytes as RFC 4648 §4 unpadded Base64 (~33% denser than hex).
 
@@ -1973,6 +1978,52 @@ Raw externs: `cryptography_sha1_hex_raw`, `cryptography_sha256_hex_raw` return a
 Public-key crypto, symmetric ciphers, and key derivation live under `std.cryptography` as explicitly-imported sub-modules (e.g. `std.cryptography.rsa`, `std.cryptography.x25519`, `std.cryptography.aes`), pure-Aether ports, no OpenSSL. The top-level `std.cryptography` module stays focused on the hash/HMAC/Base64/CSPRNG primitives with a single obvious shape.
 
 The post-quantum KEM is `std.cryptography.mlkem` (ML-KEM, FIPS 203), with `mlkem512_*`, `mlkem768_*` and `mlkem1024_*` sets: `keygen() -> (ek, dk, err)` and `encaps(ek) -> (ct, key, err)` draw their randomness from the OS CSPRNG, and `decaps(dk, ct) -> (key, err)` returns the 32-byte shared secret. Each call runs the FIPS 203 input checks (key and ciphertext lengths, the encapsulation-key modulus check, the decapsulation-key hash check) and returns an error with null outputs when one fails. `keygen_derand(d, z)` and `encaps_derand(ek, m)` take the randomness from the caller and are for known-answer tests only. `mlkem_ek_bytes(k)`, `mlkem_dk_bytes(k)` and `mlkem_ct_bytes(k)` give the sizes for k = 2, 3, 4 and 0 for any other k.
+
+The Weierstrass curves are `std.cryptography.p256`, `p384`, `p521` and `secp256k1`, each with `scalar_mult_base(k) -> (x, y)`, `scalar_mult(k, x, y) -> (x, y)`, `ecdh(priv, x, y) -> shared_x`, `ecdsa_sign(priv, hash) -> (r, s)`, `ecdsa_sign_hedged(priv, hash, extra) -> (r, s)`, `ecdsa_verify(x, y, hash, r, s) -> int`, `public_key_valid(x, y) -> int` and `private_key_valid(priv) -> int`, on big-endian buffers of 32, 48, 66 and 32 bytes. They run on `std.cryptography.ecc`, a fixed-width Montgomery field engine with complete addition formulas and a fixed-window scalar multiplication: signing, ECDH and the scalar multiplications are constant time in the private key and the nonce, and a P-256 verify takes about half a millisecond (P-384 about 1.4 ms, P-521 3.4 ms). `ecdsa_sign` derives its nonce by RFC 6979 (there is no nonce parameter); `ecdsa_sign_hedged` mixes `extra`, fresh random bytes, into the same derivation (RFC 6979 section 3.6), so no two signatures of one digest share a nonce, and whatever `extra` holds the nonce is no weaker than RFC 6979's (#3376). Both take the digest itself, of any length (its leftmost qlen bits are signed: pass a SHA-512 digest to P-521 as its 64 bytes, not padded to 66). `ecdh`, `scalar_mult` and `ecdsa_verify` refuse a public point off the curve or with a coordinate of p or more, and `ecdh` and `ecdsa_sign` a private key outside [1, n-1], with null (or 0). `std.cryptography.ct` holds the constant-time helpers (`eq`, `lt`, `select`, `bytes_eq`) and `declassify`, which marks a secret-derived value the protocol makes public; the constant-time test (`tests/integration/crypto_ct_valgrind`, under Valgrind's memcheck in CI) hooks it.
+
+`std.cryptography.shield` holds a long-lived secret (a private key) encrypted in memory, in the clear only while it is used, as OpenSSH shields its keys (#3376): `shield.wrap(secret)` → `(handle, string)` seals the buffer (consumed and wiped) with ChaCha20-Poly1305 under SHA-512 of a fresh 16 KiB random pre-key; `shield.unwrap(handle)` → `(ptr, string)` gives the secret back in a fresh buffer the caller frees with `bytes.wipe_free` after its one use, or refuses when a bit of the sealed secret or the pre-key changed in memory; `shield.free(handle)` wipes and frees both. Reading the secret out of memory then takes the whole pre-key without an error, where a plain key takes a few hundred bits. An unwrap costs about 0.1 ms. The pure TLS server keeps its private key this way: `tls13_server.ServerKey` holds the shield handle (`shielded`) in place of the plain scalar, seed or RSA key, and each signature unwraps it, signs and wipes it.
+
+Functions this batch added to the submodules (the rest of each module is
+described in its header comment):
+
+- `x448.agree(scalar, u)` → `(ptr, string)` - X448 (RFC 7748) shared secret, or `(null, error)` for an all-zero result (a low-order peer point), as `x25519.agree` refuses it.
+- `rsa.key_from_bytes(n, e, d)` → `ptr` - An RSA key from big-endian byte slices (`d` empty for a public key) without putting the private exponent through `std.bignum`, or null when `n` or `e` is empty or `d` is longer than `n`; the private-key operations are constant time and blinded.
+- `rsa.key_from_pkcs1_der(der)` → `(ptr, string)` - An RSA key from PKCS#1 RSAPrivateKey DER, built as `key_from_bytes` builds one: the private exponent goes into the key byte by byte, never through `std.bignum`, so the key's `d` bignum is null (as for `key_from_bytes`), and the DER copies it passes through are wiped as they are freed (#3382).
+- `pem.parse_at(text, from)` → `(ptr, string, string)` - `pem.parse` for the first block at or after offset `from`. Both decode the base64 body where it lies in `text`, into a buffer of its final size, so a private key's block leaves no copy as a string or a grown buffer (#3382).
+- `tls13_cert.validate_chain(leaf, intermediates, anchors, at, purpose, max_depth)` → `string` - `""` when there is a valid path from `leaf` through `intermediates` to one of `anchors` (lists of `*LeafCert`) at `at` (`"YYYYMMDDHHMMSS"`, `""` for now) for `tls13_cert.PURPOSE_SERVER` or `PURPOSE_CLIENT`, through at most `max_depth` intermediates that are not self-issued (negative for the default), else why not. RFC 5280 section 6 as the Web PKI profiles it; the comment above `PURPOSE_SERVER` in the module lists the rules.
+- `tls13_cert.TRUST_PARTIAL_CHAIN` - Or'd into `validate_chain`'s `purpose`: any anchor ends a path, not only a self-signed root, an anchor that is not a root held to an intermediate's rules, and a leaf that is itself an anchor trusted as it stands (OpenSSL's `X509_V_FLAG_PARTIAL_CHAIN`; `client.set_partial_chain` sets it, #3311).
+- `tls13_cert.check_validity_at(c, at)` → `string` - `""` when `at` is inside the certificate's validity period.
+- `tls13_cert.sign_server_cert_verify_ecdsa(kind, priv, transcript_hash)`, `sign_server_cert_verify_ed25519(seed, transcript_hash)`, `sign_server_cert_verify_rsa_pss(key, transcript_hash)` → `ptr` - A server CertificateVerify signature (RFC 8446 4.4.3) with an ECDSA key of `kind` (`KEY_P256`, `KEY_P384`, `KEY_P521`, hashed with SHA-256, -384, -512), an Ed25519 seed, or an `rsa` key as rsa_pss_rsae_sha256 with a fresh 32-byte salt; DER for ECDSA; null when the key cannot sign (#3326).
+- `tls13_server.load_private_key(pem_text)` → `(ptr, string)` - The server's key from PEM: PKCS#8 (EC P-256, P-384, P-521, Ed25519, RSA), SEC1 `EC PRIVATE KEY` (an EC PARAMETERS block before it is skipped) or PKCS#1 `RSA PRIVATE KEY`; RSA of 2048 to 16384 bits; an encrypted key is refused with how to decrypt it. `accept` takes it; `free_private_key(key)` wipes and frees it (#3326).
+- `tls13_server.parse_cert_chain_pem(pem_text)` → `(ptr, ptr)`, `parse_cert_chain_pem_checked(pem_text)` → `(ptr, ptr, string)` - The chain a server sends: the DER of every `BEGIN CERTIFICATE` block, in order, each parsed as a certificate when loaded; other blocks (a private key in a combined file) are skipped; a certificate block that does not decode or parse refuses the whole text, with why (#3378).
+- `tls13_record.seal_records(ctx, content_type, plaintext)` → `ptr` - `plaintext` sealed as records of at most 2^14 bytes of content each, back to back, or null when one cannot be sealed; the TLS client and server send handshake messages and application data this way (RFC 8446 5.1, #3380).
+- `tls13_hs.ChParsed.sig_algs` - The `signature_algorithms` schemes a ClientHello offered that a server key signs with, as `SIGBIT_ECDSA_P256`, `SIGBIT_ECDSA_P384`, `SIGBIT_ECDSA_P521`, `SIGBIT_RSA_PSS_SHA256` and `SIGBIT_ED25519` bits; `saw_sig_algs` says whether the extension was there (#3326).
+- `tls13_client.connect_socket(sock, host, cafile)` → `(ptr, string)` - The verified TLS 1.3 handshake for `host` over an already-connected `std.tcp` socket, trusting the PEM bundle `cafile` (`""` for the system store); the connection owns the socket.
+- `tls13_hs.check_extensions(kind, exts, offered)` → `(int, string)` - `(0, "")` when the extensions block `exts` of a server message of `kind` (`MSG_SERVER_HELLO`, `MSG_ENCRYPTED_EXTENSIONS`, `MSG_CERTIFICATE_ENTRY`, ...) answers only what the ClientHello offered (`OFFER_*` bits) where RFC 8446 4.2 allows it, else the alert to send and why.
+- `tls13_hs.check_certificate(body, offered)` → `(int, string)` - The same for the body of a server's Certificate message: an empty request context, at least one entry, the list filling the message, each entry's extensions allowed, a status_request holding one OCSP response.
+- `tls13_hs.check_certificate_request(body)` → `(int, string)` - The same for the body of a CertificateRequest in the handshake: an empty request context, extensions that fill the message, signature_algorithms among them (missing_extension without, #3324).
+- `tls13_hs.offers_sig_scheme(scheme)` → `int` - 1 when `scheme` is one of the signature schemes every ClientHello here offers, the only ones a server may sign its CertificateVerify with (RFC 8446 4.4.3).
+- `tls13_cert.check_leaf_cert_verify(leaf, scheme, transcript_hash, sig)` → `(int, string)` - `(0, "")` when the CertificateVerify signature `sig` under `scheme` verifies with the key of the end-entity certificate `leaf`, else the alert and why: illegal_parameter for a scheme that does not fit the key, decrypt_error for a signature that does not verify (ECDSA P-256, P-384, P-521, rsa_pss_rsae_sha256, Ed25519; #3324, #3335).
+- `tls13_client.conn_key_update(conn, request)`, `tls13_server.conn_key_update(conn, request)` → `string` - Update the connection's sending keys now with a KeyUpdate (RFC 8446 4.6.3); `request` `tls13_hs.KEY_UPDATE_REQUESTED` asks the peer to update its own, which the next `conn_recv` takes in its stride, `KEY_UPDATE_NOT_REQUESTED` does not. `conn_recv` on either side handles the peer's KeyUpdates and answers a request once before the next data (#3320).
+- `tls13_hs.key_update_msg(request)` → `ptr`, `tls13_hs.key_update_request(body)` → `(int, int, string)` - A KeyUpdate message, and the request_update of a KeyUpdate body or the alert and why (decode_error for a body that is not one byte, illegal_parameter for a value other than 0 and 1) (#3320).
+- `tls13_ks.next_traffic_secret(algo, secret)`, `tls13_ks.key_update(algo, ctx, secret)` → `ptr`; `tls13_ks.free_secret(secret)` - The traffic secret after `secret` (RFC 8446 7.2), and the same with the record context `ctx` keyed afresh from it; both consume `secret` (zeroed, then freed). `free_secret` zeroes a secret and frees it (#3320).
+- `tls13_record.rekey(ctx, key, iv12)` - Key a record context afresh, its AEAD unchanged and its sequence number 0; the old key is zeroed (#3320).
+- `tls13_hs.parse_new_session_ticket(body, out)` → `string` - A NewSessionTicket body into `tls13_hs.NstParsed` (lifetime, age_add, where the nonce and ticket are, max_early_data), or why not with `out.alert` (RFC 8446 4.6.1: an empty ticket, trailing bytes, a duplicate or malformed extension are refused; one this client does not know is ignored) (#3319).
+- `tls13_client.alert_event(level, desc, warnings)` → `(int, int, string)` - What an alert record after the handshake means (`EV_CLOSED`, `EV_NONE`, `EV_ERROR`), the alert to answer with and why: a close_notify closes, a user_canceled is read past (at most four in a row), any other alert is an error, answered with decode_error when it claims the warning level (#3323).
+- `tls13_hs.hello_retry_request(session_id, cipher_suite, group)` → `ptr` - A HelloRetryRequest asking for a share of `group` (RFC 8446 4.1.4) (#3325).
+- `tls13_hs.client_hello_retry(ch1, group, share, cookie, out)` - The second ClientHello: `ch1` with only the changes a HelloRetryRequest allows (one key share for `group` when it is not 0, the `cookie` when it is not empty, no early_data, the PSK binders zeroed for the caller to compute again) into a `PskCh` (#3325).
+- `tls13_hs.ShParsed.session_id_off`, `session_id_len`, `selected_identity`, `cookie_off`, `cookie_len` - Where the session id echo and a HelloRetryRequest's cookie are in the message, and the pre_shared_key's selected_identity (-1 without one), for the client to check (#3318, #3325).
+- `tls13_hs.ChParsed.groups`, `retry_group`, `has_early_data`, `has_cookie` - The `GROUPBIT_X25519MLKEM768` and `GROUPBIT_X25519` groups `supported_groups` names, the group a HelloRetryRequest should ask for when no key share is usable (else 0), and whether early_data and cookie were there (#3325).
+- `tls13_client.transcript_retry(tr, ch1, hrr, algo)` → `ptr` - The transcript after a HelloRetryRequest: `tr` (freed) replaced by message_hash of `ch1` and then `hrr` (RFC 8446 4.4.1) (#3325).
+- `tls13_client.conn_early_accepted(conn)` → `int` - 1 when the server took the 0-RTT data `connect_resume_0rtt` sent; 0 when it was not delivered (no 0-RTT offered, refused, or a HelloRetryRequest) and the caller sends it again if it still wants it delivered (#3355).
+- `tls13_client.ticket_cipher_suite(ticket)` → `int` - The cipher suite of the connection a `SessionTicket` came on, which its 0-RTT data uses (RFC 8446 4.2.10); a ticket that names none sends no early data (#3339).
+- `rsa.sign_pss_hash(k, algo, mhash, salt)` → `ptr`, `rsa.verify_pss_hash(k, algo, mhash, sig, slen)` → `int` - RSASSA-PSS with `algo` `"sha256"`, `"sha384"` or `"sha512"` for the message hash and MGF1; `sign_pss` and `verify_pss` are the `"sha256"` cases (#3357).
+- `tls13_cert.sign_server_cert_verify_rsa_pss_scheme(key, scheme, transcript_hash)` → `ptr` - A server CertificateVerify signature as rsa_pss_rsae_sha256, `SCHEME_RSA_PSS_RSAE_SHA384` or `SCHEME_RSA_PSS_RSAE_SHA512`, with a salt of the hash's length; null for another scheme (#3357).
+- `tls13_cert.verify_cert_verify_rsa_pss_scheme(spki_key, scheme, transcript_hash, sig)` → `int` - 1 when `sig` is a valid rsa_pss_rsae_sha256, `_sha384` or `_sha512` CertificateVerify signature by the RSAPublicKey `spki_key`, as `sign_server_cert_verify_rsa_pss_scheme` signs; 0 otherwise, another scheme included (#3376).
+- `tls13_cert.leaf_signature_holds(leaf, scheme, transcript_hash, sig)` → `int` - 1 when `sig` is a valid CertificateVerify signature under `scheme` by the key of the parsed certificate `leaf`, for every scheme the module signs (ECDSA P-256, P-384, P-521, rsa_pss_rsae_sha256/384/512, Ed25519); 0 otherwise, a scheme that does not fit the key included. The pure server checks its own signature with it before sending it (#3376).
+- `tls13_cert.client_cert_verify_holds(leaf, transcript_hash, sig)` → `int` - 1 when `sig` is a valid client CertificateVerify signature (the "client" context) under ecdsa_secp256r1_sha256 by the key of the parsed certificate `leaf`; 0 otherwise. The mTLS client checks its own signature with it before sending it (#3376).
+- `tls13_hs.ChParsed.alert` - The alert `parse_client_hello` says to send when it refuses a ClientHello (decode_error, illegal_parameter, missing_extension, unexpected_message, protocol_version, handshake_failure; #3357); `GROUPBIT_SECP256R1` and `SIGBIT_RSA_PSS_SHA384`, `SIGBIT_RSA_PSS_SHA512` join its `groups` and `sig_algs` bits.
+- `tls13_hs.client_hello_offer(random, session_id, group, pubkey, group2, pubkey2, group3, pubkey3, host, named_only)` → `ptr` - `client_hello_full`, with `named_only` (0 for none) last in supported_groups and no key share for it; `GROUP_SECP384R1` (0x0018) is the group the pure client names that way, and follows a HelloRetryRequest for (#3369).
 
 ---
 
@@ -2245,7 +2296,9 @@ Raw externs: `http_server_bind_raw`, `http_server_start_raw`, and `http_server_e
 - `http.server_use_middleware_loop_safe(server, middleware, user_data, release)` - Add a middleware that never blocks (CPU work, a short mutex), so the proxy event loop may run it (#3214): on Linux and macOS a server with a `std.http.proxy` mount stays on the loop only when every middleware before the first mount and every request hook is loop-safe. `release` frees `user_data` with the server, or `null` keeps it the program's. A middleware added with `server_use_middleware` is not loop-safe.
 
 **Server Configuration:**
-- `http.server_set_tls(server, cert_path, key_path)` → `string` - Enable HTTPS with PEM cert + key.
+- `http.server_set_tls(server, cert_path, key_path)` → `string` - Enable HTTPS with PEM cert + key. The first certificate in the file is the server's, the rest the chain it sends (#3370).
+- `http.server_set_tls_pem(server, cert_pem, key_pem)` → `string` - The same, from PEM text in memory, so the key need not be written to disk (#3362). Same checks, same results, both backends; the server keeps its own copy and wipes it when replaced or freed.
+- `http.server_set_tls_backend(server, backend)` → `string` - Choose the TLS backend: `"openssl"`, `"aether"` (the pure-Aether TLS 1.3 server; the program must `import std.cryptography.tls13_server`) or `""` for the default (OpenSSL where it is built in, the pure server where it is not or with `AETHER_PURE_TLS=1`). The choice wins over the environment variable. Call it before `server_start`, before or after `server_set_tls`. Returns `""`, or why the backend cannot be used (not built in, not linked, an unknown name).
 - `http.server_set_keepalive(server, enable, max_requests, idle_timeout)` → `string` - HTTP/1.1 keep-alive with a `Duration` idle timeout (`max_requests=0` is unlimited per connection). Keep-alive is **on by default**, so this is for changing the limits or turning it off. A response with no definite body length is never kept open; everything else is, and a connection with no request in flight waits in a poller rather than on a worker, so the number a server can hold open is a descriptor count and not a thread count. Measured on an 8-core box (16 workers), 3000 requests per cell: 78,700 rps at 8 concurrent clients, 74,400 at 50 and 70,000 at 200, against 22,000 with a close per response. See [http-server.md](http-server.md#idle-connections-wait-in-a-poller-not-on-a-worker) for the handoff rule and the full table. The idle timeout also bounds a read or a send that makes no progress: a client that stops sending its request, or stops reading its response, for that long has its connection closed (#3243, #3257); with the pure-Aether TLS stack (`AETHER_PURE_TLS=1`) a send is bounded as std.tcp bounds one, between once and twice that.
 - `http.server_set_h2(server, max_concurrent_streams)` → `string` - Enable HTTP/2 (h2 + h2c + ALPN). `max_concurrent_streams=0` uses libnghttp2's default (100). Returns error string when the build is missing libnghttp2.
 - `http.server_set_multi_accept(server, on)` → `string` - In actor dispatch mode, one listener per core (up to 16) on the server's one port, each with `SO_REUSEPORT` and an accept thread of its own, for connection rates where one `accept()` is the bottleneck. Off by default; thread-pool mode does not use it. Call it before starting, after `server_bind` or without it: a bound socket stays the first listener and gives the others its port, a port 0's included, and `server_port` reports the port they share. Returns an error where the kernel does not spread connections across the listeners: it does on Linux and DragonFly (`SO_REUSEPORT`) and FreeBSD (`SO_REUSEPORT_LB`), not on Windows, macOS, OpenBSD or NetBSD (#3194)
@@ -2448,6 +2501,8 @@ in. These knobs relax that per request; precedence for proxy is
 `ignore > explicit > env > direct`.
 - `client.set_insecure(req, on)` → `string` - `1` skips TLS peer + hostname verification for this request only (`curl -k` / `wget --no-check-certificate`). Relaxed per-connection, never on the shared process-wide `SSL_CTX`, so other requests keep verifying. Default `0`. Use only against hosts trusted out-of-band (self-signed dev/staging/appliance certs), it removes MITM protection for that request.
 - `client.set_cafile(req, path)` → `string` - pin a custom CA for this request: verify the peer against the PEM bundle at `path` instead of the system trust store, while **keeping peer and hostname verification on**. This is the "verify, but against THIS cert" knob, strictly stronger than `set_insecure`, for machine-to-machine calls to a host with a private/self-signed CA couriered out-of-band (courier the CA once over SSH, then pin it instead of blind-trusting). Per-connection via a per-`SSL` `X509_STORE`; never touches the shared `SSL_CTX`. `""` clears the pin (revert to the system store). A certificate the pinned CA doesn't cover fails the handshake, fails closed, never open.
+- `client.set_partial_chain(req, on)` → `string` - trust partial chains for this request (#3311): any certificate in the trust store (the system one, or `set_cafile`'s) ends a certification path, not only a self-signed root. For a CA file that holds an intermediate CA alone: a private PKI that hands out its issuing CA, or pinning one CA below a public root. Peer and hostname verification stay on, and a trusted certificate that is not a root must still be a CA (v3, `cA`, `keyCertSign`). Off by default, and the same on both TLS backends (OpenSSL's `X509_V_FLAG_PARTIAL_CHAIN`; without it, a trust anchor must be a self-signed root, #3310). Pooled connections are kept apart by it.
+- `client.set_tls_backend(req, backend)` → `string` - Choose this request's TLS backend: `"openssl"`, `"aether"` (the pure-Aether TLS 1.3 client; the program must `import std.cryptography.tls13_client`) or `""` for the default (OpenSSL where it is built in, the pure client where it is not or with `AETHER_PURE_TLS=1`). The choice wins over the environment variable, and pooled connections are kept apart per backend. Returns `""`, or why the backend cannot be used (not built in, not linked, an unknown name).
 - `client.use_env_proxy(req, on)` → `string` - `1` follows `$HTTP_PROXY`/`$HTTPS_PROXY`/`$NO_PROXY` (Go-compatible). **Off by default**, the deliberate inverse of the default-follow that caused the httpoxy vulnerability class (CVE-2016-5385). It is a code-visible opt-in, never ambient, and carries two guards: the CGI-injectable uppercase `HTTP_PROXY` is refused when `$REQUEST_METHOD`/`$GATEWAY_INTERFACE` is set (lowercase `http_proxy` stays honoured), and a proxy resolving to a loopback/link-local IP literal (127/8, 169.254/16 IMDS, `::1`, `fc00::/7`, `fe80::/10`) is rejected (SSRF).
 - `client.use_http_proxy(req, "http://host:port")` → `string` - Pin an explicit forward proxy; env is ignored entirely (empty url reverts to direct). A team-controlled proxy (recorder / toxiproxy) is thus immune to whatever the shell or CI has set. HTTP goes through the proxy with an absolute-form request line; HTTPS establishes a `CONNECT` tunnel with TLS end-to-end to the origin.
 - `client.ignore_http_proxy(req)` → `string` - Force a direct connection regardless of env or any proxy a higher layer set (the determinism escape hatch, e.g. a VCR that must record the origin, not a proxy's view).
@@ -2668,6 +2723,8 @@ main() {
 
 **Functions (Go-style):**
 - `tcp.connect(host, port)` → `(ptr, string)` - Connect, return `(socket, err)`
+- `tcp.connect_buffered(host, port, read_buffer)` → `(ptr, string)` - Connect with the receive buffer (`SO_RCVBUF`) set to `read_buffer` bytes before the connection is made, so the window it opens with is that size; for a client meant to take little while it does not read. `tcp.set_read_buffer` on a connected socket leaves the window already advertised (#3338).
+- `tcp.available(sock)` → `int` - Bytes waiting in the socket's receive buffer, readable without blocking (`FIONREAD`), or -1.
 - `tcp.write(sock, data)` → `(int, string)` - Write text-shaped data, return `(bytes_sent, err)`. Uses the legacy strlen-shaped raw send; use `tcp.write_n` for binary payloads.
 - `tcp.write_n(sock, data: byte[])` → `(int, string)` - Length-aware write, return `(bytes_sent, err)`. Sends the slice's bytes, preserving embedded NUL bytes; send a string as `string.bytes(s)`, a prefix as `string.bytes(s)[0..n]`.
 - `tcp.read(sock, max)` → `(string, string)` - Read text-shaped data, return `(data, err)`. Use `tcp.read_n` for binary payloads.
@@ -2679,7 +2736,7 @@ main() {
 - `tcp.close(sock)` - Close socket (infallible)
 - `tcp.server_close(server)` - Close server socket
 
-Raw externs: `tcp_connect_raw`, `tcp_send_raw`, `tcp_send_n_raw`, `tcp_receive_raw`, `tcp_receive_n_raw`, `tcp_send_bytes_raw`, `tcp_receive_into_raw`, `tcp_listen_raw`, `tcp_accept_raw`.
+Raw externs: `tcp_connect_raw`, `tcp_connect_buffered_raw`, `tcp_available_raw`, `tcp_send_raw`, `tcp_send_n_raw`, `tcp_receive_raw`, `tcp_receive_n_raw`, `tcp_send_bytes_raw`, `tcp_receive_into_raw`, `tcp_listen_raw`, `tcp_accept_raw`.
 
 ### UDP slices (`std.udp`)
 
@@ -3685,9 +3742,7 @@ import std.audit
 
 run_sandboxed(perms: ptr, code: fn) {
     sandbox_push(perms)
-    sandbox_install()
     call(code, perms)
-    sandbox_uninstall()
     sandbox_pop()
 }
 
@@ -3864,6 +3919,25 @@ lengths = worker.map(paths, | p: ptr | { return measure(p) })
   item, which the runtime cannot see. Numbers and method in
   [`docs/cross-references/bend.md`](cross-references/bend.md).
 
+### Streams between actors (`std.stream`)
+
+A send never blocks, so a producer that outruns its consumer grows memory
+without bound. A stream bounds it: the producer holds `window` credits, each
+chunk it sends costs one, and the consumer returns one per chunk handled, so
+at most `window` chunks are ever in flight. Running out of credit is a return
+value (`stream.offer` gives 0, `stream.write` returns short), never a block.
+
+- `stream.connect(producer, consumer, window)` - The stream, for both actors.
+- `stream.write(s, data, at, chunk)` / `stream.offer(s, data)` - The
+  producer's sends; `stream.finish(s)` ends the stream.
+- `stream.credit(s, n)` - The producer's, for each `StreamCredit`; 0 when the
+  consumer has ended the stream, which is freed then.
+- `stream.consumed(s, last)` - The consumer's, after each `StreamChunk`.
+
+The whole contract, a runnable producer and consumer, and the choices made
+(chunks as the unit of credit, the mailbox as the buffer, no reordering) are
+in [`std/stream/README.md`](../std/stream/README.md).
+
 ---
 
 ## Memory
@@ -3954,6 +4028,7 @@ byte 255
 - `mem.get_int` / `get_long` / `get_ptr` / `get_float32` / `get_float64`, and their `set_` twins
 - `mem.get_u16_le` / `get_u16_be` / `get_u32_le` / `get_u32_be` / `get_u64_le` / `get_u64_be`, and their `set_` twins - Explicit byte order, for wire formats
 - `mem.copy(dst, src, n)` / `move(dst, src, n)` / `compare(a, b, n)` / `set(dst, value, n)` - `memcpy`, `memmove`, `memcmp`, `memset`
+- `mem.wipe(dst, n)` - Zero `n` bytes so the writes happen even right before a free, where `set` is a dead store the C compiler may drop: the raw-memory form of `bytes.wipe`, for a struct a module frees itself, such as a hash context holding secret state (#3402)
 - `mem.copy_at` / `move_at` / `fill_at` / `compare_at` - The same with a byte offset on each buffer
 - `mem.bits_of_float` / `float_from_bits`, `mem.clz32` / `clz64`, `mem.udiv64_32` - Bit-level helpers
 - `mem.ptr_to_long(p)` / `long_to_ptr(addr)` - A pointer as a 64-bit address and back, for tagged-pointer arithmetic or storing an integer in a pointer slot
@@ -4525,6 +4600,14 @@ handle_request(req: ptr, res: ptr, ud: ptr) {
 
 Models BEAM's `erlang:register` / `whereis`. The registry doesn't track actor liveness, if the actor exits, `whereis` keeps returning the stale ref until something explicitly calls `unregister`. Match BEAM's behaviour for non-link'd registrations.
 
+The rest of the module is about the end of an actor: `actors.monitor(ref)`
+asks for a `Down { ref, reason }` message when it ends, `actors.link(ref)`
+ties two actors' ends together, `actors.kill(ref)` and `actors.stop()` end
+one, and `actors.dead_sends()` counts the messages that reached a dead one.
+The [guide](../std/actors/README.md) has each, and
+[`std.supervise`](../std/supervise/README.md) builds supervisors that restart
+actors on them.
+
 **Why the module name is plural**: `actor` (singular) is a reserved keyword in Aether and can't appear as a namespace prefix. `actors.register(...)` parses; `actor.register(...)` does not. The plural also reads correctly, "the actors registry."
 
 ---
@@ -4567,6 +4650,7 @@ export process_order(order_id: long) -> int {
 - `host.notify(event, id)` → `int` - 1 if the host had a handler for `event`, 0 if not
 - `host.caller_identity()` → `string`, `host.caller_attribute(key)` → `string`, `host.caller_deadline_ms()` → `long` - `""` / 0 outside a host call
 - `host.describe`, `host.input`, `host.event`, `host.bindings`, and the per-language `java` / `python` / `ruby` / `go` helpers - The manifest DSL a namespace's `manifest.ae` uses to describe its ABI
+- `host.last_outcome()` → `int`, `host.last_outcome_text()` → `string` - How the last call into a library export on this thread ended: `host.OK`, `host.PANICKED`, `host.DEADLINE`, `host.CANCELLED`, `host.MEMORY_CAP` or `host.OUT_OF_MEMORY`, and its reason (`""` for OK). A program importing a library in binary form gets a failed call raised again as a panic; these read it without one (#2956)
 
 ## See Also
 

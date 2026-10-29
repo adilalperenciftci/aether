@@ -169,6 +169,28 @@ jobs:
     - name: Run full CI suite
       run: HARDEN=${{ matrix.harden }} CC=${{ matrix.cc }} AE_SWEEP_SHARD=${{ matrix.shard }} CI_SWEEP_UNIT=${{ matrix.unit }} AE_SWEEP_KEEP_C=${{ matrix.name == 'Linux / GCC' && '1' || '0' }} make ${{ matrix.target || 'ci' }}
 
+    # The cross-version ABI matrix (#2957, docs/abi-policy.md): this tree's
+    # libraries and hosts against the latest published release's, on the
+    # toolchain `make ci` just built. One Linux and one macOS leg (the
+    # release workflow runs it on every platform it ships); without the
+    # release in AETHER_ABI_OLD_HOME the sweep above skipped it.
+    - name: ABI matrix against the latest release
+      if: matrix.name == 'Linux / GCC' || matrix.name == 'macOS / Clang (ARM64)'
+      timeout-minutes: 15
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        case "${{ matrix.os }}" in
+          ubuntu*) target=linux-x86_64 ;;
+          *) target=macos-arm64 ;;
+        esac
+        prev="$RUNNER_TEMP/aether-prev"
+        mkdir -p "$prev"
+        gh release download --repo "${{ github.repository }}" --pattern "aether-*-$target.tar.gz" --dir "$RUNNER_TEMP"
+        tar -xzf "$RUNNER_TEMP"/aether-*-"$target".tar.gz -C "$prev"
+        echo "against $(cat "$prev/VERSION")"
+        AETHER_ABI_OLD_HOME="$prev" CC=${{ matrix.cc }} sh tests/integration/abi_matrix/test_abi_matrix.sh
+
     # The .ae corpus at -O0 (what `ae run` compiles at) against -O2 (what the
     # sweep in `make ci` compiles at), diffing stdout and exit code (#2488).
     # One leg is enough to catch a program that behaves differently at -O0,
@@ -1381,6 +1403,64 @@ jobs:
                  cryptography_random_hex; do
           sh "tests/integration/$t/test_$t.sh"
         done
+
+  # std.cryptography's secret-key operations must not branch on, or index
+  # memory with, a secret (#2600, #1298). The probe marks every secret input
+  # undefined for Valgrind's memcheck; memcheck reports each conditional jump
+  # and address computed from one, and any such report fails the job. The
+  # other legs have no valgrind and run the probe as a known-answer test.
+  #
+  # The same job, on the same build, runs the conformance corpora of the pure
+  # TLS stack (#1298), each pinned to a commit and a checksum and fetched
+  # into a cache rather than kept in the repository: x509-limbo and the
+  # bettertls suite it imports, against tls13_cert's path validation. Each
+  # step reports on its own; tests/conformance/*/expected.txt lists every
+  # case that is skipped or does not agree, with the reason.
+  ci-crypto-ct:
+    name: Crypto constant-time (Valgrind) and conformance corpora
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install toolchain
+      run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc valgrind
+
+    - name: Build the toolchain
+      run: make -j"$(nproc)" compiler ae stdlib
+
+    - name: Constant-time probe under memcheck
+      run: CT_REQUIRE_VALGRIND=1 sh tests/integration/crypto_ct_valgrind/test_crypto_ct_valgrind.sh
+
+    # The corpora are fetched once from main's runs and read by every PR's
+    # (the key names the pins, so moving one fetches afresh); a miss only
+    # downloads them again.
+    - name: Restore the conformance corpora
+      id: conformance_cache
+      if: success() || failure()
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.cache/aether-conformance
+        key: conformance-${{ hashFiles('tests/conformance/*/run.sh') }}
+
+    - name: x509-limbo (C2SP/x509-limbo, pinned)
+      if: success() || failure()
+      run: sh tests/conformance/x509_limbo/run.sh limbo
+
+    - name: bettertls (through x509-limbo's import)
+      if: success() || failure()
+      run: sh tests/conformance/x509_limbo/run.sh bettertls
+
+    - name: Save the conformance corpora
+      if: >-
+        (success() || failure())
+        && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        && steps.conformance_cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ~/.cache/aether-conformance
+        key: conformance-${{ hashFiles('tests/conformance/*/run.sh') }}
 
   ci-wasm:
     name: WebAssembly (Emscripten)

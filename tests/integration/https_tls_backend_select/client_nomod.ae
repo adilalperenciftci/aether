@@ -1,0 +1,11 @@
+// client.set_tls_backend(req, "aether") in a program that does NOT link the
+// pure TLS client: the call itself must refuse, naming the import (#1298).
+
+import std.http.client
+
+main() {
+    req = client.request("GET", "https://localhost:1/")
+    err = client.set_tls_backend(req, "aether")
+    println("BACKEND-ERR: ${err}")
+    client.request_free(req)
+}

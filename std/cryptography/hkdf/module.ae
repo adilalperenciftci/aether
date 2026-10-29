@@ -79,7 +79,7 @@ hkdf_extract(algo: string, salt: byte[], ikm: byte[]) -> ptr {
     }
     prk = hmac.bytes(algo, use_salt, ikm)
     if made != null {
-        bytes.free(made)
+        bytes.wipe_free(made)
     }
     return prk
 }
@@ -128,12 +128,12 @@ hkdf_expand(algo: string, prk: byte[], info: byte[], out_len: int) -> ptr {
         bytes.set(tin, off, counter & 0xFF)
 
         ti = hmac.bytes(algo, prk, bytes.view(tin)[0..tlen])
-        bytes.free(tin)
+        bytes.wipe_free(tin)
         if ti == null {
             if prev != null {
-                bytes.free(prev)
+                bytes.wipe_free(prev)
             }
-            bytes.free(out)
+            bytes.wipe_free(out)
             return null
         }
 
@@ -147,14 +147,14 @@ hkdf_expand(algo: string, prk: byte[], info: byte[], out_len: int) -> ptr {
         produced = produced + take
 
         if prev != null {
-            bytes.free(prev)
+            bytes.wipe_free(prev)
         }
         prev = ti
         prev_len = hl
         counter = counter + 1
     }
     if prev != null {
-        bytes.free(prev)
+        bytes.wipe_free(prev)
     }
     return out
 }
@@ -170,6 +170,6 @@ hkdf(algo: string, salt: byte[], ikm: byte[], info: byte[], out_len: int) -> ptr
         return null
     }
     okm = hkdf_expand(algo, bytes.view(prk), info, out_len)
-    bytes.free(prk)
+    bytes.wipe_free(prk)
     return okm
 }

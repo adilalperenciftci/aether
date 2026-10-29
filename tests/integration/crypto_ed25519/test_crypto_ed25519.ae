@@ -58,6 +58,30 @@ main() {
     }
     bytes.free(pk151); bytes.free(m151); bytes.free(sig151)
 
+    // Hedged r (#3376): fresh bytes give another signature of the same
+    // message, one that verifies; the same bytes give the same signature;
+    // none at all is RFC 8032's (Test 2's vector).
+    z1 = hb("0101010101010101010101010101010101010101010101010101010101010101")
+    z2 = hb("0202020202020202020202020202020202020202020202020202020202020202")
+    h1 = ed25519.sign_hedged(s2, bytes.view(m2)[0..1], z1)
+    h1b = ed25519.sign_hedged(s2, bytes.view(m2)[0..1], z1)
+    h2 = ed25519.sign_hedged(s2, bytes.view(m2)[0..1], z2)
+    hn = ed25519.sign_hedged(s2, bytes.view(m2)[0..1], null)
+    pub2 = ed25519.publickey(s2)
+    if ed25519.verify(pub2, bytes.view(m2)[0..1], bytes.view(h1)[0..64]) == 1 && ed25519.verify(pub2, bytes.view(m2)[0..1], bytes.view(h2)[0..64]) == 1 {
+        println("ok   hedged signatures verify")
+    } else {
+        println("FAIL a hedged signature does not verify"); fails = fails + 1
+    }
+    if bh(h1) != bh(sig2) && bh(h1) != bh(h2) && bh(h1) == bh(h1b) {
+        println("ok   hedged r: new for new bytes, the same for the same bytes")
+    } else {
+        println("FAIL hedged r does not follow its bytes"); fails = fails + 1
+    }
+    fails = fails + ck("hedged with none = RFC 8032 t2", bh(hn),
+        "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00")
+    bytes.free(z1); bytes.free(z2); bytes.free(h1); bytes.free(h1b); bytes.free(h2); bytes.free(hn); bytes.free(pub2)
+
     if fails == 0 { println("ALL PASS"); return }
     println("FAILURES"); exit(1)
 }

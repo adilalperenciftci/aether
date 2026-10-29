@@ -178,8 +178,7 @@ Look for operations with the highest cycle counts and compare them across runs:
 
 Build your staging binary with profiling enabled to catch regressions before
 production. Profiling is a **compile-time** switch (`-DAETHER_PROFILE`), not a
-runtime setting, the `AETHER_PROFILE` *environment variable* is unrelated (it
-selects a runtime memory profile and does **not** enable profiling output).
+runtime setting: no environment variable turns it on.
 
 ```bash
 # Staging binary, built with profiling instrumentation

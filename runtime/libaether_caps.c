@@ -17,13 +17,17 @@
  * pass the include set from `ae cflags` and never rely on the relative path. */
 #include "libaether.h"
 #include "aether_resource_caps.h"
+#include "aether_exec.h"
 
 AETHER_API void aether_set_memory_cap(uint64_t bytes) {
     aether_caps_set_memory_cap(bytes);
 }
 
+/* Outside any execution the thread's deadline; set by a host service while
+ * an execution runs, the deadline of the executions it enters from there,
+ * the running one keeping its own (#2955). */
 AETHER_API void aether_set_call_deadline(int64_t ms) {
-    aether_caps_set_deadline_ms(ms);
+    aether_exec_set_next_deadline(ms);
 }
 
 AETHER_API int aether_deadline_tripped(void) {

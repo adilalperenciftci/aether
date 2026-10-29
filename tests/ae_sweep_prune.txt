@@ -11,6 +11,7 @@
 /lib/
 tests/integration/actor_alignment/
 tests/integration/actor_ref_after_release/
+tests/integration/actor_ref_field_reject/
 tests/integration/actor_state_base_member_reject/
 tests/integration/ae_inspect/
 tests/integration/ae_add_hash_pin/
@@ -87,6 +88,25 @@ tests/integration/emit_csrc_cross/
 tests/integration/emit_lib_clause_sets/
 tests/integration/emit_lib_const/
 tests/integration/emit_lib_deadline/
+# #2956: work.ae is a library with no main; the driver builds it and its C host
+# calls it under a deadline and a cancel from another thread.
+tests/integration/emit_lib_interrupt/
+# #2956: alloc.ae is a library with no main; the driver builds it and its C host
+# calls it past a memory cap and with allocations made to fail.
+tests/integration/emit_lib_alloc_failure/
+# #3377: kinds.ae is a library and outside.ae a program the driver runs with
+# allocations made to fail; the driver builds both.
+tests/integration/emit_lib_generated_alloc/
+# #2954: accts.ae is a library with no main, and app.ae imports it in binary
+# form; the driver builds them with C hosts in every runtime form.
+tests/integration/emit_lib_accounts/
+# #3392: steps.ae is a library with no main; the driver builds it into a C
+# host, on threads and (make ci-coop) on the cooperative scheduler.
+tests/integration/emit_lib_actor_step_context/
+# #3388: results.ae and words.ae are libraries with no main, and app.ae
+# imports words.ae in binary form; the driver builds them and fails an
+# allocation in each call.
+tests/integration/emit_lib_failed_result/
 tests/integration/emit_lib_keeps_main/
 tests/integration/emit_lib_net/
 tests/integration/emit_lib_typed_ptr/
@@ -167,6 +187,8 @@ tests/integration/http_server_sse/
 tests/integration/https_pure_tls_vertical/
 tests/integration/https_client_pure_tls/
 tests/integration/https_windows_trust/
+tests/integration/https_partial_chain/
+tests/integration/https_pure_server_keys/
 tests/integration/http_server_tls/
 tests/integration/http_server_websocket/
 tests/integration/http_ipv6/
@@ -207,6 +229,8 @@ tests/integration/os_spawn_stdio_slot/
 tests/integration/render_rule/
 tests/integration/panic_actor_step_drain/
 tests/integration/panic_categories/
+# #2955, #2956: catches.ae is built by the driver, which reads what it links.
+tests/integration/panic_link_surface/
 tests/integration/panic_stack_trace/
 tests/integration/panic_unwind_no_leak/
 tests/integration/ptr_index_diagnostic/
@@ -248,6 +272,8 @@ tests/integration/transitive_module_import/
 tests/integration/ufcs_cross_module/
 tests/integration/uncalled_module_fn_checked/
 tests/integration/varargs_forward/
+# #3375: counter.ae is built by the driver, which runs it with and without AETHER_VERBOSE.
+tests/integration/verbose_env/
 tests/integration/wasi_panic_link/
 tests/integration/wasm_emit_lib_exports/
 tests/integration/when_in_imported_module/
@@ -284,3 +310,40 @@ tests/integration/extern_fnptr_bare_function/
 tests/integration/local_named_after_called_function/
 # #3113: reject_*.ae must not compile and panic_shadowed.ae must panic; the driver checks each.
 tests/integration/array_index_checked/
+# #1298, #3311, #3326: the TLS peers, servers and probes take certificates,
+# ports and a shim from their drivers, which run them against each other.
+tests/integration/crypto_ct_valgrind/
+tests/integration/crypto_tls13_peer/
+tests/integration/https_openssl_policy/
+tests/integration/https_tls_backend_select/
+# #2955: inner.ae and outer.ae are libraries its C host loads one inside the other.
+tests/integration/sandbox_nested_libraries/
+# #3336, #3352: resumepeer.ae is the scripted PSK/0-RTT server resumeclient.ae
+# connects to; the driver runs them together and against openssl s_server.
+tests/integration/crypto_tls13_resume/
+# #2956: frames.ae is a library and app.ae its importer; the driver builds both
+# and its C host loads the library.
+tests/integration/emit_lib_execution_frame/
+# #3362, #3370: server.ae and client.ae take certificates and ports from their driver.
+tests/integration/https_server_tls_pem/
+# #3371: reload.ae takes its certificates from its driver.
+tests/integration/https_tls_reload/
+# #3293: rngfail.ae (with rng_fail_shim.c) and listener.ae dial each other; test_random_failure.sh pairs them.
+tests/integration/crypto_random_failure/
+# #3376: mtls.ae takes its certificate, key and server port from its driver.
+tests/integration/crypto_tls13_mtls_signature/
+# #3382: probe.ae links probe_shim.c (aether.toml); test_key_wipe.sh builds and runs it.
+tests/integration/crypto_key_wipe/
+# #3398: probe.ae links shim.c (aether.toml); test_pointer_store_published.sh builds and runs it.
+tests/integration/pointer_store_published/
+# #3413: probe.ae links handle.c and force-includes handle.h (aether.toml); test_owned_drop_signatures.sh builds and runs it.
+tests/integration/owned_drop_signatures/
+# #2957: app.ae imports a hand-made catalog (fake_catalog.c) and abi_lib.ae is a
+# library with no main; test_abi_policy.sh builds both against each boundary.
+tests/integration/abi_policy/
+# #2957: mlib.ae is a library with no main and app.ae its importer; test_abi_matrix.sh
+# builds them with this Aether and with the release in AETHER_ABI_OLD_HOME.
+tests/integration/abi_matrix/
+# #3419: plain.ae links shim.c and cross.ae is a library for cross_host.c;
+# test_step_word.sh builds and runs both.
+tests/integration/step_word/

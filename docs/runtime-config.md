@@ -27,17 +27,12 @@ Multiple threads work simultaneously.
 
 ### What Was Implemented
 
-1. **Lock-Free Message Pools**
-   - TLS pools have no mutex
-   - Zero contention on hot path
-   - Automatic per-thread allocation
-
-2. **Lock-Free Mailboxes**
+1. **Lock-Free Mailboxes**
    - SPSC (Single Producer Single Consumer) atomic queue
    - 64-byte cache line padding
    - Runtime switchable
 
-3. **Runtime Configuration API**
+2. **Runtime Configuration API**
    - Control optimizations via flags
    - Auto-detect CPU features
    - Enabled by default without manual configuration
@@ -62,7 +57,6 @@ int main() {
 
 **Example output on a modern CPU:**
 - Lock-free mailboxes: ENABLED
-- Lock-free pools: ENABLED
 - MWAIT idle: ENABLED
 - AVX2 SIMD: ENABLED
 
@@ -73,7 +67,6 @@ int main() {
 // Explicit flags - full control
 aether_runtime_init(8,
     AETHER_FLAG_LOCKFREE_MAILBOX |  // Use lock-free mailboxes
-    AETHER_FLAG_LOCKFREE_POOLS   |  // Use lock-free TLS pools
     AETHER_FLAG_ENABLE_SIMD      |  // Use AVX2 vectorization
     AETHER_FLAG_ENABLE_MWAIT);      // Use MWAIT for idle
 ```
@@ -102,7 +95,6 @@ aether_runtime_init(0,
 // CPU: <detected processor>
 // Active Optimizations:
 //   Lock-free mailbox: ENABLED
-//   Lock-free pools:   ENABLED
 //   ...
 ```
 
@@ -114,15 +106,15 @@ aether_runtime_init(0,
 |------|-----|-------------|
 | `AETHER_FLAG_AUTO_DETECT` | 0x01 | Auto-detect CPU features (recommended) |
 | `AETHER_FLAG_LOCKFREE_MAILBOX` | 0x02 | Use lock-free SPSC mailboxes |
-| `AETHER_FLAG_LOCKFREE_POOLS` | 0x04 | Use lock-free TLS message pools |
+| `AETHER_FLAG_LOCKFREE_POOLS` | 0x04 | Deprecated: accepted and ignored. There is no message pool (#3374); a typed message's payload is a heap copy |
 | `AETHER_FLAG_ENABLE_SIMD` | 0x08 | Enable AVX2 vectorization |
 | `AETHER_FLAG_ENABLE_MWAIT` | 0x10 | Enable MWAIT idle strategy |
 | `AETHER_FLAG_VERBOSE` | 0x20 | Print configuration on init |
 
 **Combine flags with bitwise OR:**
 ```c
-int flags = AETHER_FLAG_LOCKFREE_MAILBOX | 
-            AETHER_FLAG_LOCKFREE_POOLS;
+int flags = AETHER_FLAG_LOCKFREE_MAILBOX |
+            AETHER_FLAG_ENABLE_MWAIT;
 aether_runtime_init(8, flags);
 ```
 
@@ -242,18 +234,6 @@ same-core send goes straight into the mailbox unless a message of the actor
 is still in the queues or its overflow, which it then goes behind
 ([`runtime/scheduler/multicore_scheduler.c`](../runtime/scheduler/multicore_scheduler.c)).
 
-### Message Pool Allocation
-```c
-// runtime/actors/aether_message_pool.h, per-thread pool, abridged
-static inline Message* message_pool_alloc(void) {
-    if (!g_msg_pool) message_pool_init_thread();
-    if (atomic_load_explicit(&g_msg_pool->count, memory_order_relaxed) == 0) {
-        return malloc(sizeof(Message));   // pool exhausted: fall back to heap
-    }
-    // pop an index off the thread's free list
-}
-```
-
 ---
 
 ## Environment Variables
@@ -261,9 +241,7 @@ static inline Message* message_pool_alloc(void) {
 | Variable | Effect |
 |----------|--------|
 | `AETHER_SINGLE_CORE` | Pins all actors to core 0 (eliminates cross-core overhead) |
-| `AETHER_PROFILE` | Memory profile: `micro`, `small`, `medium` (default), `large` |
-| `AETHER_MSG_POOL_SIZE` | Override message pool size (default from profile) |
-| `AETHER_VERBOSE` | Print optimization configuration at startup |
+| `AETHER_VERBOSE` | Print the runtime configuration once, when the scheduler starts (a program compiled with `-DAETHER_VERBOSE` prints it too, once) |
 | `AETHER_PREEMPT` | Enable cooperative preemption (time-based drain loop break, default 1ms) |
 | `AETHER_PREEMPT_MS` | Override preemption threshold in milliseconds (default 1) |
 | `BENCHMARK_MESSAGES` | Sets message count for benchmark programs |
@@ -317,7 +295,7 @@ All platform-dependent code is gated behind `AETHER_HAS_*` compile-time flags de
 make stdlib EXTRA_CFLAGS="-DAETHER_NO_FILESYSTEM -DAETHER_NO_NETWORKING"
 
 # Query capabilities at runtime
-AETHER_VERBOSE=1 ./program
+AETHER_VERBOSE=1 ./program   # a program with actors: printed when its scheduler starts
 ```
 
 **Apple Silicon Notes:**

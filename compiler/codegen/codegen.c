@@ -14,6 +14,8 @@
 #include "../analysis/actor_reply.h"
 #include "../analysis/sandbox_trust.h"
 #include "../analysis/hoist.h"
+#include "../../runtime/aether_abi.h"   /* #2957: the runtime ABI the C it writes is for */
+#include "../../include/libaether.h"   /* #2957: AETHER_HOST_ABI */
 
 /* The AetherString header the emitted C inspects, from the definition the
  * runtime uses (std/string/aether_string_abi.h): its magic's bytes in
@@ -883,6 +885,9 @@ void code_generator_release(CodeGenerator* gen) {
         gen->hoist_decls = NULL;
         free(gen->defer_thunks);
         gen->defer_thunks = NULL;
+        free(gen->owned_thunks);   /* #3413: the names are interned */
+        gen->owned_thunks = NULL;
+        gen->owned_thunk_count = gen->owned_thunk_cap = 0;
         gen->hoist_decls_len = gen->hoist_decls_cap = 0;
         /* The emitted-typedef registries: one strdup'd name per distinct
          * tuple / optional / sum shape in the program (#1667). */
@@ -1572,9 +1577,14 @@ static int try_emit_owned_exit_drop(CodeGenerator* gen, ASTNode* deferred) {
     const char* rest = deferred->annotation + plen;
     const char* sep = strchr(rest, ':');
     if (!sep || sep == rest || !sep[1]) return 0;
+    /* The place's journal entry goes first, when it has one (#3406,
+     * push_owned_place_drop: _aeo_<name> says so). */
+    int nl = (int)(sep - rest);
     print_indent(gen);
-    fprintf(gen->output, "/* deferred */ if (%.*s) { %s((void*)%.*s); %.*s = NULL; }\n",
-            (int)(sep - rest), rest, sep + 1, (int)(sep - rest), rest, (int)(sep - rest), rest);
+    fprintf(gen->output,
+            "/* deferred */ if (_aeo_%.*s) aether_unwind_forget((const void*)&%.*s); "
+            "if (%.*s) { %s((void*)%.*s); %.*s = NULL; }\n",
+            nl, rest, nl, rest, nl, rest, sep + 1, nl, rest, nl, rest);
     return 1;
 }
 
@@ -3211,13 +3221,12 @@ static int lib_const_identity(ASTNode* cd, const char** name, const char** modul
 // Functions with unsupported types (tuples, structs, closures) are skipped
 // with a compile-time warning so the user knows the function won't be
 // exposed across the FFI boundary.
-/* #2931: the function a caller gives a string an export returned back to,
- * so the library's own runtime, which made it, releases it. Named for the
- * library (the name it is given, else its package, else its entry file's
- * stem, so every target's build agrees), and recorded in the
- * catalog, so an importer never derives it. */
-const char* lib_string_release_symbol_for(const char* lib_id, const char* package,
-                                          const char* source_file) {
+/* aether_<library id>_<suffix>: the library's own name for a function an
+ * importer binds. Named for the library (the name it is given, else its
+ * package, else its entry file's stem, so every target's build agrees),
+ * and recorded in the catalog, so an importer never derives it. */
+static const char* lib_symbol_for(const char* lib_id, const char* package,
+                                  const char* source_file, const char* suffix) {
     const char* base = lib_id ? lib_id : package;
     const char* end = NULL;
     if (!base) {
@@ -3232,11 +3241,129 @@ const char* lib_string_release_symbol_for(const char* lib_id, const char* packag
     for (const char* p = base; p < end && n + 1 < sizeof(id); p++)
         id[n++] = isalnum((unsigned char)*p) ? *p : '_';
     id[n] = '\0';
-    return cg_internf("aether_%s_string_release", n ? id : "lib");
+    return cg_internf("aether_%s_%s", n ? id : "lib", suffix);
+}
+
+/* #2931: the function a caller gives a string an export returned back to,
+ * so the library's own runtime, which made it, releases it. */
+const char* lib_string_release_symbol_for(const char* lib_id, const char* package,
+                                          const char* source_file) {
+    return lib_symbol_for(lib_id, package, source_file, "string_release");
+}
+
+/* #2956: how the library's last call on this thread ended, read by an
+ * Aether importer after each call (the library may run on a runtime of its
+ * own, whose outcome the importer's aether_last_outcome cannot see), with
+ * <symbol>_text for the reason. */
+static const char* lib_outcome_symbol(CodeGenerator* gen) {
+    return lib_symbol_for(gen->lib_id, module_lib_package(), gen->source_file, "outcome");
 }
 
 static const char* lib_string_release_symbol(CodeGenerator* gen) {
     return lib_string_release_symbol_for(gen->lib_id, module_lib_package(), gen->source_file);
+}
+
+/* #2956: an export that can neither panic, allocate, loop nor call anything
+ * needs no execution frame: nothing can end it from outside its code, and
+ * it changes nothing a frame gives back. Its stub calls it and records the
+ * OK outcome (one runtime call) instead of saving the context for a panic
+ * (about 5 ns a call on Windows MinGW). Kept narrow on purpose: scalar
+ * locals and parameters, literals, + - * and comparisons (division can
+ * trap), `!` and unary `-`, if/else, declarations, assignments to a local
+ * and return. Anything else, and any doubt, gets the frame. */
+static int lib_scalar_type(const Type* t) {
+    if (!t) return 1;
+    switch (t->kind) {
+    case TYPE_INT: case TYPE_INT64: case TYPE_UINT64: case TYPE_UINT32: case TYPE_UINT16:
+    case TYPE_UINT8: case TYPE_FLOAT: case TYPE_FLOAT32: case TYPE_BOOL: case TYPE_BYTE:
+    case TYPE_VOID:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int lib_node_cannot_fail(const ASTNode* n) {
+    if (!n) return 1;
+    switch (n->type) {
+    case AST_BLOCK: case AST_RETURN_STATEMENT: case AST_IF_STATEMENT:
+    case AST_IF_EXPRESSION: case AST_EXPRESSION_STATEMENT: case AST_VARIABLE_DECLARATION:
+    case AST_IDENTIFIER: case AST_LITERAL:
+        break;
+    case AST_ASSIGNMENT:
+        if (n->child_count < 1 || !n->children[0] || n->children[0]->type != AST_IDENTIFIER) return 0;
+        break;
+    case AST_UNARY_EXPRESSION:
+        if (!n->value || (strcmp(n->value, "-") != 0 && strcmp(n->value, "!") != 0)) return 0;
+        break;
+    case AST_BINARY_EXPRESSION: {
+        static const char* const ok_ops[] = { "+", "-", "*", "<", ">", "<=", ">=", "==", "!=",
+                                              "&&", "||" };
+        int ok = 0;
+        for (size_t k = 0; n->value && k < sizeof(ok_ops) / sizeof(ok_ops[0]); k++)
+            if (strcmp(n->value, ok_ops[k]) == 0) ok = 1;
+        if (!ok) return 0;
+        break;
+    }
+    default:
+        return 0;
+    }
+    if (!lib_scalar_type(n->node_type)) return 0;
+    for (int i = 0; i < n->child_count; i++)
+        if (!lib_node_cannot_fail(n->children[i])) return 0;
+    return 1;
+}
+
+static int lib_export_frameless(CodeGenerator* gen, ASTNode* program, ASTNode* fn, const Type* result) {
+    if (fn_c_callback_def(gen, fn)) return 0;
+    if (!lib_scalar_type(result)) return 0;
+    /* A clause set's members dispatch through generated code: framed. */
+    int same_name = 0;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (c && c->type == AST_EXPORT_STATEMENT && c->child_count > 0) c = c->children[0];
+        if (c && c->type == AST_FUNCTION_DEFINITION && c->value && strcmp(c->value, fn->value) == 0)
+            same_name++;
+    }
+    if (same_name != 1) return 0;
+    ASTNode* body = NULL;
+    for (int i = 0; i < fn->child_count; i++) {
+        ASTNode* c = fn->children[i];
+        if (!c) continue;
+        if (c->type == AST_VARIABLE_DECLARATION || c->type == AST_PATTERN_VARIABLE) {
+            /* A named parameter; a literal or struct pattern makes a clause. */
+            if (!lib_scalar_type(c->node_type)) return 0;
+        } else if (c->type == AST_BLOCK && i == fn->child_count - 1) {
+            body = c;
+        } else {
+            return 0;   /* guards, contracts, pattern parameters */
+        }
+    }
+    return body && lib_node_cannot_fail(body);
+}
+
+/* #3388: the end of a stub whose function returned. A call can still have
+ * failed: a stop noted after its last safe point (an allocation that failed
+ * and that the code survived, the deadline's flag, a JSON parse that
+ * stopped) gives it an outcome other than AETHER_OK at the leave. Such a
+ * call returns its zero value, as every failed call does (libaether.h), so
+ * what it would have returned is released here: the string's reference the
+ * caller would have had, an owning struct's or closure's parts, a string
+ * sequence. A `ptr` or a `*Struct` owns nothing (R4): what it points to is
+ * not reached, as on a panic. `RET` is the stub's ABI spelling of `result`. */
+static void emit_lib_stub_return(CodeGenerator* gen, Type* result, const char* ret_abi) {
+    FILE* o = gen->output;
+    fprintf(o, "    if (aether_exec_leave_outcome() != 0) {\n");
+    if (result && !result->c_alias && result->kind == TYPE_STRING) {
+        fprintf(o, "        string_release((const char*)_aether_r);\n");
+    } else if (result && !result->c_alias && result->kind == TYPE_PTR) {
+        if (is_string_seq_ptr_type(result))
+            fprintf(o, "        string_seq_free((StringSeq*)(void*)_aether_r);\n");
+    } else if (result && !result->c_alias && own_type_owns(gen, result)) {
+        fprintf(o, "    ");
+        own_emit_part(gen, result, "_aether_r", OWN_DROP);
+    }
+    fprintf(o, "        return (%s){0};\n    }\n    return _aether_r;\n}\n", ret_abi);
 }
 
 static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
@@ -3306,6 +3433,93 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
                 "const char* aether_string_data(const void* s);\n"
                 "size_t aether_string_length(const void* s);\n"
                 "void %s(const void* s);\n\n", release_sym);
+
+    /* #2955, #2956: every export runs inside an execution frame
+     * (runtime/aether_exec.h). An uncaught panic ends the call, not the
+     * process, and the export returns its result's zero value; the caller
+     * info, deadline and sandbox levels a nested call changes are back when
+     * it returns; the outcome says how it ended. Through the generated
+     * functions below an Aether importer reads the outcome of the library's
+     * own runtime, which may not be its own. */
+    const char* outcome_sym = lib_outcome_symbol(gen);
+    /* The entry every stub makes, `fail` being how it returns its zero
+     * value: the context saved with __builtin_setjmp in the stub's own
+     * frame where the compiler has it (0.57 ns, against 2.85 for the C
+     * library's setjmp on MinGW: aether_panic.h), else a frame's buf. */
+    fprintf(gen->output,
+            "extern AetherJmpFrame* aether_exec_enter(void);\n"
+            "extern void aether_exec_leave(void);\n"
+            "extern int aether_exec_leave_outcome(void);\n"
+            "extern void aether_exec_failed(void);\n"
+            "extern void aether_exec_ok(void);\n"
+            "#ifndef AETHER_EXEC_STUB_ENTER\n"
+            "#if AETHER_EXEC_BUILTIN_SJLJ\n"
+            "extern void aether_exec_enter_at(void** buf);\n"
+            "#define AETHER_EXEC_STUB_ENTER(fail) void* _aether_xb[5]; \\\n"
+            "    if (__builtin_setjmp(_aether_xb)) { aether_exec_failed(); fail; } \\\n"
+            "    aether_exec_enter_at(_aether_xb)\n"
+            "#else\n"
+            "#define AETHER_EXEC_STUB_ENTER(fail) AetherJmpFrame* _aether_x = aether_exec_enter(); \\\n"
+            "    if (AETHER_SIGSETJMP(_aether_x->buf, 1)) { aether_exec_failed(); fail; }\n"
+            "#endif\n"
+            "#endif\n"
+            "extern int aether_last_outcome(void);\n"
+            "extern const char* aether_last_outcome_text(void);\n"
+            "AETHER_WEAK_DEF int %s(void) { return aether_last_outcome(); }\n"
+            "AETHER_WEAK_DEF const char* %s_text(void) { return aether_last_outcome_text(); }\n\n",
+            outcome_sym, outcome_sym);
+    /* #2957: the runtime ABI this C was made for. Compiled against the
+     * headers of another Aether it does not build; linked or loaded against
+     * another runtime, its first call finds out (aether_runtime_abi), and
+     * every call then returns its zero value with AETHER_INCOMPATIBLE, its
+     * code never run. A host can ask first, through <lib>_check. */
+    const char* check_sym = lib_symbol_for(gen->lib_id, module_lib_package(), gen->source_file, "check");
+    fprintf(gen->output,
+            "#include \"aether_abi.h\"\n"
+            "#if !defined(AETHER_RUNTIME_ABI_REV) || AETHER_VERSION_NUM != %d || AETHER_RUNTIME_ABI_REV != %d\n"
+            "#error \"this C was generated by aetherc %s (runtime ABI %s), and is compiled against the "
+            "runtime headers of another Aether: generate it again with that Aether's aetherc\"\n"
+            "#endif\n"
+            "extern void aether_exec_note_outcome(int outcome, const char* text);\n"
+            "static _Atomic int _aether_lib_abi = 0;   /* 0 not yet asked, 1 the same, 2 another */\n"
+            "static char _aether_lib_abi_why[320];\n"
+            "static int _aether_lib_abi_check(void) {\n"
+            "    const char* rt = aether_runtime_abi();\n"
+            "    if (rt && strcmp(rt, AETHER_RUNTIME_ABI_ID) == 0) {\n"
+            "        atomic_store_explicit(&_aether_lib_abi, 1, memory_order_relaxed);\n"
+            "        return 1;\n"
+            "    }\n"
+            "    snprintf(_aether_lib_abi_why, sizeof(_aether_lib_abi_why),\n"
+            "             \"the library was made for Aether runtime %%s and runs on %%s: rebuild it with the Aether \"\n"
+            "             \"of the runtime it runs on\", AETHER_RUNTIME_ABI_ID, rt ? rt : \"(unknown)\");\n"
+            "    if (atomic_exchange_explicit(&_aether_lib_abi, 2, memory_order_relaxed) != 2)\n"
+            "        fprintf(stderr, \"aether: %%s\\n\", _aether_lib_abi_why);\n"
+            "    return 0;\n"
+            "}\n"
+            "#define AETHER_LIB_ABI_GUARD(fail) \\\n"
+            "    if (atomic_load_explicit(&_aether_lib_abi, memory_order_relaxed) != 1 && \\\n"
+            "        (atomic_load_explicit(&_aether_lib_abi, memory_order_relaxed) == 2 || !_aether_lib_abi_check())) { \\\n"
+            "        aether_exec_note_outcome(6 /* AETHER_INCOMPATIBLE */, _aether_lib_abi_why); fail; }\n"
+            "AETHER_WEAK_DEF int %s(const char** why) {\n"
+            "    int ok = atomic_load_explicit(&_aether_lib_abi, memory_order_relaxed) == 1 ||\n"
+            "             (atomic_load_explicit(&_aether_lib_abi, memory_order_relaxed) == 0 && _aether_lib_abi_check());\n"
+            "    if (why) *why = ok ? \"\" : _aether_lib_abi_why;\n"
+            "    return ok ? 0 : -1;\n"
+            "}\n\n",
+            AETHER_VERSION_NUM, AETHER_RUNTIME_ABI_REV, AETHER_VERSION, AETHER_RUNTIME_ABI_ID, check_sym);
+    /* The host API a C host reaches the library's runtime through (the
+     * deadline, memory cap, caller, outcome and accounts) is kept by the
+     * runtime itself, in aether_exec.c, which every library with a runtime
+     * of its own links through these stubs (#3439). Kept here, it made a
+     * library meant to bind to its host's runtime reference objects that
+     * host never linked. */
+    if (gen->csrc_header_file)
+        fprintf(gen->csrc_header_file,
+                "/* How the last call into an export on this thread ended: a zero\n"
+                " * result with an outcome other than AETHER_OK (0) is not a result.\n"
+                " * The constants are in libaether.h; see docs/embedding.md. */\n"
+                "int aether_last_outcome(void);\n"
+                "const char* aether_last_outcome_text(void);\n\n");
 
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* child = program->children[i];
@@ -3417,7 +3631,13 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
             fprintf(gen->csrc_header_file, ");\n");
         }
 
-        // Emit: RET aether_NAME(PARAMS) { [return] NAME(args); }
+        /* Emit, in an execution frame (#2955, #2956):
+         *   RET aether_NAME(PARAMS) {
+         *       AETHER_EXEC_STUB_ENTER(return (RET){0});
+         *       RET _aether_r = NAME(args);
+         *       aether_exec_leave();
+         *       return _aether_r;
+         *   } */
         fprintf(gen->output, "%s %s(", ret_abi, alias);
         if (param_count == 0) {
             fprintf(gen->output, "void");
@@ -3427,8 +3647,20 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
                 fprintf(gen->output, "%s %s", param_types[k], param_names[k]);
             }
         }
-        fprintf(gen->output, ") {\n    ");
-        if (strcmp(ret_abi, "void") != 0) fprintf(gen->output, "return ");
+        fprintf(gen->output, ") {\n");
+        int stub_returns = strcmp(ret_abi, "void") != 0;
+        int frameless = lib_export_frameless(gen, program, fn, result);
+        /* #2957: none of its code runs on another runtime than its own. */
+        if (stub_returns) fprintf(gen->output, "    AETHER_LIB_ABI_GUARD(return (%s){0});\n", ret_abi);
+        else fprintf(gen->output, "    AETHER_LIB_ABI_GUARD(return);\n");
+        if (frameless)
+            ;   /* nothing can end it from outside its code */
+        else if (stub_returns)
+            fprintf(gen->output, "    AETHER_EXEC_STUB_ENTER(return (%s){0});\n", ret_abi);
+        else
+            fprintf(gen->output, "    AETHER_EXEC_STUB_ENTER(return);\n");
+        fprintf(gen->output, "    ");
+        if (stub_returns) fprintf(gen->output, "%s _aether_r = ", ret_abi);
         /* #2297: a typed struct pointer returns as the opaque AetherValue*;
          * cast, as the parameter side does, or GCC 14+ rejects the
          * incompatible pointer under -Werror. */
@@ -3452,7 +3684,13 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
                 fprintf(gen->output, "%s", param_names[k]);
             }
         }
-        fprintf(gen->output, ");\n}\n");
+        fprintf(gen->output, ");\n");
+        if (frameless)
+            fprintf(gen->output, "    aether_exec_ok();\n%s}\n", stub_returns ? "    return _aether_r;\n" : "");
+        else if (stub_returns)
+            emit_lib_stub_return(gen, result, ret_abi);
+        else
+            fprintf(gen->output, "    aether_exec_leave();\n}\n");
     }
 
     /* #2349: an exported builder of a package module. A builder's ABI is its
@@ -3491,9 +3729,11 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
         Type* rt = b->node_type;
         int unannotated = (!rt || rt->kind == TYPE_VOID || rt->kind == TYPE_UNKNOWN);
         int returns = 1;
-        if (unannotated && has_return_value(b)) fprintf(gen->output, "int");
-        else if (unannotated) { fprintf(gen->output, "void"); returns = 0; }
-        else fprintf(gen->output, "%s", c_result_type(rt));
+        const char* bret = "void";
+        if (unannotated && has_return_value(b)) bret = "int";
+        else if (unannotated) returns = 0;
+        else bret = c_result_type(rt);
+        fprintf(gen->output, "%s", bret);
         fprintf(gen->output, " %s(", sym);
         int np = 0;
         for (int p = 0; p < b->child_count; p++) {
@@ -3508,15 +3748,29 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
                 fprintf(gen->output, " %s", c->value);
             }
         }
-        fprintf(gen->output, "%svoid* _builder) {\n    %s%s(", np ? ", " : "",
-                returns ? "return " : "", b->value);
+        /* In an execution frame, as the alias stubs (#2955, #2956). */
+        fprintf(gen->output, "%svoid* _builder) {\n", np ? ", " : "");
+        if (returns) fprintf(gen->output, "    AETHER_LIB_ABI_GUARD(return (%s){0});\n", bret);
+        else fprintf(gen->output, "    AETHER_LIB_ABI_GUARD(return);\n");
+        if (returns)
+            fprintf(gen->output, "    AETHER_EXEC_STUB_ENTER(return (%s){0});\n", bret);
+        else
+            fprintf(gen->output, "    AETHER_EXEC_STUB_ENTER(return);\n");
+        if (returns) fprintf(gen->output, "    %s _aether_r = %s(", bret, b->value);
+        else fprintf(gen->output, "    %s(", b->value);
         for (int p = 0; p < b->child_count; p++) {
             ASTNode* c = b->children[p];
             if (!c || c->type == AST_GUARD_CLAUSE) continue;
             if (c->type == AST_BLOCK) break;
             fprintf(gen->output, "%s, ", c->value);
         }
-        fprintf(gen->output, "_builder);\n}\n");
+        fprintf(gen->output, "_builder);\n");
+        if (returns && unannotated)
+            emit_lib_stub_return(gen, NULL, bret);
+        else if (returns)
+            emit_lib_stub_return(gen, rt, bret);
+        else
+            fprintf(gen->output, "    aether_exec_leave();\n}\n");
     }
 
     /* #996 --emit=csrc: close the header guard. */
@@ -4226,7 +4480,9 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         "    const char* const* closure_modules;\n"
         "    int actors;\n"
         "    const unsigned char* closure_config_unused;\n"
-        "    const char* string_release; };\n\n");
+        "    const char* string_release;\n"
+        "    const char* outcome;\n"
+        "    int host_abi; const char* runtime_abi; const char* requires; };\n\n");
 
     fprintf(gen->output,
         "static const struct _AetherLibFn _aether_lib_fns[] = {\n");
@@ -4595,8 +4851,6 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
     /* #2349: in a package library each closure record belongs to a module
      * too (a package builder's wrapper is aether_<module>__<name>);
      * parallel to the closure table, "" for the entry's own. */
-    int pkg_closures = 0;
-    for (int r = 0; r < clo_count; r++) if (rec_mod[r] && rec_mod[r][0]) pkg_closures = 1;
     if (pkg_lib && clo_count > 0) {
         fprintf(gen->output, "static const char* const _aether_lib_closure_modules[] = {\n");
         for (int r = 0; r < clo_count; r++) {
@@ -4638,16 +4892,15 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
     }
     fprintf(gen->output,
         "static const struct _AetherLibMeta _aether_lib_meta = {\n");
-    /* Schema is the highest feature level present: "1.2" once any constant
-     * record exists, else "1.1" with closures, else "1.0" — which keeps a
-     * function-only artifact byte-identical to v1 for existing readers. The
-     * trailing slots are always written (the struct always has them); older
-     * readers stop at the count/pointer they know. */
-    /* "1.5": the library links the shared runtime (#2297). */
-    /* "1.6": a package library's builder records carry their module. */
-    /* "1.7": the library runs actors, its own or an imported library's. */
-    /* "1.8": a builder record says its builder never uses its config. */
-    /* "1.9": an export returns a string, given back through string_release. */
+    /* The schema was the highest feature level present ("1.0" functions,
+     * "1.1" closures, "1.2" constants, "1.3" structs or source signatures,
+     * "1.4" a package, "1.5" the shared runtime, "1.6" package builders,
+     * "1.7" actors, "1.8" a builder that never uses its config, "1.9" a
+     * returned string, "1.10" the outcome accessor, #2956). Every library
+     * now has the last slots, `host_abi`, `runtime_abi` and `requires`
+     * (#2957), so every catalog is "1.11". The trailing slots are always
+     * written (the struct always has them); older readers stop at the
+     * count/pointer they know. */
     int strings_returned = 0;
     for (int i = 0; i < fn_count && !strings_returned; i++) {
         LibSig rs;
@@ -4663,18 +4916,21 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
             rs.result->kind == TYPE_STRING) strings_returned = 1;
     }
     int lib_runs_actors = gen->actor_count > 0 || gen->lib_actors;
-    const char* schema = strings_returned ? "1.9"
-                       : config_unused_any ? "1.8"
-                       : lib_runs_actors ? "1.7"
-                       : (pkg_lib && pkg_closures) ? "1.6"
-                       : gen->lib_shared_runtime ? "1.5"
-                       : pkg_lib ? "1.4"
-                       : (struct_count > 0 || src_sig_needed) ? "1.3"
-                       : (const_count > 0) ? "1.2"
-                       : (clo_count > 0)   ? "1.1"
-                       : "1.0";
+    /* #2957: "1.11" adds host_abi, runtime_abi and requires, the duties an
+     * importer must perform to use this library, each one it knows by name;
+     * one it does not know makes it refuse the library. The 1.10 duty is
+     * the outcome check after every call; a returned string is given back;
+     * a shared-runtime library makes the program link the shared runtime,
+     * whose runtime ABI must be the library's; a library that runs actors
+     * has the program run the scheduler. */
+    const char* schema = "1.11";
+    char requires[160];
+    snprintf(requires, sizeof(requires), "outcome_check%s%s%s",
+             strings_returned ? ",string_release" : "",
+             gen->lib_shared_runtime ? ",shared_runtime,runtime_abi" : "",
+             lib_runs_actors ? ",actors" : "");
     fprintf(gen->output, "    \"%s\", \"", schema);
-    fprintf(gen->output, "%s", "0.0.0-dev");  /* version string filled in by build glue if available */
+    fprintf(gen->output, "%s", AETHER_VERSION);   /* the aetherc that wrote it */
     fprintf(gen->output, "\", ");
     emit_lib_metadata_c_string_literal(gen->output, primary_src);
     fprintf(gen->output, ", %d, _aether_lib_fns, ", fn_count);
@@ -4695,8 +4951,13 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
     else                          fprintf(gen->output, "NULL, ");
     fprintf(gen->output, "%d, %s, ", lib_runs_actors ? 1 : 0,
             config_unused_any ? "_aether_lib_closure_config_unused" : "NULL");
-    if (strings_returned) fprintf(gen->output, "\"%s\"\n};\n\n", lib_string_release_symbol(gen));
-    else fprintf(gen->output, "NULL\n};\n\n");
+    if (strings_returned) fprintf(gen->output, "\"%s\", ", lib_string_release_symbol(gen));
+    else fprintf(gen->output, "NULL, ");
+    fprintf(gen->output, "\"%s\",\n", lib_outcome_symbol(gen));
+    /* #2957: the host ABI level, the runtime ABI of the headers this C is
+     * compiled against (aether_abi.h, the one the stubs check at their
+     * first call), and the duties. */
+    fprintf(gen->output, "    %d, AETHER_RUNTIME_ABI_ID, \"%s\"\n};\n\n", AETHER_HOST_ABI, requires);
 
     /* #996 --emit=csrc: serialize the identical catalog as JSON alongside the
      * C struct. Driven by the same fns[]/closure/const tables emitted above, so
@@ -4707,12 +4968,26 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         FILE* j = gen->csrc_catalog_file;
         fputs("{\n", j);
         fputs("  \"schema_version\": ", j); emit_json_string(j, schema);      fputs(",\n", j);
-        fputs("  \"aether_version\": ", j); emit_json_string(j, "0.0.0-dev"); fputs(",\n", j);
+        fputs("  \"aether_version\": ", j); emit_json_string(j, AETHER_VERSION); fputs(",\n", j);
         fputs("  \"primary_source\": ", j); emit_json_string(j, primary_src); fputs(",\n", j);
+        fprintf(j, "  \"host_abi\": %d,\n", AETHER_HOST_ABI);
+        fputs("  \"runtime_abi\": ", j); emit_json_string(j, AETHER_RUNTIME_ABI_ID); fputs(",\n", j);
+        fputs("  \"requires\": [", j);
+        for (const char* p = requires; *p;) {
+            const char* e = strchr(p, ',');
+            size_t n = e ? (size_t)(e - p) : strlen(p);
+            if (p != requires) fputs(", ", j);
+            emit_json_string(j, cg_intern_n(p, n));
+            p += n + (e ? 1 : 0);
+        }
+        fputs("],\n", j);
         if (gen->lib_shared_runtime) {
             fputs("  \"runtime\": ", j); emit_json_string(j, "shared"); fputs(",\n", j);
         }
         if (lib_runs_actors) fputs("  \"actors\": true,\n", j);
+        fputs("  \"outcome\": ", j);
+        emit_json_string(j, lib_outcome_symbol(gen));
+        fputs(",\n", j);
         if (strings_returned) {
             fputs("  \"string_release\": ", j);
             emit_json_string(j, lib_string_release_symbol(gen));
@@ -5597,8 +5872,11 @@ static void emit_main_prologue(CodeGenerator* gen, int runs_scheduler, int needs
          * carries neither the table nor the call. */
         emit_trace_message_name_table(gen);
         print_line(gen, "");
+        /* #3375: the runtime prints the configuration when AETHER_VERBOSE
+         * is in the environment; a program compiled with -DAETHER_VERBOSE
+         * asks too, and it is printed once either way. */
         print_line(gen, "#ifdef AETHER_VERBOSE");
-        print_line(gen, "aether_print_config();");
+        print_line(gen, "aether_print_config_once();");
         print_line(gen, "#endif");
         print_line(gen, "");
         print_line(gen, "scheduler_start();");
@@ -5654,27 +5932,8 @@ static void emit_main_epilogue(CodeGenerator* gen, int runs_scheduler) {
     print_line(gen, "");
     print_line(gen, "// Wait for quiescence, stop scheduler threads, and join them");
     print_line(gen, "scheduler_shutdown();");
-
-    // Print message pool statistics (only for actor programs)
-    print_line(gen, "");
-    print_line(gen, "// Message pool statistics");
-    print_line(gen, "{");
-    indent(gen);
-    print_line(gen, "uint64_t pool_hits = 0, pool_misses = 0, too_large = 0;");
-    print_line(gen, "aether_message_pool_stats(&pool_hits, &pool_misses, &too_large);");
-    print_line(gen, "if (pool_hits + pool_misses + too_large > 0) {");
-    indent(gen);
-    print_line(gen, "printf(\"\\n=== Message Pool Statistics ===\\n\");");
-    print_line(gen, "printf(\"Pool hits:      %%llu\\n\", (unsigned long long)pool_hits);");
-    print_line(gen, "printf(\"Pool misses:    %%llu (exhausted)\\n\", (unsigned long long)pool_misses);");
-    print_line(gen, "printf(\"Too large:      %%llu (>256 bytes)\\n\", (unsigned long long)too_large);");
-    print_line(gen, "uint64_t total = pool_hits + pool_misses + too_large;");
-    print_line(gen, "double hit_rate = (double)pool_hits / total * 100.0;");
-    print_line(gen, "printf(\"Hit rate:       %%.1f%%%%\\n\", hit_rate);");
-    unindent(gen);
-    print_line(gen, "}");
-    unindent(gen);
-    print_line(gen, "}");
+    /* #3374: no message pool statistics after it. There is no pool; its
+     * counters were never incremented, so the block never printed. */
     print_line(gen, "");
 }
 
@@ -7188,7 +7447,7 @@ static void emit_sandbox_trust_wrappers(CodeGenerator* gen, ASTNode* program) {
         }
         if (pc == 0) fprintf(gen->output, "void");
         fprintf(gen->output, ") {\n");
-        fprintf(gen->output, "    int _aether_sbx_saved = _aether_sandbox_trust_enter(%d);\n", site);
+        fprintf(gen->output, "    int _aether_sbx_saved = aether_sandbox_trust_enter(&_aether_sandbox_image, %d);\n", site);
         fprintf(gen->output, "    ");
         if (returns) {
             emit_trust_return_type(gen, def);
@@ -7199,7 +7458,7 @@ static void emit_sandbox_trust_wrappers(CodeGenerator* gen, ASTNode* program) {
             fprintf(gen->output, "%s_aether_sbx_p%d", k ? ", " : "", k);
         }
         fprintf(gen->output, ");\n");
-        fprintf(gen->output, "    _aether_sandbox_depth = _aether_sbx_saved;\n");
+        fprintf(gen->output, "    aether_sandbox_restore(_aether_sbx_saved);\n");
         if (returns) fprintf(gen->output, "    return _aether_sbx_r;\n");
         fprintf(gen->output, "}\n");
     }
@@ -8239,6 +8498,156 @@ static int program_uses_lanes(const ASTNode* n) {
     return 0;
 }
 
+/* One message's C: its struct, the release of the fields it owns, its
+ * registry entry (the id its sends and its receive arms use) and its
+ * --emit-header entry. generate_program emits every message this way
+ * ahead of the actors and functions, as it does the structs, so the order
+ * of the merged program does not matter: an actor generated before a
+ * message it handled had no id for it, so the arm was dropped, and an
+ * imported message, which the merge puts before main, could not be
+ * handled by the program's own actors at all (#3341). */
+static void emit_message_definition(CodeGenerator* gen, ASTNode* child) {
+    // Generate optimized message struct with field packing
+    if (child && child->value) {
+        int field_count = 0;
+        for (int i = 0; i < child->child_count; i++) {
+            if (child->children[i] && child->children[i]->type == AST_MESSAGE_FIELD) {
+                field_count++;
+            }
+        }
+        
+        print_line(gen, "// Message: %s (%d fields)", child->value, field_count);
+        
+        // Natural alignment only (#2509). Messages with more than
+        // four fields used to be declared aligned(64), but a
+        // payload lives in a malloc'd copy (aether_send_message),
+        // which promises 16 bytes, and the receiver reads it
+        // through a pointer of this type: undefined behaviour,
+        // and aligned vector moves the compiler may pick for it
+        // fault. One reader per copy, so the cache line bought
+        // nothing, and it padded every such message to 64 bytes.
+        print_line(gen, "typedef struct %s {", child->value);
+        indent(gen);
+        // The field order and types are the ones the embedding
+        // header gets (#2517).
+        emit_message_struct_body(child, gen->output, gen->indent_level);
+
+        MessageFieldDef* first_field = NULL;
+        MessageFieldDef* last_field = NULL;
+
+        // Build field list for registry. We store the resolved
+        // C type for each field so downstream codegen (receive
+        // destructuring, struct-literal send-side) can emit the
+        // correct type without re-deriving it from type_kind,
+        // which loses information for composite types like
+        // `string[]` (element type) and structs (struct name).
+        for (int i = 0; i < child->child_count; i++) {
+            ASTNode* field = child->children[i];
+            if (field && field->type == AST_MESSAGE_FIELD) {
+                MessageFieldDef* field_def = (MessageFieldDef*)malloc(sizeof(MessageFieldDef));
+                field_def->name = strdup(field->value);
+                field_def->type_kind = field->node_type ? field->node_type->kind : TYPE_UNKNOWN;
+                field_def->c_type = NULL;
+                field_def->element_c_type = NULL;
+                field_def->owned = tc_type_is_owned(field->node_type);   /* #3142 */
+                if (field->node_type) {
+                    const char* resolved = get_c_type(field->node_type);
+                    if (resolved) {
+                        field_def->c_type = strdup(resolved);
+                    }
+                    if (field->node_type->kind == TYPE_ARRAY &&
+                        field->node_type->element_type) {
+                        const char* elem = get_c_type(field->node_type->element_type);
+                        if (elem) {
+                            field_def->element_c_type = strdup(elem);
+                        }
+                    }
+                }
+                field_def->next = NULL;
+
+                if (!first_field) {
+                    first_field = field_def;
+                    last_field = field_def;
+                } else {
+                    last_field->next = field_def;
+                    last_field = field_def;
+                }
+            }
+        }
+        unindent(gen);
+        print_line(gen, "} %s;", child->value);
+        print_line(gen, "");
+        /* The death notice the runtime writes (#2974): this
+         * struct must be its AetherDownMsg. */
+        if (child->annotation && strcmp(child->annotation, "system") == 0 &&
+            strcmp(child->value, "Down") == 0) {
+            print_line(gen, "#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L");
+            print_line(gen, "_Static_assert(sizeof(Down) == sizeof(AetherDownMsg) &&");
+            print_line(gen, "               offsetof(Down, ref) == offsetof(AetherDownMsg, ref) &&");
+            print_line(gen, "               offsetof(Down, reason) == offsetof(AetherDownMsg, reason),");
+            print_line(gen, "               \"Down must be the runtime's AetherDownMsg\");");
+            print_line(gen, "#endif");
+            print_line(gen, "");
+        }
+
+        /* Per-message heap-string-field release function
+         * (#466). Walked by the receive-handler dispatch
+         * before `aether_free_message` so the deep-
+         * copied AetherString allocations the sender
+         * stamped in (codegen_expr.c send-side) are
+         * reclaimed when the recipient is done with the
+         * message. No-op for messages with no string
+         * fields; the codegen_actor.c dispatch skips
+         * the call in that case via
+         * `message_has_string_field`. */
+        if (message_owns_fields(gen, child->value)) {
+            /* Forward-declare `string_release` here so the
+             * generated release_fields function compiles
+             * even on tests that don't `import std.string`
+             * (and therefore don't get the extern
+             * registry's prototype). The duplicate-but-
+             * matching declaration is tolerated by C —
+             * matches the registry's
+             * `void string_release(const char*)` exactly
+             * when std.string IS imported. */
+            print_line(gen, "extern void string_release(const char*);");
+            print_line(gen, "static inline void _aether_msg_release_%s(%s* m) {",
+                       child->value, child->value);
+            indent(gen);
+            print_line(gen, "if (!m) return;");
+            /* Each field the message owns: a string the sender
+             * copied, a closure or struct it took (#2525, #2921). */
+            for (int fi = 0; fi < child->child_count; fi++) {
+                ASTNode* f = child->children[fi];
+                if (f && f->type == AST_MESSAGE_FIELD && own_type_owns(gen, f->node_type))
+                    own_emit_part(gen, f->node_type, cg_internf("m->%s", f->value), OWN_DROP);
+                /* #3142: an owned pointer the handler did not take
+                 * (its binding empties the field), or a message
+                 * that was never handled. */
+                else if (f && f->type == AST_MESSAGE_FIELD)
+                    emit_owned_ptr_drop(gen, f->node_type, cg_internf("m->%s", f->value));
+            }
+            unindent(gen);
+            print_line(gen, "}");
+            print_line(gen, "");
+        }
+
+        // Generate type-specific memory pool for this message type
+        print_line(gen, "// Type-specific memory pool for %s", child->value);
+        print_line(gen, "// DECLARE_TYPE_POOL(%s)", child->value);
+        print_line(gen, "// DECLARE_TLS_POOL(%s)", child->value);
+        print_line(gen, "");
+
+        register_message_type(gen->message_registry, child->value, first_field);
+
+        // The --emit-header file; #996 had gated this on the
+        // --emit=csrc catalog header, which left it empty (#2517).
+        if (gen->header_file) {
+            emit_message_to_header(gen, child);
+        }
+    }
+}
+
 void generate_program(CodeGenerator* gen, ASTNode* program) {
     if (!program || program->type != AST_PROGRAM) return;
     gen->program = program;
@@ -8324,6 +8733,78 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#endif");
     emit_libc_extern_headers(gen, program);
     print_line(gen, "#include \"aether_panic.h\"");
+    /* #2956: a `try` that catches an interruption (a library call's deadline
+     * or cancel) re-raises it after its own cleanup. */
+    print_line(gen, "extern int  aether_exec_interrupting(void);");
+    print_line(gen, "extern void aether_exec_reraise(void);");
+    /* Imported wrappers and trailing-underscore privates are emitted with
+       internal linkage, so a translation unit that imports a module and calls
+       only part of it has unused statics left over. Downstream builds with
+       -Wall -Werror would fail on generated code they did not write, so the
+       storage class carries the attribute rather than the consumer carrying a
+       -Wno flag. The allocation helpers below carry it too (#3425): clang
+       warns of an unused static inline function in a .c file, gcc does not. */
+    print_line(gen, "#ifndef AETHER_MAYBE_UNUSED");
+    print_line(gen, "#  if defined(__GNUC__) || defined(__clang__)");
+    print_line(gen, "#    define AETHER_MAYBE_UNUSED __attribute__((unused))");
+    print_line(gen, "#  else");
+    print_line(gen, "#    define AETHER_MAYBE_UNUSED");
+    print_line(gen, "#  endif");
+    print_line(gen, "#endif");
+    /* #3377: every allocation the generated code makes for itself (a
+     * captured variable's cell, a ref, a closure's environment or box, a
+     * thunk, heap.new) goes through _aether_alloc. Out of memory, it ends a
+     * library call with AETHER_OUT_OF_MEMORY and is a panic naming what ran
+     * out elsewhere (aether_out_of_memory); the result used to be used
+     * unchecked, a NULL dereference. A malloc the program calls itself keeps
+     * returning NULL (_aether_alloc_or_null) and ends a library call at its
+     * next safe point. The flag and the refusal are the runtime's test hook
+     * (aether_test_fail_alloc_after): one load while no test armed it. The
+     * names are parenthesized where the helpers are defined, so a test can
+     * wrap the call sites in a macro of the same name (closure_local_env_free
+     * counts closure environments and cells that way).
+     *
+     * #3455: a library's references to the runtime's data are weak on ELF
+     * and Mach-O, as its callback registry's is (below): a library linked
+     * with its runtime left to the host (a raw `cc -shared`, a gateway
+     * script) binds a function at its first call, but a datum when it is
+     * loaded, so with the flags strong it did not load at all where no
+     * runtime was yet (`ae lib-info`). A flag that is absent reads as
+     * unarmed. A PE DLL is always fully linked, and a weak reference does
+     * not bind to a DLL import, so there they stay strong (Cygwin's and
+     * MSYS2's gcc make PE too, and define no _WIN32: a weak flag read as
+     * absent there would have left a shared-runtime library's loops
+     * unpolled); so do they in an executable, which links its runtime.
+     * Loaded before any runtime with lazy binding, such a library now runs
+     * with the flags absent, so without deadline polls, where it would not
+     * have loaded at all: a load order no host Aether makes uses. */
+    if (gen->emit_lib) {
+        print_line(gen, "#if !defined(_WIN32) && !defined(__CYGWIN__) && (defined(__GNUC__) || defined(__clang__))");
+        print_line(gen, "#define AETHER_RT_DATA __attribute__((weak))");
+        print_line(gen, "#define AETHER_RT_DATA_PRESENT(s) (&(s) != 0)");
+        print_line(gen, "#endif");
+    }
+    print_line(gen, "#ifndef AETHER_RT_DATA");
+    print_line(gen, "#define AETHER_RT_DATA");
+    print_line(gen, "#define AETHER_RT_DATA_PRESENT(s) 1");
+    print_line(gen, "#endif");
+    print_line(gen, "extern _Atomic int aether_alloc_test_armed AETHER_RT_DATA;");
+    print_line(gen, "extern int  aether_alloc_test_refuses(void);");
+    print_line(gen, "extern void aether_alloc_failed(int why);");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void* (_aether_alloc)(size_t size, int zeroed, const char* what) {");
+    print_line(gen, "    void* p = (AETHER_RT_DATA_PRESENT(aether_alloc_test_armed) &&");
+    print_line(gen, "               atomic_load_explicit(&aether_alloc_test_armed, memory_order_relaxed) &&");
+    print_line(gen, "               aether_alloc_test_refuses()) ? (void*)0 : zeroed ? calloc(1, size) : malloc(size);");
+    print_line(gen, "    if (!p) aether_out_of_memory(what);");
+    print_line(gen, "    return p;");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void* (_aether_alloc_or_null)(size_t size) {");
+    print_line(gen, "    void* p = (AETHER_RT_DATA_PRESENT(aether_alloc_test_armed) &&");
+    print_line(gen, "               atomic_load_explicit(&aether_alloc_test_armed, memory_order_relaxed) &&");
+    print_line(gen, "               aether_alloc_test_refuses()) ? (void*)0 : calloc(1, size);");
+    print_line(gen, "    if (!p) aether_alloc_failed(5);  /* AETHER_STOP_OUT_OF_MEMORY */");
+    print_line(gen, "    return p;");
+    print_line(gen, "}");
     print_line(gen, "#include \"aether_slice.h\"");   /* #1286 `T[]` fat pointer */
     /* Cons-cell sequence type — std.collections.string_seq.
      *
@@ -8357,14 +8838,21 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * --emit=exe builds — the gate elides both the extern decls and
      * the per-loop checks. */
     if (gen->emit_lib) {
-        /* aether_caps_armed is a plain global, nonzero once any thread has
-         * armed (or tripped) a deadline. Testing it first keeps the loop-head
-         * check to one load when no deadline is in use: the call and its two
-         * thread-local reads were ~22% of mquickjs-ae's run time on macOS,
-         * where each TLS read goes through _tlv_get_addr. */
-        print_line(gen, "extern int  aether_caps_armed;");
+        /* aether_caps_armed is a global, nonzero once any thread has armed
+         * (or tripped) a deadline or cancelled a call. Testing it first keeps
+         * the loop-head check to one load when no deadline is in use: the
+         * call and its two thread-local reads were ~22% of mquickjs-ae's run
+         * time on macOS, where each TLS read goes through _tlv_get_addr. An
+         * atomic, loaded relaxed (a plain load on x86 and ARM), so a loop
+         * sees a cancel another thread makes while it runs (#2956): as a
+         * plain int, clang loaded it once before a loop that calls nothing. */
+        print_line(gen, "extern _Atomic int aether_caps_armed AETHER_RT_DATA;   /* weak: see _aether_alloc */");
         print_line(gen, "extern int  aether_caps_deadline_tripped(void);");
         print_line(gen, "extern void __aether_abort_call(void);");
+        /* #2956: the safe point. Inside an execution a passed deadline or a
+         * cancel ends it (runtime/aether_exec.h); outside one the loop
+         * breaks as before. */
+        print_line(gen, "extern int  aether_exec_poll(void);");
     }
     print_line(gen, "#ifdef _WIN32");
     /* The program TU does not include <windows.h> (#2673): mingw-w64's
@@ -8414,19 +8902,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         print_line(gen, "#endif");
     }
     /* GCC/Clang vs MSVC: guards for statement expressions ({...}) and computed goto */
-    /* Imported wrappers and trailing-underscore privates are emitted with
-       internal linkage, so a translation unit that imports a module and calls
-       only part of it has unused statics left over. Downstream builds with
-       -Wall -Werror would fail on generated code they did not write, so the
-       storage class carries the attribute rather than the consumer carrying a
-       -Wno flag. */
-    print_line(gen, "#ifndef AETHER_MAYBE_UNUSED");
-    print_line(gen, "#  if defined(__GNUC__) || defined(__clang__)");
-    print_line(gen, "#    define AETHER_MAYBE_UNUSED __attribute__((unused))");
-    print_line(gen, "#  else");
-    print_line(gen, "#    define AETHER_MAYBE_UNUSED");
-    print_line(gen, "#  endif");
-    print_line(gen, "#endif");
+    /* AETHER_MAYBE_UNUSED is defined above, before the first helper that
+     * carries it. */
     /* #3142: `move x` of an owned pointer: its value, and the place left
      * holding nothing, so the release at the place's exit skips it. */
     print_line(gen, "static inline AETHER_MAYBE_UNUSED void* aether_owned_take(void** p) "
@@ -8926,6 +9403,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "typedef void (*AetherUnwindFree)(const void*);");
     print_line(gen, "extern void aether_unwind_track(const void*, AetherUnwindFree);");
     print_line(gen, "extern void aether_unwind_track_place(const void*, const void*, AetherUnwindFree);");
+    print_line(gen, "extern int aether_unwind_track_owned_place(const void*, void (*)(void*));");
     print_line(gen, "extern void aether_unwind_forget(const void*);");
     print_line(gen, "extern void aether_teardown(void*);");
     /* Is `s` a counted AetherString, the one shape string_release frees?
@@ -9001,8 +9479,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * releases included. */
     print_line(gen, "typedef union { atomic_long _refs; long double _ld; void* _p; long long _ll; } _AeCellHeader;");
     print_line(gen, "static inline void* _aether_cell_new(size_t size) {");
-    print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)calloc(1, sizeof(_AeCellHeader) + size);");
-    print_line(gen, "    if (!h) aether_panic(\"out of memory allocating a captured variable\");");
+    print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)_aether_alloc(sizeof(_AeCellHeader) + size, 1, \"out of memory allocating a captured variable\");");
     print_line(gen, "    atomic_init(&h->_refs, 1);");
     print_line(gen, "    return (void*)(h + 1);");
     print_line(gen, "}");
@@ -9349,7 +9826,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "extern void aether_sleep_ms(int ms);");
     // Ref cells: heap-allocated mutable values for shared state in closures
     print_line(gen, "#if !AETHER_GCC_COMPAT");
-    print_line(gen, "static void* _aether_ref_new(intptr_t val) { intptr_t* r = malloc(sizeof(intptr_t)); *r = val; return (void*)r; }");
+    print_line(gen, "static void* _aether_ref_new(intptr_t val) { intptr_t* r = (intptr_t*)_aether_alloc(sizeof(intptr_t), 0, \"out of memory allocating a ref\"); *r = val; return (void*)r; }");
     print_line(gen, "#endif");
     // Closure support: generic closure struct (function pointer + captured environment)
     print_line(gen, "typedef struct { void (*fn)(void); void* env; } _AeClosure;");
@@ -9432,8 +9909,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "typedef struct { void (*fn)(void); void* env; unsigned long long tag; } _AeClosureBox;");
     print_line(gen, "#define _AE_CLOSURE_TAG 0xAEC105EDB0CEDULL");
     print_line(gen, "static inline void* _aether_box_closure(_AeClosure c) {");
-    print_line(gen, "    _AeClosureBox* p = (_AeClosureBox*)malloc(sizeof(_AeClosureBox));");
-    print_line(gen, "    if (!p) return (void*)0;");
+    print_line(gen, "    _AeClosureBox* p = (_AeClosureBox*)_aether_alloc(sizeof(_AeClosureBox), 0, \"out of memory boxing a closure\");");
     print_line(gen, "    p->fn = c.fn; p->env = c.env; p->tag = _AE_CLOSURE_TAG;");
     print_line(gen, "    return (void*)p;");
     print_line(gen, "}");
@@ -9474,7 +9950,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "}");
     // Lazy evaluation: thunks (deferred computation with memoization)
     print_line(gen, "typedef struct { _AeClosure compute; intptr_t value; int evaluated; } _AeThunk;");
-    print_line(gen, "static inline void* _aether_thunk_new(_AeClosure c) { _AeThunk* t = malloc(sizeof(_AeThunk)); t->compute = c; t->value = 0; t->evaluated = 0; return (void*)t; }");
+    print_line(gen, "static inline void* _aether_thunk_new(_AeClosure c) { _AeThunk* t = (_AeThunk*)_aether_alloc(sizeof(_AeThunk), 0, \"out of memory allocating a lazy value\"); t->compute = c; t->value = 0; t->evaluated = 0; return (void*)t; }");
     print_line(gen, "static inline intptr_t _aether_thunk_force(void* p) { _AeThunk* t = (_AeThunk*)p; if (!t->evaluated) { t->value = (intptr_t)((intptr_t(*)(void*))t->compute.fn)(t->compute.env); t->evaluated = 1; } return t->value; }");
     // thunk_free: free the thunk struct. The closure env is owned by
     // the closure variable (auto-deferred), not the thunk. The thunk
@@ -9523,100 +9999,30 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * grant that worked in a plain function was refused inside a
      * `spec.describe` block. Two different things were sharing one stack. */
     // Only emit sandbox bridge code if the program actually uses sandbox builtins.
-    // This avoids preamble bloat and the list_size/list_get dependency for programs
-    // that don't use sandboxing.
     bool has_sandbox = uses_sandbox(program);
     gen->uses_sandbox = has_sandbox ? 1 : 0;
-    /* Per thread: an enforce block contains the code that runs on its own
-     * thread. With one stack for the process, every other thread (an actor's,
-     * a std.worker's) was checked against the block's grants while it ran,
-     * and the stack itself was raced. These live in this translation unit,
-     * written and read only by its own code, so the TLS model never crosses
-     * an archive boundary (#1751). */
-    print_line(gen, "static AETHER_TLS void* _aether_sandbox_stack[64];");
-    print_line(gen, "static AETHER_TLS int _aether_sandbox_depth = 0;");
+    /* #2955: the grant levels are each thread's, kept by the runtime
+     * (runtime/aether_sandbox.c) and reached only through its functions, so
+     * every program and library on one runtime image shares a thread's
+     * levels: a library's export called inside another's enforce block is
+     * held to that block's grants, and can only narrow them. They used to
+     * live here, a stack per translation unit, with one process-wide
+     * checker pointer each enforce installed and cleared: a thread leaving
+     * its block switched off another thread's (or that thread called the
+     * pointer just cleared), and a nested library's stack was empty, or
+     * replaced the outer checker and then cleared it. A caught panic, in
+     * any code, leaves the levels pushed inside its try frame (the runtime
+     * does that in aether_panic); the per-thread stack was #1751's fix for
+     * other threads checked against a block's grants, and stays so. */
     if (has_sandbox) {
-        /* Trusted names in `sandbox.enforce(perms, foo) { ... }`: each level
-         * of the stack records which enforce site pushed it (0 for any other
-         * push). A trusted call runs with the authority of the code that
-         * wrote the enforce: it pushes a barrier, a level whose skip_to
-         * names the level its own site was entered at, and the checker
-         * walking down from the top jumps from the barrier to below that
-         * level, so the levels between (the block's grants, and any
-         * enforce inside it) do not apply. Never higher: a site is looked
-         * for only among the levels in force (not ones an earlier barrier
-         * hides), and one found nowhere on the live stack (a block that
-         * escaped its enforce, a level a panic abandoned) pushes nothing.
-         *
-         * It used to drop the depth to that level instead, and put it back
-         * after. An enforce inside the trusted function then pushed into the
-         * level it had dropped, over the block's grants, and freed what it
-         * pushed when it ended: the block was checked against freed memory
-         * from then on (allowing or refusing whatever that held), and with
-         * the depth at 0 the inner enforce's end uninstalled the checker for
-         * the rest of the block. A barrier only ever adds a level above the
-         * ones it hides, so nothing pushed inside reaches them, and a panic
-         * unwound by a `try`, which puts the depth back, leaves them as
-         * they were. */
-        print_line(gen, "static AETHER_TLS int _aether_sandbox_site_at[64];");
-        print_line(gen, "static AETHER_TLS int _aether_sandbox_skip_to[64];");
-        print_line(gen, "static AETHER_TLS int _aether_sandbox_pending_site = 0;");
-        print_line(gen, "static inline void _aether_sandbox_push(void* ctx) { if (_aether_sandbox_depth < 64) { _aether_sandbox_site_at[_aether_sandbox_depth] = _aether_sandbox_pending_site; _aether_sandbox_skip_to[_aether_sandbox_depth] = -1; _aether_sandbox_stack[_aether_sandbox_depth++] = ctx; } _aether_sandbox_pending_site = 0; }");
-        print_line(gen, "static inline AETHER_MAYBE_UNUSED int _aether_sandbox_trust_enter(int site) { int saved = _aether_sandbox_depth; for (int l = _aether_sandbox_depth - 1; l >= 0; l--) { if (_aether_sandbox_skip_to[l] >= 0) { l = _aether_sandbox_skip_to[l]; continue; } if (_aether_sandbox_site_at[l] == site) { if (_aether_sandbox_depth < 64) { _aether_sandbox_site_at[_aether_sandbox_depth] = 0; _aether_sandbox_skip_to[_aether_sandbox_depth] = l; _aether_sandbox_stack[_aether_sandbox_depth++] = (void*)0; } break; } } return saved; }");
-    } else {
-        print_line(gen, "static inline void _aether_sandbox_push(void* ctx) { if (_aether_sandbox_depth < 64) _aether_sandbox_stack[_aether_sandbox_depth++] = ctx; }");
-    }
-    print_line(gen, "static inline void _aether_sandbox_pop(void) { if (_aether_sandbox_depth > 0) _aether_sandbox_depth--; }");
-    if (has_sandbox) {
-        // Sandbox bridge: connects compiler-generated context stack to runtime checks.
-        print_line(gen, "typedef int (*aether_sandbox_check_fn)(const char*, const char*);");
-        print_line(gen, "extern aether_sandbox_check_fn _aether_sandbox_checker;");
-        print_line(gen, "extern int list_size(void*);");
-        print_line(gen, "extern void* list_get_raw(void*, int);");
-        print_line(gen, "#include \"aether_sandbox_match.h\"");
-        print_line(gen, "static int _aether_perms_allow(void* ctx, const char* category, const char* resource) {");
-        print_line(gen, "    if (!ctx) return 1;");
-        print_line(gen, "    int n = list_size(ctx);");
-        print_line(gen, "    if (n == 0) return 0;");
-        print_line(gen, "    for (int i = 0; i < n; i += 2) {");
-        /* An element is either string shape (a plain char* or an
-         * AetherString, as a grant copied by a wrapper that keeps its
-         * parameter is): read it through aether_string_data. */
-        print_line(gen, "        const void* cat_v = list_get_raw(ctx, i);");
-        print_line(gen, "        const void* pat_v = list_get_raw(ctx, i + 1);");
-        print_line(gen, "        if (!cat_v || !pat_v) continue;");
-        print_line(gen, "        const char* cat = aether_string_data(cat_v);");
-        print_line(gen, "        const char* pat = aether_string_data(pat_v);");
-        print_line(gen, "        if (cat[0] == '*' && pat[0] == '*') return 1;");
-        /* The shared matcher (runtime/aether_sandbox_match.h): globs, ports
-         * for tcp/udp, IPv4-mapped addresses. */
-        print_line(gen, "        if (strcmp(cat, category) == 0 && aether_grant_match(category, pat, resource)) return 1;");
-        print_line(gen, "    }");
-        print_line(gen, "    return 0;");
-        print_line(gen, "}");
-        print_line(gen, "extern void aether_sandbox_audit(const char*, const char*, int);");
-        print_line(gen, "static int _aether_sandbox_check_impl(const char* category, const char* resource) {");
-        print_line(gen, "    if (_aether_sandbox_depth <= 0) return 1;");
-        print_line(gen, "    int _allowed = 1;");
-        /* From the top down, a trusted call's barrier jumping over the
-         * levels it hides. With none left in force the check is the one an
-         * unsandboxed program makes: allowed, and not audited. */
-        print_line(gen, "    int _in_force = 0;");
-        print_line(gen, "    for (int level = _aether_sandbox_depth - 1; level >= 0; level--) {");
-        print_line(gen, "        if (_aether_sandbox_skip_to[level] >= 0) { level = _aether_sandbox_skip_to[level]; continue; }");
-        print_line(gen, "        _in_force = 1;");
-        print_line(gen, "        if (!_aether_perms_allow(_aether_sandbox_stack[level], category, resource)) { _allowed = 0; break; }");
-        print_line(gen, "    }");
-        print_line(gen, "    if (!_in_force) return 1;");
-        // Audit every in-process permission check — allowed and denied.
-        // The sink is opt-in (AETHER_SANDBOX_AUDIT) and the ring buffer
-        // is cheap, so this is unconditional. Note this runs only when a
-        // sandbox is active (_aether_sandbox_depth > 0).
-        print_line(gen, "    aether_sandbox_audit(category, resource, _allowed);");
-        print_line(gen, "    return _allowed;");
-        print_line(gen, "}");
-        print_line(gen, "static void _aether_sandbox_install(void) { _aether_sandbox_checker = _aether_sandbox_check_impl; }");
-        print_line(gen, "static void _aether_sandbox_uninstall(void) { if (_aether_sandbox_depth <= 0) _aether_sandbox_checker = 0; }");
+        /* This code's identity for trusted names: a site number is unique
+         * only within one program or library, and the levels are shared. */
+        print_line(gen, "static AETHER_MAYBE_UNUSED char _aether_sandbox_image;");
+        print_line(gen, "extern void aether_sandbox_push(void* grants);");
+        print_line(gen, "extern void aether_sandbox_pop(void);");
+        print_line(gen, "extern void aether_sandbox_tag_site(const void* image, int site);");
+        print_line(gen, "extern int aether_sandbox_trust_enter(const void* image, int site);");
+        print_line(gen, "extern void aether_sandbox_restore(int depth);");
         print_line(gen, "extern int aether_spawn_sandboxed(void* grant_list, const char* program, const char* arg);");
     }
     print_line(gen, "");
@@ -10457,6 +10863,14 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     if (program_releases_messages(gen))
         print_line(gen, "static void _aether_release_message(int type, void* payload);");
 
+    /* Every message before the actors and functions that send it or
+     * handle it (#3341). */
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* child = program->children[i];
+        if (child && child->type == AST_MESSAGE_DEFINITION)
+            emit_message_definition(gen, child);
+    }
+
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* child = program->children[i];
         if (!child) continue;
@@ -10527,133 +10941,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                 }
                 break;
             case AST_MESSAGE_DEFINITION:
-                // Generate optimized message struct with field packing
-                if (child && child->value) {
-                    int field_count = 0;
-                    for (int i = 0; i < child->child_count; i++) {
-                        if (child->children[i] && child->children[i]->type == AST_MESSAGE_FIELD) {
-                            field_count++;
-                        }
-                    }
-                    
-                    print_line(gen, "// Message: %s (%d fields)", child->value, field_count);
-                    
-                    // Natural alignment only (#2509). Messages with more than
-                    // four fields used to be declared aligned(64), but a
-                    // payload lives in a malloc'd copy (aether_send_message),
-                    // which promises 16 bytes, and the receiver reads it
-                    // through a pointer of this type: undefined behaviour,
-                    // and aligned vector moves the compiler may pick for it
-                    // fault. One reader per copy, so the cache line bought
-                    // nothing, and it padded every such message to 64 bytes.
-                    print_line(gen, "typedef struct %s {", child->value);
-                    indent(gen);
-                    // The field order and types are the ones the embedding
-                    // header gets (#2517).
-                    emit_message_struct_body(child, gen->output, gen->indent_level);
-
-                    MessageFieldDef* first_field = NULL;
-                    MessageFieldDef* last_field = NULL;
-
-                    // Build field list for registry. We store the resolved
-                    // C type for each field so downstream codegen (receive
-                    // destructuring, struct-literal send-side) can emit the
-                    // correct type without re-deriving it from type_kind,
-                    // which loses information for composite types like
-                    // `string[]` (element type) and structs (struct name).
-                    for (int i = 0; i < child->child_count; i++) {
-                        ASTNode* field = child->children[i];
-                        if (field && field->type == AST_MESSAGE_FIELD) {
-                            MessageFieldDef* field_def = (MessageFieldDef*)malloc(sizeof(MessageFieldDef));
-                            field_def->name = strdup(field->value);
-                            field_def->type_kind = field->node_type ? field->node_type->kind : TYPE_UNKNOWN;
-                            field_def->c_type = NULL;
-                            field_def->element_c_type = NULL;
-                            field_def->owned = tc_type_is_owned(field->node_type);   /* #3142 */
-                            if (field->node_type) {
-                                const char* resolved = get_c_type(field->node_type);
-                                if (resolved) {
-                                    field_def->c_type = strdup(resolved);
-                                }
-                                if (field->node_type->kind == TYPE_ARRAY &&
-                                    field->node_type->element_type) {
-                                    const char* elem = get_c_type(field->node_type->element_type);
-                                    if (elem) {
-                                        field_def->element_c_type = strdup(elem);
-                                    }
-                                }
-                            }
-                            field_def->next = NULL;
-
-                            if (!first_field) {
-                                first_field = field_def;
-                                last_field = field_def;
-                            } else {
-                                last_field->next = field_def;
-                                last_field = field_def;
-                            }
-                        }
-                    }
-                    unindent(gen);
-                    print_line(gen, "} %s;", child->value);
-                    print_line(gen, "");
-
-                    /* Per-message heap-string-field release function
-                     * (#466). Walked by the receive-handler dispatch
-                     * before `aether_free_message` so the deep-
-                     * copied AetherString allocations the sender
-                     * stamped in (codegen_expr.c send-side) are
-                     * reclaimed when the recipient is done with the
-                     * message. No-op for messages with no string
-                     * fields; the codegen_actor.c dispatch skips
-                     * the call in that case via
-                     * `message_has_string_field`. */
-                    if (message_owns_fields(gen, child->value)) {
-                        /* Forward-declare `string_release` here so the
-                         * generated release_fields function compiles
-                         * even on tests that don't `import std.string`
-                         * (and therefore don't get the extern
-                         * registry's prototype). The duplicate-but-
-                         * matching declaration is tolerated by C —
-                         * matches the registry's
-                         * `void string_release(const char*)` exactly
-                         * when std.string IS imported. */
-                        print_line(gen, "extern void string_release(const char*);");
-                        print_line(gen, "static inline void _aether_msg_release_%s(%s* m) {",
-                                   child->value, child->value);
-                        indent(gen);
-                        print_line(gen, "if (!m) return;");
-                        /* Each field the message owns: a string the sender
-                         * copied, a closure or struct it took (#2525, #2921). */
-                        for (int fi = 0; fi < child->child_count; fi++) {
-                            ASTNode* f = child->children[fi];
-                            if (f && f->type == AST_MESSAGE_FIELD && own_type_owns(gen, f->node_type))
-                                own_emit_part(gen, f->node_type, cg_internf("m->%s", f->value), OWN_DROP);
-                            /* #3142: an owned pointer the handler did not take
-                             * (its binding empties the field), or a message
-                             * that was never handled. */
-                            else if (f && f->type == AST_MESSAGE_FIELD)
-                                emit_owned_ptr_drop(gen, f->node_type, cg_internf("m->%s", f->value));
-                        }
-                        unindent(gen);
-                        print_line(gen, "}");
-                        print_line(gen, "");
-                    }
-
-                    // Generate type-specific memory pool for this message type
-                    print_line(gen, "// Type-specific memory pool for %s", child->value);
-                    print_line(gen, "// DECLARE_TYPE_POOL(%s)", child->value);
-                    print_line(gen, "// DECLARE_TLS_POOL(%s)", child->value);
-                    print_line(gen, "");
-
-                    register_message_type(gen->message_registry, child->value, first_field);
-
-                    // The --emit-header file; #996 had gated this on the
-                    // --emit=csrc catalog header, which left it empty (#2517).
-                    if (gen->header_file) {
-                        emit_message_to_header(gen, child);
-                    }
-                }
+                // Emitted ahead of this loop with every other message
+                // (emit_message_definition, #3341).
                 break;
             case AST_BUILDER_FUNCTION:
             case AST_FUNCTION_DEFINITION:
@@ -10742,7 +11031,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
             fprintf(gen->output,
                 "\n/* @c_callback registry (#2297): hooks reach a shared runtime by name. */\n"
                 "#if defined(__GNUC__) || defined(__clang__)\n"
-                "#if defined(_WIN32)\n"
+                "#if defined(_WIN32) || defined(__CYGWIN__)\n"   /* PE: Cygwin and MSYS2's gcc define no _WIN32 */
                 "extern void aether_callback_register(const char*, void*);\n"
                 "#define AE_CALLBACK_REGISTRY_PRESENT 1\n"
                 "#else\n"

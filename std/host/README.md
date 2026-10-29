@@ -39,6 +39,14 @@ calling and how long they will wait: the context a shared script needs to
 make a policy decision, and the reason it is here rather than passed as an
 argument to every function.
 
+`last_outcome` and `last_outcome_text` say how the last call into a library
+export on this thread ended (`OK`, `PANICKED`, `DEADLINE`, `CANCELLED`,
+`MEMORY_CAP`, `OUT_OF_MEMORY`) and why. Every export runs in an execution
+frame, so a panic ends the call rather than the process; a program that
+imports a library in binary form gets a failed call raised again as a
+panic, and these read the same outcome without a `try` (#2956,
+docs/emit-lib.md).
+
 The `java`, `python`, `ruby` and `go` helpers are the language-specific entry
 points; `contrib/host/<lang>/` carries the bridge for each, and
 `docs/aether-embedded-in-host-applications.md` is the full account.
@@ -47,4 +55,5 @@ points; `contrib/host/<lang>/` carries the bridge for each, and
 
 `notify`, `describe`, `input`, `event`, `bindings`, `java`, `python`, `ruby`,
 `go`, `manifest_get`, `manifest_clear`, `caller_identity`,
-`caller_attribute`, `caller_deadline_ms`.
+`caller_attribute`, `caller_deadline_ms`, `last_outcome`, `last_outcome_text`,
+`OK`, `PANICKED`, `DEADLINE`, `CANCELLED`, `MEMORY_CAP`, `OUT_OF_MEMORY`.

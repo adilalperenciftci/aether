@@ -1,0 +1,4 @@
+[[bin]]
+name = "ct_probe"
+path = "ct_probe.ae"
+extra_sources = ["ct_shim.c"]

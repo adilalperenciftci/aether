@@ -14,8 +14,8 @@
 //   - supported_groups: x25519 (0x001d), secp256r1 (0x0017)
 //   - key_share: x25519 and/or secp256r1 KeyShareEntry(s); SNI + ALPN http/1.1
 //   - signature_algorithms: ecdsa_secp256r1_sha256 (0x0403),
-//     ecdsa_secp384r1_sha384 (0x0503), rsa_pss_rsae_sha256 (0x0804),
-//     ed25519 (0x0807)
+//     ecdsa_secp384r1_sha384 (0x0503), ecdsa_secp521r1_sha512 (0x0603),
+//     rsa_pss_rsae_sha256 (0x0804), ed25519 (0x0807)
 //
 // Import with:  import std.cryptography.tls13_hs
 //
@@ -30,6 +30,7 @@
 
 import std.bytes
 import std.list
+import std.cryptography.sha2
 
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
@@ -38,12 +39,21 @@ extern string_char_at_n(str: string, known_length: int, index: int) -> int
 
 exports(
     ChParsed, parse_client_hello, free_ch, server_hello,
-    client_hello, client_hello_sni, client_hello_full, client_hello_pq, client_hello_psk, PskCh, parse_server_hello,
-    ShParsed,
+    client_hello, client_hello_sni, client_hello_full, client_hello_offer, client_hello_pq, client_hello_psk, PskCh, parse_server_hello,
+    ShParsed, check_extensions, check_certificate, check_certificate_request, offers_sig_scheme,
+    MSG_SERVER_HELLO, MSG_HELLO_RETRY, MSG_ENCRYPTED_EXTENSIONS, MSG_CERTIFICATE_ENTRY,
+    MSG_NEW_SESSION_TICKET, MSG_CERTIFICATE_REQUEST,
+    OFFER_SNI, OFFER_ALPN, OFFER_STATUS, OFFER_PSK, OFFER_EARLY,
     TLS_CHACHA20_POLY1305_SHA256, TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384,
-    GROUP_X25519, GROUP_SECP256R1, GROUP_X25519MLKEM768,
+    GROUP_X25519, GROUP_SECP256R1, GROUP_SECP384R1, GROUP_X25519MLKEM768,
+    SIGBIT_ECDSA_P256, SIGBIT_ECDSA_P384, SIGBIT_ECDSA_P521, SIGBIT_RSA_PSS_SHA256, SIGBIT_ED25519,
+    SIGBIT_RSA_PSS_SHA384, SIGBIT_RSA_PSS_SHA512,
     HS_ENCRYPTED_EXTENSIONS, HS_CERTIFICATE, HS_CERTIFICATE_VERIFY, HS_FINISHED,
-    encrypted_extensions, certificate_msg, certificate_verify_msg, finished_msg
+    HS_NEW_SESSION_TICKET, HS_KEY_UPDATE, KEY_UPDATE_NOT_REQUESTED, KEY_UPDATE_REQUESTED,
+    encrypted_extensions, certificate_msg, certificate_verify_msg, finished_msg,
+    key_update_msg, key_update_request,
+    NstParsed, parse_new_session_ticket,
+    hello_retry_request, client_hello_retry, GROUPBIT_X25519MLKEM768, GROUPBIT_X25519, GROUPBIT_SECP256R1
 )
 
 // Cipher suites (RFC 8446 appendix B.4).
@@ -54,6 +64,9 @@ const TLS_CHACHA20_POLY1305_SHA256 = 0x1303
 // Named groups (RFC 8446 §4.2.7).
 const GROUP_X25519 = 0x001d
 const GROUP_SECP256R1 = 0x0017
+// secp384r1: the client names it in supported_groups without a key share,
+// for a server that wants it to ask in a HelloRetryRequest (#3369).
+const GROUP_SECP384R1 = 0x0018
 // Post-quantum hybrid: X25519 + ML-KEM-768 (draft-kwiatkowski-tls-ecdhe-mlkem;
 // the group Chrome/Cloudflare default to). Client share = ML-KEM ek(1184) ||
 // X25519 pub(32); server share = ML-KEM ct(1088) || X25519 pub(32).
@@ -62,8 +75,20 @@ const GROUP_X25519MLKEM768 = 0x11EC
 // Signature schemes (RFC 8446 §4.2.3).
 const SIG_ECDSA_P256_SHA256 = 0x0403
 const SIG_ECDSA_P384_SHA384 = 0x0503
+const SIG_ECDSA_P521_SHA512 = 0x0603
 const SIG_RSA_PSS_RSAE_SHA256 = 0x0804
+const SIG_RSA_PSS_RSAE_SHA384 = 0x0805
+const SIG_RSA_PSS_RSAE_SHA512 = 0x0806
 const SIG_ED25519 = 0x0807
+
+// The offered schemes a ChParsed records (sig_algs), one bit each.
+const SIGBIT_ECDSA_P256 = 1
+const SIGBIT_ECDSA_P384 = 2
+const SIGBIT_ECDSA_P521 = 4
+const SIGBIT_RSA_PSS_SHA256 = 8
+const SIGBIT_ED25519 = 16
+const SIGBIT_RSA_PSS_SHA384 = 32
+const SIGBIT_RSA_PSS_SHA512 = 64
 
 // Handshake message types (RFC 8446 §4).
 const HS_CLIENT_HELLO = 1
@@ -72,6 +97,12 @@ const HS_ENCRYPTED_EXTENSIONS = 8
 const HS_CERTIFICATE = 11
 const HS_CERTIFICATE_VERIFY = 15
 const HS_FINISHED = 20
+const HS_NEW_SESSION_TICKET = 4
+const HS_KEY_UPDATE = 24
+
+// KeyUpdate's request_update (RFC 8446 4.6.3).
+const KEY_UPDATE_NOT_REQUESTED = 0
+const KEY_UPDATE_REQUESTED = 1
 
 // Result of parsing a ServerHello.
 struct ShParsed {
@@ -82,6 +113,16 @@ struct ShParsed {
     key_share_len: int
     is_hello_retry: int // 1 if this was a HelloRetryRequest (special random)
     psk_accepted: int // 1 if the SH echoed pre_shared_key (resumption accepted)
+    alert: int // the alert parse_server_hello says to send, when it refuses
+    // Where the legacy_session_id_echo is in the message, so the client can
+    // hold it to the one it sent (RFC 8446 4.1.3, #3318).
+    session_id_off: int
+    session_id_len: int
+    selected_identity: int // pre_shared_key's selected_identity, or -1 (#3318)
+    // A HelloRetryRequest's cookie (RFC 8446 4.2.2): where its value is in
+    // the message, length 0 when there is none (#3325).
+    cookie_off: int
+    cookie_len: int
 }
 
 // ---- little growable writer over std.bytes (append at a running offset) ----
@@ -146,6 +187,30 @@ fn get24(b: byte[], off: int) -> int {
 // 4-byte handshake header (msg_type + uint24 length). random must be 32
 // bytes; session_id 0..32 bytes (TLS 1.3 middlebox-compat: usually a 32-byte
 // echo value); x25519_pub is our 32-byte ephemeral public key.
+// The signature_algorithms extension (13) every ClientHello sends: each
+// scheme the client verifies a CertificateVerify with (RFC 8446 4.2.3).
+// Returns the offset past it.
+fn put_sig_algs(buf: ptr, at: int) -> int {
+    off = put16(buf, at, 13)
+    off = put16(buf, off, 12) // ext body len
+    off = put16(buf, off, 10) // list len
+    off = put16(buf, off, SIG_ECDSA_P256_SHA256)
+    off = put16(buf, off, SIG_ECDSA_P384_SHA384)
+    off = put16(buf, off, SIG_ECDSA_P521_SHA512)
+    off = put16(buf, off, SIG_RSA_PSS_RSAE_SHA256)
+    off = put16(buf, off, SIG_ED25519)
+    return off
+}
+
+// 1 when `scheme` is one put_sig_algs offers, the only schemes a server may
+// sign its CertificateVerify with (RFC 8446 4.4.3), else 0.
+offers_sig_scheme(scheme: int) -> int {
+    if scheme == SIG_ECDSA_P256_SHA256 || scheme == SIG_ECDSA_P384_SHA384 { return 1 }
+    if scheme == SIG_ECDSA_P521_SHA512 || scheme == SIG_RSA_PSS_RSAE_SHA256 { return 1 }
+    if scheme == SIG_ED25519 { return 1 }
+    return 0
+}
+
 client_hello(random: ptr, session_id: byte[], x25519_pub: ptr) -> ptr {
     return client_hello_sni(random, session_id, x25519_pub, "")
 }
@@ -159,23 +224,31 @@ client_hello_sni(random: ptr, session_id: byte[], x25519_pub: ptr, host: string)
 
 // Build a ClientHello offering up to three groups (e.g. X25519MLKEM768, x25519,
 // secp256r1) in supported_groups, carrying key_shares for each offered group.
-// Pass group2=0 or group3=0 to omit the respective entry.
+// Pass group2=0 or group3=0 to omit the respective entry. It offers
+// psk_key_exchange_modes { psk_dhe_ke }, so a server may send tickets (#3363).
 client_hello_full(random: ptr, session_id: byte[], group: int, pubkey: byte[], group2: int, pubkey2: byte[], group3: int, pubkey3: byte[], host: string) -> ptr {
-    if session_id.len < 0 { panic("tls13_hs.client_hello_full: the `session_id` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    return client_hello_offer(random, session_id, group, pubkey, group2, pubkey2, group3, pubkey3, host, 0)
+}
+
+// client_hello_full, and `named_only` (0 for none) listed last in
+// supported_groups with no key share: a group the client takes when a
+// HelloRetryRequest asks for it (RFC 8446 4.1.4, #3369).
+client_hello_offer(random: ptr, session_id: byte[], group: int, pubkey: byte[], group2: int, pubkey2: byte[], group3: int, pubkey3: byte[], host: string, named_only: int) -> ptr {
+    if session_id.len < 0 { panic("tls13_hs.client_hello_offer: the `session_id` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     int sid_len = session_id.len
     pubkey_len = 0
     if group != 0 {
-        if pubkey.len < 0 { panic("tls13_hs.client_hello_full: the `pubkey` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+        if pubkey.len < 0 { panic("tls13_hs.client_hello_offer: the `pubkey` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
         pubkey_len = pubkey.len
     }
     pubkey2_len = 0
     if group2 != 0 {
-        if pubkey2.len < 0 { panic("tls13_hs.client_hello_full: the `pubkey2` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+        if pubkey2.len < 0 { panic("tls13_hs.client_hello_offer: the `pubkey2` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
         pubkey2_len = pubkey2.len
     }
     pubkey3_len = 0
     if group3 != 0 {
-        if pubkey3.len < 0 { panic("tls13_hs.client_hello_full: the `pubkey3` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+        if pubkey3.len < 0 { panic("tls13_hs.client_hello_offer: the `pubkey3` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
         pubkey3_len = pubkey3.len
     }
     // Generous fixed buffer for up to 3 key shares + extensions.
@@ -235,6 +308,7 @@ client_hello_full(random: ptr, session_id: byte[], group: int, pubkey: byte[], g
     if group != 0 { num_groups = num_groups + 1 }
     if group2 != 0 { num_groups = num_groups + 1 }
     if group3 != 0 { num_groups = num_groups + 1 }
+    if named_only != 0 { num_groups = num_groups + 1 }
 
     sg_body = 2 + num_groups * 2
     off = put16(buf, off, 10)
@@ -243,16 +317,10 @@ client_hello_full(random: ptr, session_id: byte[], group: int, pubkey: byte[], g
     if group != 0 { off = put16(buf, off, group) }
     if group2 != 0 { off = put16(buf, off, group2) }
     if group3 != 0 { off = put16(buf, off, group3) }
+    if named_only != 0 { off = put16(buf, off, named_only) }
 
-    // signature_algorithms (13):
-    //   { ecdsa_p256_sha256, ecdsa_p384_sha384, rsa_pss_rsae_sha256, ed25519 }
-    off = put16(buf, off, 13)
-    off = put16(buf, off, 10) // ext body len
-    off = put16(buf, off, 8) // list len
-    off = put16(buf, off, SIG_ECDSA_P256_SHA256)
-    off = put16(buf, off, SIG_ECDSA_P384_SHA384)
-    off = put16(buf, off, SIG_RSA_PSS_RSAE_SHA256)
-    off = put16(buf, off, SIG_ED25519)
+    // signature_algorithms (13): every scheme the client verifies.
+    off = put_sig_algs(buf, off)
 
     // status_request (5): request OCSP stapling (RFC 6066 §8). Body =
     // CertificateStatusRequest { status_type=ocsp(1), responder_id_list<2>=empty,
@@ -273,6 +341,15 @@ client_hello_full(random: ptr, session_id: byte[], group: int, pubkey: byte[], g
     off = put16(buf, off, 9) // ProtocolNameList length = 1 + 8
     off = put8(buf, off, 8) // ProtocolName length
     off = put_ascii(buf, off, "http/1.1")
+
+    // psk_key_exchange_modes (45): { psk_dhe_ke (1) }, the mode a ticket
+    // from this connection is resumed with. A server may use only a mode
+    // the client lists (RFC 8446 4.2.9), and Go and BoringSSL send no
+    // NewSessionTicket to a client that lists none (#3363).
+    off = put16(buf, off, 45)
+    off = put16(buf, off, 2) // ext body len
+    off = put8(buf, off, 1) // ke_modes length
+    off = put8(buf, off, 1) // psk_dhe_ke
 
     // key_share (51): a KeyShareEntry {group, key<len>} for each offered group.
     shares_len = 0
@@ -312,7 +389,7 @@ client_hello_full(random: ptr, session_id: byte[], group: int, pubkey: byte[], g
     out = bytes.new(off)
     if off > 0 { bytes.set(out, off - 1, 0) }
     put_bytes(out, 0, bytes.view(buf)[0..off])
-    bytes.free(buf)
+    bytes.wipe_free(buf)
     return out
 }
 
@@ -364,13 +441,7 @@ client_hello_pq(random: ptr, session_id: byte[], hybrid_share: ptr, hybrid_len: 
     off = put16(buf, off, GROUP_X25519MLKEM768)
     off = put16(buf, off, GROUP_X25519)
     // signature_algorithms
-    off = put16(buf, off, 13)
-    off = put16(buf, off, 10)
-    off = put16(buf, off, 8)
-    off = put16(buf, off, SIG_ECDSA_P256_SHA256)
-    off = put16(buf, off, SIG_ECDSA_P384_SHA384)
-    off = put16(buf, off, SIG_RSA_PSS_RSAE_SHA256)
-    off = put16(buf, off, SIG_ED25519)
+    off = put_sig_algs(buf, off)
     // ALPN http/1.1
     off = put16(buf, off, 16)
     off = put16(buf, off, 11)
@@ -399,7 +470,7 @@ client_hello_pq(random: ptr, session_id: byte[], hybrid_share: ptr, hybrid_len: 
     out = bytes.new(off)
     if off > 0 { bytes.set(out, off - 1, 0) }
     put_bytes(out, 0, bytes.view(buf)[0..off])
-    bytes.free(buf)
+    bytes.wipe_free(buf)
     return out
 }
 
@@ -469,13 +540,7 @@ client_hello_psk(random: ptr, session_id: byte[], x25519_pub: ptr, host: string,
     off = put16(buf, off, GROUP_X25519)
     off = put16(buf, off, GROUP_SECP256R1)
     // signature_algorithms
-    off = put16(buf, off, 13)
-    off = put16(buf, off, 10)
-    off = put16(buf, off, 8)
-    off = put16(buf, off, SIG_ECDSA_P256_SHA256)
-    off = put16(buf, off, SIG_ECDSA_P384_SHA384)
-    off = put16(buf, off, SIG_RSA_PSS_RSAE_SHA256)
-    off = put16(buf, off, SIG_ED25519)
+    off = put_sig_algs(buf, off)
     // ALPN http/1.1
     off = put16(buf, off, 16)
     off = put16(buf, off, 11)
@@ -535,7 +600,7 @@ client_hello_psk(random: ptr, session_id: byte[], x25519_pub: ptr, host: string,
     out = bytes.new(off)
     if off > 0 { bytes.set(out, off - 1, 0) }
     put_bytes(out, 0, bytes.view(buf)[0..off])
-    bytes.free(buf)
+    bytes.wipe_free(buf)
     out_ch.buf = out
     out_ch.buf_len = off
     out_ch.binder_off = binder_off
@@ -607,7 +672,7 @@ server_hello(random: ptr, session_id: byte[], cipher_suite: int, group: int, pub
 
     out = bytes.new(off)
     bytes.copy_from_bytes(out, 0, buf, 0, off)
-    bytes.free(buf)
+    bytes.wipe_free(buf)
     return out
 }
 
@@ -632,13 +697,28 @@ struct ChParsed {
     key_share_len: int
     has_sni: int // 1 if a server_name extension was present
     saw_supported_versions: int // 1 if the client offered TLS 1.3
+    sig_algs: int // SIGBIT_* of the signature_algorithms schemes offered that a server can sign with
+    saw_sig_algs: int // 1 if a signature_algorithms extension was present
+    // The groups supported_groups names that a server takes (GROUPBIT_*),
+    // and, when no key_share is for one of them, the one a
+    // HelloRetryRequest should ask for (RFC 8446 4.2.8, #3325), else 0.
+    groups: int
+    retry_group: int
+    has_early_data: int // 1 if an early_data extension was present
+    has_cookie: int // 1 if a cookie extension was present
+    alert: int // the alert parse_client_hello says to send, when it refuses (#3357)
 }
+
+// The groups a ChParsed's `groups` records, one bit each.
+const GROUPBIT_X25519MLKEM768 = 1
+const GROUPBIT_X25519 = 2
+const GROUPBIT_SECP256R1 = 4
 
 // Free the buffers a ChParsed owns. Idempotent.
 free_ch(c: *ChParsed) {
-    if c.random != null { bytes.free(c.random) c.random = null }
-    if c.session_id != null { bytes.free(c.session_id) c.session_id = null }
-    if c.key_share != null { bytes.free(c.key_share) c.key_share = null }
+    if c.random != null { bytes.wipe_free(c.random) c.random = null }
+    if c.session_id != null { bytes.wipe_free(c.session_id) c.session_id = null }
+    if c.key_share != null { bytes.wipe_free(c.key_share) c.key_share = null }
 }
 
 // Parse a ClientHello handshake message. Returns "" on success.
@@ -658,14 +738,24 @@ parse_client_hello(msg: byte[], out: *ChParsed) -> string {
     out.key_share_len = 0
     out.has_sni = 0
     out.saw_supported_versions = 0
+    out.sig_algs = 0
+    out.saw_sig_algs = 0
+    out.groups = 0
+    out.retry_group = 0
+    out.has_early_data = 0
+    out.has_cookie = 0
+    out.alert = ALERT_DECODE_ERROR
 
     if len < 4 { return "client hello: truncated header" }
-    if get8(msg, 0) != HS_CLIENT_HELLO { return "client hello: wrong msg type" }
+    if get8(msg, 0) != HS_CLIENT_HELLO {
+        out.alert = ALERT_UNEXPECTED_MESSAGE
+        return "client hello: wrong msg type"
+    }
     body_len = get24(msg, 1)
-    if body_len + 4 > len { return "client hello: length overruns buffer" }
+    if body_len + 4 != len { return "client hello: the message length is not its body's" }
 
     p = 4
-    // legacy_version (2) -- always 0x0303 in TLS 1.3; the real version is in
+    // legacy_version (2) -- 0x0303 in TLS 1.3; the real version is in
     // the supported_versions extension.
     if p + 2 > len { return "client hello: truncated version" }
     p = p + 2
@@ -697,7 +787,7 @@ parse_client_hello(msg: byte[], out: *ChParsed) -> string {
     if p + 2 > len { return "client hello: truncated cipher suites length" }
     cs_len = get16(msg, p)
     p = p + 2
-    if p + cs_len > len { return "client hello: cipher suites overrun" }
+    if cs_len < 2 || cs_len % 2 != 0 || p + cs_len > len { return "client hello: malformed cipher suites" }
     cs_end = p + cs_len
     while p + 1 < cs_end {
         cs = get16(msg, p)
@@ -708,107 +798,582 @@ parse_client_hello(msg: byte[], out: *ChParsed) -> string {
         }
         p = p + 2
     }
-    p = cs_end
-    if out.cipher_suite == 0 { return "client hello: no mutually supported cipher suite" }
 
-    // legacy_compression_methods<1..2^8-1> -- must contain only null(0).
+    // legacy_compression_methods<1..2^8-1>: null(0) must be among them
+    // (RFC 5246 7.4.1.2), and TLS 1.3 wants it alone (checked below).
     if p + 1 > len { return "client hello: truncated compression" }
     comp_len = get8(msg, p)
     p = p + 1
-    if p + comp_len > len { return "client hello: compression overrun" }
+    if comp_len < 1 || p + comp_len > len { return "client hello: malformed compression methods" }
+    comp_null = 0
+    k = 0
+    while k < comp_len {
+        if get8(msg, p + k) == 0 { comp_null = 1 }
+        k = k + 1
+    }
+    comp_only_null = 0
+    if comp_len == 1 && comp_null == 1 { comp_only_null = 1 }
     p = p + comp_len
+    if comp_null == 0 {
+        out.alert = ALERT_ILLEGAL_PARAMETER
+        return "client hello: the compression methods do not include null"
+    }
 
-    // extensions<8..2^16-1>
-    if p + 2 > len { return "client hello: truncated extensions length" }
+    // extensions<8..2^16-1>, which fill the message (#3357).
+    if p + 2 > len { return "client hello: no extensions" }
     ext_total = get16(msg, p)
     p = p + 2
     ext_end = p + ext_total
-    if ext_end > len { return "client hello: extensions overrun" }
+    if ext_end != len { return "client hello: the extensions do not fill the message" }
 
-    while p + 4 <= ext_end {
-        ext_type = get16(msg, p)
-        ext_len = get16(msg, p + 2)
-        d = p + 4
-        if d + ext_len > ext_end { return "client hello: extension overruns" }
-
-        if ext_type == 0x0000 {
-            // server_name: presence is all a server needs here; the name
-            // itself only matters once there is more than one certificate.
-            out.has_sni = 1
-        }
-        if ext_type == 0x002b {
-            // supported_versions<2..254>: list of 2-byte versions, preceded
-            // by a 1-byte length. 0x0304 is TLS 1.3.
-            if ext_len >= 1 {
-                sv_len = get8(msg, d)
-                q = d + 1
-                sv_end = q + sv_len
-                if sv_end > d + ext_len { sv_end = d + ext_len }
-                while q + 1 < sv_end {
-                    if get16(msg, q) == 0x0304 { out.saw_supported_versions = 1 }
-                    q = q + 2
-                }
-            }
-        }
-        if ext_type == 0x0033 {
-            // key_share: client_shares<0..2^16-1> of { group(2), len(2), key }.
-            // Prefer post-quantum X25519MLKEM768 (1216 bytes) if offered,
-            // otherwise fallback to classical X25519 (32 bytes).
-            if ext_len >= 2 {
-                ks_total = get16(msg, d)
-                q = d + 2
-                ks_end = q + ks_total
-                if ks_end > d + ext_len { ks_end = d + ext_len }
-                while q + 4 <= ks_end {
-                    g = get16(msg, q)
-                    klen = get16(msg, q + 2)
-                    kstart = q + 4
-                    if kstart + klen > ks_end { q = ks_end } else {
-                        if g == GROUP_X25519MLKEM768 {
-                            if klen != 1216 {
-                                return "client hello: invalid X25519MLKEM768 key share length"
-                            }
-                            if out.key_share != null {
-                                bytes.free(out.key_share)
-                                out.key_share = null
-                            }
-                            kb = bytes.new(klen)
-                            bytes.copy_from_slice(kb, 0, msg[kstart..kstart + klen])
-                            out.group = g
-                            out.key_share = kb
-                            out.key_share_len = klen
-                        } else if g == GROUP_X25519 && out.group == 0 {
-                            if klen == 32 {
-                                kb = bytes.new(klen)
-                                bytes.copy_from_slice(kb, 0, msg[kstart..kstart + klen])
-                                out.group = g
-                                out.key_share = kb
-                                out.key_share_len = klen
-                            }
-                        }
-                        q = kstart + klen
+    seen = bytes.new(0)
+    saw_groups = 0
+    saw_key_share = 0
+    share_groups = bytes.new(0)
+    err = ""
+    while p < ext_end && err == "" {
+        if p + 4 > ext_end {
+            err = "client hello: truncated extension"
+        } else {
+            ext_type = get16(msg, p)
+            ext_len = get16(msg, p + 2)
+            d = p + 4
+            if d + ext_len > ext_end {
+                err = "client hello: extension overruns"
+            } else {
+                // One of each (RFC 8446 4.2).
+                if list16_has(seen, ext_type) == 1 {
+                    err = "client hello: extension ${ext_type} appears twice"
+                } else {
+                    list16_add(seen, ext_type)
+                    if ext_type == 0x0029 && d + ext_len != ext_end {
+                        // pre_shared_key must be the last extension (4.2.11).
+                        out.alert = ALERT_ILLEGAL_PARAMETER
+                        err = "client hello: pre_shared_key is not the last extension"
+                    } else {
+                        err = ch_extension(msg, ext_type, d, ext_len, out, share_groups)
+                        if ext_type == 0x000a { saw_groups = 1 }
+                        if ext_type == 0x0033 { saw_key_share = 1 }
                     }
                 }
             }
+            p = d + ext_len
         }
-        p = d + ext_len
     }
+    bytes.wipe_free(seen)
+    bytes.wipe_free(share_groups)
+    if err != "" { return err }
 
+    // What every TLS 1.3 ClientHello carries (RFC 8446 4.1.2, 9.2).
     if out.saw_supported_versions == 0 {
+        out.alert = ALERT_PROTOCOL_VERSION
         return "client hello: no supported_versions offering TLS 1.3"
     }
+    if comp_only_null == 0 {
+        out.alert = ALERT_ILLEGAL_PARAMETER
+        return "client hello: a TLS 1.3 ClientHello has compression methods other than null alone"
+    }
+    if out.cipher_suite == 0 {
+        out.alert = ALERT_HANDSHAKE_FAILURE
+        return "client hello: no mutually supported cipher suite"
+    }
+    if saw_groups == 0 {
+        out.alert = ALERT_MISSING_EXTENSION
+        return "client hello: no supported_groups"
+    }
+    if saw_key_share == 0 {
+        out.alert = ALERT_MISSING_EXTENSION
+        return "client hello: no key_share"
+    }
     if out.group == 0 {
-        // A real server answers this with a HelloRetryRequest naming a group
-        // it does support. Not implemented: this returns a clear error so the
-        // caller fails the handshake rather than silently negotiating
-        // something it cannot complete.
-        return "client hello: no key_share for a supported group (HelloRetryRequest not implemented)"
+        // No share the server can use. A group supported_groups names that
+        // it takes is asked for with a HelloRetryRequest (RFC 8446 4.2.8,
+        // #3325): out.retry_group says which, the server's preference
+        // first. Without one, nothing can be agreed.
+        if (out.groups & GROUPBIT_X25519MLKEM768) != 0 {
+            out.retry_group = GROUP_X25519MLKEM768
+        } else if (out.groups & GROUPBIT_X25519) != 0 {
+            out.retry_group = GROUP_X25519
+        } else if (out.groups & GROUPBIT_SECP256R1) != 0 {
+            out.retry_group = GROUP_SECP256R1
+        } else {
+            out.alert = ALERT_HANDSHAKE_FAILURE
+            return "client hello: no key_share for a supported group, and supported_groups names none the server takes"
+        }
+    }
+    out.alert = 0
+    return ""
+}
+
+// 1 when the 2-byte list `l` holds `v`.
+fn list16_has(l: ptr, v: int) -> int {
+    k = 0
+    while k + 1 < bytes.length(l) {
+        if (((bytes.get(l, k) & 0xFF) << 8) | (bytes.get(l, k + 1) & 0xFF)) == v { return 1 }
+        k = k + 2
+    }
+    return 0
+}
+
+fn list16_add(l: ptr, v: int) {
+    n = bytes.length(l)
+    bytes.set(l, n, (v >> 8) & 0xFF)
+    bytes.set(l, n + 1, v & 0xFF)
+}
+
+// One ClientHello extension, `t` with its body at msg[d, d + n), into
+// `out`: "" or why it is refused, out.alert saying with what (decode_error
+// unless set). Each body must parse and fill the extension exactly
+// (#3357). `share_groups` collects the key_share groups, which may not
+// repeat (illegal_parameter, 4.2.8).
+fn ch_extension(msg: byte[], t: int, d: int, n: int, out: *ChParsed, share_groups: ptr) -> string {
+    if t == 0x0000 {
+        // server_name: ServerNameList<1..2^16-1> of { name_type, HostName<1..2^16-1> }.
+        if n < 2 || get16(msg, d) + 2 != n || n == 2 { return "client hello: malformed server_name" }
+        q = d + 2
+        while q < d + n {
+            if q + 3 > d + n { return "client hello: malformed server_name" }
+            hn = get16(msg, q + 1)
+            if hn == 0 || q + 3 + hn > d + n { return "client hello: malformed server_name" }
+            q = q + 3 + hn
+        }
+        out.has_sni = 1
+        return ""
+    }
+    if t == 0x000a {
+        // supported_groups: named_group_list<2..2^16-1> of 2-byte groups;
+        // the ones a server takes, for a HelloRetryRequest (#3325).
+        if n < 2 || get16(msg, d) < 2 || get16(msg, d) % 2 != 0 || get16(msg, d) + 2 != n {
+            return "client hello: malformed supported_groups"
+        }
+        q = d + 2
+        while q + 1 < d + n {
+            sg = get16(msg, q)
+            if sg == GROUP_X25519MLKEM768 { out.groups = out.groups | GROUPBIT_X25519MLKEM768 }
+            if sg == GROUP_X25519 { out.groups = out.groups | GROUPBIT_X25519 }
+            if sg == GROUP_SECP256R1 { out.groups = out.groups | GROUPBIT_SECP256R1 }
+            q = q + 2
+        }
+        return ""
+    }
+    if t == 0x000d {
+        // signature_algorithms: supported_signature_algorithms<2..2^16-2>,
+        // 2-byte schemes. Recorded as SIGBIT_* for the ones a server key
+        // can sign with, so the server picks one the client verifies
+        // (RFC 8446 4.4.3, #3326).
+        if n < 2 { return "client hello: malformed signature_algorithms" }
+        sa_len = get16(msg, d)
+        if sa_len < 2 || sa_len % 2 != 0 || sa_len + 2 != n { return "client hello: malformed signature_algorithms" }
+        out.saw_sig_algs = 1
+        q = d + 2
+        while q + 1 < d + 2 + sa_len {
+            sch = get16(msg, q)
+            if sch == SIG_ECDSA_P256_SHA256 { out.sig_algs = out.sig_algs | SIGBIT_ECDSA_P256 }
+            if sch == SIG_ECDSA_P384_SHA384 { out.sig_algs = out.sig_algs | SIGBIT_ECDSA_P384 }
+            if sch == SIG_ECDSA_P521_SHA512 { out.sig_algs = out.sig_algs | SIGBIT_ECDSA_P521 }
+            if sch == SIG_RSA_PSS_RSAE_SHA256 { out.sig_algs = out.sig_algs | SIGBIT_RSA_PSS_SHA256 }
+            if sch == SIG_RSA_PSS_RSAE_SHA384 { out.sig_algs = out.sig_algs | SIGBIT_RSA_PSS_SHA384 }
+            if sch == SIG_RSA_PSS_RSAE_SHA512 { out.sig_algs = out.sig_algs | SIGBIT_RSA_PSS_SHA512 }
+            if sch == SIG_ED25519 { out.sig_algs = out.sig_algs | SIGBIT_ED25519 }
+            q = q + 2
+        }
+        return ""
+    }
+    if t == 0x002b {
+        // supported_versions<2..254>: 2-byte versions after a 1-byte
+        // length. 0x0304 is TLS 1.3.
+        if n < 1 || get8(msg, d) + 1 != n || get8(msg, d) < 2 || get8(msg, d) % 2 != 0 {
+            return "client hello: malformed supported_versions"
+        }
+        q = d + 1
+        while q + 1 < d + n {
+            if get16(msg, q) == 0x0304 { out.saw_supported_versions = 1 }
+            q = q + 2
+        }
+        return ""
+    }
+    if t == 0x0033 {
+        // key_share: client_shares<0..2^16-1> of { group, key_exchange<1..2^16-1> },
+        // filling the extension, each group once (4.2.8). The share of the
+        // group the server prefers, X25519MLKEM768, X25519, secp256r1, is
+        // taken; one of those of the wrong size is illegal_parameter.
+        if n < 2 || get16(msg, d) + 2 != n { return "client hello: malformed key_share" }
+        q = d + 2
+        best = 0
+        while q < d + n {
+            if q + 4 > d + n { return "client hello: malformed key_share" }
+            g = get16(msg, q)
+            klen = get16(msg, q + 2)
+            kstart = q + 4
+            if klen == 0 || kstart + klen > d + n { return "client hello: malformed key_share" }
+            if list16_has(share_groups, g) == 1 {
+                out.alert = ALERT_ILLEGAL_PARAMETER
+                return "client hello: two key shares for group ${g}"
+            }
+            list16_add(share_groups, g)
+            rank = 0
+            if g == GROUP_X25519MLKEM768 {
+                rank = 3
+                if klen != 1216 {
+                    out.alert = ALERT_ILLEGAL_PARAMETER
+                    return "client hello: invalid X25519MLKEM768 key share length"
+                }
+            } else if g == GROUP_X25519 {
+                rank = 2
+                if klen != 32 {
+                    out.alert = ALERT_ILLEGAL_PARAMETER
+                    return "client hello: an X25519 key share that is not 32 bytes"
+                }
+            } else if g == GROUP_SECP256R1 {
+                rank = 1
+                if klen != 65 || get8(msg, kstart) != 4 {
+                    out.alert = ALERT_ILLEGAL_PARAMETER
+                    return "client hello: a secp256r1 key share that is not an uncompressed point"
+                }
+            }
+            if rank > best {
+                best = rank
+                if out.key_share != null { bytes.wipe_free(out.key_share) }
+                kb = bytes.new(klen)
+                bytes.copy_from_slice(kb, 0, msg[kstart..kstart + klen])
+                out.group = g
+                out.key_share = kb
+                out.key_share_len = klen
+            }
+            q = kstart + klen
+        }
+        return ""
+    }
+    if t == 0x002f {
+        // certificate_authorities: DistinguishedName authorities<3..2^16-1>,
+        // each DistinguishedName<1..2^16-1> (4.2.4).
+        if n < 2 || get16(msg, d) + 2 != n || get16(msg, d) < 3 { return "client hello: malformed certificate_authorities" }
+        q = d + 2
+        while q < d + n {
+            if q + 2 > d + n { return "client hello: malformed certificate_authorities" }
+            dl = get16(msg, q)
+            if dl == 0 || q + 2 + dl > d + n { return "client hello: malformed certificate_authorities" }
+            q = q + 2 + dl
+        }
+        return ""
+    }
+    if t == 0x002a {
+        // early_data is empty in a ClientHello (4.2.10).
+        if n != 0 { return "client hello: early_data with a body" }
+        out.has_early_data = 1
+        return ""
+    }
+    if t == 0x002c {
+        // cookie<1..2^16-1> (4.2.2).
+        if n < 3 || get16(msg, d) + 2 != n { return "client hello: malformed cookie" }
+        out.has_cookie = 1
+        return ""
+    }
+    if t == 0x002d {
+        // psk_key_exchange_modes<1..255> of 1-byte modes (4.2.9).
+        if n < 2 || get8(msg, d) + 1 != n { return "client hello: malformed psk_key_exchange_modes" }
+        return ""
     }
     return ""
 }
 
+// ---- which extensions a server's message may carry (RFC 8446 4.2) ----
+//
+// check_extensions(kind, exts, offered) -> (alert, error) for the
+// extensions<..> block of a message the client received: (0, "") when
+// every extension may appear there, else the alert to send and why.
+// RFC 8446 4.2: a response to an extension the client did not send is
+// refused with unsupported_extension; an extension the client did send but
+// which the message may not carry, with illegal_parameter. A block that
+// does not parse is decode_error, and a type that appears twice is refused
+// as extensions_framed says. Only a CertificateRequest's unknown extensions
+// are ignored (4.3.2); its certificate_authorities and signature lists must
+// parse (#3365).
+//
+// `offered` says what the ClientHello carried beyond the extensions every
+// ClientHello here has (supported_versions, supported_groups,
+// signature_algorithms, key_share): OFFER_* bits.
+
+const MSG_SERVER_HELLO = 1
+const MSG_HELLO_RETRY = 2
+const MSG_ENCRYPTED_EXTENSIONS = 3
+const MSG_CERTIFICATE_ENTRY = 4
+const MSG_NEW_SESSION_TICKET = 5
+const MSG_CERTIFICATE_REQUEST = 6
+
+const OFFER_SNI = 1 // server_name
+const OFFER_ALPN = 2 // application_layer_protocol_negotiation
+const OFFER_STATUS = 4 // status_request
+const OFFER_PSK = 8 // pre_shared_key and psk_key_exchange_modes
+const OFFER_EARLY = 16 // early_data
+
+const ALERT_DECODE_ERROR = 50
+const ALERT_ILLEGAL_PARAMETER = 47
+const ALERT_MISSING_EXTENSION = 109
+const ALERT_UNSUPPORTED_EXTENSION = 110
+const ALERT_UNEXPECTED_MESSAGE = 10
+const ALERT_HANDSHAKE_FAILURE = 40
+const ALERT_PROTOCOL_VERSION = 70
+
+// 1 when the ClientHello (with `offered`) carried extension `t`.
+fn ext_offered(t: int, offered: int) -> int {
+    if t == 43 || t == 10 || t == 13 || t == 51 { return 1 }
+    if t == 0 { return offered & OFFER_SNI }
+    if t == 16 { return (offered & OFFER_ALPN) / OFFER_ALPN }
+    if t == 5 { return (offered & OFFER_STATUS) / OFFER_STATUS }
+    if t == 41 || t == 45 { return (offered & OFFER_PSK) / OFFER_PSK }
+    if t == 42 { return (offered & OFFER_EARLY) / OFFER_EARLY }
+    return 0
+}
+
+// 1 when message `kind` may carry extension `t` (RFC 8446 4.2's table).
+fn ext_allowed(kind: int, t: int) -> int {
+    if kind == MSG_SERVER_HELLO {
+        if t == 43 || t == 51 || t == 41 { return 1 }
+        return 0
+    }
+    if kind == MSG_HELLO_RETRY {
+        if t == 43 || t == 51 || t == 44 { return 1 }
+        return 0
+    }
+    if kind == MSG_ENCRYPTED_EXTENSIONS {
+        if t == 0 || t == 10 || t == 16 || t == 42 { return 1 }
+        return 0
+    }
+    if kind == MSG_CERTIFICATE_ENTRY {
+        if t == 5 || t == 18 { return 1 }
+        return 0
+    }
+    if kind == MSG_NEW_SESSION_TICKET {
+        if t == 42 || t == 62 { return 1 }
+        return 0
+    }
+    return 1
+}
+
+// 1 when this client knows extension `t`: what it sends or parses, and the
+// ones its peers' messages may carry. A NewSessionTicket ignores every
+// other (RFC 8446 4.6.1).
+fn ext_recognized(t: int) -> int {
+    if t == 0 || t == 5 || t == 10 || t == 13 || t == 16 || t == 18 { return 1 }
+    if t == 41 || t == 42 || t == 43 || t == 44 || t == 45 || t == 51 || t == 62 { return 1 }
+    return 0
+}
+
+// The body rules of the extensions a server may answer with: server_name
+// and early_data empty in EncryptedExtensions, ALPN naming exactly one
+// protocol, a status_request in a CertificateEntry holding an OCSP
+// response; a CertificateRequest's certificate_authorities and signature
+// lists well formed. (alert, error) as check_extensions.
+fn ext_body_check(kind: int, t: int, b: byte[], p: int, n: int) -> (int, string) {
+    if kind == MSG_CERTIFICATE_REQUEST && t == 47 {
+        // DistinguishedName authorities<3..2^16-1>, each
+        // DistinguishedName<1..2^16-1> (RFC 8446 4.2.4): a sender with no
+        // name to list omits the extension.
+        if n < 2 || get16(b, p) != n - 2 || n - 2 < 3 {
+            return ALERT_DECODE_ERROR, "extensions: certificate_authorities must list a name and fill its extension"
+        }
+        q = p + 2
+        while q < p + n {
+            if q + 2 > p + n { return ALERT_DECODE_ERROR, "extensions: a truncated name in certificate_authorities" }
+            dl = get16(b, q)
+            if dl == 0 || q + 2 + dl > p + n { return ALERT_DECODE_ERROR, "extensions: a name in certificate_authorities is empty or overruns it" }
+            q = q + 2 + dl
+        }
+    }
+    if kind == MSG_CERTIFICATE_REQUEST && (t == 13 || t == 50) {
+        // SignatureScheme supported_signature_algorithms<2..2^16-2> (4.2.3).
+        if n < 4 || get16(b, p) != n - 2 || (n - 2) % 2 != 0 {
+            return ALERT_DECODE_ERROR, "extensions: a signature algorithm list that is empty, odd or does not fill its extension"
+        }
+    }
+    if kind == MSG_ENCRYPTED_EXTENSIONS && (t == 0 || t == 42) && n != 0 {
+        return ALERT_DECODE_ERROR, "encrypted extensions: extension ${t} must be empty"
+    }
+    if kind == MSG_ENCRYPTED_EXTENSIONS && t == 16 {
+        // ProtocolNameList<2> holding exactly one ProtocolName<1>.
+        if n < 3 || get16(b, p) != n - 2 || get8(b, p + 2) != n - 3 || n - 3 < 1 {
+            return ALERT_DECODE_ERROR, "encrypted extensions: ALPN must name exactly one protocol"
+        }
+    }
+    if kind == MSG_NEW_SESSION_TICKET && t == 42 && n != 4 {
+        return ALERT_DECODE_ERROR, "extensions: early_data must hold max_early_data_size"
+    }
+    if kind == MSG_NEW_SESSION_TICKET && t == 62 {
+        // TLS flags (draft-ietf-tls-tlsflags): flags<1..255>, minimally
+        // encoded, so the last byte is never zero (#3319).
+        if n < 2 || get8(b, p) != n - 1 {
+            return ALERT_DECODE_ERROR, "extensions: flags must hold one to 255 bytes"
+        }
+        if get8(b, p + n - 1) == 0 {
+            return ALERT_ILLEGAL_PARAMETER, "extensions: flags end in a zero byte"
+        }
+    }
+    return 0, ""
+}
+
+check_extensions(kind: int, exts: byte[], offered: int) -> (int, string) {
+    if exts.len < 0 { panic("tls13_hs.check_extensions: the `exts` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int n = exts.len
+    // The block first, whole: each extension inside it, and no type twice,
+    // before any one is judged, so that a repeated extension is refused as
+    // one whatever else is wrong with it.
+    fa, ferr = extensions_framed(kind, exts)
+    if fa != 0 { return fa, ferr }
+    p = 0
+    while p < n {
+        t = get16(exts, p)
+        el = get16(exts, p + 2)
+        if kind == MSG_NEW_SESSION_TICKET {
+            // A ticket's extensions answer nothing: the ones this client
+            // does not know are ignored, the ones it knows must belong in a
+            // ticket and parse (RFC 8446 4.6.1, 4.2, #3319).
+            if ext_recognized(t) == 1 && ext_allowed(kind, t) == 0 {
+                return ALERT_ILLEGAL_PARAMETER, "extensions: extension ${t} may not appear in a NewSessionTicket"
+            }
+            na, nerr = ext_body_check(kind, t, exts, p + 4, el)
+            if na != 0 { return na, nerr }
+        } else if kind == MSG_CERTIFICATE_REQUEST {
+            ra, rerr = ext_body_check(kind, t, exts, p + 4, el)
+            if ra != 0 { return ra, rerr }
+        } else {
+            cookie = 0
+            if kind == MSG_HELLO_RETRY && t == 44 { cookie = 1 }
+            if ext_offered(t, offered) == 0 && cookie == 0 {
+                return ALERT_UNSUPPORTED_EXTENSION, "extensions: extension ${t} answers nothing the client sent"
+            }
+            if ext_allowed(kind, t) == 0 {
+                return ALERT_ILLEGAL_PARAMETER, "extensions: extension ${t} may not appear in this message"
+            }
+            ba, berr = ext_body_check(kind, t, exts, p + 4, el)
+            if ba != 0 { return ba, berr }
+        }
+        p = p + 4 + el
+    }
+    return 0, ""
+}
+
+// The extensions block `exts` of message `kind` as a block: (0, "") when
+// every extension lies inside it and no type comes twice (RFC 8446 4.2).
+// One that overruns is decode_error; a repeated type is decode_error in
+// EncryptedExtensions, where the block is one list of answers, and
+// illegal_parameter in the other messages, as BoringSSL sends them.
+fn extensions_framed(kind: int, exts: byte[]) -> (int, string) {
+    int n = exts.len
+    seen = bytes.new(0)
+    p = 0
+    while p < n {
+        if p + 4 > n {
+            bytes.wipe_free(seen)
+            return ALERT_DECODE_ERROR, "extensions: truncated"
+        }
+        t = get16(exts, p)
+        el = get16(exts, p + 2)
+        if p + 4 + el > n {
+            bytes.wipe_free(seen)
+            return ALERT_DECODE_ERROR, "extensions: extension ${t} overruns its block"
+        }
+        // The types seen so far, two bytes each.
+        k = 0
+        while k + 1 < bytes.length(seen) {
+            if (((bytes.get(seen, k) & 0xFF) << 8) | (bytes.get(seen, k + 1) & 0xFF)) == t {
+                bytes.wipe_free(seen)
+                if kind == MSG_ENCRYPTED_EXTENSIONS { return ALERT_DECODE_ERROR, "extensions: extension ${t} appears twice" }
+                return ALERT_ILLEGAL_PARAMETER, "extensions: extension ${t} appears twice"
+            }
+            k = k + 2
+        }
+        sl = bytes.length(seen)
+        bytes.set(seen, sl, (t >> 8) & 0xFF)
+        bytes.set(seen, sl + 1, t & 0xFF)
+        p = p + 4 + el
+    }
+    bytes.wipe_free(seen)
+    return 0, ""
+}
+
+// check_certificate(body, offered) -> (alert, error) for the body of a
+// server's Certificate message (RFC 8446 4.4.2): an empty
+// certificate_request_context, a certificate_list of at least one entry
+// that fills the message exactly, each entry's cert_data non-empty and its
+// extensions what check_extensions allows in a CertificateEntry, a
+// status_request holding exactly one OCSP CertificateStatus. (0, "") when
+// it is well formed.
+check_certificate(body: byte[], offered: int) -> (int, string) {
+    if body.len < 0 { panic("tls13_hs.check_certificate: the `body` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int n = body.len
+    if n < 4 { return ALERT_DECODE_ERROR, "certificate: truncated" }
+    if get8(body, 0) != 0 { return ALERT_DECODE_ERROR, "certificate: a server's certificate_request_context must be empty" }
+    list_len = get24(body, 1)
+    if 4 + list_len != n { return ALERT_DECODE_ERROR, "certificate: the certificate list does not fill the message" }
+    if list_len == 0 { return ALERT_DECODE_ERROR, "certificate: no certificate" }
+    p = 4
+    while p < n {
+        if p + 3 > n { return ALERT_DECODE_ERROR, "certificate: truncated entry" }
+        cl = get24(body, p)
+        if cl == 0 || p + 3 + cl + 2 > n { return ALERT_DECODE_ERROR, "certificate: a cert_data overruns the list" }
+        q = p + 3 + cl
+        el = get16(body, q)
+        if q + 2 + el > n { return ALERT_DECODE_ERROR, "certificate: an entry's extensions overrun the list" }
+        a, err = check_extensions(MSG_CERTIFICATE_ENTRY, body[q + 2..q + 2 + el], offered)
+        if a != 0 { return a, "certificate: ${err}" }
+        // A status_request answer is one CertificateStatus { status_type
+        // ocsp(1), OCSPResponse<1..2^24-1> } (RFC 8446 4.4.2.1, RFC 6066 8).
+        r = q + 2
+        while r + 4 <= q + 2 + el {
+            t = get16(body, r)
+            tl = get16(body, r + 2)
+            if t == 5 {
+                if tl < 5 || get8(body, r + 4) != 1 || 4 + get24(body, r + 5) != tl || get24(body, r + 5) == 0 {
+                    return ALERT_DECODE_ERROR, "certificate: a status_request answer is not one OCSP response"
+                }
+            }
+            r = r + 4 + tl
+        }
+        p = q + 2 + el
+    }
+    return 0, ""
+}
+
+// check_certificate_request(body) -> (alert, error) for the body of a
+// CertificateRequest in the handshake (RFC 8446 4.3.2): an empty
+// certificate_request_context (only post-handshake authentication, which
+// this client does not offer, fills it) and extensions that fill the rest,
+// each once, are decode_error and illegal_parameter otherwise; without
+// signature_algorithms, missing_extension (109) (#3324). An empty
+// certificate_authorities, one with bytes after its names, or a signature
+// list that is empty, odd or short is decode_error (4.2.4, 4.2.3, #3365).
+check_certificate_request(body: byte[]) -> (int, string) {
+    if body.len < 0 { panic("tls13_hs.check_certificate_request: the `body` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int n = body.len
+    if n < 3 { return ALERT_DECODE_ERROR, "certificate request: truncated" }
+    if get8(body, 0) != 0 { return ALERT_DECODE_ERROR, "certificate request: a handshake's certificate_request_context must be empty" }
+    if 3 + get16(body, 1) != n { return ALERT_DECODE_ERROR, "certificate request: the extensions do not fill the message" }
+    a, err = check_extensions(MSG_CERTIFICATE_REQUEST, body[3..n], 0)
+    if a != 0 { return a, "certificate request: ${err}" }
+    p = 3
+    while p + 4 <= n {
+        if get16(body, p) == 13 { return 0, "" }
+        p = p + 4 + get16(body, p + 2)
+    }
+    return ALERT_MISSING_EXTENSION, "certificate request: no signature_algorithms"
+}
+
+// parse_server_hello(msg, out) -> "" or why the ServerHello (or
+// HelloRetryRequest) is refused; out.alert is then the alert to send:
+// decode_error for a message that does not parse, protocol_version for one
+// that is not TLS 1.3, else what check_extensions or the field says.
 parse_server_hello(msg: byte[], out: *ShParsed) -> string {
     if msg.len < 0 { panic("tls13_hs.parse_server_hello: the `msg` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    out.alert = 0
+    err = parse_server_hello_fields(msg, out)
+    if err != "" && out.alert == 0 {
+        out.alert = ALERT_ILLEGAL_PARAMETER
+    }
+    return err
+}
+
+fn parse_server_hello_fields(msg: byte[], out: *ShParsed) -> string {
     int len = msg.len
     out.version = 0
     out.cipher_suite = 0
@@ -817,45 +1382,68 @@ parse_server_hello(msg: byte[], out: *ShParsed) -> string {
     out.key_share_len = 0
     out.is_hello_retry = 0
     out.psk_accepted = 0
+    out.session_id_off = 0
+    out.session_id_len = 0
+    out.selected_identity = -1
+    out.cookie_off = 0
+    out.cookie_len = 0
 
-    if len < 4 { return "server hello: truncated header" }
+    if len < 4 { out.alert = ALERT_DECODE_ERROR; return "server hello: truncated header" }
     if get8(msg, 0) != HS_SERVER_HELLO { return "server hello: wrong msg type" }
     body_len = get24(msg, 1)
-    if body_len + 4 > len { return "server hello: length overruns buffer" }
+    if body_len + 4 > len { out.alert = ALERT_DECODE_ERROR; return "server hello: length overruns buffer" }
 
     p = 4
-    // legacy_version (2) — ignored, real version is in supported_versions
-    if p + 2 > len { return "server hello: truncated version" }
+    // legacy_version (2): TLS 1.3 fixes it at 0x0303, the real version
+    // travelling in supported_versions (RFC 8446 4.1.3, #3318).
+    if p + 2 > len { out.alert = ALERT_DECODE_ERROR; return "server hello: truncated version" }
+    if get16(msg, p) != 0x0303 { return "server hello: legacy_version ${get16(msg, p)} is not 0x0303" }
     p = p + 2
     // random[32] — a HelloRetryRequest is a ServerHello whose random equals the
     // special SHA-256("HelloRetryRequest") sentinel (RFC 8446 §4.1.3).
-    if p + 32 > len { return "server hello: truncated random" }
+    if p + 32 > len { out.alert = ALERT_DECODE_ERROR; return "server hello: truncated random" }
     if is_hrr_random(msg, p) == 1 { out.is_hello_retry = 1 }
     p = p + 32
     // legacy_session_id_echo<0..32>
-    if p + 1 > len { return "server hello: truncated session id len" }
+    if p + 1 > len { out.alert = ALERT_DECODE_ERROR; return "server hello: truncated session id len" }
     sid_len = get8(msg, p)
+    if sid_len > 32 || p + 1 + sid_len > len { out.alert = ALERT_DECODE_ERROR; return "server hello: bad legacy_session_id_echo" }
+    out.session_id_off = p + 1
+    out.session_id_len = sid_len
     p = p + 1 + sid_len
     // cipher_suite (2)
-    if p + 2 > len { return "server hello: truncated cipher suite" }
+    if p + 2 > len { out.alert = ALERT_DECODE_ERROR; return "server hello: truncated cipher suite" }
     out.cipher_suite = get16(msg, p)
     p = p + 2
-    // legacy_compression_method (1) — must be 0
-    if p + 1 > len { return "server hello: truncated compression" }
-    if get8(msg, p) != 0 { return "server hello: nonzero compression method" }
+    // legacy_compression_method (1): 0, the only value the field may hold
+    // (RFC 8446 4.1.3), so any other is a message that does not parse
+    // (decode_error, as BoringSSL sends, #3364).
+    if p + 1 > len { out.alert = ALERT_DECODE_ERROR; return "server hello: truncated compression" }
+    if get8(msg, p) != 0 { out.alert = ALERT_DECODE_ERROR; return "server hello: nonzero compression method" }
     p = p + 1
     // extensions<6..2^16-1>
-    if p + 2 > len { return "server hello: truncated extensions length" }
+    if p + 2 > len { out.alert = ALERT_DECODE_ERROR; return "server hello: truncated extensions length" }
     ext_total = get16(msg, p)
     p = p + 2
     ext_end = p + ext_total
-    if ext_end > len { return "server hello: extensions overrun" }
+    if ext_end > len { out.alert = ALERT_DECODE_ERROR; return "server hello: extensions overrun" }
+    // The extensions end the message (RFC 8446 4.1.3, #3318).
+    if ext_end != 4 + body_len { out.alert = ALERT_DECODE_ERROR; return "server hello: the extensions do not fill the message" }
+    kind = MSG_SERVER_HELLO
+    if out.is_hello_retry == 1 { kind = MSG_HELLO_RETRY }
+    // Every extension the ClientHello may carry counts as offered here:
+    // the client refuses a pre_shared_key it did not offer itself.
+    xa, xerr = check_extensions(kind, msg[p..ext_end], OFFER_SNI | OFFER_ALPN | OFFER_STATUS | OFFER_PSK | OFFER_EARLY)
+    if xa != 0 {
+        out.alert = xa
+        return "server hello: ${xerr}"
+    }
 
     while p + 4 <= ext_end {
         ext_type = get16(msg, p)
         ext_len = get16(msg, p + 2)
         p = p + 4
-        if p + ext_len > ext_end { return "server hello: extension overrun" }
+        if p + ext_len > ext_end { out.alert = ALERT_DECODE_ERROR; return "server hello: extension overrun" }
 
         if ext_type == 43 {
             // supported_versions (server form: single selected version)
@@ -866,14 +1454,14 @@ parse_server_hello(msg: byte[], out: *ShParsed) -> string {
             if out.is_hello_retry == 1 {
                 // HRR key_share carries only the selected group (2 bytes),
                 // no key — it tells the client which group to retry with.
-                if ext_len < 2 { return "server hello: bad HRR key_share" }
+                if ext_len != 2 { out.alert = ALERT_DECODE_ERROR; return "hello retry request: a key_share that is not one group" }
                 out.group = get16(msg, p)
             } else {
                 // key_share (server form: single KeyShareEntry {group, key<len>})
-                if ext_len < 4 { return "server hello: bad key_share" }
+                if ext_len < 4 { out.alert = ALERT_DECODE_ERROR; return "server hello: bad key_share" }
                 out.group = get16(msg, p)
                 ks_len = get16(msg, p + 2)
-                if 4 + ks_len > ext_len { return "server hello: key_share overrun" }
+                if 4 + ks_len != ext_len { out.alert = ALERT_DECODE_ERROR; return "server hello: a key_share that does not fill its extension" }
                 ks = bytes.new(ks_len)
                 if ks_len > 0 { bytes.set(ks, ks_len - 1, 0) }
                 j = 0
@@ -888,12 +1476,26 @@ parse_server_hello(msg: byte[], out: *ShParsed) -> string {
         if ext_type == 41 {
             // pre_shared_key (server form: selected_identity uint16). Its
             // presence means the server accepted our PSK — resumption is on.
+            // Which identity it took is the client's to check (#3318).
+            if ext_len != 2 { out.alert = ALERT_DECODE_ERROR; return "server hello: a pre_shared_key that is not one selected_identity" }
             out.psk_accepted = 1
+            out.selected_identity = get16(msg, p)
+        }
+        if ext_type == 44 {
+            // cookie<1..2^16-1>, only in a HelloRetryRequest (check_extensions
+            // saw to that), echoed in the second ClientHello (#3325).
+            if ext_len < 3 || 2 + get16(msg, p) != ext_len {
+                out.alert = ALERT_DECODE_ERROR
+                return "hello retry request: a cookie that is empty or does not fill its extension"
+            }
+            out.cookie_off = p + 2
+            out.cookie_len = ext_len - 2
         }
         p = p + ext_len
     }
 
     if out.version != 0x0304 {
+        out.alert = 70
         return "server hello: not TLS 1.3 (no supported_versions=0x0304): the server negotiated an older TLS version, and this client speaks TLS 1.3 only"
     }
     return ""
@@ -902,27 +1504,36 @@ parse_server_hello(msg: byte[], out: *ShParsed) -> string {
 // The HelloRetryRequest sentinel random = SHA-256("HelloRetryRequest")
 // (RFC 8446 §4.1.3). Returns 1 if the 32 bytes at msg[off..off+32) match.
 fn is_hrr_random(msg: byte[], off: int) -> int {
-    // RFC 8446 §4.1.3 HelloRetryRequest special Random =
-    // SHA-256("HelloRetryRequest"):
-    // CF 21 AD 74 E5 9A 61 11 BE 1D FA 3A 06 B4 4E 8C
-    // 84 5C 76 30 04 8B 15 D5 A0 0D 20 3A 15 D5 B2 6E
-    hrr = bytes.new(32)
-    bytes.set(hrr, 0, 0xCF); bytes.set(hrr, 1, 0x21); bytes.set(hrr, 2, 0xAD); bytes.set(hrr, 3, 0x74)
-    bytes.set(hrr, 4, 0xE5); bytes.set(hrr, 5, 0x9A); bytes.set(hrr, 6, 0x61); bytes.set(hrr, 7, 0x11)
-    bytes.set(hrr, 8, 0xBE); bytes.set(hrr, 9, 0x1D); bytes.set(hrr, 10, 0xFA); bytes.set(hrr, 11, 0x3A)
-    bytes.set(hrr, 12, 0x06); bytes.set(hrr, 13, 0xB4); bytes.set(hrr, 14, 0x4E); bytes.set(hrr, 15, 0x8C)
-    bytes.set(hrr, 16, 0x84); bytes.set(hrr, 17, 0x5C); bytes.set(hrr, 18, 0x76); bytes.set(hrr, 19, 0x30)
-    bytes.set(hrr, 20, 0x04); bytes.set(hrr, 21, 0x8B); bytes.set(hrr, 22, 0x15); bytes.set(hrr, 23, 0xD5)
-    bytes.set(hrr, 24, 0xA0); bytes.set(hrr, 25, 0x0D); bytes.set(hrr, 26, 0x20); bytes.set(hrr, 27, 0x3A)
-    bytes.set(hrr, 28, 0x15); bytes.set(hrr, 29, 0xD5); bytes.set(hrr, 30, 0xB2); bytes.set(hrr, 31, 0x6E)
+    hrr = hrr_random()
     same = 1
     i = 0
     while i < 32 {
         if (msg[off + i] & 0xFF) != (bytes.get(hrr, i) & 0xFF) { same = 0 }
         i = i + 1
     }
-    bytes.free(hrr)
+    bytes.wipe_free(hrr)
     return same
+}
+
+// The HelloRetryRequest random (RFC 8446 4.1.3), SHA-256 of the ASCII
+// "HelloRetryRequest": CF 21 AD 74 E5 9A 61 11 BE 1D 8C 02 1E 65 B8 91 C2 A2
+// 11 16 7A BB 8C 5E 07 9E 09 E2 C8 A8 33 9C. It is computed, not spelled out:
+// a hand-copied constant had the second half wrong (#3325), so a real
+// server's HelloRetryRequest read as a ServerHello and ours was refused.
+// Fresh 32 bytes.
+fn hrr_random() -> ptr {
+    s = "HelloRetryRequest"
+    n = string_length(s)
+    t = bytes.new(n)
+    i = 0
+    while i < n {
+        bytes.set(t, i, string_char_at_n(s, n, i) & 0xFF)
+        i = i + 1
+    }
+    ctx, _err = sha2.new("sha256")
+    sha2.update(ctx, bytes.view(t)[0..n])
+    bytes.wipe_free(t)
+    return sha2.final_bytes(ctx)
 }
 
 // EncryptedExtensions handshake message (RFC 8446 §4.3.1)
@@ -1001,4 +1612,224 @@ finished_msg(vd: ptr, vd_len: int) -> ptr {
     put24(m, 1, vd_len)
     bytes.copy_from_bytes(m, 4, vd, 0, vd_len)
     return m
+}
+
+// KeyUpdate handshake message (RFC 8446 4.6.3): `request` is
+// KEY_UPDATE_NOT_REQUESTED or KEY_UPDATE_REQUESTED. Fresh bytes (caller
+// frees).
+key_update_msg(request: int) -> ptr {
+    m = bytes.new(5)
+    bytes.set(m, 0, HS_KEY_UPDATE)
+    put24(m, 1, 1)
+    bytes.set(m, 4, request & 0xFF)
+    return m
+}
+
+// The request_update of a KeyUpdate body (RFC 8446 4.6.3): (request, 0, "")
+// or (-1, alert, why): decode_error for a body that is not one byte,
+// illegal_parameter for a value other than KEY_UPDATE_NOT_REQUESTED and
+// KEY_UPDATE_REQUESTED.
+key_update_request(body: byte[]) -> (int, int, string) {
+    if body.len < 0 { panic("tls13_hs.key_update_request: the `body` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    if body.len != 1 { return -1, ALERT_DECODE_ERROR, "key update: the body is not one byte" }
+    v = body[0] & 0xFF
+    if v > KEY_UPDATE_REQUESTED { return -1, ALERT_ILLEGAL_PARAMETER, "key update: request_update ${v} is neither 0 nor 1" }
+    return v, 0, ""
+}
+
+// ---- NewSessionTicket (RFC 8446 4.6.1) ----
+
+// A NewSessionTicket body, as parse_new_session_ticket reads it: the
+// nonce and the ticket are where they are in the body.
+struct NstParsed {
+    lifetime: int // ticket_lifetime, seconds
+    age_add: int // ticket_age_add
+    nonce_off: int
+    nonce_len: int
+    ticket_off: int
+    ticket_len: int
+    max_early_data: int // early_data's max_early_data_size; 0 without it
+    alert: int // the alert to send when it is refused
+}
+
+// parse_new_session_ticket(body, out) -> "" or why the body of a
+// NewSessionTicket is refused, `out.alert` then saying what to send
+// (#3319): decode_error for a body that does not parse, an empty ticket
+// (ticket<1..2^16-1>) and bytes after the extensions; what check_extensions
+// says about those (a duplicate is illegal_parameter, an early_data that is
+// not four bytes decode_error, TLS flags empty or ending in a zero byte
+// decode_error or illegal_parameter; an extension this client does not
+// know is ignored, as 4.6.1 asks).
+parse_new_session_ticket(body: byte[], out: *NstParsed) -> string {
+    if body.len < 0 { panic("tls13_hs.parse_new_session_ticket: the `body` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int n = body.len
+    out.lifetime = 0
+    out.age_add = 0
+    out.nonce_off = 0
+    out.nonce_len = 0
+    out.ticket_off = 0
+    out.ticket_len = 0
+    out.max_early_data = 0
+    out.alert = ALERT_DECODE_ERROR
+    if n < 9 { return "new session ticket: truncated" }
+    out.lifetime = (get16(body, 0) << 16) | get16(body, 2)
+    out.age_add = (get16(body, 4) << 16) | get16(body, 6)
+    nl = get8(body, 8)
+    p = 9
+    if p + nl + 2 > n { return "new session ticket: truncated nonce" }
+    out.nonce_off = p
+    out.nonce_len = nl
+    p = p + nl
+    tl = get16(body, p)
+    p = p + 2
+    if tl == 0 { return "new session ticket: an empty ticket" }
+    if p + tl + 2 > n { return "new session ticket: truncated ticket" }
+    out.ticket_off = p
+    out.ticket_len = tl
+    p = p + tl
+    el = get16(body, p)
+    p = p + 2
+    if p + el != n { return "new session ticket: the extensions do not fill the message" }
+    a, err = check_extensions(MSG_NEW_SESSION_TICKET, body[p..n], 0)
+    if a != 0 {
+        out.alert = a
+        return "new session ticket: ${err}"
+    }
+    q = p
+    while q + 4 <= n {
+        if get16(body, q) == 42 {
+            out.max_early_data = (get16(body, q + 4) << 16) | get16(body, q + 6)
+        }
+        q = q + 4 + get16(body, q + 2)
+    }
+    out.alert = 0
+    return ""
+}
+
+// ---- HelloRetryRequest (RFC 8446 4.1.4) ----
+
+// A HelloRetryRequest (#3325): a ServerHello whose random is the
+// HelloRetryRequest sentinel, echoing `session_id`, naming `cipher_suite`,
+// and asking in key_share for a share of `group`. Fresh bytes (caller frees).
+hello_retry_request(session_id: byte[], cipher_suite: int, group: int) -> ptr {
+    if session_id.len < 0 { panic("tls13_hs.hello_retry_request: the `session_id` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int sid_len = session_id.len
+    n = 4 + 2 + 32 + 1 + sid_len + 2 + 1 + 2 + 6 + 6
+    m = bytes.new(n)
+    bytes.set(m, n - 1, 0)
+    put8(m, 0, HS_SERVER_HELLO)
+    put24(m, 1, n - 4)
+    off = put16(m, 4, 0x0303)
+    hrr = hrr_random()
+    off = put_bytes(m, off, bytes.view(hrr)[0..32])
+    bytes.wipe_free(hrr)
+    off = put8(m, off, sid_len)
+    off = put_bytes(m, off, session_id)
+    off = put16(m, off, cipher_suite)
+    off = put8(m, off, 0)
+    off = put16(m, off, 12)
+    off = put16(m, off, 43)
+    off = put16(m, off, 2)
+    off = put16(m, off, 0x0304)
+    off = put16(m, off, 51)
+    off = put16(m, off, 2)
+    off = put16(m, off, group)
+    return m
+}
+
+// client_hello_retry(ch1, group, share, cookie, out): the second
+// ClientHello after a HelloRetryRequest, which RFC 8446 4.1.2 wants to be
+// the first one, `ch1`, changed only as the HelloRetryRequest asks: when
+// `group` is not 0, key_share holds the one KeyShareEntry for it with
+// `share`; a non-empty `cookie` goes in a cookie extension; early_data is
+// gone; and a pre_shared_key, still the last extension, has its binders
+// zeroed for the caller to compute again over the new transcript (#3325).
+// Fills `out` as client_hello_psk does: binder_off and truncated_len are 0
+// without a pre_shared_key. Caller frees out.buf.
+client_hello_retry(ch1: byte[], group: int, share: byte[], cookie: byte[], out: *PskCh) {
+    if ch1.len < 0 { panic("tls13_hs.client_hello_retry: the `ch1` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    if share.len < 0 { panic("tls13_hs.client_hello_retry: the `share` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    if cookie.len < 0 { panic("tls13_hs.client_hello_retry: the `cookie` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int n = ch1.len
+    int share_len = share.len
+    int cookie_len = cookie.len
+    out.buf = null
+    out.buf_len = 0
+    out.binder_off = 0
+    out.truncated_len = 0
+    // Fixed fields: version, random, session id, cipher suites, compression.
+    p = 4 + 2 + 32
+    p = p + 1 + get8(ch1, p)
+    p = p + 2 + get16(ch1, p)
+    p = p + 1 + get8(ch1, p)
+    ext_end = p + 2 + get16(ch1, p)
+    buf = bytes.new(n + share_len + cookie_len + 64)
+    bytes.set(buf, n + share_len + cookie_len + 63, 0)
+    off = put_bytes(buf, 0, ch1[0..p])
+    ext_len_pos = off
+    off = off + 2
+    q = p + 2
+    cookie_done = 0
+    while q + 4 <= ext_end {
+        t = get16(ch1, q)
+        el = get16(ch1, q + 2)
+        if t == 41 && cookie_len > 0 && cookie_done == 0 {
+            off = put_cookie(buf, off, cookie)
+            cookie_done = 1
+        }
+        if t == 51 && group != 0 {
+            off = put16(buf, off, 51)
+            off = put16(buf, off, 2 + 4 + share_len)
+            off = put16(buf, off, 4 + share_len)
+            off = put16(buf, off, group)
+            off = put16(buf, off, share_len)
+            off = put_bytes(buf, off, share)
+        } else if t == 42 {
+            // No early data after a HelloRetryRequest (4.1.2).
+        } else if t == 41 {
+            // identities<2>, then binders<2> of binder<1> entries, zeroed.
+            off = put16(buf, off, 41)
+            off = put16(buf, off, el)
+            il = get16(ch1, q + 4)
+            off = put_bytes(buf, off, ch1[q + 4..q + 6 + il])
+            out.truncated_len = off
+            b = q + 6 + il
+            bl = get16(ch1, b)
+            off = put16(buf, off, bl)
+            r = b + 2
+            first = 1
+            while r < b + 2 + bl {
+                one = get8(ch1, r)
+                off = put8(buf, off, one)
+                if first == 1 { out.binder_off = off }
+                first = 0
+                k = 0
+                while k < one {
+                    off = put8(buf, off, 0)
+                    k = k + 1
+                }
+                r = r + 1 + one
+            }
+        } else {
+            off = put_bytes(buf, off, ch1[q..q + 4 + el])
+        }
+        q = q + 4 + el
+    }
+    if cookie_len > 0 && cookie_done == 0 { off = put_cookie(buf, off, cookie) }
+    put16(buf, ext_len_pos, off - ext_len_pos - 2)
+    put24(buf, 1, off - 4)
+    m = bytes.new(off)
+    bytes.copy_from_bytes(m, 0, buf, 0, off)
+    bytes.wipe_free(buf)
+    out.buf = m
+    out.buf_len = off
+}
+
+// The cookie extension (44) holding `cookie`; the offset past it.
+fn put_cookie(buf: ptr, at: int, cookie: byte[]) -> int {
+    int cl = cookie.len
+    off = put16(buf, at, 44)
+    off = put16(buf, off, 2 + cl)
+    off = put16(buf, off, cl)
+    return put_bytes(buf, off, cookie)
 }

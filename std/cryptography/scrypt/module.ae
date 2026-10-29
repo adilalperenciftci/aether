@@ -221,7 +221,7 @@ scrypt(pass: byte[], salt: byte[], n: int, r: int, p: int, dklen: int) -> ptr {
     xbuf = bytes.new(64)
     bx = bytes.new(block_bytes)
     if v == null {
-        bytes.free(b)
+        bytes.wipe_free(b)
         return null
     }
 
@@ -268,14 +268,14 @@ scrypt(pass: byte[], salt: byte[], n: int, r: int, p: int, dklen: int) -> ptr {
         pi = pi + 1
     }
 
-    bytes.free(v)
-    bytes.free(tmp)
-    bytes.free(xbuf)
-    bytes.free(bx)
+    bytes.wipe_free(v)
+    bytes.wipe_free(tmp)
+    bytes.wipe_free(xbuf)
+    bytes.wipe_free(bx)
 
     // DK = PBKDF2-HMAC-SHA256(P, B, 1, dkLen)
     out = pbkdf2.pbkdf2("sha256", pass, bytes.view(b)[0..total], 1, dklen)
-    bytes.free(b)
+    bytes.wipe_free(b)
     return out
 }
 
@@ -302,6 +302,6 @@ scrypt_hex(pass: byte[], salt: byte[], n: int, r: int, p: int, dklen: int) -> st
         bytes.set(hexbuf, i * 2 + 1, c_lo)
         i = i + 1
     }
-    bytes.free(out)
+    bytes.wipe_free(out)
     return bytes.finish(hexbuf, dklen * 2)
 }

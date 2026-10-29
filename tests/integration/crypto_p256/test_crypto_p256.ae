@@ -1,14 +1,47 @@
 // Validate std.cryptography.p256: known base-point multiples, a NIST
-// ECDH CAVP vector, and an ECDSA sign/verify round-trip (+ tamper).
+// ECDH CAVP vector, RFC 6979 deterministic ECDSA (appendix A.2.5, every SHA-2
+// digest), a sign/verify round trip with tamper rejection, and the input
+// checks: private keys outside [1, n-1], and public points off the curve or
+// with a coordinate >= p (the invalid-curve attack, #3291).
 import std.cryptography.p256
+import std.cryptography.sha2
 import std.bytes
 import std.string
 import std.io
 
-hv(c: int) -> int { if c >= 48 { if c <= 57 { return c - 48 } } if c >= 97 { if c <= 102 { return c - 87 } } return 0 }
+hv(c: int) -> int { if c >= 48 { if c <= 57 { return c - 48 } } if c >= 97 { if c <= 102 { return c - 87 } } if c >= 65 { if c <= 70 { return c - 55 } } return 0 }
 hb(h: string) -> ptr { n = string.length(h); b = bytes.new(n / 2); i = 0; while i < n { bytes.set(b, i / 2, hv(string_char_at_n(h, n, i)) * 16 + hv(string_char_at_n(h, n, i + 1))); i = i + 2 } return b }
-bh(b: ptr) -> string { d = "0123456789abcdef"; o = ""; n = bytes.length(b); i = 0; while i < n { v = bytes.get(b, i); o = string.concat(o, string.concat(string.substring(d, (v / 16) & 15, ((v / 16) & 15) + 1), string.substring(d, v & 15, (v & 15) + 1))); i = i + 1 } return o }
-ck(lbl: string, got: string, want: string) -> int { if got == want { println("ok   ${lbl}"); return 0 } println("FAIL ${lbl}\n  ${got}\n  ${want}"); return 1 }
+bh(b: ptr) -> string { if b == null { return "(null)" } d = "0123456789abcdef"; o = ""; n = bytes.length(b); i = 0; while i < n { v = bytes.get(b, i); o = string.concat(o, string.concat(string.substring(d, (v / 16) & 15, ((v / 16) & 15) + 1), string.substring(d, v & 15, (v & 15) + 1))); i = i + 1 } return o }
+ck(lbl: string, got: string, want: string) -> int { if got == string.to_lower(want) { println("ok   ${lbl}"); return 0 } println("FAIL ${lbl}\n  ${got}\n  ${want}"); return 1 }
+
+fn digest(algo: string, msg: string) -> ptr {
+    n = string.length(msg)
+    m = bytes.new(n)
+    i = 0
+    while i < n {
+        bytes.set(m, i, string_char_at_n(msg, n, i))
+        i = i + 1
+    }
+    ctx, _e = sha2.new(algo)
+    sha2.update(ctx, bytes.view(m))
+    bytes.free(m)
+    return sha2.final_bytes(ctx)
+}
+
+// RFC 6979 A.2.5: sign `msg` hashed with `algo` under the appendix's key and
+// compare (r, s); the signature must also verify.
+fn rfc6979(priv: ptr, px: ptr, py: ptr, algo: string, msg: string, want_r: string, want_s: string) -> int {
+    h = digest(algo, msg)
+    r, s = p256.ecdsa_sign(priv, h)
+    fails = ck("rfc6979 ${algo} \"${msg}\" r", bh(r), want_r)
+    fails = fails + ck("rfc6979 ${algo} \"${msg}\" s", bh(s), want_s)
+    if p256.ecdsa_verify(px, py, h, r, s) != 1 {
+        println("FAIL rfc6979 ${algo} \"${msg}\" does not verify")
+        fails = fails + 1
+    }
+    bytes.free(h); bytes.free(r); bytes.free(s)
+    return fails
+}
 
 main() {
     fails = 0
@@ -18,23 +51,93 @@ main() {
     g2x, g2y = p256.scalar_mult_base(two)
     fails = fails + ck("2G x", bh(g2x), "7cf27b188d034f7e8a52380304b51ac3c08969e277f21b35a60b48fc47669978")
     fails = fails + ck("2G y", bh(g2y), "07775510db8ed040293d9ac69f7430dbba7dade63ce982299e04b79d227873d1")
+    // (n-1)*G = -G: the scalar multiplication across the whole width.
+    nm1 = hb("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632550")
+    mgx, mgy = p256.scalar_mult_base(nm1)
+    fails = fails + ck("(n-1)G x", bh(mgx), "6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296")
+    fails = fails + ck("(n-1)G y", bh(mgy), "b01cbd1c01e58065711814b583f061e9d431cca994cea1313449bf97c840ae0a")
+    // n*G is the point at infinity: no affine coordinates.
+    nn = hb("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551")
+    ix, iy = p256.scalar_mult_base(nn)
+    if ix == null && iy == null { println("ok   nG is the identity") } else { println("FAIL nG returned a point"); fails = fails + 1 }
 
     // NIST ECDH CAVP vector.
     priv = hb("7d7dc5f71eb29ddaf80d6214632eeae03d9058af1fb6d22ed80badb62bc1a534")
     pbx = hb("700c48f77f56584c5cc632ca65640db91b6bacce3a4df6b42ce7cc838833d287")
     pby = hb("db71e509e3fd9b060ddb20ba5c51dcc5948d46fbf640dfe0441782cab85fa4ac")
-    fails = fails + ck("ecdh", bh(p256.ecdh(priv, pbx, pby)),
-        "46fc62106420ff012e54a434fbdd2d25ccc5852060561e68040dd7778997bd7b")
+    z = p256.ecdh(priv, pbx, pby)
+    fails = fails + ck("ecdh", bh(z), "46fc62106420ff012e54a434fbdd2d25ccc5852060561e68040dd7778997bd7b")
 
-    // ECDSA sign/verify round-trip.
+    // RFC 6979 A.2.5: the key pair, then every SHA-2 digest of both messages.
+    x = hb("C9AFA9D845BA75166B5C215767B1D6934E50C3DB36E89B127B8A622B120F6721")
+    ux, uy = p256.scalar_mult_base(x)
+    fails = fails + ck("rfc6979 Ux", bh(ux), "60FED4BA255A9D31C961EB74C6356D68C049B8923B61FA6CE669622E60F29FB6")
+    fails = fails + ck("rfc6979 Uy", bh(uy), "7903FE1008B8BC99A41AE9E95628BC64F2F1B20C2D7E9F5177A3C294D4462299")
+    fails = fails + rfc6979(x, ux, uy, "sha224", "sample",
+        "53B2FFF5D1752B2C689DF257C04C40A587FABABB3F6FC2702F1343AF7CA9AA3F",
+        "B9AFB64FDC03DC1A131C7D2386D11E349F070AA432A4ACC918BEA988BF75C74C")
+    fails = fails + rfc6979(x, ux, uy, "sha256", "sample",
+        "EFD48B2AACB6A8FD1140DD9CD45E81D69D2C877B56AAF991C34D0EA84EAF3716",
+        "F7CB1C942D657C41D436C7A1B6E29F65F3E900DBB9AFF4064DC4AB2F843ACDA8")
+    fails = fails + rfc6979(x, ux, uy, "sha384", "sample",
+        "0EAFEA039B20E9B42309FB1D89E213057CBF973DC0CFC8F129EDDDC800EF7719",
+        "4861F0491E6998B9455193E34E7B0D284DDD7149A74B95B9261F13ABDE940954")
+    fails = fails + rfc6979(x, ux, uy, "sha512", "sample",
+        "8496A60B5E9B47C825488827E0495B0E3FA109EC4568FD3F8D1097678EB97F00",
+        "2362AB1ADBE2B8ADF9CB9EDAB740EA6049C028114F2460F96554F61FAE3302FE")
+    fails = fails + rfc6979(x, ux, uy, "sha224", "test",
+        "C37EDB6F0AE79D47C3C27E962FA269BB4F441770357E114EE511F662EC34A692",
+        "C820053A05791E521FCAAD6042D40AEA1D6B1A540138558F47D0719800E18F2D")
+    fails = fails + rfc6979(x, ux, uy, "sha256", "test",
+        "F1ABB023518351CD71D881567B1EA663ED3EFCF6C5132B354F28D3B0B7D38367",
+        "019F4113742A2B14BD25926B49C649155F267E60D3814B4C0CC84250E46F0083")
+    fails = fails + rfc6979(x, ux, uy, "sha384", "test",
+        "83910E8B48BB0C74244EBDF7F07A1C5413D61472BD941EF3920E623FBCCEBEB6",
+        "8DDBEC54CF8CD5874883841D712142A56A8D0F218F5003CB0296B6B509619F2C")
+    fails = fails + rfc6979(x, ux, uy, "sha512", "test",
+        "461D93F31B6540894788FD206C07CFA0CC35F46FA3C91816FFF1040AD1581A04",
+        "39AF9F15DE0DB8D97E72719C74820D304CE5226E32DEDAE67519E840D1194E55")
+
+    // Round trip with an arbitrary key and digest, then tamper.
     d = hb("c477f9f65c22cce20657faa5b2d1d8122336f851a508a1ed04e479c34985bf96")
     hash = hb("0102030405060708010203040506070801020304050607080102030405060708")
-    k = hb("7a1a7e52797fc8caaa435d2a4dace39158504bf204fbe19f14dbb427faee50ae")
-    r, s = p256.ecdsa_sign(d, hash, k)
+    r, s = p256.ecdsa_sign(d, hash)
+    r2, s2 = p256.ecdsa_sign(d, hash)
+    if bh(r) == bh(r2) && bh(s) == bh(s2) { println("ok   signing is deterministic") } else { println("FAIL two signatures of one digest differ"); fails = fails + 1 }
     px, py = p256.scalar_mult_base(d)
     if p256.ecdsa_verify(px, py, hash, r, s) != 1 { println("FAIL ecdsa verify"); fails = fails + 1 } else { println("ok   ecdsa sign/verify") }
     bytes.set(hash, 0, bytes.get(hash, 0) ^ 1)
     if p256.ecdsa_verify(px, py, hash, r, s) != 0 { println("FAIL ecdsa tamper not rejected"); fails = fails + 1 } else { println("ok   ecdsa tamper rejected") }
+
+    // Private keys outside [1, n-1] are refused by sign and ecdh.
+    zero = hb("0000000000000000000000000000000000000000000000000000000000000000")
+    zr, zs = p256.ecdsa_sign(zero, hash)
+    nr, ns = p256.ecdsa_sign(nn, hash)
+    if zr == null && zs == null && nr == null && ns == null { println("ok   sign refuses 0 and n") } else { println("FAIL sign accepted a key outside [1, n-1]"); fails = fails + 1 }
+    if p256.ecdh(zero, pbx, pby) == null && p256.ecdh(nn, pbx, pby) == null { println("ok   ecdh refuses 0 and n") } else { println("FAIL ecdh accepted a key outside [1, n-1]"); fails = fails + 1 }
+    if p256.private_key_valid(zero) == 0 && p256.private_key_valid(nn) == 0 && p256.private_key_valid(nm1) == 1 && p256.private_key_valid(d) == 1 {
+        println("ok   private_key_valid")
+    } else { println("FAIL private_key_valid"); fails = fails + 1 }
+
+    // Invalid-curve attack (#3291): a point off the curve (y + 1), and one
+    // with x = p, are refused by ecdh, scalar_mult and verify.
+    offy = hb("db71e509e3fd9b060ddb20ba5c51dcc5948d46fbf640dfe0441782cab85fa4ad")
+    xp = hb("ffffffff00000001000000000000000000000000ffffffffffffffffffffffff")
+    if p256.ecdh(priv, pbx, offy) == null { println("ok   ecdh refuses an off-curve point") } else { println("FAIL ecdh accepted an off-curve point"); fails = fails + 1 }
+    if p256.ecdh(priv, xp, pby) == null { println("ok   ecdh refuses x = p") } else { println("FAIL ecdh accepted x = p"); fails = fails + 1 }
+    sx, sy = p256.scalar_mult(priv, pbx, offy)
+    if sx == null && sy == null { println("ok   scalar_mult refuses an off-curve point") } else { println("FAIL scalar_mult accepted an off-curve point"); fails = fails + 1 }
+    if p256.public_key_valid(pbx, pby) == 1 && p256.public_key_valid(pbx, offy) == 0 && p256.public_key_valid(xp, pby) == 0 {
+        println("ok   public_key_valid")
+    } else { println("FAIL public_key_valid"); fails = fails + 1 }
+    bytes.set(hash, 0, bytes.get(hash, 0) ^ 1)
+    if p256.ecdsa_verify(px, offy, hash, r, s) == 0 { println("ok   verify refuses an off-curve key") } else { println("FAIL verify accepted an off-curve key"); fails = fails + 1 }
+
+    bytes.free(two); bytes.free(g2x); bytes.free(g2y); bytes.free(nm1); bytes.free(mgx); bytes.free(mgy); bytes.free(nn)
+    bytes.free(priv); bytes.free(pbx); bytes.free(pby); bytes.free(z)
+    bytes.free(x); bytes.free(ux); bytes.free(uy)
+    bytes.free(d); bytes.free(hash); bytes.free(r); bytes.free(s); bytes.free(r2); bytes.free(s2); bytes.free(px); bytes.free(py)
+    bytes.free(zero); bytes.free(offy); bytes.free(xp)
 
     if fails == 0 { println("ALL PASS"); return }
     println("FAILURES"); exit(1)

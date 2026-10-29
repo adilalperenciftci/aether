@@ -1,10 +1,9 @@
 #!/bin/sh
 # Wycheproof adversarial vector suites — ECDSA P-384 (P1363 + DER forms), wave 5.
 #
-# Its own harness slot: a P-384 ECDSA verify is two bignum scalar
-# multiplications (~1-2s each at CI's -O0). Default stride 10 samples ~28
-# (P1363) + ~50 (DER) cases; WYCHEPROOF_FULL=1 (the nightly) sweeps all 784,
-# WYCHEPROOF_STRIDE=N picks a custom density.
+# Every vector of both files (280 + 504 cases), about 8 s at the -O0 of
+# `ae run` since #2600 (a P-384 verify is two fixed-width scalar
+# multiplications in one pass). WYCHEPROOF_STRIDE=N samples every Nth case.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"

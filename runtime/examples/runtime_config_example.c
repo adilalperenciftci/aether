@@ -19,7 +19,6 @@ void print_examples(void) {
     printf("2. MAXIMUM PERFORMANCE:\n");
     printf("   aether_runtime_init(8, \n");
     printf("       AETHER_FLAG_LOCKFREE_MAILBOX |\n");
-    printf("       AETHER_FLAG_LOCKFREE_POOLS |\n");
     printf("       AETHER_FLAG_ENABLE_SIMD |\n");
     printf("       AETHER_FLAG_ENABLE_MWAIT);\n");
     printf("   - Explicit control, all optimizations ON\n");
@@ -32,9 +31,7 @@ void print_examples(void) {
     printf("   - Slower but guaranteed compatibility\n\n");
     
     printf("4. SELECTIVE OPTIMIZATION:\n");
-    printf("   aether_runtime_init(8, \n");
-    printf("       AETHER_FLAG_LOCKFREE_MAILBOX |\n");
-    printf("       AETHER_FLAG_LOCKFREE_POOLS);\n");
+    printf("   aether_runtime_init(8, AETHER_FLAG_LOCKFREE_MAILBOX);\n");
     printf("   - Lock-free only, no SIMD/MWAIT\n");
     printf("   - Good for non-x86 platforms\n\n");
     
@@ -61,7 +58,7 @@ int main(void) {
     printf("Available Flags:\n");
     printf("  AETHER_FLAG_AUTO_DETECT      (0x%02x) - Auto-detect CPU features\n", AETHER_FLAG_AUTO_DETECT);
     printf("  AETHER_FLAG_LOCKFREE_MAILBOX (0x%02x) - Lock-free SPSC mailboxes\n", AETHER_FLAG_LOCKFREE_MAILBOX);
-    printf("  AETHER_FLAG_LOCKFREE_POOLS   (0x%02x) - Lock-free TLS pools\n", AETHER_FLAG_LOCKFREE_POOLS);
+    printf("  AETHER_FLAG_LOCKFREE_POOLS   (0x%02x) - Deprecated, accepted and ignored (no message pool)\n", AETHER_FLAG_LOCKFREE_POOLS);
     printf("  AETHER_FLAG_ENABLE_SIMD      (0x%02x) - AVX2 vectorization\n", AETHER_FLAG_ENABLE_SIMD);
     printf("  AETHER_FLAG_ENABLE_MWAIT     (0x%02x) - MWAIT idle strategy\n", AETHER_FLAG_ENABLE_MWAIT);
     printf("  AETHER_FLAG_VERBOSE          (0x%02x) - Print config on init\n", AETHER_FLAG_VERBOSE);

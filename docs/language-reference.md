@@ -2687,9 +2687,12 @@ it with the type's drop function:
   `T` and `null`).
 - **The drop function** takes one `ptr` and frees it: C's `free`, or a
   function or extern whose parameter is `@frees` (`bytes.free`, a function of
-  the program's own). The type's base is a bare `ptr`.
+  the program's own, C's `fclose` for a `FILE*`). What it returns is ignored,
+  and a C prototype may type the pointer (`int fclose(FILE*)`, #3413). The
+  type's base is a bare `ptr`.
 
-A handler that panics while it holds an owned binding does not release it;
+A panic releases what a holder it leaves holds, as the holder's exit would: a
+function's local, and a handler's binding when the handler panics (#3406);
 the message's other owned fields are released with the message.
 
 ## Optionals
@@ -3619,7 +3622,16 @@ w ! Close {}            // error: actor 'Writer' has no receive arm for 'Close'
 
 A function can take or return a typed reference, `close_it(w:
 actor_ref[Writer])` or `-> actor_ref[Writer]`, and a `spawn` result passes
-where one is wanted.
+where one is wanted. A typed reference also reaches the actor's state
+(`w.lines`); a bare `actor_ref` names no actor, so a field access through
+one is an error that says to type it (#3333).
+
+A send never blocks the sender. Two messages one sender sends one actor are
+handled in the order sent; a message is handled at most once, and one the
+actor never handles (it had ended, or its mailbox bound was reached) is
+released and counted. See "The delivery contract" in
+[actor-concurrency.md](actor-concurrency.md#the-delivery-contract), and
+"A bounded mailbox" below.
 
 ### Ask Pattern (Request-Reply)
 
@@ -3681,6 +3693,9 @@ destructured from there (`p, err = store ? GetRange {}`, then `lo, hi = p`).
 | `"the actor is dead"` | the actor had died (or was released) before the ask reached it |
 | `"the actor died before it replied"` | the handler panicked with the ask in hand |
 | `"the handler returned without replying"` | the handler that took the ask finished without a `reply` |
+| `"the asking actor was killed"` | the actor whose handler asked was killed while it waited (`actors.kill`), and the ask ended at once |
+| `"the mailbox is full"` | the actor has a mailbox bound (`@mailbox(bound: N)`) and N messages it has not handled yet; the ask was refused at once |
+| `"out of memory"` | there was no memory to make the ask (its reply slot, or the copy of its message); nothing was sent, and inside a library call the call then ends with `AETHER_OUT_OF_MEMORY` (#3387) |
 
 An ask to a dead actor, in either form, ends at once rather than after the
 timeout, and so does one whose actor dies before replying or whose handler
@@ -3808,6 +3823,102 @@ per message, and an actor that `implements` a protocol has a receive arm for
 each of its messages (a `_` arm does not count). A protocol and its actors
 can come from an imported module, as messages do. `protocol` and
 `implements` are words only in these places: they stay usable as names.
+
+### Ending an actor, and Death notices
+
+An actor ends once: when its handler panics, when `actors.kill(ref)` is
+called on it (from anywhere), or when its own handler calls `actors.stop()`
+(`import std.actors`). A kill or a stop takes effect when the handler that is
+running returns; a handler is never cut short. What was queued for the actor
+is then dropped, and so is every later send to it, each counted by
+`actors.dead_sends()`.
+
+An actor that calls `actors.monitor(ref)` gets one `Down` message when `ref`
+ends, with the reason: `"normal"` for a stop, `"killed"` for a kill, the
+panic's message for a panic. `Down` is declared by the compiler, as
+`message Down { ref: actor_ref, reason: string }`, so a program handles it in
+an arm without declaring it (and may not declare its own):
+
+```aether,run
+import std.actors
+
+message Watch { who: actor_ref }
+message Work {}
+
+actor Worker {
+    receive {
+        Work() -> { panic("out of paper") }
+    }
+}
+
+actor Foreman {
+    receive {
+        Watch(who) -> { _id = actors.monitor(who) }
+        Down(ref, reason) -> { println("worker ended: ${reason}") }
+    }
+}
+
+main() {
+    w = spawn(Worker())
+    f = spawn(Foreman())
+    f ! Watch { who: w }
+    wait_for_idle()
+    w ! Work {}
+    wait_for_idle()
+}
+```
+```output
+worker ended: out of paper
+```
+
+A `Down` comes after the last messages the ended actor sent its watcher, and
+never while its handler still runs. A monitor of an actor that has ended
+already is answered at once, with the reason it ended with.
+`actors.demonitor(id)`, with the id `monitor` returned, drops a monitor: no
+`Down` of it is handled after that, one already on its way included. A
+handler that is waiting in an ask when its actor is killed gets
+`"the asking actor was killed"` from it at once.
+
+`actors.link(ref)` ties two actors both ways: when either ends, the other
+ends too, with the same reason, unless the reason is `"normal"`. An actor
+that calls `actors.trap_exits(true)` gets a `Down` for a linked actor's death
+instead, and lives on. `actors.unlink(ref)` takes the tie away.
+
+An ended actor can be restarted under the same ref, so the refs its siblings
+and clients hold reach the new one: `std.supervise` does it, by strategy and
+within a restart budget, from factories such as `|| -> spawn(Worker())`
+(see its [guide](../std/supervise/README.md)). `actors.incarnation(ref)` says
+how many times an actor was restarted.
+
+On wasi a panic ends the whole program (the target has no way to unwind), so
+`actors.monitor`, `actors.link` and `actors.trap_exits` are refused when
+compiling for it.
+
+### A bounded mailbox
+
+An actor's mailbox is unbounded unless the actor says otherwise: a send never
+blocks its sender, and what the actor has not handled yet waits in memory.
+`@mailbox(bound: N)` before an actor takes at most N messages it has not
+handled yet; past that, a send is refused at once, never blocked on:
+
+```aether,fragment
+@mailbox(bound: 1000)
+actor Ingest {
+    receive { Line(text) -> { /* ... */ } }
+}
+
+err = try_send(ingest, Line { text: t })   // "", or "the mailbox is full"
+ingest ! Line { text: t }                    // dropped and counted when full
+n, why = ingest ? Count {}                   // why: "the mailbox is full"
+```
+
+`try_send(ref, Msg { ... })` sends as `!` does and says what happened: `""`
+when it sent, `"the mailbox is full"` or `"the actor is dead"` when it did
+not (the message is released). A plain `!` past the bound is dropped,
+counted by `actors.full_drops(ref)`, and reported once on stderr. An ask past
+it fails at once with `"the mailbox is full"`. N counts every message
+accepted for the actor and not yet taken by its handler, wherever it waits,
+and a `Down` is never refused.
 
 ---
 
@@ -5002,6 +5113,7 @@ Rules:
 | Function | Description |
 |----------|-------------|
 | `spawn(ActorName())` | Create actor instance |
+| `try_send(ref, Msg { ... })` | Send as `ref ! Msg { ... }` does, and say whether it did: `""`, `"the mailbox is full"` or `"the actor is dead"` (see A bounded mailbox) |
 | `wait_for_idle()` | Wait for all actors to finish |
 
 ### Environment & Process

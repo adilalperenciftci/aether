@@ -675,6 +675,12 @@ typedef struct {
     size_t defer_thunks_cap;
     int defer_thunk_count;
     long defer_proto_pos;
+    /* #3413: the drop functions of owned pointer types the unwind journal
+     * runs through a thunk (owned_drop_thunk), each named once; the thunks
+     * are written with the defer thunks. */
+    const char** owned_thunks;
+    int owned_thunk_count;
+    int owned_thunk_cap;
     int hoist_output_ok;
     /* Was a `goto main_exit;` written (a `return` in main)? Its label is
      * written only then. */

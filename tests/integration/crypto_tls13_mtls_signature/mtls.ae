@@ -1,0 +1,74 @@
+// The pure TLS client with a client certificate (connect_mtls), for
+// test_tls13_mtls_signature.sh: CLIENT_CERT and CLIENT_KEY name its PEM
+// files (an ECDSA P-256 pair), PORT the server's port on localhost. It sends
+// "GET / HTTP/1.0" and prints "GOT <first line>" for the answer, or
+// "REFUSED: <why>" when the handshake fails, or "RECVERR: <why>" when the
+// server ends the connection instead of answering.
+
+import std.os
+import std.fs
+import std.bytes
+import std.list
+import std.string
+import std.cryptography
+import std.cryptography.tls13_client
+import std.cryptography.tls13_server
+
+extern exit(code: int)
+extern atoi(s: string) -> int
+
+main() {
+    cert_pem, cerr = fs.read(os.getenv("CLIENT_CERT"))
+    key_pem, kerr = fs.read(os.getenv("CLIENT_KEY"))
+    if cerr != "" || kerr != "" {
+        println("FAIL: read the pair: ${cerr}${kerr}")
+        exit(1)
+    }
+    chain, _lens = tls13_server.parse_cert_chain_pem(cert_pem)
+    if chain == null || list.size(chain) < 1 {
+        println("FAIL: the client certificate does not parse")
+        exit(1)
+    }
+    cert = list.at(chain, 0) as ptr
+    // The P-256 scalar connect_mtls signs with.
+    scalar = tls13_server.parse_ec_private_key_pem(key_pem)
+    if scalar == null || bytes.length(scalar) != 32 {
+        println("FAIL: the client key is not a P-256 key")
+        exit(1)
+    }
+    xpriv, rerr = cryptography.random_buffer(32)
+    if rerr != "" {
+        println("FAIL: ${rerr}")
+        exit(1)
+    }
+    conn, err = tls13_client.connect_mtls("localhost", atoi(os.getenv("PORT")), xpriv, cert, bytes.length(cert), scalar)
+    bytes.free(xpriv)
+    bytes.wipe_free(scalar)
+    if err != "" {
+        println("REFUSED: ${err}")
+        exit(0)
+    }
+    req = "GET / HTTP/1.0\r\n\r\n"
+    serr = tls13_client.conn_send(conn, string.bytes(req))
+    if serr != "" {
+        println("RECVERR: send: ${serr}")
+        tls13_client.close_conn(conn)
+        exit(0)
+    }
+    buf, n, rerr2 = tls13_client.conn_recv(conn)
+    if rerr2 != "" {
+        println("RECVERR: ${rerr2}")
+    } else if buf == null || n == 0 {
+        println("RECVERR: closed with no answer")
+    } else {
+        text = bytes.to_string(buf, n)
+        line = text
+        nl = string.index_of(text, "\r\n")
+        if nl >= 0 {
+            line = string.substring(text, 0, nl)
+        }
+        println("GOT ${line}")
+        bytes.free(buf)
+    }
+    tls13_client.close_conn(conn)
+}

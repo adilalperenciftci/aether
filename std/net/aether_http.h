@@ -132,19 +132,10 @@ const char* http_client_pool_configure_raw(int max_idle, int max_per_host,
 void http_client_pool_clear_raw(void);
 int  http_client_pool_idle_count_raw(void);
 
-/* std.cryptography.tls13_client records why a pure-TLS handshake failed, so
- * the https request's error names the real cause (untrusted chain, wrong host,
- * a server that does not speak TLS 1.3) rather than a guess. Thread-local. */
-void aether_pure_tls_client_set_error(const char* msg);
-
-/* The Windows trust anchors both HTTPS clients use (#2675), for
- * std.cryptography.tls13_client: every certificate of the ROOT system store as
- * PEM text, and the first bundle file of the list std.http.client's OpenSSL
- * path looks for. Each a fresh counted AetherString (cast to char*) the
- * caller releases with string_release, "" when there is nothing (always, off
- * Windows), NULL only when out of memory. */
-char* aether_tls_windows_store_pem(void);
-char* aether_tls_windows_bundle(void);
+/* Why a pure-TLS handshake failed reaches the request as the callback's
+ * reason (runtime/aether_callbacks.h), and the Windows trust anchors both
+ * HTTPS clients use (#2675) are in aether_tls_trust.h: neither through this
+ * file, which std.cryptography.tls13_client would link for them (#3426). */
 long long http_client_rx_buffer_allocs_raw(void);
 
 int http_response_status(HttpResponse* response);
@@ -283,6 +274,15 @@ int http_request_set_insecure_raw(HttpClientRequest* req, int on);
 // verification ON. Strictly stronger than set_insecure. Per-connection (never
 // touches the shared SSL_CTX); NULL/empty clears the pin. `path` is copied.
 int http_request_set_cafile_raw(HttpClientRequest* req, const char* path);
+// Trust partial chains for THIS request (#3311): any certificate in the trust
+// store ends a path, not only a self-signed root (an intermediate CA pinned
+// alone). Verification stays on; a trusted non-root must still be a CA. Both
+// backends. 0 on success, -1 null request.
+int http_request_set_partial_chain_raw(HttpClientRequest* req, int on);
+/* "aether" / "openssl" / "" (default) for this request (#1298). 0 on success;
+ * -1 null request, -2 unknown name, -3 no OpenSSL in this build, -4 the
+ * pure-Aether client is not linked. */
+int http_request_set_tls_backend_raw(HttpClientRequest* req, const char* name);
 
 // Enable streaming response bodies for THIS request (#1004). When on (non-zero),
 // http_send_raw returns a response whose body is NOT buffered: it carries an

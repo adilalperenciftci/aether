@@ -1,0 +1,56 @@
+// tls13_client.connect with the OS CSPRNG failing from its Nth draw on
+// (#3293; rng_fail_shim.c, test_random_failure.sh). The first connect
+// draws freely and counts its draws, D; then one connect for each N in
+// 0..D-1 with only N draws let through. Each connects to listener.ae at
+// 127.0.0.1 PEER_PORT, which reports what the client sent; this prints
+// one line per connect: "N=<n> ERR: <why>" or "N=<n> OK".
+//
+// Without a failing CSPRNG to stand in (rng_fail_supported() 0: macOS and
+// the BSDs, whose arc4random_buf cannot fail) it prints "SKIP".
+
+import std.os
+import std.bytes
+import std.string
+import std.cryptography.tls13_client
+
+extern rng_fail_after(n: int)
+extern rng_fail_calls() -> int
+extern rng_fail_supported() -> int
+
+fn attempt(port: int, priv: ptr, n: int) {
+    rng_fail_after(n)
+    conn, err = tls13_client.connect("127.0.0.1", port, priv)
+    rng_fail_after(-1)
+    if conn != null {
+        tls13_client.close_conn(conn)
+        println("N=${n} OK")
+    } else {
+        println("N=${n} ERR: ${err}")
+    }
+}
+
+main() {
+    if rng_fail_supported() == 0 {
+        println("SKIP: no CSPRNG to fail on this platform")
+        return
+    }
+    port, _perr = string.to_int(os.getenv("PEER_PORT"))
+    // The caller's own X25519 scalar, fixed: only the draws connect makes
+    // itself are under test.
+    priv = bytes.new(32)
+    i = 0
+    while i < 32 {
+        bytes.set(priv, i, 0x40 + i)
+        i = i + 1
+    }
+    before = rng_fail_calls()
+    attempt(port, priv, -1)
+    draws = rng_fail_calls() - before
+    println("D=${draws}")
+    n = 0
+    while n < draws {
+        attempt(port, priv, n)
+        n = n + 1
+    }
+    bytes.free(priv)
+}

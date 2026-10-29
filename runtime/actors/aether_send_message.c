@@ -1,10 +1,15 @@
 #include "actor_state_machine.h"
+#include "../utils/aether_fatal.h"   /* aether_fatal_flush (#3435) */
 #include "../scheduler/multicore_scheduler.h"
 #include "../config/aether_optimization_config.h"
 #include "../utils/aether_compiler.h"
 #include <string.h>
 #include <stdlib.h>
 #include "../utils/aether_thread.h"
+#include "../../std/string/aether_string.h"
+#include "../aether_resource_caps.h"
+#include "aether_frames.h"
+#include "aether_panic.h"
 
 // Thread-local core ID for optimization
 extern AETHER_TLS int current_core_id;
@@ -12,94 +17,35 @@ extern AETHER_TLS int current_core_id;
 // ActorBase is defined in multicore_scheduler.h
 
 // ==============================================================================
-// TIER 1 OPTIMIZATION: Thread-Local Message Payload Pool
+// Message payloads
 // ==============================================================================
-// Instead of malloc/free for every message payload (one alloc + one free per
-// send/receive cycle on the hot path), draw from a per-thread pool of small
-// buffers. Eliminates the allocator as a bottleneck for small-message traffic.
+// A typed message's payload is a heap copy (payload_message below), freed by
+// whoever handles or drops the message. There is no payload pool (#3374):
+// its acquire side was removed because an actor can move to another core
+// after a message is sent, so a pooled payload would be released by a
+// thread that does not own the pool.
 
-#define MSG_PAYLOAD_POOL_SIZE 256      // 256 buffers per thread
-#define MSG_PAYLOAD_MAX_SIZE 256       // Max pooled message size (Ping/Pong ~16 bytes)
-
-typedef struct {
-    char buffer[MSG_PAYLOAD_MAX_SIZE];
-    int in_use;  // Thread-local: no atomics needed
-} PooledPayload;
-
-typedef struct {
-    PooledPayload payloads[MSG_PAYLOAD_POOL_SIZE];
-    int next_index;  // Thread-local: no atomics needed
-    int initialized;
-} PayloadPool;
-
-// Thread-local payload pool
-static AETHER_TLS PayloadPool* g_payload_pool = NULL;
-
-// Global statistics (atomic, shared across all threads)
-static _Atomic uint64_t g_pool_hits = 0;
-static _Atomic uint64_t g_pool_misses = 0;
-static _Atomic uint64_t g_too_large = 0;
-
-// Get pool statistics (for debugging/profiling)
+/* Deprecated (#3374): there is no pool, so there is nothing to count; kept
+ * for callers built against it, it reports zeros. */
 void aether_message_pool_stats(uint64_t* hits, uint64_t* misses, uint64_t* large) {
-    *hits = atomic_load_explicit(&g_pool_hits, memory_order_relaxed);
-    *misses = atomic_load_explicit(&g_pool_misses, memory_order_relaxed);
-    *large = atomic_load_explicit(&g_too_large, memory_order_relaxed);
+    if (hits) *hits = 0;
+    if (misses) *misses = 0;
+    if (large) *large = 0;
 }
 
-// Initialize thread-local payload pool
-/* The acquire side of this pool was removed: it was unreachable, and the
- * send path below documents why it must stay that way. An actor can be
- * migrated to another core after a message is sent, so a TLS-pooled
- * payload would be released by a thread that does not own that pool.
- * payload_pool_release still runs and simply reports "not mine" for
- * every heap payload. */
-
-
-// Return payload to pool
-static inline int payload_pool_release(void* ptr) {
-    if (!g_payload_pool || !g_payload_pool->initialized) {
-        return 0;  // Not from pool
-    }
-
-    // Check if pointer is within pool memory
-    char* pool_start = (char*)g_payload_pool->payloads;
-    char* pool_end = pool_start + sizeof(g_payload_pool->payloads);
-
-    if ((char*)ptr < pool_start || (char*)ptr >= pool_end) {
-        return 0;  // Not from pool
-    }
-
-    // Find which slot this is
-    size_t offset = (char*)ptr - pool_start;
-    size_t slot_index = offset / sizeof(PooledPayload);
-
-    if (slot_index >= MSG_PAYLOAD_POOL_SIZE) {
-        return 0;  // Invalid
-    }
-
-    // Mark as free (thread-local: plain store)
-    g_payload_pool->payloads[slot_index].in_use = 0;
-    return 1;  // Successfully returned to pool
-}
-
-// Free message payload - try pool first, then fall back to free()
 void aether_free_message(void* msg_data) {
-    if (!msg_data) return;
-
-    // Try to return to pool
-    if (payload_pool_release(msg_data)) {
-        return;  // Returned to pool successfully
-    }
-
-    // Was malloc'd (large message or pool exhausted), use regular free
     free(msg_data);
 }
 
 void aether_message_drop(ActorBase* target, Message* msg) {
     if (msg->payload_ptr) {
-        if (target && target->release_message)
+        if (msg->type == AETHER_MSG_DOWN) {
+            // The runtime wrote it (#2974): its reason is the runtime's to
+            // release, whether or not the program declares Down.
+            string_release(((AetherDownMsg*)msg->payload_ptr)->reason);
+        } else if (target && target->release_message) {
             target->release_message(msg->type, msg->payload_ptr);
+        }
         aether_free_message(msg->payload_ptr);
         msg->payload_ptr = NULL;
     }
@@ -110,30 +56,135 @@ void aether_message_drop(ActorBase* target, Message* msg) {
     }
 }
 
+/* #3401: the drop of a message an ending actor leaves undelivered. Its
+ * release is the program's code for a field of an owned type (a drop
+ * function, #3142), which may panic, and the finalize that drains the
+ * actor ran it bare: a panic there jumped out of the finalize (to the
+ * nearest frame below, or ended the program without one), so the messages
+ * after it were not released and the actor's watchers and links were never
+ * told. The release runs in a containment frame of its own instead
+ * (aether_contain): a panic in it is caught there, the unwind journal
+ * giving back what the release held at its depth, and reported as the step
+ * barrier reports a panic in the release that follows a handler, through
+ * the death hook (itself contained, #3417) with
+ * the actor's id and the panic's reason, which is then released. The
+ * actor's end has its reason already and keeps it. What the release did not
+ * get to free (the payload, an owned zero-copy buffer) goes here, and the
+ * finalize goes on with the next message. A message whose release is not
+ * the program's (no release_message, a runtime Down) needs no frame. The
+ * step barrier drops the message a panicking handler ran on through here
+ * too (#3403). */
+typedef struct { ActorBase* target; Message* msg; } DropCall;
+
+static void drop_body(void* p) {
+    DropCall* c = (DropCall*)p;
+    aether_message_drop(c->target, c->msg);
+}
+
+/* The drop of `msg` in a containment frame (#3403): 0 when it was dropped,
+ * 1 when its release panicked: what the release did not get to free (the
+ * payload, an owned zero-copy buffer) is freed here, and *reason and
+ * *reason_release are the panic's, the caller's to report and release. A
+ * drop cut by an interruption of the call it runs inside (#3404) leaves
+ * the same freed and reports nothing: the call ends with it. */
+int aether_message_drop_contained(ActorBase* target, Message* msg, const char** reason,
+                                  void (**reason_release)(const void*)) {
+    if (!target || !target->release_message || !msg->payload_ptr || msg->type == AETHER_MSG_DOWN) {
+        aether_message_drop(target, msg);
+        return 0;
+    }
+    DropCall c = { target, msg };
+    int how = aether_contain(drop_body, &c, reason, reason_release);
+    if (how == 0) return 0;
+    if (msg->payload_ptr) {
+        aether_free_message(msg->payload_ptr);
+        msg->payload_ptr = NULL;
+    }
+    if (msg->zerocopy.owned && msg->zerocopy.data) {
+        free(msg->zerocopy.data);
+        msg->zerocopy.data = NULL;
+        msg->zerocopy.owned = 0;
+    }
+    return how == 1;
+}
+
+void aether_message_drop_at_end(ActorBase* target, Message* msg) {
+    const char* reason = NULL;
+    void (*reason_release)(const void*) = NULL;
+    if (!aether_message_drop_contained(target, msg, &reason, &reason_release)) return;
+    /* In a frame of its own, as the step barrier's hook is (#3417): a hook
+     * that panics is reported on stderr and the finalize goes on. Fired
+     * bare, its panic left the finalize halfway (the messages it had drained
+     * never credited, so scheduler_shutdown waited for them forever, and the
+     * watchers never told), and the finalize, marked done, never ran again.
+     * Nothing a finalize runs leaves it now; a link's drain still journals
+     * its queue for a panic that would (#3400). */
+    aether_fire_death_hook_contained(target->id, reason);
+    if (reason_release) reason_release(reason);
+}
+
+// The heap copy of a typed message's payload, or NULL when there was no
+// memory for it.
+// Always use heap allocation for type-safe messages.
+// TLS pools have thread affinity issues: a same-core actor may be migrated
+// to another core after the message is sent, causing the receiver to call
+// free() on pool memory (heap-use-after-free / free-on-non-malloc).
+static void* payload_copy(void* message_data, size_t message_size) {
+    void* msg_copy = aether_alloc_test_refuses() ? NULL : malloc(message_size);
+    if (msg_copy) memcpy(msg_copy, message_data, message_size);
+    return msg_copy;
+}
+
+static Message message_of(void* payload, int type, void* reply_slot) {
+    Message msg;
+    msg.type = type;
+    msg.sender_id = 0;
+    msg.payload_int = 0;
+    msg.payload_ptr = payload;
+    msg.zerocopy.data = NULL;
+    msg.zerocopy.size = 0;
+    msg.zerocopy.owned = 0;
+    msg._reply_slot = reply_slot;
+    return msg;
+}
+
 // The heap copy of a typed message's payload, as the Message a send carries.
 static Message payload_message(ActorBase* actor, void* message_data, size_t message_size) {
-    // Always use heap allocation for type-safe messages.
-    // TLS pools have thread affinity issues: a same-core actor may be migrated
-    // to another core after the message is sent, causing the receiver to call
-    // free() on pool memory (heap-use-after-free / free-on-non-malloc).
-    void* msg_copy = malloc(message_size);
+    void* msg_copy = payload_copy(message_data, message_size);
     if (!msg_copy) {
+        /* Inside a library call (#2956): nothing is queued yet, so the
+         * message's own values are released (they moved into it) and the
+         * call ends with AETHER_OUT_OF_MEMORY. Elsewhere the process stops,
+         * as it always did: the send has no way to fail. */
+        AetherFrames* F = aether_frames_here();
+        if (F->exec_depth > F->exec_floor) {
+            if (actor->release_message) actor->release_message(*(int*)message_data, message_data);
+            aether_out_of_memory("out of memory copying a message");
+        }
+        aether_fatal_flush();   /* the program's lines first (#3435, aether_fatal.h) */
         fprintf(stderr, "aether: malloc(%zu) failed for msg type %d to actor %d\n",
                 message_size, *(int*)message_data, actor->id);
         abort();
     }
-    memcpy(msg_copy, message_data, message_size);
+    return message_of(msg_copy, *(int*)message_data, NULL);
+}
 
-    Message msg;
-    msg.type = *(int*)message_data;
-    msg.sender_id = 0;
-    msg.payload_int = 0;
-    msg.payload_ptr = msg_copy;
-    msg.zerocopy.data = NULL;
-    msg.zerocopy.size = 0;
-    msg.zerocopy.owned = 0;
-    msg._reply_slot = g_pending_reply_slot;
-    return msg;
+// An ask's message (#3387): the payload copied, the asker's reply slot in it.
+// An ask can fail, so a copy that finds no memory is its failure, not an
+// unwind: 0, with what the message owns released (its values moved into it)
+// and nothing sent. The slot is passed here rather than through a
+// thread-local the send reads: the send can step its target inline, and
+// every payload send that handler made read the asker's slot too.
+int aether_ask_message(void* actor_ptr, void* message_data, size_t message_size,
+                       void* reply_slot, Message* out) {
+    ActorBase* actor = (ActorBase*)actor_ptr;
+    void* msg_copy = payload_copy(message_data, message_size);
+    if (!msg_copy) {
+        if (actor && actor->release_message) actor->release_message(*(int*)message_data, message_data);
+        return 0;
+    }
+    *out = message_of(msg_copy, *(int*)message_data, reply_slot);
+    return 1;
 }
 
 // Send a typed message to an actor. The payload is copied to the heap and
@@ -143,8 +194,12 @@ static Message payload_message(ActorBase* actor, void* message_data, size_t mess
 // aether_scheduler_poll.
 void aether_send_message(void* actor_ptr, void* message_data, size_t message_size) {
     ActorBase* actor = (ActorBase*)actor_ptr;
-    Message msg = payload_message(actor, message_data, message_size);
+    aether_send_built(actor, payload_message(actor, message_data, message_size));
+}
 
+// A message built already (an ask's), to its actor: through this core when
+// the actor is this core's, else through its own.
+void aether_send_built(ActorBase* actor, Message msg) {
 #if AETHER_HAS_THREADS
     // Cache TLS once — avoids repeated tlv_get_addr calls on macOS
     const int my_core = current_core_id;
@@ -157,6 +212,15 @@ void aether_send_message(void* actor_ptr, void* message_data, size_t message_siz
 #else
     scheduler_send_local(actor, msg);
 #endif
+}
+
+// try_send(ref, Msg {...}) of a payload message (#2974): sent as
+// aether_send_message sends it, unless the actor is dead or its mailbox
+// full, which it says ("" when sent).
+const char* aether_try_send_message(void* actor_ptr, void* message_data, size_t message_size) {
+    ActorBase* actor = (ActorBase*)actor_ptr;
+    if (!actor) return "the actor is dead";
+    return scheduler_try_send(actor, payload_message(actor, message_data, message_size));
 }
 
 // A typed message sent inside a batched loop (#3117): it joins the batch, as

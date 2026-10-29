@@ -58,6 +58,28 @@ main() {
     rsig = rsa.sign_pss(k, mh, bytes.view(salt)[0..32])
     if rsa.verify_pss(k, mh, bytes.view(rsig), 32) != 1 { println("FAIL pss round-trip"); fails = fails + 1 } else { println("ok   pss round-trip") }
 
+    // key_from_bytes: the same key from big-endian bytes signs the same, and
+    // a public-only key (empty d) signs and decrypts nothing (#2600).
+    nb = hb("cfc733d3d62af11a935cbba777e3bf08262629284d84095aecf7dfc63efe38dd0680a6972d677ff04cc3d2e7c84cb4463c528ebc87680623db37792f0315447b2a5da8d229afa229af95b5249eba3c4b3ea726f54989b76cca9002ee10a383de28efe84ebc6f5b74e9f201fd1b9543679e4ef022bf728270b9687beb10599d55")
+    eb = hb("010001")
+    db = hb("007f6fea75cf31df573172fb15a80ee3a817dde7f87432bb9a2d258af688c45c14145cebd06564c9af9525b641bb34708d738a1f49bab32eb0e74f8ae02ebfe893976a220e1b8df88445fb1e9c2fe4f11fd8c6cd42fef697c22bf3c2dd9dab6333aef9b1cb4dc7dd4c371015f103d36561a5ce65f4ac5055403301a94c920f1401")
+    kb = rsa.key_from_bytes(bytes.view(nb), bytes.view(eb), bytes.view(db))
+    sigb = rsa.sign_pss(kb, mh, bytes.view(salt))
+    fails = fails + ck("key_from_bytes pss sign", bh(sigb), "cad326f8644bb81fdf7696a1100e0ea9b7f630d24a724874eb98048294d6e182c6bffd71600de9a58679ad027bf76429818d3376323743aedb9c46d0bc914866c36ae5f57d4aa9ad52f1adb2e076179ec16d66a9c5de12ab195c27c1afcee8ca1deb8785dfc5d722a7abe5c014be04c247b0d1f53ce026cf3dffdbc0e9051ca1")
+    empty = bytes.new(0)
+    kp = rsa.key_from_bytes(bytes.view(nb), bytes.view(eb), bytes.view(empty)[0..0])
+    if rsa.sign_pss(kp, mh, bytes.view(salt)) == null && rsa.raw_decrypt(kp, rtct) == null {
+        println("ok   a public key signs and decrypts nothing")
+    } else { println("FAIL a public key signed or decrypted"); fails = fails + 1 }
+    // A d longer than n with a nonzero leading byte is refused.
+    bytes.set(db, 0, 1)
+    if rsa.key_from_bytes(bytes.view(nb), bytes.view(eb), bytes.view(db)) == null {
+        println("ok   key_from_bytes refuses a d longer than n")
+    } else { println("FAIL key_from_bytes took a d longer than n"); fails = fails + 1 }
+    rsa.key_free(kb)
+    rsa.key_free(kp)
+    bytes.free(nb); bytes.free(eb); bytes.free(db); bytes.free(empty); bytes.free(sigb)
+
     if fails == 0 { println("ALL PASS"); return }
     println("FAILURES"); exit(1)
 }

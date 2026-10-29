@@ -49,7 +49,106 @@ between "I cleaned up" and "someone else already did".
 
 `whereis` on an unbound name returns null, so check before sending.
 
+## Ending actors, and death notices (#2974)
+
+An actor ends once: its handler panics, `actors.kill(ref)` ends it (from
+anywhere), or its own handler calls `actors.stop()`. A kill or a stop takes
+effect when the running handler returns. What was queued for it is dropped,
+and so is every send to it after, each counted by `actors.dead_sends()`.
+
+`actors.monitor(ref)`, from a handler, asks for one `Down { ref, reason }`
+when `ref` ends: `"normal"` for a stop, `"killed"` for a kill, the panic's
+message for a panic, and at once for an actor that has ended already. The
+compiler declares `Down`; an actor handles it in a `Down(ref, reason)` arm.
+`actors.demonitor(id)` drops a monitor, and no `Down` of it is handled after.
+
+```aether,run
+import std.actors
+
+message Watch { who: actor_ref }
+message Halt {}
+
+actor Job {
+    receive { Halt() -> { actors.stop() } }
+}
+
+actor Boss {
+    receive {
+        Watch(who) -> { _id = actors.monitor(who) }
+        Down(ref, reason) -> { println("job ended: ${reason}") }
+    }
+}
+
+main() {
+    j = spawn(Job())
+    b = spawn(Boss())
+    b ! Watch { who: j }
+    wait_for_idle()
+    j ! Halt {}
+    wait_for_idle()
+}
+```
+```output
+job ended: normal
+```
+
+`actors.link(ref)` ties two actors both ways: when either ends, the other
+ends too, with the same reason, unless it is `"normal"`; an actor that called
+`actors.trap_exits(true)` gets a `Down` instead and lives on.
+`actors.unlink(ref)` takes the tie away.
+
+A supervisor restarts a child in place, under the ref its clients hold:
+`actors.rebirth_begin(child)`, then the child's factory (whose spawn of the
+child's actor type takes the child's block), then `actors.rebirth_end(child)`.
+`std.supervise` does this for you; `actors.incarnation(ref)` counts the
+restarts.
+
+On wasi a panic ends the program, so `monitor`, `link` and `trap_exits` are
+refused when compiling for it. See docs/actor-concurrency.md, "The end of an
+actor".
+
+## A bounded mailbox (#2974)
+
+A mailbox is unbounded by default: a send never blocks, and what an actor has
+not handled yet waits in memory. `@mailbox(bound: N)` on an actor takes at
+most N messages it has not handled yet. Past that a send is refused, never
+blocked: `try_send(ref, Msg { ... })` says `"the mailbox is full"` (or
+`"the actor is dead"`, and `""` when it sent), an ask fails at once with
+`"the mailbox is full"`, and a plain `!` is dropped and counted by
+`actors.full_drops(ref)`. A `Down` always gets in.
+
+```aether,run
+import std.actors
+
+message Item { k: int }
+
+@mailbox(bound: 2)
+actor Sink {
+    state n = 0
+    receive { Item(k) -> { n = n + 1 } }
+}
+
+main() {
+    s = spawn(Sink())
+    k = 0
+    full = 0
+    while k < 1000 {
+        if try_send(s, Item { k: k }) != "" {
+            full = full + 1
+        }
+        k = k + 1
+    }
+    wait_for_idle()
+    println("handled + refused = ${s.n + full}")
+}
+```
+```output
+handled + refused = 1000
+```
+
 ## Exports
 
 `register`, `whereis`, `unregister`, `is_registered`, `registry_size`,
-`registry_clear`.
+`registry_clear`, `monitor`, `demonitor`, `kill`, `stop`, `dead_sends`,
+`full_drops`, `link`, `unlink`, `trap_exits`, `rebirth_begin`, `rebirth_end`,
+`incarnation`.

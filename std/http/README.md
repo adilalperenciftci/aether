@@ -59,33 +59,79 @@ if err != "" {
 }
 ```
 
+A program that holds its certificate and key in memory, and should not write
+the key to disk to hand it over, gives them as PEM text instead:
+`server_set_tls_pem(server, cert_pem, key_pem)` makes the same checks with
+the same results (#3362). Either way the first certificate is the server's
+own and the rest are the chain it sends with it, so a CA's bundle (leaf, then
+intermediates) serves as issued on both backends (#3370). Only the
+`BEGIN CERTIFICATE` blocks form the chain: any other block in the text, such
+as the key in a file that holds both, is skipped, and a certificate block
+that does not parse refuses the whole text (#3378). The server keeps
+its own copy of the text, for a later `server_set_tls_backend`, and wipes it
+when it is replaced or the server is freed.
+
 **Two backends.** OpenSSL is the default wherever it is compiled in. The other
 is a pure-Aether TLS 1.3 implementation with no OpenSSL dependency at all,
-selected with `AETHER_PURE_TLS=1`, and used automatically when the build has
-no OpenSSL, which is what lets a cross-compiled binary (`ae build --target=…`,
-which links none) serve HTTPS at all.
+used automatically when the build has no OpenSSL, which is what lets a
+cross-compiled binary (`ae build --target=…`, which links none) serve HTTPS at
+all. A program chooses explicitly with `http.server_set_tls_backend(server,
+"aether")` (or `"openssl"`, or `""` for the default); `AETHER_PURE_TLS=1`
+moves a whole process onto the pure stack, and an explicit choice wins over
+it. `server_set_tls_backend` returns an error string when the backend is not
+built in or not linked (#1298):
 
-The pure backend is **opt-in at the application**, because it reads the
-certificate and key itself and so needs filesystem capability that a plain
-`std.http` user should not inherit:
+```aether,fragment
+err = http.server_set_tls_backend(server, "aether")
+if err != "" { println("TLS backend: ${err}"); return }
+```
+
+The pure backend is **opt-in at the application**: a program that uses it
+imports it, and a plain `std.http` user does not carry it. The server reads
+the certificate and key files for both backends, so the pure server reads
+no files itself (and needs no `--with=fs` under `--emit=lib`); it parses
+them once, when the server is set up, and every connection shares that
+(#3362):
 
 ```aether,fragment
 import std.http
-import std.cryptography.tls13_server   // pure TLS server; needs --with=fs
+import std.cryptography.tls13_server   // pure TLS server
 ```
 
-The pure backend has constraints the OpenSSL one does not, and most fail as a
-**dropped connection rather than a message**, so they are worth knowing before
-debugging one:
+The pure backend has constraints the OpenSSL one does not; they are worth
+knowing before debugging a handshake:
 
-- the server key must be **ECDSA P-256**: there is no RSA signing path, so an
-  RSA certificate produces a server that fails at the signature step
-  (`openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1`)
+- the server key is **ECDSA P-256, P-384 or P-521, Ed25519, or RSA** of 2048
+  to 16384 bits (PKCS#8, SEC1 or PKCS#1 PEM, not encrypted), and
+  CertificateVerify is signed with the key's own scheme (RSA as
+  rsa_pss_rsae_sha256, or rsa_pss_rsae_sha384 or rsa_pss_rsae_sha512 for a
+  client that offers only those, #3357): a client that offers none of the
+  key's schemes gets `handshake_failure` (#3326). `server_set_tls` checks the
+  certificate and key when the server is set up and says why it cannot serve
+  them, as the OpenSSL backend does (#3328)
+- every CertificateVerify signature is checked against the certificate's
+  key before it is sent: a signature computed wrongly (a fault while
+  signing, a bit flipped in memory) can disclose the key, so one that does
+  not verify is never sent, and the handshake ends with `internal_error`
+  (#3376). The check is a verification per handshake, about as costly as
+  the signature for ECDSA and Ed25519, about a tenth of it for RSA
+- the private key is kept encrypted in memory (`std.cryptography.shield`,
+  as OpenSSH keeps its keys), in the clear only for each signature, so a
+  memory-reading attack must read a 16 KiB random pre-key without an error
+  to get it; a key whose encrypted form changed in memory is not used
+  (#3376)
 - key exchange is **X25519MLKEM768** (the post-quantum hybrid, preferred
-  when the client offers it) **or X25519**
-- **HelloRetryRequest is not implemented**, so a client offering only other
-  groups (a P-256-only client, say) is refused with a `handshake_failure`
-  alert rather than renegotiated
+  when the client offers it), **X25519 or secp256r1** (P-256, which RFC 8446
+  9.1 requires, #3357); a client that names one of them in supported_groups
+  but sends no key share for it gets a **HelloRetryRequest** asking for that
+  share (#3325), and a client offering none of them (a P-384-only client,
+  say) is refused with a `handshake_failure` alert
+- a handshake message or a write over one TLS record (2^14 bytes), such as
+  a certificate chain over 16 KiB or a large response, goes out in as many
+  records as it takes (#3380), and the pure client reads one split across
+  records (#3321) up to 256 KiB for the server's Certificate and 64 KiB for
+  its other handshake messages (#3366); the pure server takes a ClientHello
+  split across records, up to 64 KiB, and asks for no client certificate
 
 The client side is the mirror, and is now wired the same way (#1849):
 `std.http.client` does HTTPS through OpenSSL where it is compiled in, and
@@ -98,10 +144,12 @@ import std.cryptography.tls13_client
 
 to the program and `https://` works in a cross-built binary that links no TLS
 library at all. The pure client offers X25519MLKEM768 by default, alongside
-X25519 and P-256 key shares, so it gets post-quantum key exchange from any
-server that supports it (#2483). `set_insecure` and `set_cafile` are honoured on the pure path
-too, and an https request through a forward proxy works because the CONNECT
-tunnel is established before the handshake either way.
+X25519 and P-256 key shares (and names P-384 without one, for a server that
+asks for it in a HelloRetryRequest, #3369), so it gets post-quantum key
+exchange from any server that supports it (#2483). `set_insecure` and
+`set_cafile` are honoured on the pure path too, and an https request through
+a forward proxy works because the CONNECT tunnel is established before the
+handshake either way.
 
 Without that import the pure client is not linked, and an https request in a
 no-OpenSSL build fails with an error naming the missing import rather than
@@ -110,7 +158,22 @@ returning an empty body. (`std.http.client` does not import it for you:
 `--emit=lib --with=net` reject every `std.http.client` user, the same reason
 the server side is opt-in.)
 
-In a build that HAS OpenSSL, `AETHER_PURE_TLS=1` (the variable that already
+**Choosing the client backend per request.** `client.set_tls_backend(req,
+"aether")` sends this request through the pure client, `"openssl"` through
+OpenSSL, `""` back to the default (OpenSSL where it is built in, unless
+`AETHER_PURE_TLS=1`); the choice wins over the environment variable, and
+pooled connections are kept apart per backend. It returns an error string
+for a backend that cannot be used: `"openssl"` in a build without OpenSSL,
+`"aether"` without `import std.cryptography.tls13_client`, an unknown name
+(#1298).
+
+```aether,fragment
+req = client.request("GET", "https://example.com/")
+err = client.set_tls_backend(req, "aether")
+if err != "" { println("TLS backend: ${err}"); return }
+```
+
+In a build that HAS OpenSSL, `AETHER_PURE_TLS=1` (the variable that also
 selects the pure server) moves client requests onto the pure client as well,
 provided the program imports it (otherwise the request fails, naming the
 import). That is how the pure path is tested on every platform, not only in
@@ -130,20 +193,51 @@ certificate directory that loads) Android's `/apex/com.android.conscrypt/cacerts
 file with no bundle at all, then `/etc/ssl/certs`. If nothing loads, the
 handshake fails closed.
 
+**What it validates.** The server's certificate must name the host
+(subjectAltName only, on the OpenSSL backend too since #3313: DNS names, with
+a whole-label leading wildcard over at least two labels, and IP
+addresses), and there must be a path from it
+through the certificates the server sent to one of those anchors, which
+must be a self-signed root, on this backend as on OpenSSL's (a trusted
+intermediate ends no path; pinning one is #3311)
+(`tls13_cert.validate_chain`, RFC 5280 section 6 as the Web PKI profiles it)
+on which every signature verifies (RSA PKCS#1 v1.5 with SHA-256, SHA-384 or
+SHA-512; ECDSA on P-256, P-384 or P-521; Ed25519), every key is one of those
+(RSA of at least 2048 bits, named curves only; the OpenSSL backend refuses
+the same RSA keys, at security level 2 or above, #3312), every certificate
+is inside its validity period, every issuer below the anchor is a version 3 CA
+(basicConstraints cA) allowed to sign certificates (keyUsage keyCertSign
+when keyUsage is present) within its pathLenConstraint, the leaf's keyUsage
+(when present) allows digitalSignature, which TLS 1.3 signs with, the leaf
+and every issuer that lists extendedKeyUsage allow serverAuth (a leaf without
+extendedKeyUsage is valid for any purpose, as RFC 5280 says and as OpenSSL
+and Go's crypto/x509 read it: the backend a program runs on must not change
+which chains it accepts), every issuer's name
+constraints hold (DNS names, IP addresses, mailboxes, URI hosts, directory
+names; a wildcard is refused under an excluded name it could match), and no
+certificate has a critical extension the client does not process (nor a
+critical key identifier, which OpenSSL refuses too). Every candidate path is
+tried, within a bound, so an extra or cross-signed certificate in the
+server's list does not hide a good one. Before #3303 only the names and the signatures were
+checked, and a certificate a CA issued to any site could sign one for any
+other. The rules are measured against the x509-limbo and bettertls corpora
+in CI; `tests/conformance/x509_limbo/expected.txt` lists the cases that
+differ and why, each one the OpenSSL backend accepts too. A stapled OCSP response saying revoked fails the handshake;
+there is no CRL or online revocation check.
+
 **Scope and errors.** The pure client speaks TLS 1.3 only. A server that does
 not is refused with an error that says so (`server does not support TLS 1.3`),
 not a hang. Handshake failures carry the real cause (an untrusted chain, a
 certificate not valid for the requested host, no trust store) prefixed with
 `TLS handshake failed (pure-Aether TLS 1.3):`.
 
-**Performance.** A pure handshake against a real CDN (a P-256 leaf over
-secp384r1 intermediates) completes in about 1.3 seconds, and a full cross-built
-HTTPS request in under a second. That is slower than OpenSSL but well inside any
-server's handshake deadline. An earlier version of this note measured 12-22
-seconds and warned that the default request timeout could expire mid-handshake;
-that cost was `std.bignum`'s bit-serial division inside every P-256 and P-384
-field reduction, and it is gone: the division is Knuth's Algorithm D (#2595),
-and a P-256 signature check takes about 15 ms. No timeout adjustment is needed.
+**Performance.** A whole pure-client GET of a real site (github.com,
+www.cloudflare.com, www.bing.com: DNS, trust store, handshake with full path
+validation, response) takes 0.4 to 0.5 seconds on a desktop, network
+included. A P-256 signature check takes about 0.5 ms (`std.cryptography.ecc`,
+#2600); earlier versions of this note measured 12 to 22 seconds, then 1.3,
+when every field operation went through `std.bignum`. No timeout adjustment is
+needed.
 
 See also `std.http.server.lb` for load balancing, `std.tcp` for raw sockets,
 and `docs/http-server.md` for routing, middleware, TLS and the HTTP/2 path.

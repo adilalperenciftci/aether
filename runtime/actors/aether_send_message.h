@@ -10,10 +10,11 @@ void aether_send_message(void* actor_ptr, void* message_data, size_t message_siz
 // (#3117).
 void aether_send_message_batch(void* actor_ptr, void* message_data, size_t message_size);
 
-// Free message payload (tries thread-local pool first, then falls back to free())
+// Free a message payload (a heap copy: free())
 void aether_free_message(void* msg_data);
 
-// Get message pool statistics (for profiling)
+// Deprecated (#3374): there is no message pool; reports zeros. Removed at
+// host ABI level 2 (docs/abi-policy.md, "Deprecated names").
 void aether_message_pool_stats(uint64_t* hits, uint64_t* misses, uint64_t* large);
 
 #endif

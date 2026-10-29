@@ -31,6 +31,7 @@
 
 import std.bits
 import std.bytes
+import std.mem
 
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
@@ -512,7 +513,7 @@ emit_le64(out: ptr, off: int, v: long) {
 
 free_internals(t: *TigerCtx) {
     if t.buf != null {
-        bytes.free(t.buf)
+        bytes.wipe_free(t.buf)
         t.buf = null
     }
 }
@@ -524,6 +525,7 @@ final_bytes(ctx: ptr) -> ptr {
     out = finalize_to_bytes(t)
     s = bytes.finish(out, 24)
     free_internals(t)
+    mem.wipe(ctx, sizeof(TigerCtx))
     free(ctx)
     res = bytes.new(24)
     bytes.copy_from_string(res, 0, s, 24)
@@ -553,9 +555,10 @@ final_hex(ctx: ptr) -> string {
         bytes.set(hexbuf, i * 2 + 1, c_lo)
         i = i + 1
     }
-    bytes.free(out)
+    bytes.wipe_free(out)
     s = bytes.finish(hexbuf, 48)
     free_internals(t)
+    mem.wipe(ctx, sizeof(TigerCtx))
     free(ctx)
     return s
 }
@@ -569,6 +572,7 @@ free_ctx(ctx: ptr) {
     }
     t = ctx as *TigerCtx
     free_internals(t)
+    mem.wipe(ctx, sizeof(TigerCtx))
     free(ctx)
 }
 

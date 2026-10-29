@@ -275,7 +275,8 @@ For a Java app to use Aether-defined handlers, you'd need one of:
   table, scope policies, factory names) as data, but handlers are written
   in Java.  The config is the blueprint; Java is the runtime.  This is the
   Terraform model, HCL defines *what*, the provider plugin (Go code)
-  defines *how*.
+  defines *how*. ([aether-vs-hcl.md](aether-vs-hcl.md) compares the two side
+  by side.)
 
 #### Summary: path of least resistance, current state
 

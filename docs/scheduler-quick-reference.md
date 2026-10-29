@@ -140,12 +140,6 @@ sender -> scheduler_send_local -> mailbox (direct) -> actor step
 #define MAILBOX_SIZE 32   // In actor_state_machine.h (must be power of 2)
 ```
 
-### Message Pool
-```c
-#define MSG_PAYLOAD_POOL_SIZE 256  // In aether_send_message.c
-#define MSG_PAYLOAD_MAX_SIZE 256   // Max pooled message size
-```
-
 ### Cross-Core Queue
 ```c
 #define QUEUE_SIZE 1024  // In lockfree_queue.h
@@ -195,7 +189,6 @@ Both migration and work stealing use ascending core-id lock ordering to prevent 
 
 ### Low Throughput
 - Verify compiler flags include `-O3 -march=native -flto`
-- Check that message pool is active (pool stats via `aether_message_pool_stats`)
 - Ensure batch size is appropriate for workload
 - Verify core count matches available hardware
 
@@ -205,7 +198,7 @@ Both migration and work stealing use ascending core-id lock ordering to prevent 
 - Avoid blocking operations in actor step functions
 
 ### Crashes
-- Verify every actor struct starts with `ActorBase`'s fields: expand `AETHER_ACTOR_BASE_FIELDS` first (or put an `ActorBase` member first) rather than copying the list, which drifts as fields are added. In order, they are `active`, `id`, `mailbox`, `step`, `thread`, `auto_process`, `assigned_core`, `migrate_to`, `spsc_queue`, `reply_slot`, `step_lock`, `timeout_ns`, `last_activity_ns`, `dead`, `alloc_size`, `destroy_state`, `scheduler_owned`, `inbox`, `thread_parked`, `inflight`.
+- Verify every actor struct starts with `ActorBase`'s fields: expand `AETHER_ACTOR_BASE_FIELDS` first (or put an `ActorBase` member first) rather than copying the list, which drifts as fields are added. In order, they are `active`, `id`, `mailbox`, `step`, `thread`, `auto_process`, `assigned_core`, `migrate_to`, `spsc_queue`, `reply_slot`, `step_lock`, `exit_flags`, `mailbox_bound`, `timeout_ns`, `last_activity_ns`, `step_payload`, `step_type`, `dead`, `alloc_size`, `destroy_state`, `release_message`, `scheduler_owned`, `incarnation`, `inbox`, `thread_parked`, `inflight`, `death_watch`, `mailbox_pending`, `full_drops`.
 - Initialize `migrate_to = -1` after actor creation
 - Use `scheduler_send_remote` instead of direct mailbox writes for cross-core messages
 - Call `scheduler_shutdown()` before process exit (waits for quiescence, stops and joins threads)
@@ -223,7 +216,7 @@ Both migration and work stealing use ascending core-id lock ordering to prevent 
 - `runtime/scheduler/multicore_scheduler.c` - Multi-core scheduler: coalescing, migration, work stealing
 - `runtime/scheduler/aether_scheduler_coop.c` - Cooperative single-threaded scheduler (WASM, embedded)
 - `runtime/config/aether_optimization_config.h` - Platform detection (Tier 0 `AETHER_HAS_*` flags)
-- `runtime/actors/aether_send_message.c` - Message sending, thread-local pools
+- `runtime/actors/aether_send_message.c` - Message sending, payload copies
 - `runtime/actors/aether_actor_thread.c` - Actor-owned thread loop
 - `runtime/utils/aether_thread.h` - Portable thread primitives (POSIX/Win32/no-op stubs)
 - `runtime/aether_numa.c` - NUMA topology detection and allocation

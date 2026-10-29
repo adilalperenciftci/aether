@@ -17,6 +17,8 @@
 //   5. copy_within non-overlapping — dst <= src, full source must
 //      already exist; fails if it doesn't.
 //   6. free without finish — discard path.
+//   7. wipe zeroes the whole capacity, past the length too, and keeps the
+//      buffer and its length; wipe_free and both on null (#3376).
 
 import std.bytes
 import std.string
@@ -101,6 +103,46 @@ main() {
     bytes.set(b6, 0, 33)
     bytes.free(b6)
     println("  PASS: free without finish")
+
+    // Case 7: wipe zeroes every byte of the capacity, not only the live
+    // ones: a secret written by data() and trimmed with set_length is still
+    // in the storage past the length (#3376).
+    b7 = bytes.new(32)
+    cap7 = bytes.capacity(b7)
+    all7 = bytes.capacity_view(b7)
+    k = 0
+    while k < cap7 {
+        all7[k] = 165
+        k = k + 1
+    }
+    bytes.set_length(b7, 8)
+    bytes.wipe(b7)
+    if bytes.length(b7) != 8 || bytes.capacity(b7) != cap7 {
+        println("  FAIL 7: wipe changed the buffer: length ${bytes.length(b7)}, capacity ${bytes.capacity(b7)}")
+        exit(1)
+    }
+    left7 = 0
+    seen7 = bytes.capacity_view(b7)
+    k = 0
+    while k < cap7 {
+        if seen7[k] != 0 {
+            left7 = left7 + 1
+        }
+        k = k + 1
+    }
+    if left7 != 0 {
+        println("  FAIL 7: ${left7} of ${cap7} bytes not zero after wipe")
+        exit(1)
+    }
+    bytes.set(b7, 0, 7)
+    if bytes.get(b7, 0) != 7 {
+        println("  FAIL 7: the buffer is not usable after wipe")
+        exit(1)
+    }
+    bytes.wipe_free(b7)
+    bytes.wipe(null)
+    bytes.wipe_free(null)
+    println("  PASS: wipe zeroes the whole capacity and keeps the buffer")
 
     println("=== All cases passed ===")
 }

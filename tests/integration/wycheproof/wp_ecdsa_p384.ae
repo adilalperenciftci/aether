@@ -6,7 +6,8 @@
 // exercised by the wp_ecdsa_p384_der.ae sibling.
 //   "valid"   -> verify MUST return 1.
 //   "invalid" -> verify MUST return 0.
-// Stride sampling (default 10; WYCHEPROOF_FULL=1 or WYCHEPROOF_STRIDE=N).
+// Every vector runs by default (a verify is about a millisecond since #2600);
+// WYCHEPROOF_STRIDE=N samples every Nth case instead.
 
 import std.cryptography.p384
 import std.cryptography.sha2
@@ -76,7 +77,7 @@ fn sha384_of(b: ptr, n: int) -> ptr {
 }
 
 main() {
-    stride = 10
+    stride = 1
     wf = os.getenv("WYCHEPROOF_FULL")
     if wf == "1" { stride = 1 }
     sv = os.getenv("WYCHEPROOF_STRIDE")

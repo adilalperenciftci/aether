@@ -37,6 +37,7 @@
 //     Aether has no fixed-size inline array fields.
 
 import std.bytes
+import std.cryptography.ct
 
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
@@ -847,7 +848,7 @@ fn ladder(scalar: ptr, u: ptr) -> ptr {
     r = bytes.new(POINT_BYTES)
     fe_encode(&x2, r)
 
-    bytes.free(k)
+    bytes.wipe_free(k)
     return r
 }
 
@@ -877,7 +878,7 @@ base_point(scalar: ptr) -> ptr {
     bytes.set(u, POINT_BYTES - 1, 0)
     bytes.set(u, 0, 9)
     r = ladder(scalar, u)
-    bytes.free(u)
+    bytes.wipe_free(u)
     return r
 }
 
@@ -892,8 +893,10 @@ agree(scalar: ptr, u: ptr) -> (ptr, string) {
         acc = acc | (bytes.get(r, i) & 255)
         i = i + 1
     }
-    if acc == 0 {
-        bytes.free(r)
+    // Whether the result is zero is public (the handshake ends on it): the
+    // one value the constant-time harness lets decide a branch here.
+    if ct.declassify(ct.eq(acc, 0)) == 1 {
+        bytes.wipe_free(r)
         return null, "x25519: all-zero shared secret (small-order point)"
     }
     return r, ""

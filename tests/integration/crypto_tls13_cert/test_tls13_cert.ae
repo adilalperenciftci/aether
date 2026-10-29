@@ -59,14 +59,17 @@ fn set_path_fixture_validity(c: *tls13_cert.LeafCert) {
     c.not_after_len = 13
 }
 
-// Parse a DER certificate and return its pathLenConstraint, or -999 when the
+// Parse a DER certificate and return its pathLenConstraint; -1 when its
+// basicConstraints is malformed (a negative pathLenConstraint is: the
+// certificate is then refused, not read as a looser limit); -999 when the
 // parse fails or the certificate has none.
 fn parsed_path_len(hex: string) -> int {
     der = from_hex(hex)
     c = tls13_cert.LeafCert { tbs: null, tbs_len: 0, sig_alg_oid: null, signature: null, signature_len: 0, spki_algo_oid: null, spki_key: null, spki_key_len: 0, issuer: null, issuer_len: 0, subject: null, subject_len: 0, not_before: null, not_before_len: 0, not_after: null, not_after_len: 0, dns_names: null }
     err = tls13_cert.parse_certificate(bytes.view(der), &c)
     v = -999
-    if string.equals(err, "") == 1 && c.has_path_len == 1 { v = c.path_len }
+    if string.equals(err, "") == 1 && (c.ext_bits & tls13_cert.EXT_PATHLEN) != 0 { v = c.path_len }
+    if string.equals(err, "") == 1 && (c.ext_bits & tls13_cert.EXT_MALFORMED) != 0 { v = -1 }
     tls13_cert.free_leaf(&c); bytes.free(der)
     return v
 }
@@ -218,8 +221,7 @@ main() {
     c3, c3len = tls13_cert.cert_verify_content(bytes.view(th)[0..32])
     digest = sha256b(c3, c3len)
     bytes.free(c3)
-    knonce = from_hex("7a1a7e52797fc8caaa435d2a4dace39158504bf204fbe19f14dbb427faee50ae")
-    r32, s32 = p256.ecdsa_sign(priv, digest, knonce)
+    r32, s32 = p256.ecdsa_sign(priv, digest)
     dsig, dlen = der_ecdsa_sig(r32, s32)
     if tls13_cert.verify_cert_verify(tls13_cert.SCHEME_ECDSA_P256_SHA256, px, py, bytes.view(th)[0..32], bytes.view(dsig)[0..dlen]) == 1 {
         println("ok   ecdsa-p256 CertificateVerify accepts valid sig")
@@ -237,7 +239,7 @@ main() {
     // --- mTLS: CLIENT CertificateVerify sign round-trip (RFC 8446 §4.4.3) ---
     // Sign the client content with the client key, then verify the DER sig is a
     // valid ECDSA-P256 signature over SHA-256(client content).
-    ccv_sig = tls13_cert.sign_client_cert_verify_ecdsa_p256(priv, bytes.view(th)[0..32], knonce)
+    ccv_sig = tls13_cert.sign_client_cert_verify_ecdsa_p256(priv, bytes.view(th)[0..32])
     ccv_content, ccv_clen = tls13_cert.client_cert_verify_content(bytes.view(th)[0..32])
     ccv_digest = sha256b(ccv_content, ccv_clen)
     // The client content differs from the server content (context string), so a
@@ -252,11 +254,24 @@ main() {
     } else { println("FAIL client sig verified under server context"); total_ok = 0 }
     bytes.free(ccv_sig); bytes.free(ccv_content); bytes.free(ccv_digest)
     bytes.free(crr); bytes.free(css)
+
+    // --- SERVER CertificateVerify sign (the pure server's path): the DER
+    // signature verifies as a server CertificateVerify, and a key outside
+    // [1, n-1] signs nothing.
+    scv_sig = tls13_cert.sign_server_cert_verify_ecdsa_p256(priv, bytes.view(th)[0..32])
+    if tls13_cert.verify_cert_verify(tls13_cert.SCHEME_ECDSA_P256_SHA256, px, py, bytes.view(th)[0..32], bytes.view(scv_sig)) == 1 {
+        println("ok   server CertificateVerify signs + verifies")
+    } else { println("FAIL server CertificateVerify sig"); total_ok = 0 }
+    bytes.free(scv_sig)
+    zkey = from_hex("0000000000000000000000000000000000000000000000000000000000000000")
+    if tls13_cert.sign_server_cert_verify_ecdsa_p256(zkey, bytes.view(th)[0..32]) == null {
+        println("ok   server CertificateVerify refuses a zero key")
+    } else { println("FAIL server CertificateVerify signed with a zero key"); total_ok = 0 }
+    bytes.free(zkey)
     bytes.free(priv)
     bytes.free(px)
     bytes.free(py)
     bytes.free(digest)
-    bytes.free(knonce)
     bytes.free(r32)
     bytes.free(s32)
     bytes.free(dsig)
@@ -295,6 +310,13 @@ main() {
         println("ok   *.example.com rejects a.b.example.com")
     } else { println("FAIL wildcard spanned two labels"); total_ok = 0 }
     tls13_cert.free_leaf(&hw)
+    // A wildcard over a top-level domain matches nothing (x509-limbo's
+    // public-suffix-wildcard-san, #1298).
+    htld = mk_leaf_san("*.com")
+    if string.equals(tls13_cert.check_hostname(&htld, "example.com"), "") != 1 {
+        println("ok   *.com matches nothing")
+    } else { println("FAIL *.com matched example.com"); total_ok = 0 }
+    tls13_cert.free_leaf(&htld)
     he = mk_leaf_san("api.example.com")
     if string.equals(tls13_cert.check_hostname(&he, "API.example.com"), "") == 1 {
         println("ok   exact match is case-insensitive")
@@ -352,9 +374,13 @@ main() {
     } else { println("FAIL RSA-PSS accepted tampered sig"); total_ok = 0 }
     bytes.free(rsa_spki); bytes.free(rsa_sig); bytes.free(rsa_th)
 
-    // --- intermediate-CA chain building (chain_verify_path) ---
+    // --- intermediate-CA chain building (validate_chain) ---
     // 3-level ECDSA PKI: leaf <- intermediate <- root. Only root is trusted;
-    // the intermediate is a server-sent CA the path must traverse.
+    // the intermediate is a server-sent CA the path must traverse. These
+    // fixtures were valid from 2026-07-28 to 2026-07-30, so the path is
+    // validated at a time inside that window (validate_chain checks every
+    // certificate's validity, as chain_verify_path does now, at the present).
+    at3 = "20260729120000"
     cp_root = from_hex("3082017e30820123a00302010202145c702d3cc21d8183652f2cfa02e9b7f6844b8da5300a06082a8648ce3d04030230143112301006035504030c095465737420526f6f74301e170d3236303732383232353133325a170d3236303733313232353133325a30143112301006035504030c095465737420526f6f743059301306072a8648ce3d020106082a8648ce3d030107034200041740254dfbb1c90c7ef083091d0f4c1622a202de87b55cedd2bb0f786b4f244c6bbde1bf3abb3ddb0e1644e8234a1aa3f867de35303edb156664c450800f2801a3533051301d0603551d0e04160414b27999d5d4667a7a87cc5357cb0a866c2236e699301f0603551d23041830168014b27999d5d4667a7a87cc5357cb0a866c2236e699300f0603551d130101ff040530030101ff300a06082a8648ce3d0403020349003046022100ac69c0f3a06e882a53f23af02c53f176ec0f3bafe20e89ec59343a733ccddcc4022100be41ede785a8c707b48917082ffaa0cf3ccc4f99744eb3f83d0bbcd1c4de84a2")
     cp_int = from_hex("3082018e30820135a00302010202144dabe3cd6d7512d3897ae34ff552226c0d16125a300a06082a8648ce3d04030230143112301006035504030c095465737420526f6f74301e170d3236303732383232353133335a170d3236303733313232353133335a301c311a301806035504030c115465737420496e7465726d6564696174653059301306072a8648ce3d020106082a8648ce3d030107034200041c75b3de45ad714bcbd377f4fc50a2f94b24e53632fa9478fe0ed1bd1fa4dbb403458519822dca095933ced4a4ec876661a6efa5682b55b8ecba92e15d045755a35d305b300c0603551d13040530030101ff300b0603551d0f040403020204301d0603551d0e041604140a74b333ea0cd034f90333f79cd1127feca903ab301f0603551d23041830168014b27999d5d4667a7a87cc5357cb0a866c2236e699300a06082a8648ce3d040302034700304402206fe0684b0bb4e4d3e85dae7d88267a3768a218c115e262f60ddd477e5535d08902204f1dd369a0e932cef441f6fdd923c4a430315aca27937f2cde1f8031e58be210")
     cp_leaf = from_hex("3082018b30820130a003020102021402b286e4bdc746e47304f6935a264a8f9606f2d9300a06082a8648ce3d040302301c311a301806035504030c115465737420496e7465726d656469617465301e170d3236303732383232353133335a170d3236303733303232353133335a30143112301006035504030c096c6f63616c686f73743059301306072a8648ce3d020106082a8648ce3d0301070342000410f1edfe0c66ec3ebe94f1689629f901d215e9592104da1e3f1dcfa8af65a8b882c14adb2d0379069c87545c81544b86a37ec3c8bbdd28d5bb799fdcb185ad66a358305630140603551d11040d300b82096c6f63616c686f7374301d0603551d0e04160414ef5c392fa331d2e00730805fc54a1083a45b1531301f0603551d230418301680140a74b333ea0cd034f90333f79cd1127feca903ab300a06082a8648ce3d0403020349003046022100f523de6be6de2fe0849888b1f5275e6ac437f64cbada051ba2c9529c0d66a301022100c86009498ab965939e733219e10175889c9ba1d501ba0febcaef880e96f430d9")
@@ -368,15 +394,19 @@ main() {
     canchors = list_new(); _ = list.add(canchors, &croot)
     cinters = list_new(); _ = list.add(cinters, &cint)
     cempty = list_new()
-    if string.equals(tls13_cert.chain_verify_path(&cleaf, cinters, canchors), "") == 1 {
+    if string.equals(tls13_cert.validate_chain(&cleaf, cinters, canchors, at3, tls13_cert.PURPOSE_SERVER, -1), "") == 1 {
         println("ok   leaf->intermediate->root path verified")
     } else { println("FAIL intermediate chain rejected"); total_ok = 0 }
-    if string.equals(tls13_cert.chain_verify_path(&cleaf, cempty, canchors), "") != 1 {
+    if string.equals(tls13_cert.validate_chain(&cleaf, cempty, canchors, at3, tls13_cert.PURPOSE_SERVER, -1), "") != 1 {
         println("ok   leaf without intermediate rejected")
     } else { println("FAIL leaf-alone accepted"); total_ok = 0 }
-    if string.equals(tls13_cert.chain_verify_path(&cint, cempty, canchors), "") == 1 {
-        println("ok   intermediate chains directly to root")
-    } else { println("FAIL intermediate->root rejected"); total_ok = 0 }
+    // The intermediate chains straight to the root, but its keyUsage is
+    // keyCertSign only, so it is no TLS leaf (#3309): refused for that, and
+    // not for want of a path.
+    ir = tls13_cert.validate_chain(&cint, cempty, canchors, at3, tls13_cert.PURPOSE_SERVER, -1)
+    if string.contains(ir, "keyUsage") == 1 {
+        println("ok   intermediate chains to root, refused as a TLS leaf (${ir})")
+    } else { println("FAIL intermediate as leaf: ${ir}"); total_ok = 0 }
     if tls13_cert.leaf_is_ca(&cint) == 1 {
         println("ok   intermediate has basicConstraints cA=TRUE")
     } else { println("FAIL intermediate missing cA=TRUE"); total_ok = 0 }
@@ -438,7 +468,7 @@ main() {
     pathlen_der = from_hex("308201943082013aa003020102021459562d737e1e060c34d015905f42155a6833c8ab300a06082a8648ce3d04030230163114301206035504030c0b506174684c656e5a65726f301e170d3236313032393037333731315a170d3336313032363037333731315a30163114301206035504030c0b506174684c656e5a65726f3059301306072a8648ce3d020106082a8648ce3d03010703420004390fc63d2b28603c5d079f1b36a221ed9416e328763445b2035b09263984e7e2e9005dafb8c1d0fbc41c9aa724108675ca327a375416cac1749fa49100db9a57a3663064301d0603551d0e041604140dc2001c67f67b04dab972449df9bdfb3fffd231301f0603551d230418301680140dc2001c67f67b04dab972449df9bdfb3fffd23130120603551d130101ff040830060101ff020100300e0603551d0f0101ff040403020204300a06082a8648ce3d0403020348003045022100ccb2eae5c09bca66b223921c843972eefb745b46d606bb1ca3ce6dddf86c969902205494af127cbfb2ee2ce27f31f94ce6466f25fb16ee2346fbd877f8a0b1e6fc05")
     pathlen_cert = tls13_cert.LeafCert { tbs: null, tbs_len: 0, sig_alg_oid: null, signature: null, signature_len: 0, spki_algo_oid: null, spki_key: null, spki_key_len: 0, issuer: null, issuer_len: 0, subject: null, subject_len: 0, not_before: null, not_before_len: 0, not_after: null, not_after_len: 0, dns_names: null }
     pathlen_err = tls13_cert.parse_certificate(bytes.view(pathlen_der), &pathlen_cert)
-    if string.equals(pathlen_err, "") == 1 && pathlen_cert.has_path_len == 1 && pathlen_cert.path_len == 0 {
+    if string.equals(pathlen_err, "") == 1 && (pathlen_cert.ext_bits & tls13_cert.EXT_PATHLEN) != 0 && pathlen_cert.path_len == 0 {
         println("ok   pathLenConstraint=0 parsed")
     } else { println("FAIL pathLenConstraint=0 not parsed"); total_ok = 0 }
     tls13_cert.free_leaf(&pathlen_cert); bytes.free(pathlen_der)
@@ -446,7 +476,8 @@ main() {
     // pathLenConstraint=128 is DER INTEGER 00 80: the leading zero must not
     // make it read as negative. 300 (01 2c) has no leading zero. The same
     // certificate with the bytes changed to ff 80 (-128) must give the
-    // rejecting -1. (Fixtures: openssl req -x509, prime256v1, pathlen:128/300.)
+    // malformed -1: the certificate is refused. (Fixtures: openssl req -x509,
+    // prime256v1, pathlen:128/300.)
     if parsed_path_len("3082017230820118a003020102021402e3400f60aba8e263948b45654d6cbe1889deca300a06082a8648ce3d04030230153113301106035504030c0a506174684c656e313238301e170d3236313032393037353832365a170d3336313032363037353832365a30153113301106035504030c0a506174684c656e3132383059301306072a8648ce3d020106082a8648ce3d030107034200042cce06783196bb7146e0a39b7dd2faa049a4cbcaf5cef3590cfde32a30fe66967479ba13f89f69b2806d74f2260df041e0fcf7b60adc0dd7dee9beb3a9d306fea3463044301d0603551d0e04160414b99719befb036c4a90681d1cb2d08fa30b35501b30130603551d130101ff040930070101ff02020080300e0603551d0f0101ff040403020204300a06082a8648ce3d0403020348003045022100ed34eefa744e8120877af33f75c9d17c63e26c8fa883f1f200c05d36d97b797202202ad4eca699a0b641a6687653a787cbb9c04f5b2f22fe617146efbb7baea10712") == 128 {
         println("ok   pathLenConstraint=128 (00 80) parsed")
     } else { println("FAIL pathLenConstraint=128 (00 80) misread"); total_ok = 0 }
@@ -454,18 +485,41 @@ main() {
         println("ok   pathLenConstraint=300 parsed")
     } else { println("FAIL pathLenConstraint=300 misread"); total_ok = 0 }
     if parsed_path_len("3082017230820118a003020102021402e3400f60aba8e263948b45654d6cbe1889deca300a06082a8648ce3d04030230153113301106035504030c0a506174684c656e313238301e170d3236313032393037353832365a170d3336313032363037353832365a30153113301106035504030c0a506174684c656e3132383059301306072a8648ce3d020106082a8648ce3d030107034200042cce06783196bb7146e0a39b7dd2faa049a4cbcaf5cef3590cfde32a30fe66967479ba13f89f69b2806d74f2260df041e0fcf7b60adc0dd7dee9beb3a9d306fea3463044301d0603551d0e04160414b99719befb036c4a90681d1cb2d08fa30b35501b30130603551d130101ff040930070101ff0202ff80300e0603551d0f0101ff040403020204300a06082a8648ce3d0403020348003045022100ed34eefa744e8120877af33f75c9d17c63e26c8fa883f1f200c05d36d97b797202202ad4eca699a0b641a6687653a787cbb9c04f5b2f22fe617146efbb7baea10712") == -1 {
-        println("ok   negative pathLenConstraint becomes a rejecting limit")
+        println("ok   a negative pathLenConstraint makes the certificate malformed (refused)")
     } else { println("FAIL negative pathLenConstraint not rejected"); total_ok = 0 }
+    // A constraint of four bytes or more limits no path this code builds and
+    // reads as unbounded, as OpenSSL reads it (2^24 is INTEGER 01 00 00 00).
+    if parsed_path_len("308201953082013ba0030201020214277974184e4d89d1a391d2f7e3f20d019be5ac54300a06082a8648ce3d04030230153113301106035504030c0a506174684c656e426967301e170d3236313032393131313231315a170d3336313032363131313231315a30153113301106035504030c0a506174684c656e4269673059301306072a8648ce3d020106082a8648ce3d0301070342000479000f70cc7c75ae84f29b9cb098ee946f189c757fa0561d2f967e1633efda29a555b5d5b8b462a19960d1140c251987a32f1cc512196333d609f3fc1abdd6cda3693067301d0603551d0e041604146a1fd3240e3cf2a52de002a2d7ef6e123950e96d301f0603551d230418301680146a1fd3240e3cf2a52de002a2d7ef6e123950e96d30150603551d130101ff040b30090101ff020401000000300e0603551d0f0101ff040403020204300a06082a8648ce3d040302034800304502201b5d9447f6220daef9c023fa610073d3f6a96181b1c21c3eb1342a5409719ede02210089d4e84e8a9a69d7ed8beac8c8d5b17894417975d2cf50f79bbad1c222cf9ccc") == 2147483647 {
+        println("ok   a pathLenConstraint over three bytes (2^24) reads as unbounded")
+    } else { println("FAIL a pathLenConstraint over three bytes (2^24) not read as unbounded"); total_ok = 0 }
+    // 00 2c pads 44 with a zero it does not need: not DER, so refused.
+    if parsed_path_len("3082017330820118a00302010202143ac45b366b953d3b367dc2566c364f10b43abe76300a06082a8648ce3d04030230153113301106035504030c0a506174684c656e333030301e170d3236313032393037353832365a170d3336313032363037353832365a30153113301106035504030c0a506174684c656e3330303059301306072a8648ce3d020106082a8648ce3d030107034200042cce06783196bb7146e0a39b7dd2faa049a4cbcaf5cef3590cfde32a30fe66967479ba13f89f69b2806d74f2260df041e0fcf7b60adc0dd7dee9beb3a9d306fea3463044301d0603551d0e04160414b99719befb036c4a90681d1cb2d08fa30b35501b30130603551d130101ff040930070101ff0202002c300e0603551d0f0101ff040403020204300a06082a8648ce3d040302034900304602210085db7da35a750a83e979741ebf6e3202f203603d4c8349e22b2c1fb634f7b59c022100d7f734b746c5f0ed02ac92860a4fd454f7b58450f87b5e4f376a8d92008f77cb") == -1 {
+        println("ok   a zero-padded pathLenConstraint makes the certificate malformed (refused)")
+    } else { println("FAIL a zero-padded pathLenConstraint not rejected"); total_ok = 0 }
+    // basicConstraints { TRUE, INTEGER 0, INTEGER 300 }: a field repeated,
+    // where the last read as the limit (300); OpenSSL refuses it.
+    if parsed_path_len("3082016b30820111a00302010202146999b9510e204d6ffb4726086079ba68b0601751300a06082a8648ce3d0403023010310e300c06035504030c054243647570301e170d3236313032393132323734325a170d3336313032363132323734325a3010310e300c06035504030c0542436475703059301306072a8648ce3d020106082a8648ce3d0301070342000479000f70cc7c75ae84f29b9cb098ee946f189c757fa0561d2f967e1633efda29a555b5d5b8b462a19960d1140c251987a32f1cc512196333d609f3fc1abdd6cda349304730160603551d130101ff040c300a0101ff0201000202012c300e0603551d0f0101ff040403020106301d0603551d0e041604146a1fd3240e3cf2a52de002a2d7ef6e123950e96d300a06082a8648ce3d0403020348003045022100dbb1a3363187b7665c45adb235b56a49836462e53c4f515d9b60b9e74f29dc69022000e59e8cf2b2d37d58a10564fdc982d4ef902819442e8b6cc564b0696c2bf094") == -1 {
+        println("ok   a repeated pathLenConstraint makes the certificate malformed (refused)")
+    } else { println("FAIL a repeated pathLenConstraint not rejected"); total_ok = 0 }
+    // basicConstraints { INTEGER 300, TRUE }: the fields out of order.
+    if parsed_path_len("3082016c30820112a003020102021446a9b75cc80ce2b955ef026f22f18ac1669de5c0300a06082a8648ce3d04030230123110300e06035504030c0742436f72646572301e170d3236313032393132323734325a170d3336313032363132323734325a30123110300e06035504030c0742436f726465723059301306072a8648ce3d020106082a8648ce3d0301070342000479000f70cc7c75ae84f29b9cb098ee946f189c757fa0561d2f967e1633efda29a555b5d5b8b462a19960d1140c251987a32f1cc512196333d609f3fc1abdd6cda346304430130603551d130101ff040930070202012c0101ff300e0603551d0f0101ff040403020106301d0603551d0e041604146a1fd3240e3cf2a52de002a2d7ef6e123950e96d300a06082a8648ce3d0403020348003045022100e4477ed80ddcb98ef0debd3898009527947f286cc528df600c34ba45e74824d802207d7934b465b91e0d054b03172b16c3fec11b78e7706402ecbab52a88b71bdba3") == -1 {
+        println("ok   a pathLenConstraint before the cA makes the certificate malformed (refused)")
+    } else { println("FAIL a pathLenConstraint before the cA not rejected"); total_ok = 0 }
+    // basicConstraints SEQUENCE { TRUE } 00: a byte after the SEQUENCE in the
+    // extension's value, where nothing may follow it.
+    if parsed_path_len("308201693082010fa00302010202145059a6c88a79125ca556555bc49781efdbf81898300a06082a8648ce3d04030230123110300e06035504030c074243747261696c301e170d3236313032393133313835305a170d3336313032363133313835305a30123110300e06035504030c074243747261696c3059301306072a8648ce3d020106082a8648ce3d0301070342000479000f70cc7c75ae84f29b9cb098ee946f189c757fa0561d2f967e1633efda29a555b5d5b8b462a19960d1140c251987a32f1cc512196333d609f3fc1abdd6cda343304130100603551d130101ff040630030101ff00300e0603551d0f0101ff040403020106301d0603551d0e041604146a1fd3240e3cf2a52de002a2d7ef6e123950e96d300a06082a8648ce3d040302034800304502204bfa672d0c2023e11ae84ace2c5ca6f5290bb2d0953947051de3d59deed04ea50221008920e0e075e3709d7f741027381803d469e23f66d90f8ec424f8103f9216aae4") == -1 {
+        println("ok   a byte after basicConstraints makes the certificate malformed (refused)")
+    } else { println("FAIL a byte after basicConstraints not rejected"); total_ok = 0 }
 
     // pathLenConstraint counts intermediate CAs, not the target certificate,
     // even when that target happens to assert cA.
-    x_noku.has_path_len = 1
+    x_noku.ext_bits = x_noku.ext_bits | tls13_cert.EXT_PATHLEN
     x_noku.path_len = 0
     x_v_noku.is_ca = 1
     if string.equals(tls13_cert.chain_verify_path(&x_v_noku, xi_noku, xanchors), "") == 1 {
         println("ok   pathLenConstraint excludes the target certificate")
     } else { println("FAIL pathLenConstraint counted the target certificate"); total_ok = 0 }
-    x_noku.has_path_len = 0
+    x_noku.ext_bits = x_noku.ext_bits & ~tls13_cert.EXT_PATHLEN
     x_v_noku.is_ca = 0
 
     // A dead-end certificate can share the subject and public key of the
@@ -507,13 +561,14 @@ main() {
     bytes.free(pl_anchor.subject)
     pl_anchor.subject = from_hex("3003310130")
     pl_anchor.subject_len = 5
-    pl_signer.has_path_len = 1
+    pl_signer.ext_bits = pl_signer.ext_bits | tls13_cert.EXT_PATHLEN
     pl_signer.path_len = 0
     pl_inters = list_new(); _ = list.add(pl_inters, &x_noku); _ = list.add(pl_inters, &pl_signer)
     pl_anchors = list_new(); _ = list.add(pl_anchors, &pl_anchor)
-    if string.equals(tls13_cert.chain_verify_path(&x_v_noku, pl_inters, pl_anchors), "") != 1 {
+    pl_err = tls13_cert.chain_verify_path(&x_v_noku, pl_inters, pl_anchors)
+    if string.equals(pl_err, "a CA's path length constraint is exceeded") == 1 {
         println("ok   pathLenConstraint rejects excess subordinate CAs")
-    } else { println("FAIL pathLenConstraint accepted an excess subordinate CA"); total_ok = 0 }
+    } else { println("FAIL pathLenConstraint and an excess subordinate CA: '${pl_err}'"); total_ok = 0 }
     list_free(pl_inters); list_free(pl_anchors)
     tls13_cert.free_leaf(&pl_signer); tls13_cert.free_leaf(&pl_anchor)
 
@@ -544,7 +599,7 @@ main() {
     set_path_fixture_validity(&p3i)
     p3anchors = list_new(); _ = list.add(p3anchors, &p3r)
     p3inters = list_new(); _ = list.add(p3inters, &p3i)
-    if string.equals(tls13_cert.chain_verify_path(&p3l, p3inters, p3anchors), "") == 1 {
+    if string.equals(tls13_cert.validate_chain(&p3l, p3inters, p3anchors, at3, tls13_cert.PURPOSE_SERVER, -1), "") == 1 {
         println("ok   P-256 leaf <- P-384/SHA-384 intermediate <- P-384 root verified")
     } else { println("FAIL P-384 chain hop rejected"); total_ok = 0 }
     list_free(p3anchors); list_free(p3inters)

@@ -120,7 +120,7 @@ static inline AetherSlice aether_slice_alloc(int64_t count, size_t elem_size) {
         aether_panic("make([]T, n): negative element count");
     }
     void* p = calloc(count > 0 ? (size_t)count : 1, elem_size);
-    if (!p) aether_panic("make([]T, n): out of memory");
+    if (!p) aether_out_of_memory("make([]T, n): out of memory");
     AetherSlice s = aether_slice_make(p, (uint64_t)count);
     s.flags = AETHER_SLICE_MADE;
     return s;

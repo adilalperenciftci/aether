@@ -8,7 +8,8 @@
 // uses for SCHEME_ECDSA_P384_SHA384, followed by p384.ecdsa_verify.
 //   "valid"   -> parse+verify MUST succeed (1).
 //   "invalid" -> parse MUST error or verify MUST return 0.
-// Stride sampling (default 10; WYCHEPROOF_FULL=1 or WYCHEPROOF_STRIDE=N).
+// Every vector runs by default (a verify is about a millisecond since #2600);
+// WYCHEPROOF_STRIDE=N samples every Nth case instead.
 // P-384 hash is SHA-384 (48 bytes) — same width as a coordinate, so it is
 // fed straight to ecdsa_verify.
 
@@ -75,7 +76,7 @@ fn sha384_of(b: ptr, n: int) -> ptr {
 }
 
 main() {
-    stride = 10
+    stride = 1
     wf = os.getenv("WYCHEPROOF_FULL")
     if wf == "1" { stride = 1 }
     sv = os.getenv("WYCHEPROOF_STRIDE")

@@ -1,0 +1,77 @@
+// A std.tcp write to a connection the peer has closed fails, and the program
+// goes on (#3457).
+//
+// std.tcp sent with no flags on sockets made without SO_NOSIGPIPE, so such a
+// write raised SIGPIPE, which ends a process that has not ignored it, with no
+// output: on macOS the pure TLS stack's client and scripted peer died that
+// way. The write now fails with EPIPE, as the HTTP server's always did.
+// net.fd_write on such a socket wrote with write(), which raises SIGPIPE on
+// Linux whatever the socket carries; it fails the same way now.
+//
+// The peer closes; the program writes until a write fails (the first may
+// still be taken: the peer answers it with a reset), then says it is alive.
+
+import std.tcp
+import std.net
+
+extern exit(code: int)
+
+// A connected socket whose peer has closed.
+fn closed_peer() -> ptr {
+    srv, lerr = tcp.listen_on("127.0.0.1", 0)
+    if lerr != "" {
+        println("FAIL listen: ${lerr}")
+        exit(1)
+    }
+    port = tcp.server_port(srv)
+    sock, cerr = tcp.connect("127.0.0.1", port)
+    if cerr != "" {
+        println("FAIL connect: ${cerr}")
+        exit(1)
+    }
+    peer, aerr = tcp.accept(srv)
+    if aerr != "" {
+        println("FAIL accept: ${aerr}")
+        exit(1)
+    }
+    tcp.close(peer)
+    _ = tcp.server_close(srv)
+    return sock
+}
+
+main() {
+    sock = closed_peer()
+    failed = 0
+    i = 0
+    while i < 200 && failed == 0 {
+        _n, werr = tcp.write(sock, "after the peer closed, a line it will never read\n")
+        if werr != "" {
+            failed = 1
+        }
+        sleep(5)
+        i = i + 1
+    }
+    tcp.close(sock)
+    if failed == 0 {
+        println("FAIL: every write to the closed peer was taken")
+        exit(1)
+    }
+    println("PASS a write to a closed peer fails, and the program goes on")
+
+    sock2 = closed_peer()
+    failed = 0
+    i = 0
+    while i < 200 && failed == 0 {
+        if net.fd_write(tcp.fd(sock2), "after the peer closed, a line it will never read\n") < 0 {
+            failed = 1
+        }
+        sleep(5)
+        i = i + 1
+    }
+    tcp.close(sock2)
+    if failed == 0 {
+        println("FAIL: every net.fd_write to the closed peer was taken")
+        exit(1)
+    }
+    println("PASS a net.fd_write to a closed peer fails, and the program goes on")
+}

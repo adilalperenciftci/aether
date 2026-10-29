@@ -2,9 +2,10 @@
  *
  * Counts closure environments and promoted capture cells by hooking the
  * allocator calls the generated code makes: an env is the
- * `malloc(sizeof(_closure_env_N))` of a closure literal and a cell the
- * `calloc(1, sizeof(_AeCellHeader) + size)` of a promoted capture, both
- * recognised by the spelling of their size argument. Every free() in the
+ * `_aether_alloc(sizeof(_closure_env_N), ...)` of a closure literal and a
+ * cell the `_aether_alloc(sizeof(_AeCellHeader) + size, ...)` of a promoted
+ * capture (a malloc and a calloc before #3377), both recognised by the
+ * spelling of their size argument. Every free() in the
  * generated code (the env destructors and the cell releases are generated
  * code) is checked against those blocks.
  *
@@ -111,8 +112,19 @@ static void ec_free(void* p) {
     free(p);
 }
 
+/* The generated code allocates an env or a cell through its checked helper
+ * (#3377), whose definition spells its name in parentheses so this macro
+ * wraps only the calls: counted by the spelling of the size argument, as the
+ * bare malloc and calloc calls were. */
+static void* ec_track_alloc(void* p, size_t n, const char* spelled) {
+    if (strstr(spelled, "_closure_env_")) return ec_track(p, n, 1);
+    if (strstr(spelled, "_AeCellHeader")) return ec_track(p, n, 2);
+    return p;
+}
+
 #define malloc(n) ec_malloc((n), #n)
 #define calloc(k, n) ec_calloc((k), (n), #n)
 #define free(p) ec_free((void*)(p))
+#define _aether_alloc(n, zeroed, what) ec_track_alloc((_aether_alloc)((n), (zeroed), (what)), (n), #n)
 
 #endif

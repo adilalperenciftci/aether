@@ -1,0 +1,7 @@
+// The importer of the hand-made catalog (#2957): it builds only when the
+// importer accepts the catalog.
+import fake
+
+main() {
+    println("add: ${fake.add(2, 3)}")
+}

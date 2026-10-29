@@ -97,9 +97,50 @@ parse runs. Plaintext clients hitting the TLS port get rejected at
 handshake time. The cert and key must be PEM-encoded; the server
 validates they match.
 
-When the build does not include OpenSSL (`AETHER_HAS_OPENSSL`
-undefined), `server_set_tls` returns `"TLS unavailable: built without
-OpenSSL"`.
+### Choosing the TLS backend
+
+Two backends terminate TLS: OpenSSL, and a pure-Aether TLS 1.3 server
+(`std.cryptography.tls13_server`, no OpenSSL at all). The choice is
+explicit (#1298):
+
+- **By default** OpenSSL serves wherever it is compiled in, and the pure
+  server serves where it is not (every `ae build --target=` cross-build,
+  which links no OpenSSL). `AETHER_PURE_TLS=1` moves a process onto the
+  pure stack.
+- **Per server**, `http.server_set_tls_backend(server, backend)` picks
+  `"aether"` or `"openssl"` (or `""` for the default), and wins over the
+  environment variable:
+
+```aether,fragment
+import std.http
+import std.cryptography.tls13_server   // links the pure server
+
+err = http.server_set_tls(server, "cert.pem", "key.pem")
+if err != "" { println("TLS setup: ${err}"); exit(1) }
+err = http.server_set_tls_backend(server, "aether")
+if err != "" { println("TLS backend: ${err}"); exit(1) }
+```
+
+It returns an error string when the named backend cannot serve: `"openssl"`
+in a build without OpenSSL, `"aether"` in a program that does not import
+`std.cryptography.tls13_server`, or an unknown name. Call it before
+`server_start`; it may come before or after `server_set_tls` (it re-applies
+the certificate and key). The pure server speaks TLS 1.3 only. It signs with
+an ECDSA P-256, P-384 or P-521, Ed25519 or RSA (2048 to 16384 bits) key, the
+key's own scheme when the client offers it, in constant time (see
+[writing-security-sensitive-code.md](writing-security-sensitive-code.md))
+(#3326), and checks each signature against the certificate's key before
+sending it, so a signature computed wrongly, which can disclose the key, is
+never sent (#3376). `server_set_tls` loads the certificate and key on this backend as on
+OpenSSL's, and returns why when it cannot serve them: an unreadable file, an
+encrypted or too-short key, a key that does not match the certificate
+(#3328). A chain or a response over one TLS record (2^14 bytes) goes out in
+as many records as it takes, so a large chain serves as it does on OpenSSL
+(#3380); the server reads a ClientHello split across records, up to 64 KiB
+(#3321).
+
+The client has the same choice per request, `client.set_tls_backend(req,
+backend)` (see the client section of `std/http/README.md`).
 
 ---
 
@@ -410,6 +451,15 @@ Parking is on whenever the server has a worker pool and a poller. If
 the lot is full or unavailable the worker keeps its connection, which
 is what happened before parking existed. `aether_http_parked_connections`
 in the metrics output reports how many are held.
+
+On a TLS connection, "the client speaks again" means application data.
+A client may also send records that carry none, a KeyUpdate above all,
+and a read would handle such a record and then wait for a request for
+the whole idle timeout, holding its worker. So when the socket of a TLS
+connection turns readable, the server asks the TLS library, without
+waiting, whether a read would find data. If none, the connection goes,
+or goes back, to the lot for what is left of its idle time. This holds
+on both backends (#3405).
 
 Server emits `Connection: keep-alive` and `Keep-Alive: timeout=N,
 max=M` headers per response.

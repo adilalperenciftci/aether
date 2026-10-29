@@ -21,6 +21,7 @@ exports(
     set_le16, get_le16, set_le32, get_le32, set_le64, get_le64,
     set_be16, get_be16, set_be32, get_be32, set_be64, get_be64,
     copy_from_string, copy_from_bytes, copy_within, finish, to_string, free,
+    wipe, wipe_free,
     data, capacity, set_length, from_ptr, string_from_ptr,
     view, capacity_view, from_slice, copy_from_slice, string_from_slice
 )
@@ -69,6 +70,8 @@ extern aether_bytes_finish(b: @frees ptr, length: int) -> string @heap
 // owner can keep it and mint again. See to_string wrapper below.
 extern aether_bytes_to_string(b: ptr, length: int) -> string @heap
 extern aether_bytes_free(b: @frees ptr)
+extern aether_bytes_wipe(b: ptr)
+extern aether_bytes_wipe_free(b: @frees ptr)
 
 // ---- Aether-side wrappers ----
 // Allocate a new mutable byte buffer with at least `initial_capacity`
@@ -319,4 +322,21 @@ to_string(b: ptr, length: int) -> string {
 // isn't needed.
 free(b: @frees ptr) {
     aether_bytes_free(b)
+}
+
+// Zero every byte the buffer holds, its whole capacity, so that the writes
+// happen even right before a free: a loop of `set` calls is a dead store the
+// C compiler may drop once it inlines them (link-time optimization does)
+// (#3376). The buffer stays valid and keeps its length.
+// Use it on secrets: key material, nonces, the text of a private key.
+// Nothing on null, or on a string, which is immutable and may be shared. A
+// buffer that grew moved its contents, and the memory it moved out of was
+// freed as it was, so give a secret a buffer of its final size.
+wipe(b: ptr) {
+    aether_bytes_wipe(b)
+}
+
+// wipe, then free. Idempotent on null.
+wipe_free(b: @frees ptr) {
+    aether_bytes_wipe_free(b)
 }

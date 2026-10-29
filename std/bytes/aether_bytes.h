@@ -183,4 +183,16 @@ void* aether_bytes_to_string(AetherBytes* b, int length);
  * isn't needed (error path, etc.). */
 void aether_bytes_free(AetherBytes* b);
 
+/* Zero every byte the buffer holds, its whole capacity, in a way the
+ * compiler cannot drop as dead before a free (#3376). The buffer stays
+ * valid, its length unchanged. For a secret: key material, nonces, the text
+ * of a private key. Nothing on NULL or on an AetherString, which is
+ * immutable and may be shared. A buffer that grew moved its contents, and
+ * the memory it moved out of was freed as it was, so a secret is best given
+ * a buffer of its final size. */
+void aether_bytes_wipe(AetherBytes* b);
+
+/* Wipe the buffer, then free it. Idempotent on NULL. */
+void aether_bytes_wipe_free(AetherBytes* b);
+
 #endif

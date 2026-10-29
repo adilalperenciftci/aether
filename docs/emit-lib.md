@@ -140,6 +140,9 @@ content-addressable. Fields:
 | `closures[]` | Closure surface reachable from exports: `name`, `role` (`builder` / `param` / `literal`), `enclosing_export`, `signature`, `captures[]` (`name` + `type`), `source_file`, `source_line` |
 | `constants[]` | Exported scalar/string consts: `name`, `type`, `value` |
 | `structs[]` | Schema 1.3: the structs the exports use, `name`, `kind` (`""`, `"extern"`, `"extern_packed"`), `fields[]` (`name`, `type` as Aether source, `flags`), `source_file`, `source_line` |
+| `host_abi` | Schema 1.11: the host ABI level of `libaether.h` the library was built at ([abi-policy.md](abi-policy.md)) |
+| `runtime_abi` | Schema 1.11: the runtime ABI it was compiled for (`AETHER_RUNTIME_ABI_ID`, such as `"0.856.0/abi1"`) |
+| `requires[]` | Schema 1.11: what its importer must do (`outcome_check`, `string_release`, `shared_runtime`, `runtime_abi`, `actors`); an importer that does not know one refuses the library |
 
 ```json
 {
@@ -602,10 +605,10 @@ aether_set_call_deadline(50);              // 50 ms wall-clock
 
 call_into_aether();                        // returns inside both bounds
 
-if (aether_deadline_tripped()) {
-    /* The deadline fired mid-call. The Aether call returned
-     * early via the codegen tripwire. Any partial state is
-     * the host's to interpret. */
+if (aether_last_outcome() == AETHER_DEADLINE) {
+    /* The deadline fired mid-call: the call ended at a safe point
+     * and returned its zero value. Any partial state is the
+     * host's to interpret. */
 }
 ```
 
@@ -619,24 +622,328 @@ error-string convention; stdlib functions surface "out of memory:
 cap exceeded" up the call chain rather than aborting. Pass `0` to
 disable.
 
-**Wall-clock deadline.** Per-thread monotonic (`CLOCK_MONOTONIC`).
-The codegen emits `if (aether_caps_armed && aether_caps_deadline_tripped())
-{ __aether_abort_call(); break; }` at every `for` / `while` loop head
-under `--emit=lib` not under `--emit=exe` (zero overhead on
-non-sandboxed builds). `aether_caps_armed` is a plain global that goes
-nonzero once any thread arms a deadline (or trips one) and stays so; until
-then a loop head costs one load, with no call and no thread-local read.
-(The call reads two thread-locals, and on macOS each of those is itself a
-call: in a ported interpreter that was a fifth of the run time.) On trip the sticky flag flips; subsequent
-loop heads in the same call exit too, so any depth of nested loops
-unwinds in O(N) tripwire-bounded breaks. Pass `0` to disable; pass
-a fresh ms value to clear the sticky flag and re-arm.
+**Allocation failure ends the call (#2956).** Inside an export, an
+allocation that fails, past the cap or with the allocator out of memory,
+still fails cleanly where it happens (the std operation returns its
+error, its own memory freed), and the call ends at its next safe point,
+or when it returns, with `AETHER_MEMORY_CAP` or `AETHER_OUT_OF_MEMORY`
+and the zero value: its defers run, and a `try` in the script does not
+catch it. The call does not unwind from inside the allocator, which would
+skip the C code between it and the safe point. An allocation the code
+cannot go on without ends the call at once with `AETHER_OUT_OF_MEMORY`: a
+message's payload copy, `make([]T, n)`, and every allocation the generated
+code makes for itself (a captured variable's cell, `ref`, `lazy`, a
+closure's environment, a closure boxed into a `ptr`, `heap.new`, #3377).
+Outside an export a send stops the process as before, and the others are
+a panic naming what ran out (they used to dereference NULL). A `malloc`
+the program declares and calls itself still returns NULL, as C's does,
+and ends the call when it next reaches a safe point or returns.
+Neither the outcome nor the unwind allocates: the reasons are static
+strings and the journal is drained in place. One failure still stops the
+process, inside an export or not: a message the scheduler has no memory to
+queue behind an actor's earlier messages, since it has no place that keeps
+their order.
 
-The trip is observable via `aether_deadline_tripped()` the host
-checks after the call to know whether the result was complete or
-truncated. Retrying a tripped deadline is the host's policy:
-re-arm + call again with a more generous budget, or surface
-`Deadline` to the user.
+**Wall-clock deadline.** Per-thread monotonic (`CLOCK_MONOTONIC`).
+The codegen emits a safe point, `if (aether_caps_armed && aether_exec_poll())
+{ __aether_abort_call(); break; }`, at every `for` / `while` loop head
+under `--emit=lib` not under `--emit=exe` (zero overhead on
+non-sandboxed builds). `aether_caps_armed` is a global that goes
+nonzero once any thread arms a deadline, trips one or cancels a call, and
+stays so; until then a loop head costs one load, with no call and no
+thread-local read. It is an atomic read with a relaxed load (a plain load
+on x86 and ARM), so a loop that started before another thread's cancel
+sees it. (The call reads thread-locals, and on macOS each of
+those is itself a call: in a ported interpreter that was a fifth of the
+run time.) Pass `0` to disable; pass a fresh ms value to clear the sticky
+flag and re-arm.
+
+**Interruptions (#2956).** Inside an export, the first safe point past the
+deadline ends the call: the interruption unwinds like a panic, so every
+frame on the way runs its defers and releases its owned locals, and the
+export returns its zero value with the outcome `AETHER_DEADLINE`. A `try`
+in the script runs its own cleanup and passes the interruption on instead
+of running its handler: a script cannot swallow its deadline. Another
+thread can end a call the same way: `aether_exec_token()` on the calling
+thread names the running call (or, outside one, its next), and
+`aether_exec_cancel(token)` from any thread ends it at its next safe point
+with `AETHER_CANCELLED`. A call nested inside the cancelled one ends first;
+the cancelled one at its own next safe point, once the host code between
+them has returned. A cancel of a call that already ended does nothing.
+Outside any export (a library's actor, say) a loop head breaks at a passed
+deadline, as it did before. An actor stepped on the call's thread inside
+it (a send's inline step, a cooperative ask's poll) is outside it too: the
+call's deadline and cancel do not reach its loops, a `try` in it catches
+its own panics, and the call is cut at its own next safe point once the
+step returns (#3392). The drops its step runs after its handler (of the
+message a panicking handler ran on, and of the messages waiting for an
+actor the step ended) are outside the call as well (#3416). Code the runtime runs inside the call in a frame of
+its own (the drop of an ending actor's messages, when the call ends an
+actor there and then) is cut by the interruption, and the interruption
+goes on to the call: it ends at the call's next safe point, or when it
+returns, and a later call's `try` is not touched by it (#3404). Such a frame
+tells an interruption from a panic by what its own code raised: one already
+on its way when the code began (a `defer` the interruption's unwind runs
+ends an actor, whose drops run there) goes on as it was, and an ordinary
+panic in a drop is the drop's, reported as any is, so the call still ends
+with the interruption's outcome and a `try` on the way passes it on (#3415).
+
+The safe points are loop heads, and `json.parse`, which checks every 4096
+values it reads and then fails with "stopped: the call's deadline passed or
+it was cancelled" (the export then ends with the outcome). Nothing else
+stops a call, so these are bounded only by their own length:
+
+- straight-line code, however long;
+- recursion without a loop: a safe point at every function's entry would
+  cut it, but it made fib(30) through its stub 1.18 ms against 0.69 ms, so
+  there is none;
+- C-backed std operations other than the JSON parse (string split, join and
+  replace, `json.stringify`, a regex match, compression), each bounded by
+  its input;
+- `extern` C functions, and host services the script calls: they run to
+  their return, and the next safe point after it ends the call.
+
+The trip is also observable via `aether_deadline_tripped()`. Retrying a
+tripped deadline is the host's policy: re-arm + call again with a more
+generous budget, or surface `Deadline` to the user.
+
+### Execution accounts (#2954)
+
+The cap and the deadline above belong to the process and to one call. A
+host that runs many scripts on one thread, each yielding to it and resumed
+later (a game's scripts, an editor's plugins), needs a budget that belongs
+to the script: an execution account.
+
+```c
+AetherExecLimits lim = { 256 * 1024, 5000, AETHER_DEADLINE_ACTIVE, NULL };
+AetherExecAccount* script = aether_exec_account_new(&lim);
+
+AetherExecAccount* was;
+aether_exec_use(script, &was);     // this thread's calls charge `script`
+int r = aether_on_frame(dt);
+if (aether_last_outcome() == AETHER_MEMORY_CAP) { /* past its 256 KiB */ }
+aether_exec_use(was, NULL);        // back to the host's own
+
+if (aether_exec_account_tripped(script)) drop(script);
+aether_exec_account_free(script);
+```
+
+- **Memory.** While an account is in use on a thread, every cap-aware
+  allocation made there (strings, collections, JSON, the std buffers) is
+  charged to it and to its parent chain. One that would take any of them
+  past its `memory_bytes` is refused as the process cap refuses one: the
+  call ends at its next safe point with `AETHER_MEMORY_CAP`, and the
+  account's `aether_exec_account_tripped` has
+  `AETHER_ACCOUNT_TRIPPED_MEMORY`. The process cap stays the outer ceiling.
+- **A block stays the account's that allocated it** until it is freed,
+  wherever that happens: in a call under another account, or in the host
+  outside any call. So a string a script hands its host keeps counting
+  against the script until the host releases it, and two scripts on one
+  thread never charge each other.
+- **Deadlines.** A call under an account has the earliest deadline on the
+  account's chain, or the call deadline (`aether_set_call_deadline`) if
+  that is earlier. `AETHER_DEADLINE_ELAPSED` (the default) counts wall time
+  from `aether_exec_account_new`, so the time a script spends suspended
+  counts; `AETHER_DEADLINE_ACTIVE` counts only the time spent in calls
+  under the account, once however calls nest: a call a host service makes
+  inside another, under the same account or a descendant of it, adds no
+  time of its own to it (#3409). Past it the call ends with
+  `AETHER_DEADLINE`, and the account keeps
+  `AETHER_ACCOUNT_TRIPPED_DEADLINE`.
+- **A parent only narrows.** An account made with a `parent` charges what
+  it holds to the parent too, and its deadline is never later than the
+  parent's: a host gives each plugin an account and each of the plugin's
+  scripts a child of it. A `parent` that is no live account of these
+  accounts (one the host freed, or one another runtime copy made without
+  sharing them) makes `aether_exec_account_new` return NULL (#3412): the
+  child is refused, never made wider than the parent meant.
+- **Nesting.** An execution puts back the account that was in use when it
+  began, whatever the code it ran set: a host service that runs another
+  script under its own account, inside a call, leaves the outer call's
+  account as it was.
+- **Threads.** An account is in use on one thread at a time:
+  `aether_exec_use` returns -1 for one in use on another thread, and it may
+  move to another thread once let go there. Allocations on other threads (an
+  actor's handler) are not charged to it, nor those of an actor stepped on
+  this thread while it is in use (a send's inline step, a cooperative ask's
+  poll), the drops its step runs after its handler included (#3416): a step
+  runs in its own context (actor-concurrency.md, "The delivery contract").
+  The refusal on another thread is a threaded build's: a cooperative build
+  (`AETHER_NO_THREADING`) runs one thread per program by contract, so there
+  is no other thread to refuse.
+- **Ownership.** The account is the host's from `aether_exec_account_new`
+  to `aether_exec_account_free`; the runtime keeps nothing of `limits` past
+  the call, writes `previous` and keeps nothing of it. Freeing an account
+  detaches its blocks, which then count only against the process cap: its
+  ancestors are credited with what they were charged for them (#3408). Its
+  children go under its own parent, which their blocks were charged to all
+  along, and keep narrowing under it. Nothing in the runtime names a freed account (#3407): in use
+  on the calling thread, it is in use no more; in use on another thread,
+  nothing more is charged to it there, and that thread lets go of it at its
+  next allocation, call or `aether_exec_use`; an execution that began under
+  it puts no account back when it returns. A freed account is the host's
+  no more: passing it again is not supported.
+- **An Aether host** has the same in std.host: `host.account_new(bytes, ms,
+  host.DEADLINE_ELAPSED, parent)`, `host.account_use(a)`,
+  `host.account_in_use()`, `host.account_used(a)`,
+  `host.account_tripped(a)` and `host.account_free(a)`.
+
+**Runtime copies.** A library built without `--shared-runtime` has a
+runtime of its own, and the accounts are still one per process: every copy
+works through the accounts of the first loaded image that has them, found
+once, at its first account call or execution (the rule the sandbox's
+levels follow). There is one lock, one table of blocks and one account in
+use per thread, so an account is charged whichever copy allocates, and is
+refused on another thread whichever copy is asked.
+
+- The copy that owns the accounts must stay loaded while another runs:
+  unloading it first is not supported. Any other copy may be unloaded: it
+  leaves the accounts as it goes (#3411), and is never written into after.
+- Each copy marks its image with a record the loader maps with it (a PE
+  section, an ELF note, a Mach-O section), and the copies read the records
+  in load order, the program first. So a program's own copy is found though
+  its executable exports nothing (on Windows, and on Linux without
+  `-rdynamic`, as a C host linked with `ae cflags --libs` is), whenever the
+  libraries are loaded (#3445). Records are read on Windows, macOS, Linux
+  and FreeBSD, NetBSD and OpenBSD; elsewhere (Cygwin, illumos, DragonFly)
+  copies look each other up by name in the global scope, and where two do
+  not find each other, a copy refuses (-1) to put in use an account the
+  other made, rather than charge one it does not guard. Copies in a
+  namespace of their own (glibc's `dlmopen`) find none outside it.
+- The accounts carry a version and the sizes of what the copies pass each
+  other. A copy that finds accounts of another layout (another Aether
+  version) does not share them: it says so once on stderr, naming
+  `--shared-runtime`; its `aether_exec_account_new` returns NULL and its
+  `aether_exec_use` -1 for an account; its allocations are charged to
+  none; and it reads nothing of the other's but the version and sizes.
+
+**What it costs.** While no account exists nothing is charged, and a
+cap-aware allocation still tests one word before it calls `malloc` (the
+word also holds the process cap and the test hook); an execution's entry
+adds one load, and an actor step one at each end (the delivery contract's
+item 5, in [actor-concurrency.md](actor-concurrency.md#the-delivery-contract)).
+
+While an account exists anywhere in the process (#3410):
+
+- A thread with no account in use takes no lock. Its cap-aware
+  allocation or free reads its account in use and one word of a filter
+  of the addresses the accounts recorded (32 KiB); only an address whose
+  bit is set (another account's block, or one sharing its bit) takes the
+  accounts' lock to look the table up. Actor cores and HTTP workers pay
+  nothing for a script's account. A clear bit is enough: a block is
+  recorded under the lock with its bit set first, before the allocator
+  returns it, and whatever thread frees it got the pointer after that, so
+  it sees the bit; a free that finds the bit clear is of a block no
+  account was charged for. The bits are cleared only when the table holds
+  no block. A false positive, a free whose bit another block set, costs a
+  table probe under the lock: with n blocks recorded about n / 262,144 of
+  such frees (8% with 20,000).
+- A thread with an account in use takes the lock for each allocation and
+  free (a table probe and a walk of the account's chain), so threads that
+  each have one contend on it. A waiter pauses, then yields.
+- Freeing an account is one pass over the table, under the lock.
+
+Measured on Windows x86_64 (MinGW, the msvcrt heap), a 64-byte
+`aether_caps_malloc` and `aether_caps_free`, best of 5 passes of 2 million
+on each thread:
+
+| Setting | 1 thread | 3 threads |
+|---|---|---|
+| no account exists | 27 ns | 81-145 ns |
+| none exists, one more thread allocating (heap contention only) | 74-99 ns | 123-198 ns |
+| an account in use on that other thread, holding 20,000 blocks | 61-82 ns (199-252 before #3410) | 102-156 ns (697-716 before) |
+| each thread its own account | 46 ns (41 before) | 374-407 ns (532-570 before) |
+
+Freeing an account of 40,000 live blocks takes 0.5 ms (1.1 s before).
+
+## Failures and nested calls at the boundary
+
+Every `aether_<name>` export (and every package builder export) runs inside
+an execution frame (#2955, #2956). How each call ended is its outcome:
+
+```c
+#include <libaether.h>
+
+int r = aether_parse(text);
+switch (aether_last_outcome()) {
+case AETHER_OK:        use(r); break;
+case AETHER_PANICKED:  log("script failed: %s", aether_last_outcome_text()); break;
+case AETHER_DEADLINE:  /* cut by its deadline: r is not a result */ break;
+}
+```
+
+- **A panic ends the call, not the process.** A panic the export does not
+  catch used to print "panic outside any try/catch or actor" and abort the
+  host. It now ends the call with `AETHER_PANICKED`, the export returns
+  the zero value of its result (NULL for a string, which the release
+  accepts), and `aether_last_outcome_text()` gives the panic's message
+  (copied into a fixed buffer, cut at 1023 bytes: nothing is allocated to
+  report it). The library takes the next call at once. Nothing done before
+  the failure is rolled back: host effects, module state, messages sent.
+- **A zero value with an outcome other than `AETHER_OK` is not a result.**
+  Release only what an `AETHER_OK` call returned. `AETHER_DEADLINE` and
+  `AETHER_CANCELLED` mean a safe point ended the call ("Per-call resource
+  caps" above): it returned its zero value, its defers run. A call that ran
+  to its return with a stop noted after its last safe point (an allocation
+  it survived, a JSON parse that stopped, the deadline's flag) ends with
+  that outcome and returns its zero value as well (#3388): the stub
+  releases what the function returned, a string, or the strings and
+  closures of a struct or closure by value. A `ptr` or `*Struct` result
+  owns nothing (R4), so what it points to is not released, as on a panic.
+  An Aether importer gives such a string back to the library before it
+  raises the failure, whichever version built the library.
+- **Nested calls.** An export that calls a host service, which calls an
+  export again on the same thread, runs two executions. The inner one sees
+  what the service set for it (caller info, `aether_set_call_deadline`),
+  has its own outcome, and whatever it leaves behind is undone when it
+  returns, on every exit: the outer one's caller info, deadline (and trip
+  flag) and sandbox levels are as they were
+  ([lib-caller-info.md](lib-caller-info.md#nested-calls-2955),
+  [containment-sandbox.md](containment-sandbox.md#threads-libraries-and-panics)).
+  Executions nest up to 32 deep on one thread.
+- **An Aether program importing the library in binary form** gets a failed
+  call raised again as a panic in its own runtime, with the same reason, so
+  a `try` around the call catches it; `host.last_outcome()` and
+  `host.last_outcome_text()` in std.host read the outcome without one. The
+  stub reads it from the library's own runtime through the accessor the
+  catalog names (`outcome`, schema 1.10), since a library with a runtime of
+  its own records it there.
+- **What a call costs.** Catching a panic needs the stub to save its
+  context, where a panic can return to, on every call; nothing else is paid
+  unless something asks for it (a nested call, a deadline ever armed, a
+  sandbox level on some thread, caller info changed during the call). On
+  x86 and x86-64 the stub saves it with `__builtin_setjmp` (0.57 ns; the C
+  library's setjmp is 2.85 ns on Windows), elsewhere with setjmp. Measured
+  on Windows MinGW, a C host calling in a loop (medians of 9 interleaved
+  rounds against main): an export that calls a function costs 5.7 ns a call
+  against 0.4 ns, about 2 ns of it the registers Win64 makes the stub keep
+  (rbx, rbp, rsi, rdi, r12 to r15, xmm6 to xmm15) for a panic's return;
+  fib(30) through its stub is 0.699 ms against 0.701 ms, the difference
+  lost in the recursion. An export that can neither panic, allocate, loop
+  nor call anything (scalar parameters and locals, `+ - *`, comparisons,
+  if/else, return) gets no frame and records its OK outcome only: 0.57 ns
+  against 0.19 ns.
+- **A library made for another runtime runs nothing** (#2957). A
+  `--shared-runtime` library on a runtime of another ABI than the one it
+  was compiled for (a shared runtime replaced in place), or `--emit=csrc`
+  code linked against another Aether's runtime, finds out at its first
+  call: every export returns its zero value with `AETHER_INCOMPATIBLE`
+  (6), none of its code runs, and the reason, naming both runtimes, is
+  printed once and in `aether_last_outcome_text()`. A host asks first with
+  `aether_<lib>_check(const char** why)`: 0, or -1 with the reason. The
+  same C compiled against another Aether's headers does not compile. A
+  host treats an outcome it does not know as a failure.
+  [abi-policy.md](abi-policy.md) has what is supported across versions.
+- **The host API is in every library.** A library built with its own
+  runtime carries `aether_set_call_deadline`, `aether_deadline_tripped`,
+  `aether_set_memory_cap`, `aether_set_caller`, `aether_clear_caller`,
+  `aether_last_outcome`, `aether_last_outcome_text`, `aether_exec_token`,
+  `aether_exec_cancel` and the execution accounts' `aether_exec_account_new`,
+  `aether_exec_account_free`, `aether_exec_use`, `aether_exec_account_used`
+  and `aether_exec_account_tripped` even when its code calls none of them, so a host
+  that loads it can call them in its runtime (a library DLL had no
+  `aether_set_call_deadline` before). On the shared runtime they are the
+  shared runtime's.
 
 ## What's out of scope for v1
 
@@ -777,7 +1084,16 @@ those fields were always present, just NULL before). `schema_version` is
 "1.0" for function-only artifacts, "1.1" once closure records are
 present, "1.2" once exported-constant records
 (`constant_count`/`constants`, of type `AetherLibConstant`) are present,
-and "1.3" once struct records or source signatures are (below). A reader
+and "1.3" once struct records or source signatures are (below), and so on
+up to "1.9" (runtime/aether_lib_meta.h lists them). Since "1.10" every
+catalog has `outcome`, the library's outcome accessor
+([above](#failures-and-nested-calls-at-the-boundary)). Since "1.11"
+(#2957) every catalog also has `host_abi`, the host ABI level it was built
+at, `runtime_abi`, the runtime ABI it was compiled for, and `requires`, a
+comma-separated list of what its importer must do; every library built now
+is "1.11". An importer reads any minor of schema 1 and refuses another
+major, and refuses a library that requires something it does not know,
+naming it and the fix ([abi-policy.md](abi-policy.md)). A reader
 touches a field only when the artifact's minor version is at least the one
 that appended it: an older artifact's struct ends before the newer slots.
 The function table includes every
@@ -975,6 +1291,12 @@ ae build app.ae -o app                                            # imports both
   pointer) and a builder that uses its config have none. Where the copies
   stay apart (macOS, Windows), importing a static library that has such an
   export is an error naming each one, with the rebuild: `--shared-runtime`.
+- A sandbox's grants are each thread's, in the runtime: on one runtime a
+  library's export called from inside another's `sandbox.enforce` block is
+  held to the block's grants. Where the copies stay apart, the inner copy
+  cannot read them and refuses what the block would check, with a message
+  naming `--shared-runtime`
+  ([containment-sandbox.md](containment-sandbox.md#threads-libraries-and-panics)).
 - Hooks a program supplies to the runtime by `@c_callback` (the pure-TLS
   client and server) reach a shared runtime by registration: every
   `@c_callback` registers itself by name when its image loads, and the

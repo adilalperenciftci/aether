@@ -10,10 +10,14 @@
 //
 // A gateway set to pure TLS takes a connection; the loop must not have
 // taken it, on any platform (Windows has no loop, and counts none). The
-// handshake is not this test's business: the certificate paths name no
-// files, and the worker path closes a connection it cannot shake hands on.
-// The servers listen on 127.0.0.1 and a port the kernel picks.
+// handshake is not this test's business: the certificate is a self-signed one
+// the test writes, and the worker path closes a connection that sends
+// plain HTTP to a TLS port. The pure server is imported, as a program that
+// uses it must (#1298), and its pair is real, since server_set_tls checks it
+// (#3328). The servers listen on 127.0.0.1 and a port the kernel picks.
 
+import std.cryptography.tls13_server
+import std.fs
 import std.http
 import std.http.proxy
 import std.os
@@ -22,6 +26,16 @@ import std.tcp
 
 extern exit(code: int)
 extern http_server_evloop_connections(server: ptr) -> int
+
+// A self-signed P-256 pair for localhost, good until 2126. server_set_tls
+// checks the pair it is given (#3328), so the gateway needs real files.
+fn test_cert() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBlTCCATugAwIBAgIUTcmDMt5d7e0N56ALpyQQu9lFub8wCgYIKoZIzj0EAwIw\nFDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MTAyODE4MDYxM1oYDzIxMjYxMDA0\nMTgwNjEzWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjO\nPQMBBwNCAASysB/pp9OO2HCoPvAPR6Bh2RMYwvQEaFPcYGah1XNuQV81ISkj0+li\nILe3MdnCkC2jiFoxIxO9pOfsKpMq+fA3o2kwZzAdBgNVHQ4EFgQUjNH0ltVjmUq2\nTbvlKu+ByFCh65MwHwYDVR0jBBgwFoAUjNH0ltVjmUq2TbvlKu+ByFCh65MwDwYD\nVR0TAQH/BAUwAwEB/zAUBgNVHREEDTALgglsb2NhbGhvc3QwCgYIKoZIzj0EAwID\nSAAwRQIhAJNTcbxDRkO9ST1q0UtHv+r2QlL2oJsUfmO7tDBjKw5gAiAocb88reSB\nW7SWl8242FJ4cD+7F1/bpwOVOboL1EKcQQ==\n-----END CERTIFICATE-----\n"
+}
+
+fn test_key() -> string {
+    return "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgk2P0BnYO5mJHctnz\nIDF2r7nCNkL1tpLqIL6Jsr2wveShRANCAASysB/pp9OO2HCoPvAPR6Bh2RMYwvQE\naFPcYGah1XNuQV81ISkj0+liILe3MdnCkC2jiFoxIxO9pOfsKpMq+fA3\n-----END PRIVATE KEY-----\n"
+}
 
 handle_up(req: ptr, res: ptr, ud: ptr) {
     http.response_set_status(res, 200)
@@ -60,7 +74,20 @@ main() {
         println("FAIL: mount: ${merr}")
         exit(1)
     }
-    terr = http.server_set_tls(gateway, "no-such-cert.pem", "no-such-key.pem")
+    dir, derr = fs.make_temp_dir("", "ae3256")
+    if derr != "" {
+        println("FAIL: temp dir: ${derr}")
+        exit(1)
+    }
+    cert = "${dir}/cert.pem"
+    key = "${dir}/key.pem"
+    werr = fs.write(cert, test_cert())
+    kerr = fs.write(key, test_key())
+    if werr != "" || kerr != "" {
+        println("FAIL: write the pair: ${werr}${kerr}")
+        exit(1)
+    }
+    terr = http.server_set_tls(gateway, cert, key)
     if terr != "" {
         println("FAIL: server_set_tls: ${terr}")
         exit(1)
@@ -99,6 +126,9 @@ main() {
 
     http.server_stop(gateway)
     http.server_stop(upstream)
+    fs.delete(cert)
+    fs.delete(key)
+    fs.delete_dir(dir)
     if bad > 0 {
         println("FAIL: ${bad} case(s)")
         exit(1)

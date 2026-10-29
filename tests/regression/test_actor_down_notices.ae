@@ -1,0 +1,148 @@
+// A watched actor's death reaches its watcher as a Down (#2974).
+//
+// Aether code could not learn that an actor died: the death hook was C's
+// alone. actors.monitor(ref) now sends the monitoring actor one
+// `Down { ref, reason }` when `ref` ends, with "normal" for actors.stop(),
+// "killed" for actors.kill(ref), and the panic's reason for a panic; at once
+// for an actor that has ended already. actors.demonitor(id) stops one before
+// it comes, and a death's undelivered messages are counted
+// (actors.dead_sends()).
+
+import std.actors
+
+message Watch { who: actor_ref }
+message Unwatch {}
+message Boom {}
+message Halt {}
+message Ping {}
+
+extern exit(code: int)
+
+actor Target {
+    state n = 0
+    receive {
+        Boom() -> { panic("the target blew up") }
+        Halt() -> { actors.stop() }
+        Ping() -> { n = n + 1 }
+    }
+}
+
+actor Watcher {
+    state downs = 0
+    state last_reason = ""
+    state last_ref: actor_ref = null
+    state last_id = 0
+    receive {
+        Watch(who) -> { last_id = actors.monitor(who) }
+        Unwatch() -> { actors.demonitor(last_id) }
+        Down(ref, reason) -> {
+            downs = downs + 1
+            last_reason = reason
+            last_ref = ref
+        }
+    }
+}
+
+// Monitors and has no Down arm: a Down it gets is dropped as any message it
+// has no arm for.
+actor Bystander {
+    receive {
+        Watch(who) -> { _id = actors.monitor(who) }
+    }
+}
+
+check(label: string, ok: bool) -> int {
+    if !ok {
+        println("  FAIL ${label}")
+        return 1
+    }
+    println("  PASS ${label}")
+    return 0
+}
+
+main() {
+    println("=== a watched actor's death reaches its watcher (#2974) ===")
+    fails = 0
+
+    // A panic: its reason.
+    a = spawn(Target())
+    wa = spawn(Watcher())
+    wa ! Watch { who: a }
+    wait_for_idle()
+    a ! Boom {}
+    wait_for_idle()
+    fails = fails + check("a panic: one Down, \"the target blew up\", got ${wa.downs}, \"${wa.last_reason}\"",
+        wa.downs == 1 && wa.last_reason == "the target blew up")
+    fails = fails + check("its ref is the dead actor's", wa.last_ref == a)
+
+    // A stop, with three messages queued behind it: "normal", and the three
+    // are dropped and counted.
+    b = spawn(Target())
+    wb = spawn(Watcher())
+    wb ! Watch { who: b }
+    wait_for_idle()
+    dead0 = actors.dead_sends()
+    b ! Halt {}
+    b ! Ping {}
+    b ! Ping {}
+    b ! Ping {}
+    wait_for_idle()
+    fails = fails + check("a stop: one Down, \"normal\", got ${wb.downs}, \"${wb.last_reason}\"",
+        wb.downs == 1 && wb.last_reason == "normal")
+    fails = fails + check("its three queued messages are counted, got ${actors.dead_sends() - dead0}",
+        actors.dead_sends() - dead0 == 3)
+    fails = fails + check("and none was handled, got ${b.n}", b.n == 0)
+
+    // A kill, and a send after it.
+    c = spawn(Target())
+    wc = spawn(Watcher())
+    wc ! Watch { who: c }
+    wait_for_idle()
+    actors.kill(c)
+    wait_for_idle()
+    dead1 = actors.dead_sends()
+    c ! Ping {}
+    wait_for_idle()
+    fails = fails + check("a kill: one Down, \"killed\", got ${wc.downs}, \"${wc.last_reason}\"",
+        wc.downs == 1 && wc.last_reason == "killed")
+    fails = fails + check("a send to it after is counted, got ${actors.dead_sends() - dead1}",
+        actors.dead_sends() - dead1 == 1)
+
+    // Monitored once dead: at once, with the reason it died of.
+    late = spawn(Watcher())
+    late ! Watch { who: c }
+    wait_for_idle()
+    fails = fails + check("a monitor of a dead actor: one Down, \"killed\", got ${late.downs}, \"${late.last_reason}\"",
+        late.downs == 1 && late.last_reason == "killed")
+
+    // Demonitored before the death: no Down.
+    d = spawn(Target())
+    wd = spawn(Watcher())
+    wd ! Watch { who: d }
+    wait_for_idle()
+    wd ! Unwatch {}
+    wait_for_idle()
+    actors.kill(d)
+    wait_for_idle()
+    fails = fails + check("demonitored first: no Down, got ${wd.downs}", wd.downs == 0)
+
+    // A live actor gets none, and a watcher with no Down arm drops one.
+    e = spawn(Target())
+    we = spawn(Watcher())
+    we ! Watch { who: e }
+    wait_for_idle()
+    by = spawn(Bystander())
+    by ! Watch { who: e }
+    e ! Ping {}
+    wait_for_idle()
+    fails = fails + check("a live actor: no Down, got ${we.downs}", we.downs == 0)
+    actors.kill(e)
+    wait_for_idle()
+    fails = fails + check("then killed: one, got ${we.downs}", we.downs == 1)
+
+    if fails > 0 {
+        println("FAIL: ${fails} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

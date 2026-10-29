@@ -11,7 +11,9 @@
 // intermediate digest are all full of NUL bytes — so every byte path
 // is a length-carrying byte[] slice (#2301): keys and messages come in as
 // slices, and the internal blocks are fed to sha2.update as bounded views
-// of their std.bytes buffers.
+// of their std.bytes buffers. Each of them (K0, the pads, the inner digest)
+// is a key or a digest of one, so each is freed with bytes.wipe_free, and
+// sha2 wipes its own state (#3402).
 //
 //   HMAC(K, m) = H( (K0 ^ opad) || H( (K0 ^ ipad) || m ) )
 //
@@ -26,6 +28,7 @@
 
 import std.bits
 import std.bytes
+import std.mem
 import std.cryptography.sha2
 
 extern malloc(size: int) -> ptr
@@ -87,7 +90,7 @@ make_k0(algo: string, key: byte[], block_size: int) -> ptr {
         // K0 = H(key) (binary-safe), padded with zeros to B.
         hctx, herr = sha2.new(algo)
         if herr != "" {
-            bytes.free(k0)
+            bytes.wipe_free(k0)
             return null
         }
         sha2.update(hctx, key)
@@ -98,7 +101,7 @@ make_k0(algo: string, key: byte[], block_size: int) -> ptr {
             bytes.set(k0, i, bytes.get(digest, i))
             i = i + 1
         }
-        bytes.free(digest)
+        bytes.wipe_free(digest)
     } else {
         i = 0
         while i < key_len {
@@ -124,6 +127,7 @@ new(algo: string, key: byte[]) -> {
     }
     k0 = make_k0(algo, key, bs)
     if k0 == null {
+        mem.wipe(ctx, sizeof(HmacCtx))
         free(ctx)
         return null, "unknown algorithm"
     }
@@ -138,18 +142,19 @@ new(algo: string, key: byte[]) -> {
         bytes.set(opad, i, (kb ^ 0x5c) & 255)
         i = i + 1
     }
-    bytes.free(k0)
+    bytes.wipe_free(k0)
 
     // Start the inner hash and feed it the ipad block.
     inner, ierr = sha2.new(algo)
     if ierr != "" {
-        bytes.free(ipad)
-        bytes.free(opad)
+        bytes.wipe_free(ipad)
+        bytes.wipe_free(opad)
+        mem.wipe(ctx, sizeof(HmacCtx))
         free(ctx)
         return null, ierr
     }
     sha2.update(inner, bytes.view(ipad)[0..bs])
-    bytes.free(ipad)
+    bytes.wipe_free(ipad)
 
     ctx.inner = inner
     ctx.opad = opad
@@ -178,18 +183,20 @@ final_bytes(ctx: ptr) -> ptr {
 
     outer, oerr = sha2.new(c.algo)
     if oerr != "" {
-        bytes.free(inner_digest)
-        bytes.free(c.opad)
+        bytes.wipe_free(inner_digest)
+        bytes.wipe_free(c.opad)
+        mem.wipe(ctx, sizeof(HmacCtx))
         free(ctx)
         return null
     }
     sha2.update(outer, bytes.view(c.opad)[0..c.block_size])
     sha2.update(outer, bytes.view(inner_digest)[0..idl])
-    bytes.free(inner_digest)
+    bytes.wipe_free(inner_digest)
     result = sha2.final_bytes(outer)
 
-    bytes.free(c.opad)
+    bytes.wipe_free(c.opad)
     c.opad = null
+    mem.wipe(ctx, sizeof(HmacCtx))
     free(ctx)
     return result
 }
@@ -201,7 +208,7 @@ final_hex(ctx: ptr) -> string {
         return ""
     }
     s = bytes_to_hex(res)
-    bytes.free(res)
+    bytes.wipe_free(res)
     return s
 }
 
@@ -216,9 +223,10 @@ free_ctx(ctx: ptr) {
         c.inner = null
     }
     if c.opad != null {
-        bytes.free(c.opad)
+        bytes.wipe_free(c.opad)
         c.opad = null
     }
+    mem.wipe(ctx, sizeof(HmacCtx))
     free(ctx)
 }
 

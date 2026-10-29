@@ -35,6 +35,7 @@
 // AEAD is ChaCha20-Poly1305 (16-byte tag). AES-GCM support is a later add.
 
 import std.bytes
+import std.mem
 import std.string
 import std.bits
 import std.cryptography.chacha20poly1305
@@ -44,7 +45,8 @@ extern malloc(size: int) -> ptr
 @extern("free") libc_free(p: ptr)
 
 exports(
-    new, new_aead, free_ctx, seal_record, open_record, nonce_for,
+    new, new_aead, rekey, free_ctx, seal_record, seal_records, open_record, nonce_for, check_header,
+    ALERT_UNEXPECTED_MESSAGE, ALERT_BAD_RECORD_MAC, ALERT_RECORD_OVERFLOW, ALERT_DECODE_ERROR,
     RecordCtx, OpenedRecord,
     CONTENT_HANDSHAKE, CONTENT_APPLICATION_DATA, CONTENT_ALERT,
     TAG_LEN, RECORD_HEADER_LEN, OPAQUE_APPLICATION_DATA,
@@ -100,31 +102,55 @@ new(key: byte[], iv12: ptr) -> ptr {
 // is built once here (GCM only runs the cipher forward, for seal AND open).
 new_aead(aead_id: int, key: byte[], iv12: ptr) -> ptr {
     if key.len < 0 { panic("tls13_record.new_aead: the `key` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
-    int key_len = key.len
     ctx = malloc(sizeof(RecordCtx)) as *RecordCtx
+    ctx.key = null
+    ctx.key_len = 0
+    ctx.iv = null
+    ctx.seq = 0
+    ctx.aead = aead_id
+    ctx.aes_ctx = null
+    rekey(ctx as ptr, key, iv12)
+    return ctx as ptr
+}
+
+// Key `ctx` afresh with `key` and `iv12`, its AEAD unchanged, and start its
+// sequence number again at 0, as a KeyUpdate does (RFC 8446 4.6.3, 5.3).
+// Both are copied (the ctx owns its copies; the old ones are freed).
+rekey(ctx: ptr, key: byte[], iv12: ptr) {
+    if key.len < 0 { panic("tls13_record.rekey: the `key` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    c = ctx as *RecordCtx
+    int key_len = key.len
     k = bytes.new(key_len)
     if key_len > 0 { bytes.set(k, key_len - 1, 0) }
     bytes.copy_from_slice(k, 0, key[0..key_len])
     iv = bytes.new(NONCE_LEN)
     bytes.set(iv, NONCE_LEN - 1, 0)
     bytes.copy_from_bytes(iv, 0, iv12, 0, NONCE_LEN)
-    ctx.key = k
-    ctx.key_len = key_len
-    ctx.iv = iv
-    ctx.seq = 0
-    ctx.aead = aead_id
-    ctx.aes_ctx = null
-    if aead_id == AEAD_AES_128_GCM || aead_id == AEAD_AES_256_GCM {
-        ctx.aes_ctx = aes.new_encryptor(bytes.view(k)[0..key_len])
+    wipe_free(c.key)
+    wipe_free(c.iv)
+    if c.aes_ctx != null { aes.free(c.aes_ctx) }
+    c.key = k
+    c.key_len = key_len
+    c.iv = iv
+    c.seq = 0
+    c.aes_ctx = null
+    if c.aead == AEAD_AES_128_GCM || c.aead == AEAD_AES_256_GCM {
+        c.aes_ctx = aes.new_encryptor(bytes.view(k)[0..key_len])
     }
-    return ctx as ptr
+}
+
+// Zero a key buffer, then free it: a record key must not outlive its
+// context (RFC 8446 7.2 asks that keys replaced by a KeyUpdate be deleted).
+fn wipe_free(b: @frees ptr) {
+    bytes.wipe_free(b)
 }
 
 free_ctx(ctx: ptr) {
     c = ctx as *RecordCtx
-    bytes.free(c.key)
-    bytes.free(c.iv)
+    wipe_free(c.key)
+    wipe_free(c.iv)
     if c.aes_ctx != null { aes.free(c.aes_ctx) }
+    mem.wipe(ctx, sizeof(RecordCtx))
     libc_free(ctx)
 }
 
@@ -209,12 +235,46 @@ seal_record(ctx: ptr, content_type: int, plaintext: byte[]) -> ptr {
     bytes.set(rec, 4, ct_len & 0xFF)
     bytes.copy_from_bytes(rec, RECORD_HEADER_LEN, enc, 0, ct_len)
 
-    bytes.free(inner)
-    bytes.free(aad)
-    bytes.free(nonce)
-    bytes.free(enc)
+    bytes.wipe_free(inner)
+    bytes.wipe_free(aad)
+    bytes.wipe_free(nonce)
+    bytes.wipe_free(enc)
     c.seq = c.seq + 1
     return rec
+}
+
+// `plaintext` of `content_type` as records of at most CONTENT_MAX_PLAIN_LEN
+// bytes of content each, back to back in one fresh buffer (caller frees),
+// or null when one cannot be sealed (seal_record's limits). RFC 8446 5.1:
+// a handshake message larger than a record is split across records, and
+// application data is cut the same way (#3380). Empty `plaintext` is one
+// empty record.
+seal_records(ctx: ptr, content_type: int, plaintext: byte[]) -> ptr {
+    if plaintext.len < 0 { panic("tls13_record.seal_records: the `plaintext` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    int n = plaintext.len
+    if n <= CONTENT_MAX_PLAIN_LEN { return seal_record(ctx, content_type, plaintext) }
+    out = bytes.new(n + (n / CONTENT_MAX_PLAIN_LEN + 1) * (RECORD_HEADER_LEN + 1 + TAG_LEN))
+    olen = 0
+    off = 0
+    while off < n {
+        m = n - off
+        if m > CONTENT_MAX_PLAIN_LEN { m = CONTENT_MAX_PLAIN_LEN }
+        rec = seal_record(ctx, content_type, plaintext[off..off + m])
+        if rec == null {
+            bytes.wipe_free(out)
+            return null
+        }
+        rl = bytes.length(rec)
+        bytes.copy_from_bytes(out, olen, rec, 0, rl)
+        olen = olen + rl
+        bytes.wipe_free(rec)
+        off = off + m
+    }
+    res = bytes.new(olen)
+    bytes.set(res, olen - 1, 0)
+    bytes.copy_from_bytes(res, 0, out, 0, olen)
+    bytes.wipe_free(out)
+    return res
 }
 
 // Parsed result of opening a record.
@@ -222,6 +282,7 @@ struct OpenedRecord {
     content_type: int
     plaintext: ptr // fresh bytes (caller frees) — the inner content
     plaintext_len: int
+    alert: int // the alert open_record says to send, when it refuses the record
 }
 
 // Dispatch AEAD-Open to the negotiated cipher. Returns (inner_plaintext, "")
@@ -237,12 +298,45 @@ fn aead_open_dispatch(c: *RecordCtx, nonce: ptr, aad: ptr, ctbuf: byte[]) -> (pt
 // Verifies the AEAD tag, strips trailing zero padding, and reads the real
 // content type from the last non-zero inner byte. Advances ctx.seq. Returns
 // "" on success or an error string. On success out.plaintext is fresh bytes.
+// The alerts the record layer refuses with (RFC 8446 5, 6.2).
+const ALERT_UNEXPECTED_MESSAGE = 10
+const ALERT_BAD_RECORD_MAC = 20
+const ALERT_RECORD_OVERFLOW = 22
+const ALERT_DECODE_ERROR = 50
+
+// check_header(header) -> (alert, error) for a record's 5-byte header (the
+// first five bytes of `header`): (0, "") for a content type TLS 1.3 knows
+// (change_cipher_spec, alert, handshake, application_data) and a length the
+// type allows: 2^14 for a plaintext record, 2^14 + 256 for a protected one
+// (RFC 8446 5.1, 5.2), and never zero for a handshake or alert. Else
+// unexpected_message or record_overflow. Checked as soon as the header has
+// arrived, so a bogus length never sizes a read.
+check_header(header: byte[]) -> (int, string) {
+    if header.len < 0 { panic("tls13_record.check_header: the `header` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    if header.len < RECORD_HEADER_LEN { return ALERT_DECODE_ERROR, "record: truncated header" }
+    t = header[0] & 0xFF
+    n = ((header[3] & 0xFF) << 8) | (header[4] & 0xFF)
+    if t != 20 && t != 21 && t != 22 && t != 23 {
+        return ALERT_UNEXPECTED_MESSAGE, "record: unknown content type ${t}"
+    }
+    if t == OPAQUE_APPLICATION_DATA {
+        if n > RECORD_MAX_CIPHERTEXT_LEN { return ALERT_RECORD_OVERFLOW, "record: a protected record over 2^14 + 256 bytes" }
+    } else if n > CONTENT_MAX_PLAIN_LEN {
+        return ALERT_RECORD_OVERFLOW, "record: a plaintext record over 2^14 bytes"
+    }
+    if (t == 21 || t == 22) && n == 0 {
+        return ALERT_UNEXPECTED_MESSAGE, "record: an empty handshake or alert record"
+    }
+    return 0, ""
+}
+
 open_record(ctx: ptr, record: byte[], out: *OpenedRecord) -> string {
     if record.len < 0 { panic("tls13_record.open_record: the `record` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
     int rec_len = record.len
     out.content_type = 0
     out.plaintext = null
     out.plaintext_len = 0
+    out.alert = ALERT_DECODE_ERROR
 
     if ctx == null { return "record: null context" }
     c = ctx as *RecordCtx
@@ -252,16 +346,21 @@ open_record(ctx: ptr, record: byte[], out: *OpenedRecord) -> string {
         return "record: sequence number overflow"
     }
     if rec_len < RECORD_HEADER_LEN + TAG_LEN {
+        // Shorter than its tag: it cannot be decrypted, which RFC 8446 5.2
+        // answers with bad_record_mac (#3357).
+        out.alert = ALERT_BAD_RECORD_MAC
         return "record: too short"
     }
     // header: opaque_type must be 0x17 for a protected record
     if (record[0] & 0xFF) != OPAQUE_APPLICATION_DATA {
+        out.alert = ALERT_UNEXPECTED_MESSAGE
         return "record: unexpected opaque_type"
     }
     ct_len = ((record[3] & 0xFF) << 8) | (record[4] & 0xFF)
     // RFC 8446 §5.2: a TLSCiphertext over 2^14 + 256 bytes is a record_overflow.
     // Reject before allocating so a bogus length cannot drive the buffer size.
     if ct_len > RECORD_MAX_CIPHERTEXT_LEN {
+        out.alert = ALERT_RECORD_OVERFLOW
         return "record: length exceeds maximum record size"
     }
     if RECORD_HEADER_LEN + ct_len > rec_len {
@@ -280,11 +379,12 @@ open_record(ctx: ptr, record: byte[], out: *OpenedRecord) -> string {
     nonce = nonce_for(c.iv, c.seq)
     inner, err = aead_open_dispatch(c, nonce, aad, bytes.view(ctbuf)[0..ct_len])
 
-    bytes.free(aad)
-    bytes.free(ctbuf)
-    bytes.free(nonce)
+    bytes.wipe_free(aad)
+    bytes.wipe_free(ctbuf)
+    bytes.wipe_free(nonce)
 
     if string.equals(err, "") != 1 {
+        out.alert = ALERT_BAD_RECORD_MAC
         return err
     }
 
@@ -304,11 +404,27 @@ open_record(ctx: ptr, record: byte[], out: *OpenedRecord) -> string {
     }
     if ct_idx < 0 {
         // all-zero inner plaintext: no content type -> illegal
-        bytes.free(inner)
+        bytes.wipe_free(inner)
         c.seq = c.seq + 1
+        out.alert = ALERT_UNEXPECTED_MESSAGE
         return "record: no content type (all-zero inner plaintext)"
     }
     out.content_type = bytes.get(inner, ct_idx) & 0xFF
+    // RFC 8446 5.4: TLSInnerPlaintext is at most 2^14 + 1 bytes (content,
+    // type and padding), and 5: a record type TLS 1.3 does not know is
+    // unexpected_message (#3317).
+    if inner_len > CONTENT_MAX_PLAIN_LEN + 1 {
+        bytes.wipe_free(inner)
+        c.seq = c.seq + 1
+        out.alert = ALERT_RECORD_OVERFLOW
+        return "record: inner plaintext over 2^14 + 1 bytes"
+    }
+    if out.content_type != 21 && out.content_type != 22 && out.content_type != 23 {
+        bytes.wipe_free(inner)
+        c.seq = c.seq + 1
+        out.alert = ALERT_UNEXPECTED_MESSAGE
+        return "record: protected record of unknown type ${out.content_type}"
+    }
     content_len = ct_idx
     pt = bytes.new(content_len)
     if content_len > 0 {
@@ -317,8 +433,9 @@ open_record(ctx: ptr, record: byte[], out: *OpenedRecord) -> string {
     }
     out.plaintext = pt
     out.plaintext_len = content_len
+    out.alert = 0
 
-    bytes.free(inner)
+    bytes.wipe_free(inner)
     c.seq = c.seq + 1
     return ""
 }

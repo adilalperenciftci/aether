@@ -880,8 +880,8 @@ endif
 
 COMPILER_SRC = compiler/aetherc.c compiler/parser/lexer.c compiler/parser/parser.c compiler/ast.c compiler/analysis/typechecker.c compiler/analysis/contract_eval.c compiler/analysis/derive.c compiler/analysis/actor_reply.c compiler/analysis/missing_return.c compiler/analysis/actor_protocol.c compiler/analysis/free_check.c compiler/analysis/slice_escape.c compiler/analysis/slice_own.c compiler/analysis/hoist.c compiler/analysis/slice_coerce.c compiler/analysis/sandbox_trust.c compiler/analysis/quote.c compiler/aether_defines.c compiler/codegen/codegen.c compiler/codegen/codegen_expr.c compiler/codegen/codegen_stmt.c compiler/codegen/codegen_actor.c compiler/codegen/codegen_func.c compiler/codegen/codegen_schema.c compiler/codegen/codegen_own.c compiler/aether_error.c compiler/aether_module.c compiler/aether_aea.c compiler/analysis/type_inference.c compiler/codegen/optimizer.c compiler/aether_diagnostics.c compiler/aether_strmap.c runtime/actors/aether_message_registry.c lsp/aether_lsp.c
 COMPILER_LIB_SRC = compiler/parser/lexer.c compiler/parser/parser.c compiler/ast.c compiler/analysis/typechecker.c compiler/analysis/contract_eval.c compiler/analysis/derive.c compiler/analysis/actor_reply.c compiler/analysis/missing_return.c compiler/analysis/actor_protocol.c compiler/analysis/free_check.c compiler/analysis/slice_escape.c compiler/analysis/slice_own.c compiler/analysis/hoist.c compiler/analysis/slice_coerce.c compiler/analysis/sandbox_trust.c compiler/analysis/quote.c compiler/aether_defines.c compiler/codegen/codegen.c compiler/codegen/codegen_expr.c compiler/codegen/codegen_stmt.c compiler/codegen/codegen_actor.c compiler/codegen/codegen_func.c compiler/codegen/codegen_schema.c compiler/codegen/codegen_own.c compiler/aether_error.c compiler/aether_module.c compiler/aether_aea.c compiler/analysis/type_inference.c compiler/codegen/optimizer.c compiler/aether_diagnostics.c compiler/aether_strmap.c runtime/actors/aether_message_registry.c lsp/aether_lsp.c
-RUNTIME_SRC = $(SCHEDULER_SRC) runtime/scheduler/scheduler_optimizations.c runtime/scheduler/aether_io_poller_epoll.c runtime/scheduler/aether_io_poller_kqueue.c runtime/scheduler/aether_io_poller_poll.c runtime/config/aether_optimization_config.c runtime/memory/aether_arena.c runtime/memory/aether_pool.c runtime/memory/aether_memory_stats.c runtime/utils/aether_trace.c runtime/utils/aether_spawn.c runtime/utils/aether_bounds_check.c runtime/utils/aether_test.c runtime/memory/aether_arena_optimized.c runtime/aether_runtime_types.c runtime/aether_locale_num.c runtime/utils/aether_cpu_detect.c runtime/utils/aether_simd_vectorized.c runtime/aether_runtime.c runtime/aether_numa.c runtime/aether_sandbox.c runtime/sandbox/spawn_sandboxed_linux.c runtime/sandbox/spawn_sandboxed_bsd.c runtime/sandbox/spawn_sandboxed_stub.c runtime/sandbox/capsicum_autosandbox.c runtime/sandbox/aether_audit.c runtime/aether_shared_map.c runtime/aether_observe.c runtime/aether_schema.c runtime/aether_process_mem.c runtime/aether_host.c runtime/aether_resource_caps.c runtime/libaether_caps.c runtime/actors/aether_send_buffer.c runtime/actors/aether_send_message.c runtime/actors/aether_actor_thread.c runtime/actors/aether_panic.c runtime/actors/aether_unwind.c runtime/aether_callbacks.c
-STD_SRC = std/string/aether_string.c std/math/aether_math.c std/net/aether_http.c std/net/aether_http_server.c std/net/aether_http_pool.c std/net/aether_http_park.c std/net/aether_http_evloop.c std/net/aether_net.c std/udp/aether_udp.c std/collections/aether_collections.c std/intmap/aether_intmap.c std/json/aether_json.c std/yaml/aether_yaml.c std/xml/aether_xml.c std/fs/aether_fs.c std/log/aether_log.c std/io/aether_io.c std/os/aether_os.c std/ipc/aether_ipc.c std/mem/aether_mem.c std/cryptography/aether_cryptography.c std/cryptography/aes/aether_aes.c std/zlib/aether_zlib.c std/brotli/aether_brotli.c std/zstd/aether_zstd.c std/lzf/lzf_c.c std/lzf/lzf_d.c std/lzf/aether_lzf.c std/dl/aether_dl.c std/http/middleware/aether_middleware.c std/http/server/h2/aether_h2.c std/http/proxy/aether_proxy_pool.c std/http/proxy/aether_proxy_lb.c std/http/proxy/aether_proxy_breaker.c std/http/proxy/aether_proxy_health.c std/http/proxy/aether_proxy_cache.c std/http/proxy/aether_proxy_opts.c std/http/proxy/aether_proxy_metrics.c std/http/proxy/aether_proxy_middleware.c std/http/script_gateway/aether_script_gateway.c std/bytes/aether_bytes.c std/bytes/cursor/aether_bytes_cursor.c std/strbuilder/aether_strbuilder.c std/config/aether_config.c std/actors/aether_actor_registry.c std/regex/aether_regex.c std/regex/aether_pcre2_vendored.c std/capsicum/aether_capsicum.c std/casper/aether_casper.c std/snapshot/aether_snapshot.c std/sync/aether_sync.c std/audio/aether_audio.c std/worker/aether_worker.c std/alloc/aether_alloc.c std/tracking/aether_tracking.c std/tar/aether_tar.c std/quote/aether_quote.c std/unicode/aether_unicode.c std/unicode/utf8proc/utf8proc.c
+RUNTIME_SRC = $(SCHEDULER_SRC) runtime/scheduler/scheduler_optimizations.c runtime/scheduler/aether_io_poller_epoll.c runtime/scheduler/aether_io_poller_kqueue.c runtime/scheduler/aether_io_poller_poll.c runtime/config/aether_optimization_config.c runtime/memory/aether_arena.c runtime/memory/aether_pool.c runtime/memory/aether_memory_stats.c runtime/utils/aether_trace.c runtime/utils/aether_spawn.c runtime/utils/aether_bounds_check.c runtime/utils/aether_test.c runtime/memory/aether_arena_optimized.c runtime/aether_runtime_types.c runtime/aether_locale_num.c runtime/utils/aether_cpu_detect.c runtime/utils/aether_simd_vectorized.c runtime/aether_runtime.c runtime/aether_numa.c runtime/aether_sandbox.c runtime/sandbox/spawn_sandboxed_linux.c runtime/sandbox/spawn_sandboxed_bsd.c runtime/sandbox/spawn_sandboxed_stub.c runtime/sandbox/capsicum_autosandbox.c runtime/sandbox/aether_audit.c runtime/aether_shared_map.c runtime/aether_observe.c runtime/aether_schema.c runtime/aether_process_mem.c runtime/aether_host.c runtime/aether_exec.c runtime/aether_resource_caps.c runtime/libaether_caps.c runtime/actors/aether_send_buffer.c runtime/actors/aether_send_message.c runtime/actors/aether_actor_thread.c runtime/actors/aether_panic.c runtime/actors/aether_unwind.c runtime/actors/aether_supervision.c runtime/aether_callbacks.c
+STD_SRC = std/string/aether_string.c std/math/aether_math.c std/net/aether_http.c std/net/aether_tls_trust.c std/net/aether_http_server.c std/net/aether_http_pool.c std/net/aether_http_park.c std/net/aether_http_evloop.c std/net/aether_net.c std/udp/aether_udp.c std/collections/aether_collections.c std/intmap/aether_intmap.c std/json/aether_json.c std/yaml/aether_yaml.c std/xml/aether_xml.c std/fs/aether_fs.c std/log/aether_log.c std/io/aether_io.c std/os/aether_os.c std/ipc/aether_ipc.c std/mem/aether_mem.c std/cryptography/aether_cryptography.c std/cryptography/aes/aether_aes.c std/zlib/aether_zlib.c std/brotli/aether_brotli.c std/zstd/aether_zstd.c std/lzf/lzf_c.c std/lzf/lzf_d.c std/lzf/aether_lzf.c std/dl/aether_dl.c std/http/middleware/aether_middleware.c std/http/server/h2/aether_h2.c std/http/proxy/aether_proxy_pool.c std/http/proxy/aether_proxy_lb.c std/http/proxy/aether_proxy_breaker.c std/http/proxy/aether_proxy_health.c std/http/proxy/aether_proxy_cache.c std/http/proxy/aether_proxy_opts.c std/http/proxy/aether_proxy_metrics.c std/http/proxy/aether_proxy_middleware.c std/http/script_gateway/aether_script_gateway.c std/bytes/aether_bytes.c std/bytes/cursor/aether_bytes_cursor.c std/strbuilder/aether_strbuilder.c std/config/aether_config.c std/actors/aether_actor_registry.c std/regex/aether_regex.c std/regex/aether_pcre2_vendored.c std/capsicum/aether_capsicum.c std/casper/aether_casper.c std/snapshot/aether_snapshot.c std/sync/aether_sync.c std/audio/aether_audio.c std/worker/aether_worker.c std/alloc/aether_alloc.c std/tracking/aether_tracking.c std/tar/aether_tar.c std/quote/aether_quote.c std/unicode/aether_unicode.c std/unicode/utf8proc/utf8proc.c
 # Stdlib sources that reference scheduler internals (scheduler_io_register,
 # g_sync_step_actor, current_core_id). Excluded from the compiler binary
 # because aetherc does not link the runtime scheduler, but included in
@@ -938,6 +938,10 @@ TEST_OBJS = $(TEST_SRC:%.c=$(OBJ_DIR)/%.o)
 $(OBJ_DIR)/tools/ae_version.o: $(VERSION_HEADER)
 $(OBJ_DIR)/tools/ae.o: $(VERSION_HEADER)
 $(OBJ_DIR)/compiler/aetherc.o: $(VERSION_HEADER)
+# aether_abi.h includes it (#2957): the runtime ABI id the runtime reports
+# and the one the code generator writes into each library.
+$(OBJ_DIR)/runtime/aether_exec.o: $(VERSION_HEADER)
+$(OBJ_DIR)/compiler/codegen/codegen.o: $(VERSION_HEADER)
 
 # Test files using TEST() macro system (exclude standalone tests)
 TEST_SRC = tests/runtime/test_harness.c \
@@ -968,9 +972,18 @@ TEST_SRC = tests/runtime/test_harness.c \
            tests/runtime/test_spsc_queue.c \
            tests/runtime/test_worksteal_race.c \
            tests/runtime/test_ask_relief.c \
+           tests/runtime/test_ask_message.c \
+           tests/runtime/test_wait_inside_actor.c \
+           tests/runtime/test_step_context.c \
+           tests/runtime/test_exec_accounts.c \
+           tests/runtime/test_abi_layout.c \
            tests/runtime/test_sender_move_order.c \
            tests/runtime/test_actor_thread_sends.c \
            tests/runtime/test_overflow_reentry.c \
+           tests/runtime/test_actor_death.c \
+           tests/runtime/test_actor_rebirth.c \
+           tests/runtime/test_mailbox_bound.c \
+           tests/runtime/test_win_mutex_no_debug_info.c \
            tests/runtime/test_http_server.c \
            tests/runtime/test_http_resolver.c \
            tests/runtime/test_resource_caps.c \
@@ -1214,19 +1227,36 @@ compiler: $(BUILD_DIR)/aetherc$(EXE_EXT) $(BUILD_TARGET_STAMP)
 # the binary other tests were executing at that moment: macOS kills a process
 # whose text file changed under it, which is a SIGKILL in a test that never
 # went near the build system.
-$(BUILD_DIR)/aetherc$(EXE_EXT): $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(OBJ_DIR)/runtime/utils/aether_spawn.o $(OBJ_DIR)/runtime/aether_sandbox.o $(OBJ_DIR)/runtime/aether_resource_caps.o $(OBJ_DIR)/runtime/aether_locale_num.o $(OBJ_DIR)/runtime/aether_callbacks.o $(IO_POLLER_OBJS) $(MANIFEST_OBJ) | $(VERSION_HEADER) $(STDLIB_SYMS_HEADER) $(FRONTEND_ID_HEADER)
+# The runtime pieces aetherc links, for this rule, compiler-fast and the
+# release compiler alike: compiler-fast kept a list of its own, which lost
+# aether_spawn.c and aether_sandbox.c and could not link (#3351), and so
+# did the release compiler's, which lost aether_unwind.c once the caps code
+# read the execution frames, so `make install` could not link. std.dl keeps
+# what every Aether library binds to (aether_runtime_abi), and aether_exec.c
+# keeps the host API with it (#3439): the compiler links the std objects
+# whole, so it links those three files too.
+AETHERC_RUNTIME_SRC = runtime/utils/aether_spawn.c runtime/aether_sandbox.c runtime/sandbox/aether_audit.c runtime/actors/aether_panic.c runtime/actors/aether_unwind.c runtime/aether_resource_caps.c runtime/aether_locale_num.c runtime/aether_callbacks.c runtime/aether_exec.c runtime/aether_host.c runtime/libaether_caps.c
+AETHERC_RUNTIME_OBJS = $(patsubst %.c,$(OBJ_DIR)/%.o,$(AETHERC_RUNTIME_SRC))
+
+$(BUILD_DIR)/aetherc$(EXE_EXT): $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(AETHERC_RUNTIME_OBJS) $(IO_POLLER_OBJS) $(MANIFEST_OBJ) | $(VERSION_HEADER) $(STDLIB_SYMS_HEADER) $(FRONTEND_ID_HEADER)
 	@echo "Linking compiler..."
-	@$(CC) $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(OBJ_DIR)/runtime/utils/aether_spawn.o $(OBJ_DIR)/runtime/aether_sandbox.o $(OBJ_DIR)/runtime/aether_resource_caps.o $(OBJ_DIR)/runtime/aether_locale_num.o $(OBJ_DIR)/runtime/aether_callbacks.o $(IO_POLLER_OBJS) $(MANIFEST_OBJ) -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) $(AETHERC_STACK_LDFLAGS)
+	@$(CC) $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(AETHERC_RUNTIME_OBJS) $(IO_POLLER_OBJS) $(MANIFEST_OBJ) -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) $(AETHERC_STACK_LDFLAGS)
 	@echo "Compiler built successfully"
 
-# Fast compiler target (monolithic, for clean builds)
-compiler-fast: $(FRONTEND_ID_HEADER)
+# Fast compiler target (monolithic, for clean builds): the same sources and
+# generated headers as the rule above, compiled in one command. The sources
+# compiled with flags of their own (the vendored lzf and miniaudio, which
+# relax warnings for them alone) come from their own rules; one command
+# cannot give one file different flags.
+COMPILER_FAST_OWN_SRC = std/lzf/lzf_c.c std/lzf/lzf_d.c std/lzf/aether_lzf.c std/audio/aether_audio.c
+COMPILER_FAST_OWN_OBJS = $(patsubst %.c,$(OBJ_DIR)/%.o,$(filter $(COMPILER_FAST_OWN_SRC),$(STD_SRC)))
+compiler-fast: $(COMPILER_FAST_OWN_OBJS) $(MANIFEST_OBJ) | $(VERSION_HEADER) $(STDLIB_SYMS_HEADER) $(FRONTEND_ID_HEADER)
 ifdef WINDOWS_NATIVE
 	@if not exist "$(BUILD_DIR)" mkdir "$(BUILD_DIR)"
 else
 	@$(MKDIR) $(BUILD_DIR)
 endif
-	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) $(IO_POLLER_SRC) runtime/aether_resource_caps.c runtime/aether_locale_num.c runtime/aether_callbacks.c -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) $(AETHERC_STACK_LDFLAGS)
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(COMPILER_SRC) $(filter-out $(COMPILER_FAST_OWN_SRC),$(STD_SRC)) $(COMPILER_FAST_OWN_OBJS) $(COLLECTIONS_SRC) $(AETHERC_RUNTIME_SRC) $(IO_POLLER_SRC) $(MANIFEST_OBJ) -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) $(AETHERC_STACK_LDFLAGS)
 
 test: $(TEST_OBJS) $(COMPILER_LIB_OBJS) $(RUNTIME_OBJS) $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS)
 	@echo "==================================="
@@ -1617,6 +1647,7 @@ test-release-archive: compiler ae stdlib check-archive-exports
 	  test -f "$$verdir/include/aether/$$(basename "$$h")" || { echo "  FAIL: include/aether/$$(basename "$$h") missing (#1420)"; exit 1; }; \
 	done && \
 	test -d "$$verdir/share/aether/runtime"  || (echo "  FAIL: share/aether/runtime missing"; exit 1) && \
+	test -f "$$verdir/share/aether/runtime/coop_runtime_sources.txt" || (echo "  FAIL: the runtime list ae build --target=wasm reads is missing (#3383)"; exit 1) && \
 	test -d "$$verdir/share/aether/std"      || (echo "  FAIL: share/aether/std missing"; exit 1) && \
 	test -f "$$verdir/share/aether/tools/ae-fetch/main.ae" || (echo "  FAIL: the package fetcher's source is missing (#1362)"; exit 1) && \
 	test -f "$$verdir/share/aether/contrib/sqlite/amalgamation/sqlite3.c" || (echo "  FAIL: the SQLite amalgamation is missing (#1372)"; exit 1) && \
@@ -1759,6 +1790,21 @@ bench-json-compare: $(BUILD_DIR)/run_json_bench $(BUILD_DIR)/run_yyjson_bench
 #                   ≥4.8 and every Clang (Linux + macOS).
 # test-json-valgrind — same under Valgrind on Linux (macOS skips if no
 #                      valgrind installed).
+# The TLS conformance corpora (#1298), fetched at pinned commits into
+# $(CONFORMANCE_CACHE) (default ~/.cache/aether-conformance), never committed.
+# conformance-x509: x509-limbo and the bettertls suite it imports, against
+# std.cryptography.tls13_cert (Linux CI runs it in ci-crypto-ct).
+# conformance-bogo: BoringSSL's ssl/test/runner (BoGo) against the pure TLS
+# client and server through tests/conformance/bogo/shim.ae; needs Go 1.27 and
+# git, takes about five minutes, and is not run in CI. BOGO_FLAGS passes runner
+# flags, e.g. BOGO_FLAGS="-test 'Basic-*'".
+.PHONY: conformance-x509 conformance-bogo
+conformance-x509: compiler ae stdlib
+	@sh tests/conformance/x509_limbo/run.sh all
+
+conformance-bogo: compiler ae stdlib
+	@sh tests/conformance/bogo/run.sh $(BOGO_FLAGS)
+
 # test-json-conformance — (Phase 4a) run JSONTestSuite if committed.
 
 .PHONY: test-json-asan test-json-valgrind test-json-conformance
@@ -2042,6 +2088,7 @@ $(BUILD_DIR)/libaether_main.a: runtime/windows/aether_lib_main.c $(BUILD_FLAGS_S
 
 $(BUILD_DIR)/aether_manifest.o: runtime/windows/aether.rc runtime/windows/aether.manifest
 	@echo "Compiling the Windows application manifest..."
+	@mkdir -p $(BUILD_DIR)
 	@$(WINDRES) -I runtime/windows runtime/windows/aether.rc -O coff -o $@
 
 # The archive is a FILE target, not a phony one. As a phony `stdlib` it was
@@ -2280,7 +2327,7 @@ release-build: $(BUILD_DIR)/aetherc-release$(EXE_EXT)
 
 # A file target as well, so `make install` on a current tree does not spend a
 # minute recompiling the whole compiler in one LTO link before copying.
-$(BUILD_DIR)/aetherc-release$(EXE_EXT): $(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) runtime/aether_resource_caps.c runtime/aether_locale_num.c runtime/aether_callbacks.c $(STDLIB_SYMS_HEADER) $(FRONTEND_ID_HEADER) $(VERSION_HEADER) $(MANIFEST_OBJ) Makefile
+$(BUILD_DIR)/aetherc-release$(EXE_EXT): $(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) $(AETHERC_RUNTIME_SRC) $(STDLIB_SYMS_HEADER) $(FRONTEND_ID_HEADER) $(VERSION_HEADER) $(MANIFEST_OBJ) Makefile
 	@echo "==================================="
 	@echo "Building Optimized Release"
 	@echo "==================================="
@@ -2301,11 +2348,10 @@ $(BUILD_DIR)/aetherc-release$(EXE_EXT): $(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS
 	@# regex.compile in the SHIPPED aetherc failed at runtime while the build
 	@# stayed clean. std.regex now refuses to compile stubs unless asked, which
 	@# is what surfaced this. The matching LDFLAGS are already in $(LDFLAGS).
-	@$(CC) -O3 -DNDEBUG $(LTO_FLAG) -Werror -Icompiler -Iruntime -Istd -Istd/collections \
+	@$(CC) -O3 -DNDEBUG $(LTO_FLAG) -Werror -Iinclude -Icompiler -Iruntime -Istd -Istd/collections \
 		-DAETHER_VERSION=\"$(VERSION)\" \
 		$(OPENSSL_CFLAGS) $(ZLIB_CFLAGS) $(NGHTTP2_CFLAGS) $(PCRE2_CFLAGS) $(YAML_CFLAGS) $(BROTLI_CFLAGS) $(ZSTD_CFLAGS) \
-		$(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) runtime/aether_resource_caps.c \
-		runtime/aether_locale_num.c runtime/aether_callbacks.c $(MANIFEST_OBJ) \
+		$(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) $(AETHERC_RUNTIME_SRC) $(MANIFEST_OBJ) \
 		-o $(BUILD_DIR)/aetherc-release$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 ifeq ($(DETECTED_OS),Linux)
 	@echo "Stripping debug symbols..."
@@ -2834,6 +2880,8 @@ help:
 	@echo "  make check-warnings      - Every .ae file under std and contrib type-checks without a warning"
 	@echo "  make check-examples      - Every example builds clean and prints the output it says it prints"
 	@echo "  make check-contrib-modules - Type-check every non-host contrib module"
+	@echo "  make conformance-x509 - x509-limbo and bettertls against tls13_cert (fetched, pinned)"
+	@echo "  make conformance-bogo - BoringSSL BoGo against the pure TLS stack (needs Go 1.27; not in CI)"
 	@echo "  make check-changelog  - Validate changelog fragments, catch a release-fold"
 	@echo "  make add-changelog    - Write a new_changelogs/ fragment (SECTION=, SLUG=)"
 	@echo "  make collect-changelogs - Fold settled fragments into CHANGELOG.md"
@@ -3026,6 +3074,7 @@ ci: clean
 	@$(CI_STAGE) 900 check-tests $(MAKE) check-tests
 	@$(CI_STAGE) 900 check-extern-widths $(MAKE) check-extern-widths
 	@$(CI_STAGE) 600 check-raw-calls $(MAKE) check-raw-calls
+	@$(CI_STAGE) 600 check-crypto-wipe $(MAKE) check-crypto-wipe
 	@$(CI_STAGE) 900 check-warnings $(MAKE) check-warnings
 	@echo ""
 	@echo "[5/11] Running .ae integration tests..."
@@ -3143,6 +3192,22 @@ check-raw-calls: compiler ae stdlib
 	    > $(BUILD_DIR)/raw_calls/self_test.log 2>&1 || \
 	    { cat $(BUILD_DIR)/raw_calls/self_test.log; exit 1; }
 	@./$(RAW_CALLS_CHECKER) --exclude tests/raw_calls/fixture std contrib tests examples
+
+# Every buffer the cryptography modules free is wiped first (#3402, #3414):
+# a module under std/cryptography frees a std.bytes buffer with
+# bytes.wipe_free, never bytes.free, since a rule decided call by call
+# missed one secret after another. The checker is Aether
+# (tests/crypto_wipe/check.ae); its self-test first, over a fixture with
+# exactly 3 plain frees.
+CRYPTO_WIPE_CHECKER := $(BUILD_DIR)/crypto_wipe/check$(EXE_EXT)
+.PHONY: check-crypto-wipe
+check-crypto-wipe: compiler ae stdlib
+	@mkdir -p $(BUILD_DIR)/crypto_wipe
+	@./$(BUILD_DIR)/ae$(EXE_EXT) build tests/crypto_wipe/check.ae -o $(CRYPTO_WIPE_CHECKER)
+	@./$(CRYPTO_WIPE_CHECKER) --expect 3 tests/crypto_wipe/fixture \
+	    > $(BUILD_DIR)/crypto_wipe/self_test.log 2>&1 || \
+	    { cat $(BUILD_DIR)/crypto_wipe/self_test.log; exit 1; }
+	@./$(CRYPTO_WIPE_CHECKER) std/cryptography
 
 # -----------------------------------------------------------------
 # Examples (#3105): examples/ is the path a learner follows, so each example
@@ -3607,6 +3672,13 @@ ci-coop: clean compiler ae
 	           examples/02-actors/04-actor-refs.ae \
 	           examples/02-actors/03-ask-reply.ae \
 	           examples/02-actors/07-worker-pool.ae \
+	           tests/regression/test_actor_down_notices.ae \
+	           tests/regression/test_actor_links.ae \
+	           tests/regression/test_ask_failure_reasons.ae \
+	           tests/regression/test_actor_step_reentry.ae \
+	           tests/regression/test_owned_panic_unwind.ae \
+	           tests/regression/test_step_panic_drop.ae \
+	           tests/regression/test_step_drop_context.ae \
 	           examples/01-language/01-hello.ae; do \
 		printf "  %-50s " "$$src"; \
 		if AETHER_HOME="" ./$(BUILD_DIR)/ae run "$$src" >/tmp/ae_coop_out.txt 2>&1; then \
@@ -3620,6 +3692,15 @@ ci-coop: clean compiler ae
 	done; \
 	printf "  %-50s " "end of main, countdown armed (#3219)"; \
 	if sh tests/integration/exit_armed_timeout/test_exit_armed_timeout.sh >/tmp/ae_coop_out.txt 2>&1; then \
+		echo "PASS"; \
+		pass=$$((pass + 1)); \
+	else \
+		echo "FAIL"; \
+		cat /tmp/ae_coop_out.txt | head -10; \
+		fail=$$((fail + 1)); \
+	fi; \
+	printf "  %-50s " "an export's ask steps actors outside it (#3392)"; \
+	if sh tests/integration/emit_lib_actor_step_context/test_emit_lib_actor_step_context.sh >/tmp/ae_coop_out.txt 2>&1; then \
 		echo "PASS"; \
 		pass=$$((pass + 1)); \
 	else \
@@ -3664,7 +3745,7 @@ ci-wasm: clean compiler ae
 	@echo "  WebAssembly (Emscripten) CI"
 	@echo "==================================="
 	@echo ""
-	@echo "[1/3] Generating C from test programs..."
+	@echo "[1/4] Generating C from test programs..."
 	@mkdir -p $(BUILD_DIR)/wasm
 	@pass=0; fail=0; \
 	for src in $(WASM_CI_PROGRAMS); do \
@@ -3686,9 +3767,9 @@ ci-wasm: clean compiler ae
 # signature (an int64_t where the definition takes a 32-bit size_t), and
 # links a stub that traps when the call runs: --fatal-warnings makes that
 # the build error it is.
-	@echo "[2/3] Compiling runtime + generated C with emcc..."
+	@echo "[2/4] Compiling runtime + generated C with emcc..."
 	@WASM_CFLAGS="-O2 -DAETHER_NO_THREADING -DAETHER_NO_FILESYSTEM -DAETHER_NO_NETWORKING \
-		-Iruntime -Iruntime/actors -Iruntime/scheduler -Iruntime/utils -Iruntime/memory \
+		-Iinclude -Iruntime -Iruntime/actors -Iruntime/scheduler -Iruntime/utils -Iruntime/memory \
 		-Iruntime/config -Istd -Istd/string -Istd/io -Istd/math -Istd/net -Istd/collections -Istd/json \
 		-Wall -Wextra -Wno-unused-parameter -Wno-unused-function \
 		-Wno-unused-variable -Wno-missing-field-initializers -Wno-unused-label"; \
@@ -3710,7 +3791,7 @@ ci-wasm: clean compiler ae
 	echo "  $$pass compiled, $$fail failed"; \
 	if [ "$$fail" -gt 0 ]; then exit 1; fi
 	@echo ""
-	@echo "[3/3] Running WASM programs with Node.js..."
+	@echo "[3/4] Running WASM programs with Node.js..."
 	@pass=0; fail=0; \
 	for src in $(WASM_CI_PROGRAMS); do \
 		name=$$(basename $$src .ae); \
@@ -3726,6 +3807,24 @@ ci-wasm: clean compiler ae
 	done; \
 	echo "  $$pass passed, $$fail failed"; \
 	if [ "$$fail" -gt 0 ]; then exit 1; fi
+	@echo ""
+# The steps above compile with this Makefile's own command; a user's
+# `ae build --target=wasm` composes its own, from the runtime list ae reads
+# (#3383: ae's copy of the list had drifted, and nothing here built a
+# program the way a user does).
+	@echo "[4/4] ae build --target=wasm, as a user builds..."
+	@if ! command -v emcc > /dev/null 2>&1; then echo "  emcc not on PATH, skipped"; exit 0; fi; \
+	printf '  %-40s ' "ae build 02-state"; \
+	if ./$(BUILD_DIR)/ae build --target=wasm examples/02-actors/02-state.ae \
+			-o "$(BUILD_DIR)/wasm/ae_state" > /tmp/ae_wasm_build.txt 2>&1 && \
+	   node "$(BUILD_DIR)/wasm/ae_state.js" > /tmp/ae_wasm_run.txt 2>&1 && \
+	   grep -q "counter: Current value: 18 after 3 changes" /tmp/ae_wasm_run.txt; then \
+		echo "PASS"; \
+	else \
+		echo "FAIL"; \
+		cat /tmp/ae_wasm_build.txt /tmp/ae_wasm_run.txt | head -20; \
+		exit 1; \
+	fi
 	@echo ""
 	@echo "==================================="
 	@echo "  WebAssembly CI PASSED"

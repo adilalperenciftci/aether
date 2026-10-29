@@ -33,6 +33,7 @@
 
 import std.bits
 import std.bytes
+import std.mem
 
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
@@ -252,7 +253,8 @@ new(variant: string) -> {
     ctx.buf_len = 0
     ok = config_variant(ctx, variant)
     if ok == 0 {
-        bytes.free(ctx.buf)
+        bytes.wipe_free(ctx.buf)
+        mem.wipe(ctx, sizeof(Sha3Ctx))
         free(ctx)
         return null, "unknown sha3 variant"
     }
@@ -332,9 +334,20 @@ squeeze(c: *Sha3Ctx, n: int) -> ptr {
 
 free_internals(c: *Sha3Ctx) {
     if c.buf != null {
-        bytes.free(c.buf)
+        bytes.wipe_free(c.buf)
         c.buf = null
     }
+}
+
+// Free a context, wiped first (#3402): the lane state and the scratch are
+// a function of whatever it absorbed, and the rate buffer the block in
+// progress; Ed448's seed among what it absorbs. mem.wipe, as a zeroing
+// before a free is otherwise a dead store the C compiler may drop.
+fn wipe_ctx_free(ctx: ptr) {
+    c = ctx as *Sha3Ctx
+    free_internals(c)
+    mem.wipe(ctx, sizeof(Sha3Ctx))
+    free(ctx)
 }
 
 // Abandon a context WITHOUT finalizing — the bail-out cleanup path.
@@ -344,9 +357,7 @@ free_ctx(ctx: ptr) {
     if ctx == null {
         return
     }
-    c = ctx as *Sha3Ctx
-    free_internals(c)
-    free(ctx)
+    wipe_ctx_free(ctx)
 }
 
 // `out_len` is ignored for fixed digests (uses the variant's length) and
@@ -359,13 +370,14 @@ final_bytes(ctx: ptr, out_len: int) -> ptr {
         n = out_len
     }
     do_pad(c)
+    // The output stays in the buffer it was squeezed into: it used to go
+    // through a string and back, and a secret (Ed448's expanded key and
+    // nonce are SHAKE256 output) does not belong in a string (#2600, the
+    // constant-time test's finding; see sha2.final_bytes).
     out = squeeze(c, n)
-    s = bytes.finish(out, n)
-    free_internals(c)
-    free(ctx)
-    res = bytes.new(n)
-    bytes.copy_from_string(res, 0, s, n)
-    return res
+    bytes.set_length(out, n)
+    wipe_ctx_free(ctx)
+    return out
 }
 
 // Finalize and return the digest as lowercase hex. FREES the ctx; do
@@ -396,10 +408,9 @@ final_hex(ctx: ptr, out_len: int) -> string {
         bytes.set(hexbuf, i * 2 + 1, c_lo)
         i = i + 1
     }
-    bytes.free(out)
+    bytes.wipe_free(out)
     s = bytes.finish(hexbuf, n * 2)
-    free_internals(c)
-    free(ctx)
+    wipe_ctx_free(ctx)
     return s
 }
 

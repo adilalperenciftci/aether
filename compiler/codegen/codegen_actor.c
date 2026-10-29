@@ -1,5 +1,14 @@
 #include "codegen_internal.h"
 #include <string.h>
+#include <stdlib.h>
+
+/* #2974: the N of an actor's `@mailbox(bound: N)` (the parser's
+ * "mailbox_bound:N" annotation), 0 for an actor with no bound. */
+static int actor_mailbox_bound(const ASTNode* actor) {
+    const char* a = actor ? actor->annotation : NULL;
+    if (!a || strncmp(a, "mailbox_bound:", 14) != 0) return 0;
+    return atoi(a + 14);
+}
 
 /* The message name of the `_` arm's handler, `<Actor>_handle__aether_any`:
  * no message can be named so, `_aether` names being the compiler's. */
@@ -384,6 +393,33 @@ const char* state_struct_array_owned(CodeGenerator* gen, ASTNode* state_decl, in
     return sname;
 }
 
+/* #3386: the state declaration of `field` in the actor the reference `ref`
+ * names (`r.field`, `r` an actor reference to a Sink), when that state is a
+ * place that owns what it holds: of an owning type, not widened to a
+ * pointer, so destroy_state drops it (emit_actor_destroy_state). NULL for
+ * anything else, a protocol's reference included (no one actor). */
+ASTNode* actor_ref_owned_state(CodeGenerator* gen, ASTNode* ref, const char* field) {
+    const char* name = referenced_actor(ref);
+    if (!gen || !gen->program || !name || !field) return NULL;
+    for (int i = 0; i < gen->program->child_count; i++) {
+        ASTNode* actor = gen->program->children[i];
+        if (actor && actor->type == AST_EXPORT_STATEMENT && actor->child_count > 0)
+            actor = actor->children[0];
+        if (!actor || actor->type != AST_ACTOR_DEFINITION || !actor->value ||
+            strcmp(actor->value, name) != 0) continue;
+        for (int j = 0; j < actor->child_count; j++) {
+            ASTNode* sd = actor->children[j];
+            if (!sd || sd->type != AST_STATE_DECLARATION || !sd->value ||
+                strcmp(sd->value, field) != 0) continue;
+            if (!sd->node_type || !own_type_owns(gen, sd->node_type) ||
+                state_field_is_ptr(gen, actor, field)) return NULL;
+            return sd;
+        }
+        return NULL;
+    }
+    return NULL;
+}
+
 /* #2528: `_aether_state_drop_<Actor>(void*)`, the scheduler's hook for what the
  * state fields own, run once by the free path that ends a scheduler-owned
  * actor, after it can no longer be stepped. Each state field of an owning
@@ -734,14 +770,11 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                                  * releases nothing of it after the arm. */
                                 if (tc_type_is_owned(fsig)) {
                                     print_line(gen, "_pattern->%s = NULL;", field->value);
-                                    ASTNode* carrier = create_ast_node(AST_EXPRESSION_STATEMENT, NULL,
-                                                                       field->line, field->column);
-                                    if (carrier) {
-                                        carrier->annotation = strdup(cg_internf("owned_exit_drop:%s:%s", var_name,
-                                                                        tc_owned_drop_c(fsig)));
-                                        codegen_own_node(gen, carrier);
-                                        push_defer(gen, carrier);
-                                    }
+                                    /* Journaled too (#3406): a panic in the
+                                     * arm skips its exits, and the message,
+                                     * emptied, no longer holds it. */
+                                    push_owned_place_drop(gen, var_name, tc_owned_drop_c(fsig),
+                                                          field->line, field->column);
                                     continue;
                                 }
                                 /* The binding is a view of the message's
@@ -952,6 +985,8 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     print_line(gen, "return;");
     unindent(gen);
     print_line(gen, "}");
+    if (actor_mailbox_bound(actor) > 0)
+        print_line(gen, "aether_mailbox_took(&self->_aether_base, msg.type);   /* @mailbox (#2974) */");
     if (timeout_arm) {
         // A message disarms the timeout; its handling's end arms it again.
         print_line(gen, "self->_aether_base.last_activity_ns = 0;");
@@ -1101,6 +1136,17 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
 
                         print_line(gen, "handle_%s:", pattern->value);
                         indent(gen);
+                        /* A Down from a monitor this actor has since
+                         * dropped is not handled (#2974). */
+                        if (strcmp(pattern->value, "Down") == 0) {
+                            print_line(gen, "if (!aether_down_accept(&self->_aether_base, &msg)) {");
+                            indent(gen);
+                            print_line(gen, "aether_message_drop(&self->_aether_base, &msg);");
+                            emit_timeout_rearm(gen, timeout_arm);
+                            print_line(gen, "return;");
+                            unindent(gen);
+                            print_line(gen, "}");
+                        }
                         if (single_int) {
                             // Single-field inline: reconstruct on stack from payload_int
                             const char* cast = "";
@@ -1208,8 +1254,12 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     print_line(gen, "if (!actor) return NULL;");
     print_line(gen, "atomic_init(&actor->_aether_base.active, 0);  // inactive until first message send");
     print_line(gen, "atomic_init(&actor->_aether_base.migrate_to, -1);");
-    print_line(gen, "atomic_init(&actor->_aether_base.dead, 0);");
+    /* Not `dead`: a fresh block is alive from scheduler_spawn_actor, and a
+     * restart's block (#2974) stays dead until it is ready, below. */
     print_line(gen, "actor->_aether_base.auto_process = 0;");
+    if (actor_mailbox_bound(actor) > 0)
+        print_line(gen, "atomic_store_explicit(&actor->_aether_base.mailbox_bound, %d, memory_order_relaxed);   /* @mailbox (#2974) */",
+                   actor_mailbox_bound(actor));
     print_line(gen, "");
     
     for (int i = 0; i < actor->child_count; i++) {
@@ -1313,6 +1363,9 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
         print_line(gen, "atomic_store_explicit(&actor->_aether_base.active, 1, memory_order_release);  // Activate for timeout polling");
     }
 
+    /* Initialized: an actor restarted in place (#2974) comes alive here, under
+     * the ref its clients hold; a fresh one already is. */
+    print_line(gen, "scheduler_spawn_ready(&actor->_aether_base);");
     print_line(gen, "");
     print_line(gen, "return actor;");
     unindent(gen);

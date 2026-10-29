@@ -1,0 +1,184 @@
+// What a step runs after its handler is the receiver's, wherever it is
+// stepped (#3416).
+//
+// A receiver stepped inside another actor's handler (an idle actor of the
+// same core asked from it: inline on threads, an ask's poll on the
+// cooperative scheduler) is checked as on a thread of its own. After its
+// handler, its step drops what the actor owned: the message a panicking
+// handler ran on and, when the step ended the actor, the messages waiting
+// for it. Those drops are the receiver's code, and since #3403 they ran after
+// the step had given the asker's context back: inside a deny-all enforce
+// block a drop read PATH as refused, where on the actor's own thread it reads
+// it. They run in the step's own context now, each in a containment frame,
+// and the asker's context is given back after them.
+
+import std.actors
+import std.bytes
+import std.os
+import std.sandbox
+import std.sync
+
+extern exit(code: int)
+
+var g_drops: ptr = null
+var g_readable: ptr = null
+
+fn readable(name: string) -> int {
+    v = os.os_getenv(name)
+    if v == null {
+        return 0
+    }
+    return 1
+}
+
+// The drop of a Peek reads PATH, as any code of the receiver's may.
+peek_drop(p: @frees ptr) {
+    sync.atomic_add(g_drops, 1)
+    sync.atomic_add(g_readable, readable("PATH"))
+    bytes.free(p)
+}
+
+type Peek = owned ptr drop peek_drop
+
+message Hit { a: int, b: Peek }
+message Quit {}
+message Ask { boom: bool }
+message AskBlocked { boom: bool }
+
+fn peek() -> Peek {
+    return bytes.new(4) as Peek
+}
+
+// A Hit queues one to itself and panics, its Peek not bound: the barrier
+// drops the message it ran on, and the finalize the one queued. A Quit
+// queues one and stops: the finalize after the handler drops it.
+actor Target {
+    state me: actor_ref = null
+    receive {
+        Hit(a) -> {
+            if a < 0 {
+                reply 0
+            }
+            m = me
+            m ! Hit { a: 0, b: peek() }
+            panic("hit")
+        }
+        Quit() -> {
+            m = me
+            m ! Hit { a: 0, b: peek() }
+            actors.stop()
+            reply 0
+        }
+    }
+}
+
+// Asks a Target idle on its own core, so the Target is stepped here, inside
+// this handler; outside an enforce block, and inside a deny-all one.
+actor Asker {
+    state target: actor_ref = null
+    receive {
+        Ask(boom) -> {
+            t = target
+            if boom {
+                _v, _e = t ? Hit { a: 1, b: peek() }
+            } else {
+                _v, _e = t ? Quit {}
+            }
+            reply 1
+        }
+        AskBlocked(boom) -> {
+            nothing = sandbox.new("nothing") {
+            }
+            t = target
+            inside = ref(-1)
+            sandbox.enforce(nothing) callback {
+                if boom {
+                    _v, _e = t ? Hit { a: 1, b: peek() }
+                } else {
+                    _v, _e = t ? Quit {}
+                }
+                ref_set(inside, readable("PATH"))
+            }
+            sandbox.free(nothing)
+            int seen = ref_get(inside)
+            ref_free(inside)
+            reply seen
+        }
+    }
+}
+
+check(label: string, ok: bool) -> int {
+    if !ok {
+        println("  FAIL ${label}")
+        return 1
+    }
+    println("  PASS ${label}")
+    return 0
+}
+
+main() {
+    println("=== what a step runs after its handler is the receiver's (#3416) ===")
+    g_drops = sync.atomic_new(0)
+    g_readable = sync.atomic_new(0)
+    fails = 0
+
+    // On the Target's own thread: what its drops read.
+    t1 = spawn(Target())
+    t1.me = t1
+    t1 ! Hit { a: 1, b: peek() }
+    q1 = spawn(Target())
+    q1.me = q1
+    q1 ! Quit {}
+    wait_for_idle()
+    own_drops = sync.atomic_load(g_drops)
+    own_readable = sync.atomic_load(g_readable)
+    fails = fails + check("own thread: ${own_drops} drops (the held message, two queued), ${own_readable} read PATH",
+        own_drops == 3 && own_readable == 3)
+
+    // Stepped inside an Asker's handler, outside any enforce block.
+    d0 = sync.atomic_load(g_drops)
+    r0 = sync.atomic_load(g_readable)
+    a = spawn(Asker(), core: 0)
+    t2 = spawn(Target(), core: 0)
+    t2.me = t2
+    a.target = t2
+    int x1 = a ? Ask { boom: true }
+    q2 = spawn(Target(), core: 0)
+    q2.me = q2
+    a.target = q2
+    int x2 = a ? Ask { boom: false }
+    wait_for_idle()
+    in_drops = sync.atomic_load(g_drops) - d0
+    in_readable = sync.atomic_load(g_readable) - r0
+    fails = fails + check("inline: ${in_drops} drops, ${in_readable} read PATH, as on its own thread",
+        x1 + x2 == 2 && in_drops == own_drops && in_readable == own_readable)
+
+    // The same inside a deny-all enforce block: the block's levels are the
+    // Asker's, not the Target's.
+    d1 = sync.atomic_load(g_drops)
+    r1 = sync.atomic_load(g_readable)
+    b = spawn(Asker(), core: 0)
+    t3 = spawn(Target(), core: 0)
+    t3.me = t3
+    b.target = t3
+    int y1 = b ? AskBlocked { boom: true }
+    q3 = spawn(Target(), core: 0)
+    q3.me = q3
+    b.target = q3
+    int y2 = b ? AskBlocked { boom: false }
+    wait_for_idle()
+    bl_drops = sync.atomic_load(g_drops) - d1
+    bl_readable = sync.atomic_load(g_readable) - r1
+    fails = fails + check("in a block: ${bl_drops} drops, ${bl_readable} read PATH, as on its own thread",
+        bl_drops == own_drops && bl_readable == own_readable)
+    fails = fails + check("in a block: PATH still refused in the block after each ask, got ${y1} and ${y2}",
+        y1 == 0 && y2 == 0)
+
+    sync.atomic_free(g_drops)
+    sync.atomic_free(g_readable)
+    if fails > 0 {
+        println("FAIL: ${fails} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

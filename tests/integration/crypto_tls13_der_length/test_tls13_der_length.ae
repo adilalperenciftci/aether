@@ -1,0 +1,69 @@
+// DER lengths of four bytes in a stapled OCSP response (#3308).
+//
+// tls13_cert's DER reader (der_tlv, under parse_ocsp_status and the OCSP
+// signature check) took up to 127 length bytes into a 32-bit int. A length
+// of four bytes from 0x80000000 up overflowed into a negative one, which
+// passed the "fits in the buffer" bound, and a length near 0x7FFFFFFF made
+// that bound's own addition wrap; either way the caller's next offset
+// pointed before the buffer, and the next read walked off it. The server
+// controls the staple, so a malicious server could stop the client. Each
+// response below is well formed around one bad length, inside the
+// responseType OID, and must be refused as OCSP_ERROR. Before the fix the
+// first panicked the program ("slice index -2147483633 out of range").
+//
+//   30 13 0A 01 00 A0 0E 30 0C 06 <len> 2B 06 01 04 01 00
+//
+// with <len> 84 80 00 00 00 (0x80000000), 84 7F FF FF FF (0x7FFFFFFF), and,
+// as the control that was always refused, 83 01 00 00: a length past the
+// end of the buffer.
+
+import std.cryptography.tls13_cert
+import std.bytes
+import std.string
+
+extern exit(code: int)
+extern string_char_at(str: string, index: int) -> int
+
+fn hexval(h: int) -> int {
+    if h >= 48 && h <= 57 { return h - 48 }
+    if h >= 97 && h <= 102 { return h - 87 }
+    return h - 55
+}
+
+fn from_hex(s: string) -> ptr {
+    n = string.length(s) / 2
+    b = bytes.new(n)
+    i = 0
+    while i < n {
+        hi = hexval(string_char_at(s, 2 * i))
+        lo = hexval(string_char_at(s, 2 * i + 1))
+        bytes.set(b, i, hi * 16 + lo)
+        i = i + 1
+    }
+    return b
+}
+
+// 0 when the response is refused as OCSP_ERROR, else 1.
+fn refused(label: string, hex: string) -> int {
+    der = from_hex(hex)
+    st = tls13_cert.parse_ocsp_status(bytes.view(der)[0..bytes.length(der)])
+    bytes.free(der)
+    if st == tls13_cert.OCSP_ERROR {
+        println("ok   ${label}: refused")
+        return 0
+    }
+    println("FAIL ${label}: status ${st}, want OCSP_ERROR")
+    return 1
+}
+
+main() {
+    fails = 0
+    fails = fails + refused("length 84 80 00 00 00", "30130A0100A00E300C0684800000002B0601040100")
+    fails = fails + refused("length 84 7F FF FF FF", "30130A0100A00E300C06847FFFFFFF2B0601040100")
+    fails = fails + refused("length 83 01 00 00, past the buffer", "30120A0100A00D300B06830100002B0601040100")
+    if fails > 0 {
+        println("tls13_der_length: ${fails} FAILURES")
+        exit(1)
+    }
+    println("tls13_der_length: all checks pass")
+}

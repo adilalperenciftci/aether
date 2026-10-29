@@ -1,0 +1,381 @@
+// Path validation of the pure TLS client (#3303, #1298).
+//
+// The pure client accepted any path whose names matched and whose signatures
+// verified: it never asked whether an issuer was a CA at all. A certificate a
+// CA issued to any web site (cA FALSE) could sign a certificate for any other
+// host, and the client trusted it. The first cases below are that shape,
+// through chain_verify_path, the call the client made; each failed before
+// the fix (the forged certificate was accepted) and is refused now. The rest
+// cover what validate_chain checks on the way: keyUsage keyCertSign,
+// pathLenConstraint, extendedKeyUsage for the purpose, name constraints, an
+// unknown critical extension, and validity at a chosen time; then what the
+// x509-limbo corpus showed missing (#1298): weak and explicit-curve keys, a
+// wildcard under an excluded subtree, the max_depth bound, a leaf whose
+// keyUsage does not allow signing (#3309), and trust anchors that are not
+// self-signed roots (#3310). The signature algorithms it showed missing are
+// crypto_tls13_sig_algs (#3307).
+//
+// The fixtures are a PKI made once with openssl (`req -new`, `x509 -req
+// -extfile`, valid 2026-01-01 to 2126-01-01), ECDSA P-256 unless named:
+//   root        self-signed CA (basicConstraints cA, keyUsage keyCertSign)
+//   ica         CA under root;  leaf (good.example, serverAuth) under ica
+//   ee          an end entity of root (cA FALSE, ee.example)
+//   forged      victim.example, signed with ee's key
+//   eenobc      an end entity of root with no basicConstraints at all
+//   forged2     victim.example, signed with eenobc's key
+//   clientonly  extendedKeyUsage clientAuth only, under ica
+//   ica0        CA under root with pathLenConstraint 0; subca under ica0;
+//               subleaf under subca
+//   icanoks     CA under root whose keyUsage lacks keyCertSign; nksleaf under it
+//   icanc       CA under root, name constraints permit good.example only;
+//               ncin (in.good.example) and ncout (other.example) under it
+//   crit        under ica, with an unknown critical extension
+//   icabadku    CA under root whose keyUsage extnValue is an OCTET STRING;
+//               badkuleaf under it
+//   icadup      CA under root with keyUsage twice (cRLSign, then keyCertSign:
+//               the second was made as 2.5.29.16 and its OID patched, the
+//               certificate signed again); dupleaf under it
+//   icabool     CA under root whose basicConstraints cA is the BOOLEAN 0x01;
+//               boolleaf under it
+//   weak        a 1024-bit RSA leaf under ica
+//   explicit    a P-256 leaf under ica whose key gives the curve explicitly
+//   icaex       CA under root excluding bar.example.com; wild (*.example.com)
+//               and wildok (*.other.com) under it
+//   kunoca      under root, keyUsage keyCertSign and no basicConstraints;
+//               kunocaleaf under it
+//   akikeyid, akiissuer, akiserial, akiall
+//               self-issued roots whose authorityKeyIdentifier names another
+//               key, issuer (CN=Someone Else), serial, or all three, each
+//               with a leaf (akikeyidleaf and so on); akiself, whose AKI
+//               names its own serial, and akiselfleaf
+//   pinned      a self-signed leaf (peer.example, cA FALSE), its own anchor
+
+import std.list
+import std.string
+import std.cryptography.tls13_cert
+
+extern exit(code: int)
+
+fn pem_root() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBbTCCARSgAwIBAgIIAbG3Zcl3Rz4wCgYIKoZIzj0EAwIwGjEYMBYGA1UEAwwP\nQ2hhaW4gVGVzdCBSb290MCAXDTI2MDEwMTAwMDAwMFoYDzIxMjYwMTAxMDAwMDAw\nWjAaMRgwFgYDVQQDDA9DaGFpbiBUZXN0IFJvb3QwWTATBgcqhkjOPQIBBggqhkjO\nPQMBBwNCAAR9WijVAhsIJAknhWwdyIvLEtorzMadRjzVfyAQwKwOLawIHYNNOvPQ\nYmTm71x3tM534A0n3XtBlrp/j6L/QciLo0IwQDAPBgNVHRMBAf8EBTADAQH/MA4G\nA1UdDwEB/wQEAwIBBjAdBgNVHQ4EFgQUkxMUuxXX9urrj1w+az33GyEVI20wCgYI\nKoZIzj0EAwIDRwAwRAIgKZ7Y0hdZRPElIh1HvcDAMb9XHTcp/okFAMtywwN7R1sC\nIBAyiGHEuLnkCWB476svZbEXO00Ct4B80nalck9pukIL\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_ica() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBjzCCATWgAwIBAgIJAJBavY/jwwlXMAoGCCqGSM49BAMCMBoxGDAWBgNVBAMM\nD0NoYWluIFRlc3QgUm9vdDAgFw0yNjAxMDEwMDAwMDBaGA8yMTI2MDEwMTAwMDAw\nMFowGTEXMBUGA1UEAwwOQ2hhaW4gVGVzdCBJQ0EwWTATBgcqhkjOPQIBBggqhkjO\nPQMBBwNCAASpETrrs+VDr7q/ra0Q5KynmBG7qAk1dNXgILwLD8rgxOK9hkAmss8F\nfrIPLNFlsQnIxKHmK6g1IHhUZv7Fl5X4o2MwYTAPBgNVHRMBAf8EBTADAQH/MA4G\nA1UdDwEB/wQEAwIBBjAdBgNVHQ4EFgQUE+9oi4kAZ9qqWUFROtwYghoTg/YwHwYD\nVR0jBBgwFoAUkxMUuxXX9urrj1w+az33GyEVI20wCgYIKoZIzj0EAwIDSAAwRQIg\nKt7dHC4pBL21r1YGk4VyNPl7uEy5R90HOWfh5pi9S9ICIQCqQOA3J8MHe763jdxw\n+hjE5mXH1ml4f05IJznJnVd5RA==\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_leaf() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBtzCCAV6gAwIBAgIIMRlYFof+w6QwCgYIKoZIzj0EAwIwGTEXMBUGA1UEAwwO\nQ2hhaW4gVGVzdCBJQ0EwIBcNMjYwMTAxMDAwMDAwWhgPMjEyNjAxMDEwMDAwMDBa\nMBcxFTATBgNVBAMMDGdvb2QuZXhhbXBsZTBZMBMGByqGSM49AgEGCCqGSM49AwEH\nA0IABDDD2g4+irUUUV440ebyU6Qi3VpVud0WdhSngS28cGJkCpXZBHVvwYn70R2Y\n3CQPLsrhzJu2f6aRuJKgV9SKchyjgY8wgYwwDAYDVR0TAQH/BAIwADAOBgNVHQ8B\nAf8EBAMCB4AwEwYDVR0lBAwwCgYIKwYBBQUHAwEwFwYDVR0RBBAwDoIMZ29vZC5l\neGFtcGxlMB0GA1UdDgQWBBR/Jgdz9pBzoaP4G1DbR35Kxj5i1TAfBgNVHSMEGDAW\ngBQT72iLiQBn2qpZQVE63BiCGhOD9jAKBggqhkjOPQQDAgNHADBEAiB4DrjMjk+N\nRmbRLHLDuWaGQf9QIYLZUaraBwWqeHOmuAIgV5O5/ilGq3V9Qrziy7CRshXpVUCg\n7dmUMLldx4g+FJ8=\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_ee() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBtjCCAVygAwIBAgIJALh6d6i8YBNcMAoGCCqGSM49BAMCMBoxGDAWBgNVBAMM\nD0NoYWluIFRlc3QgUm9vdDAgFw0yNjAxMDEwMDAwMDBaGA8yMTI2MDEwMTAwMDAw\nMFowFTETMBEGA1UEAwwKZWUuZXhhbXBsZTBZMBMGByqGSM49AgEGCCqGSM49AwEH\nA0IABNh9gNf9eWeSwPWdhI3DpIOVHrjenicX3Sa1tLnJFYAUS3OqIa0+t52fV8EK\n+PogSXWCbZGUKwvKJsEgUTdRnfyjgY0wgYowDAYDVR0TAQH/BAIwADAOBgNVHQ8B\nAf8EBAMCB4AwEwYDVR0lBAwwCgYIKwYBBQUHAwEwFQYDVR0RBA4wDIIKZWUuZXhh\nbXBsZTAdBgNVHQ4EFgQU2C1hh779HGUAtLwhOXqC+++0OQYwHwYDVR0jBBgwFoAU\nkxMUuxXX9urrj1w+az33GyEVI20wCgYIKoZIzj0EAwIDSAAwRQIhAPgn8Alk5Asg\nISkDOFApVhWfMU9u0TRihoNtDey6EUcCAiBsWnuvSTm7jaZzi6iskC6zrc57avCQ\n8gOvYudJgv2nfw==\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_forged() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBhTCCASqgAwIBAgIJAJp6M/qgtyKkMAoGCCqGSM49BAMCMBUxEzARBgNVBAMM\nCmVlLmV4YW1wbGUwIBcNMjYwMTAxMDAwMDAwWhgPMjEyNjAxMDEwMDAwMDBaMBkx\nFzAVBgNVBAMMDnZpY3RpbS5leGFtcGxlMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcD\nQgAEjy2MCqFgblLNqfj7FCaVaegV/9+IkYJeYVpte/exJ8vv3aGUoXdlo+Kt5zft\nW03JvOkgxeW0hvXHS9KdtQAe96NdMFswGQYDVR0RBBIwEIIOdmljdGltLmV4YW1w\nbGUwHQYDVR0OBBYEFMTLqT26KUrQSXnrAQpKrsWbHlIcMB8GA1UdIwQYMBaAFNgt\nYYe+/RxlALS8ITl6gvvvtDkGMAoGCCqGSM49BAMCA0kAMEYCIQDhwGxYrWXzzbZT\nXfJJokjc2tmFgdLY/dicqD0x9q1LggIhANdlUx/01YP8xidD02QXFq+qGq6q2ssY\nyVzw0ygGHpxR\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_eenobc() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBiDCCAS+gAwIBAgIJAOuT8Kr+X28hMAoGCCqGSM49BAMCMBoxGDAWBgNVBAMM\nD0NoYWluIFRlc3QgUm9vdDAgFw0yNjAxMDEwMDAwMDBaGA8yMTI2MDEwMTAwMDAw\nMFowGTEXMBUGA1UEAwwOZWVub2JjLmV4YW1wbGUwWTATBgcqhkjOPQIBBggqhkjO\nPQMBBwNCAATTmdom/PCdU96Botu6WF72Igr8nD5jGo8SzfMGvFrFyCTUg7EzX2pf\n5fgh5fYZi3h2IAfch6nv7/fXAmiFePUUo10wWzAZBgNVHREEEjAQgg5lZW5vYmMu\nZXhhbXBsZTAdBgNVHQ4EFgQUwP9lFK4DVOEof9dBeUmYRhKH1DMwHwYDVR0jBBgw\nFoAUkxMUuxXX9urrj1w+az33GyEVI20wCgYIKoZIzj0EAwIDRwAwRAIgZpl7cJ6I\nRuc3eezttvN+kTFR/+bpLyYPPFgnxx9FXmsCIBaVjeDZAr/p76XRHAxXiSEEt8yo\nvneiWRuK/TZb45Mh\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_forged2() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBhzCCAS2gAwIBAgIIQcQjFTeJtwEwCgYIKoZIzj0EAwIwGTEXMBUGA1UEAwwO\nZWVub2JjLmV4YW1wbGUwIBcNMjYwMTAxMDAwMDAwWhgPMjEyNjAxMDEwMDAwMDBa\nMBkxFzAVBgNVBAMMDnZpY3RpbS5leGFtcGxlMFkwEwYHKoZIzj0CAQYIKoZIzj0D\nAQcDQgAEFU/D0GBoosynBWc1hjeBPlssyZB7KhTHfwVrDz/7a72KiOY5ghBVDHw6\nUsOWCaXgPcd38HK5dGecyeZM+pwD8KNdMFswGQYDVR0RBBIwEIIOdmljdGltLmV4\nYW1wbGUwHQYDVR0OBBYEFJ3l4IbWT8YT0U9/5aCJbSDvf76hMB8GA1UdIwQYMBaA\nFMD/ZRSuA1ThKH/XQXlJmEYSh9QzMAoGCCqGSM49BAMCA0gAMEUCIBN7fvaYseeq\nuzuUmui3Y4JeSXd7hfBifiFzfJexY1VkAiEA0hipOAf4fVKGNy8W+zunch4EnAnB\na7qbgPU1i2PEFSc=\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_clientonly() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBmzCCAUKgAwIBAgIIDn7pbe/nHO8wCgYIKoZIzj0EAwIwGTEXMBUGA1UEAwwO\nQ2hhaW4gVGVzdCBJQ0EwIBcNMjYwMTAxMDAwMDAwWhgPMjEyNjAxMDEwMDAwMDBa\nMBkxFzAVBgNVBAMMDmNsaWVudC5leGFtcGxlMFkwEwYHKoZIzj0CAQYIKoZIzj0D\nAQcDQgAEI4Qzi8xpgeOqdRBxY4dLpeeD8Wr9R9AwT0z4FV0NSqOU0wxprYBLgaVK\nROH9NBFi0PEpqoHt9guIJRh89A8aBqNyMHAwEwYDVR0lBAwwCgYIKwYBBQUHAwIw\nGQYDVR0RBBIwEIIOY2xpZW50LmV4YW1wbGUwHQYDVR0OBBYEFEWCMkxgil+SUrbY\nZuku1i3llze5MB8GA1UdIwQYMBaAFBPvaIuJAGfaqllBUTrcGIIaE4P2MAoGCCqG\nSM49BAMCA0cAMEQCICrHOLiPRHOiHXqsdF+2l+HZ/x3VgKJHqC1OJC+AW8baAiBZ\nBoWlSr4gn8hcbsLOYG/8wOh/E0jZNGko5KJtIQFwDA==\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_ica0() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBmzCCAUKgAwIBAgIJAMLf9qj23N6LMAoGCCqGSM49BAMCMBoxGDAWBgNVBAMM\nD0NoYWluIFRlc3QgUm9vdDAgFw0yNjAxMDEwMDAwMDBaGA8yMTI2MDEwMTAwMDAw\nMFowIzEhMB8GA1UEAwwYQ2hhaW4gVGVzdCBJQ0EgcGF0aGxlbiAwMFkwEwYHKoZI\nzj0CAQYIKoZIzj0DAQcDQgAEHlB2UAAVsUlk6KR2djgmZjgSVz2Z94BTUaaTJe0L\nQQXVbmletsjVVdoqM3NM0GLtZaRSSpsvr+5NFLpNXnOhg6NmMGQwEgYDVR0TAQH/\nBAgwBgEB/wIBADAOBgNVHQ8BAf8EBAMCAgQwHQYDVR0OBBYEFC1D6CQdGfKoUlve\nkD0oKbgoxp42MB8GA1UdIwQYMBaAFJMTFLsV1/bq649cPms99xshFSNtMAoGCCqG\nSM49BAMCA0cAMEQCIBideI7PfEAnZjNwgO1XMo8r7riIauvjM0vUDIjpDrZLAiBJ\nLu8yKQjlHifKhufX7wbPzABA9cMaK1Pb3R7u2UBdaw==\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_subca() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBmzCCAUGgAwIBAgIJAJmIRc5+V1ANMAoGCCqGSM49BAMCMCMxITAfBgNVBAMM\nGENoYWluIFRlc3QgSUNBIHBhdGhsZW4gMDAgFw0yNjAxMDEwMDAwMDBaGA8yMTI2\nMDEwMTAwMDAwMFowHDEaMBgGA1UEAwwRQ2hhaW4gVGVzdCBTdWIgQ0EwWTATBgcq\nhkjOPQIBBggqhkjOPQMBBwNCAAS+K2mCkDX7CkdRk3vg5A/+wgJ0Y3WfUOaQFzTo\nCXzWbgQ2Jk6BPSdVWNRW9dp6EndJeBG9h/B20AlTzVqIGJ2So2MwYTAPBgNVHRMB\nAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIBBjAdBgNVHQ4EFgQUY/7Jxh3TCK9chIUC\nVo4nQgA69AgwHwYDVR0jBBgwFoAULUPoJB0Z8qhSW96QPSgpuCjGnjYwCgYIKoZI\nzj0EAwIDSAAwRQIgY/anlw+ei9nUB1dq9hlkvaWJ8gA9kLJnEIL0HouEX5cCIQDu\nkhxekx3zfeItmfLP3NpojifpfKCD0YQHBLNB8G8QOg==\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_subleaf() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBhDCCASqgAwIBAgIILMkd8QRRxuYwCgYIKoZIzj0EAwIwHDEaMBgGA1UEAwwR\nQ2hhaW4gVGVzdCBTdWIgQ0EwIBcNMjYwMTAxMDAwMDAwWhgPMjEyNjAxMDEwMDAw\nMDBaMBYxFDASBgNVBAMMC3N1Yi5leGFtcGxlMFkwEwYHKoZIzj0CAQYIKoZIzj0D\nAQcDQgAEaBLR/3EML0w6D8fKNWxJeTcx6um59Lgii9pRzIxE6u805pWggKe5C9C0\nIzSf3HkPOpXVzNzpowP60/EnKKtAbKNaMFgwFgYDVR0RBA8wDYILc3ViLmV4YW1w\nbGUwHQYDVR0OBBYEFPhPycykUHLBwaV1fLjciEYKp8DEMB8GA1UdIwQYMBaAFGP+\nycYd0wivXISFAlaOJ0IAOvQIMAoGCCqGSM49BAMCA0gAMEUCIH//5blPcMu7meq4\njq3A+TqkIeq8gyTFeqC3WjZvn+Z5AiEAhoM0UOZ//y8j1i1rCiKNXvgksmvblnB+\n/Qe3TYSV6ag=\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_icanoks() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBnTCCAUSgAwIBAgIJALpRev/6Tu4PMAoGCCqGSM49BAMCMBoxGDAWBgNVBAMM\nD0NoYWluIFRlc3QgUm9vdDAgFw0yNjAxMDEwMDAwMDBaGA8yMTI2MDEwMTAwMDAw\nMFowKDEmMCQGA1UEAwwdQ2hhaW4gVGVzdCBJQ0Egbm8ga2V5Q2VydFNpZ24wWTAT\nBgcqhkjOPQIBBggqhkjOPQMBBwNCAARmFPRj7mj+UEqoOk2pISa+Z6UhP8eDe7Kc\n7gRMF+U3ypvwQDqGydvOp8u+6zWAzWDK96UBSHcxuff0j2OOZWP4o2MwYTAPBgNV\nHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIHgDAdBgNVHQ4EFgQUl4xI6MB5GLl3\nRGHihPVCn4gMvCYwHwYDVR0jBBgwFoAUkxMUuxXX9urrj1w+az33GyEVI20wCgYI\nKoZIzj0EAwIDRwAwRAIgFByzmYzj7Rn7LbYTZiwEFuBaNb0Cu9f0dQtAo15TQawC\nIDNTScG4zcryVOIkbUxDvefxkwtEKciZB3Ov6WNgbgXZ\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_nksleaf() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBkDCCATagAwIBAgIIA2DlyWvYdw8wCgYIKoZIzj0EAwIwKDEmMCQGA1UEAwwd\nQ2hhaW4gVGVzdCBJQ0Egbm8ga2V5Q2VydFNpZ24wIBcNMjYwMTAxMDAwMDAwWhgP\nMjEyNjAxMDEwMDAwMDBaMBYxFDASBgNVBAMMC25rcy5leGFtcGxlMFkwEwYHKoZI\nzj0CAQYIKoZIzj0DAQcDQgAEtW7KfMY7ZNhQbC1r32cdJjS3nOhgFhM/5dmEBqeE\nCw/6CLdPGkWFm7bywZxE2sW0CBSmsfGRuUdfkr5oD6w6DqNaMFgwFgYDVR0RBA8w\nDYILbmtzLmV4YW1wbGUwHQYDVR0OBBYEFBHWDlL8HlzbTwN62b5fuW4JEcC9MB8G\nA1UdIwQYMBaAFJeMSOjAeRi5d0Rh4oT1Qp+IDLwmMAoGCCqGSM49BAMCA0gAMEUC\nIEor3mznKbsdnyw2PVzf+qwKlxHgv8dSzdEdWVRpX7GoAiEAkL3aplGzLlkg5Sps\nSj8kK/hvxYukdSBTrAw+SvHO0MU=\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_icanc() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBtTCCAVqgAwIBAgIJAKWgHjZwUGe6MAoGCCqGSM49BAMCMBoxGDAWBgNVBAMM\nD0NoYWluIFRlc3QgUm9vdDAgFw0yNjAxMDEwMDAwMDBaGA8yMTI2MDEwMTAwMDAw\nMFowHDEaMBgGA1UEAwwRQ2hhaW4gVGVzdCBJQ0EgTkMwWTATBgcqhkjOPQIBBggq\nhkjOPQMBBwNCAASvgqKfa9BvleWEvPzASMuj54dAv9cEvzYGvE+dR8d0RSNqfvVA\nwObn6vR7ShijGkFs11YRUPL9AJGocWIY59evo4GEMIGBMA8GA1UdEwEB/wQFMAMB\nAf8wDgYDVR0PAQH/BAQDAgIEMB4GA1UdHgEB/wQUMBKgEDAOggxnb29kLmV4YW1w\nbGUwHQYDVR0OBBYEFNCvHGtH4ODXuWD4UzBAVI5fXQuSMB8GA1UdIwQYMBaAFJMT\nFLsV1/bq649cPms99xshFSNtMAoGCCqGSM49BAMCA0kAMEYCIQDRh4AGgPLQcXb1\noTUO3151XFstiaYlubcpWskbQQBM1QIhAJakKYwTwHgg3aoDPlxgoYpuFztHXUO7\nGfpSyKI6xR5I\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_ncin() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBjDCCATOgAwIBAgIJANt5rtot2mHzMAoGCCqGSM49BAMCMBwxGjAYBgNVBAMM\nEUNoYWluIFRlc3QgSUNBIE5DMCAXDTI2MDEwMTAwMDAwMFoYDzIxMjYwMTAxMDAw\nMDAwWjAaMRgwFgYDVQQDDA9pbi5nb29kLmV4YW1wbGUwWTATBgcqhkjOPQIBBggq\nhkjOPQMBBwNCAARQA5J/Ito04N13qoPsqQGO8IvLzkfkHScqWEyr77k6Ble1IwV8\nK8MGp36bk6iLh80t3tS70Ju1Y+6PBo2JHzPbo14wXDAaBgNVHREEEzARgg9pbi5n\nb29kLmV4YW1wbGUwHQYDVR0OBBYEFP4eHzOVbNmVcAYyYD3re7ua6dG5MB8GA1Ud\nIwQYMBaAFNCvHGtH4ODXuWD4UzBAVI5fXQuSMAoGCCqGSM49BAMCA0cAMEQCIGzp\nwCZsTilWT9O4awdbf7jiqw+vhLssVdIoee3wiGA8AiBY8izMmrF808CA/pteAULP\nTJtiErY1Ufl9BMxjA/9qIA==\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_ncout() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBijCCAS+gAwIBAgIJAORdoTy0HXBLMAoGCCqGSM49BAMCMBwxGjAYBgNVBAMM\nEUNoYWluIFRlc3QgSUNBIE5DMCAXDTI2MDEwMTAwMDAwMFoYDzIxMjYwMTAxMDAw\nMDAwWjAYMRYwFAYDVQQDDA1vdGhlci5leGFtcGxlMFkwEwYHKoZIzj0CAQYIKoZI\nzj0DAQcDQgAEj742kwsLFTv62WJkLN6tPlCp1sJMSm+LqW4anNwWK2/qsyVxkpg2\nLJ7Sl2r5Pp5MDwR49x4bHJfBgXM7Wf0s/aNcMFowGAYDVR0RBBEwD4INb3RoZXIu\nZXhhbXBsZTAdBgNVHQ4EFgQUtEhVLY+WciHX/ZExbk9ihBsD9xYwHwYDVR0jBBgw\nFoAU0K8ca0fg4Ne5YPhTMEBUjl9dC5IwCgYIKoZIzj0EAwIDSQAwRgIhANY5fHuJ\nbTWiHYF3k4LewShlJnq3J8mkwmhYOuuAbANHAiEAvwxLIIUW7i95X2+uvE7cLU3c\nTqFGi2TA2bvgvy8D7kM=\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_crit() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBmDCCAT2gAwIBAgIIU90IRfczU08wCgYIKoZIzj0EAwIwGTEXMBUGA1UEAwwO\nQ2hhaW4gVGVzdCBJQ0EwIBcNMjYwMTAxMDAwMDAwWhgPMjEyNjAxMDEwMDAwMDBa\nMBcxFTATBgNVBAMMDGNyaXQuZXhhbXBsZTBZMBMGByqGSM49AgEGCCqGSM49AwEH\nA0IABGMGAeJlRDNlyQ3EVYvnTq3AcH01Eyk+4ZmzoiVERAMcJ+DjdcXKjQotfOEN\n2zb+GMlz3niSHaFZ2IhtA0UZnB2jbzBtMBcGA1UdEQQQMA6CDGNyaXQuZXhhbXBs\nZTASBgkrBgEEAYOyAwEBAf8EAgUAMB0GA1UdDgQWBBRqbvVWkol98Dk0yyD+C3JW\nh9NHWjAfBgNVHSMEGDAWgBQT72iLiQBn2qpZQVE63BiCGhOD9jAKBggqhkjOPQQD\nAgNJADBGAiEA1GTK77TkfqmFd9lBRRG8KfeCMSQp/7RF8Qk17inQqDsCIQDPJfwq\nMvkw83kJO4Eh6m7YRBhhHiyYOjedQA4BzxduOA==\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_weak() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIByzCCAXGgAwIBAgIJAP0mboTG0UH3MAoGCCqGSM49BAMCMBkxFzAVBgNVBAMM\nDkNoYWluIFRlc3QgSUNBMCAXDTI2MDEwMTAwMDAwMFoYDzIxMjYwMTAxMDAwMDAw\nWjAXMRUwEwYDVQQDDAx3ZWFrLmV4YW1wbGUwgZ8wDQYJKoZIhvcNAQEBBQADgY0A\nMIGJAoGBANq0yiKc/H7BBo2iB6RsddnllzOA47N7uACzr+vjz1KBmsQ2iM36NIeB\nRScRJga/enopWcol10/6jUr3W0D6Q8XWB9HrOGRVRZNZ2Mnw2UahwpyNe03I3zmr\nDPY6jun9CHnuqlyjv0CJ+a4KNaJowGaHbNW58L9YiCOwhbtnzrIbAgMBAAGjWzBZ\nMBcGA1UdEQQQMA6CDHdlYWsuZXhhbXBsZTAdBgNVHQ4EFgQUNM5rEsSRCCI3pBsE\nwE8k+uETC6UwHwYDVR0jBBgwFoAUE+9oi4kAZ9qqWUFROtwYghoTg/YwCgYIKoZI\nzj0EAwIDSAAwRQIgf9gEjX5KNXixoQNipPSBYwobVjljuEvHq4/3+92t+qkCIQCB\nOiI6e9ik0WRHnBtjWTNDKbhA6VNmBbujgdtbBcQOCg==\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_explicit() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIICfzCCAiWgAwIBAgIIMYV5ulpXqzgwCgYIKoZIzj0EAwIwGTEXMBUGA1UEAwwO\nQ2hhaW4gVGVzdCBJQ0EwIBcNMjYwMTAxMDAwMDAwWhgPMjEyNjAxMDEwMDAwMDBa\nMBsxGTAXBgNVBAMMEGV4cGxpY2l0LmV4YW1wbGUwggFLMIIBAwYHKoZIzj0CATCB\n9wIBATAsBgcqhkjOPQEBAiEA/////wAAAAEAAAAAAAAAAAAAAAD/////////////\n//8wWwQg/////wAAAAEAAAAAAAAAAAAAAAD///////////////wEIFrGNdiqOpPn\ns+u9VXaYhrxlHQawzFOw9jvOPD4n0mBLAxUAxJ02CIbnBJNqZnjhE50mt4GffpAE\nQQRrF9Hy4SxCR/i85uVjpEDydwN9gS3rM6D0oTlF2JjClk/jQuL+Gn+bjufrSnwP\nnhYrzjNXazFezsu2QGg3v1H1AiEA/////wAAAAD//////////7zm+q2nF56E87nK\nwvxjJVECAQEDQgAEMqxpwdZNw+GRe3BpjDh1BIvQHsd3CN5z/8yY7TC6VtvgxKlv\nDJNEf8qrhe45zKsk8FiYkVHJeIX6dZ5WiNgCRqNfMF0wGwYDVR0RBBQwEoIQZXhw\nbGljaXQuZXhhbXBsZTAdBgNVHQ4EFgQUHHgxCcNB2CdTu7P6splEx7g8W2kwHwYD\nVR0jBBgwFoAUE+9oi4kAZ9qqWUFROtwYghoTg/YwCgYIKoZIzj0EAwIDSAAwRQIh\nAJ5X+i2Jf9pLAoXphIMLz2osHImbh+44ZG7v/EMfo/4/AiA0u6Txr48c/y9FDX+Y\norMfDIZTdh9TRvKCXHmclaK7dw==\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_icaex() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBwTCCAWegAwIBAgIIB9vW3Df6JvowCgYIKoZIzj0EAwIwGjEYMBYGA1UEAwwP\nQ2hhaW4gVGVzdCBSb290MCAXDTI2MDEwMTAwMDAwMFoYDzIxMjYwMTAxMDAwMDAw\nWjAnMSUwIwYDVQQDDBxDaGFpbiBUZXN0IElDQSBleGNsdWRpbmcgYmFyMFkwEwYH\nKoZIzj0CAQYIKoZIzj0DAQcDQgAEL31MUOMndDs3uoX4gJp7Ia8f9422/syEdpwB\nleUIV5q3dI2AZu6AOQehAKISCm70+9XqwFGbJQfJ74qrOTlbpKOBhzCBhDAPBgNV\nHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwICBDAhBgNVHR4BAf8EFzAVoRMwEYIP\nYmFyLmV4YW1wbGUuY29tMB0GA1UdDgQWBBRkaPJx//lT3TBL9rTuasQ79xQYRTAf\nBgNVHSMEGDAWgBSTExS7Fdf26uuPXD5rPfcbIRUjbTAKBggqhkjOPQQDAgNIADBF\nAiEAnN5iS3WNVNuRBGO+CmhHL5hZnMa0FE7tsjnsIW+CO94CIEXEfRS5nb5DTlG5\nLy26+O3ph7M0DVp63pu2nJh8P50J\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_wild() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBljCCAT2gAwIBAgIJAP3UL9Ox9hAqMAoGCCqGSM49BAMCMCcxJTAjBgNVBAMM\nHENoYWluIFRlc3QgSUNBIGV4Y2x1ZGluZyBiYXIwIBcNMjYwMTAxMDAwMDAwWhgP\nMjEyNjAxMDEwMDAwMDBaMBsxGTAXBgNVBAMMEHdpbGQuZXhhbXBsZS5jb20wWTAT\nBgcqhkjOPQIBBggqhkjOPQMBBwNCAATDNIUVf8/oY1zT3oKQOrt7d4MbPLA4mDWa\ndRz7HSCKXRamUU48Vatjxtb+AJgJ3WuYrbmO6YVLyKZrQIHwQR1Ro1wwWjAYBgNV\nHREEETAPgg0qLmV4YW1wbGUuY29tMB0GA1UdDgQWBBR22nR/KnenoAT3DO+ZGXoH\nUlnROzAfBgNVHSMEGDAWgBRkaPJx//lT3TBL9rTuasQ79xQYRTAKBggqhkjOPQQD\nAgNHADBEAiB2Vayf8IY8qqOI93nNs0AHCmc5D4VQCZKnQqVlvuh/TAIgKvQiTA19\nlQOtV2R/VVeYNZZScjTOrNr86Ajb6BHa9b0=\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_wildok() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBkjCCATigAwIBAgIIaa6GyEXMU2swCgYIKoZIzj0EAwIwJzElMCMGA1UEAwwc\nQ2hhaW4gVGVzdCBJQ0EgZXhjbHVkaW5nIGJhcjAgFw0yNjAxMDEwMDAwMDBaGA8y\nMTI2MDEwMTAwMDAwMFowGTEXMBUGA1UEAwwOd2lsZC5vdGhlci5jb20wWTATBgcq\nhkjOPQIBBggqhkjOPQMBBwNCAAQauX7Sk+KJqQnj2WqzgQx0Iogn+vaYqTtGjQ1k\n1y7xlonTz4K+BGWMrOKHmP+OQYJ1Acv+y/ip7i4N/V0hszF3o1owWDAWBgNVHREE\nDzANggsqLm90aGVyLmNvbTAdBgNVHQ4EFgQUXo47cVyU/MbGUlJSWWm00R8py8sw\nHwYDVR0jBBgwFoAUZGjycf/5U90wS/a07mrEO/cUGEUwCgYIKoZIzj0EAwIDSAAw\nRQIgKXwCfbhj+WCkymYBLJ+6k2YEkGtHNBWaBeMCXrnade0CIQDC2Vbe9Q3VLr5I\nXA67ui0z+HfSi6aoCXd2AH+9hht4DQ==\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_akikeyid() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBlzCCAT2gAwIBAgICfgEwCgYIKoZIzj0EAwIwITEfMB0GA1UEAwwWQUtJIFRl\nc3QgUm9vdCBha2lrZXlpZDAgFw0yNjAxMDEwMDAwMDBaGA8yMTI2MDEwMTAwMDAw\nMFowITEfMB0GA1UEAwwWQUtJIFRlc3QgUm9vdCBha2lrZXlpZDBZMBMGByqGSM49\nAgEGCCqGSM49AwEHA0IABLCswswc/A+jV3vDnQpaamjdYjypeAxyUX5G89yT9I3x\n+1qw/jFh72WLAxTLnGF1FPXKEpFOlne9pduIyVpzIi2jYzBhMA8GA1UdEwEB/wQF\nMAMBAf8wDgYDVR0PAQH/BAQDAgEGMB0GA1UdDgQWBBRsFVvO3l0QOtF+wGyEkb1v\nDY3DKDAfBgNVHSMEGDAWgBQRERERERERERERERERERERERERETAKBggqhkjOPQQD\nAgNIADBFAiEAtruEwJzHoDJa+TviDpiOM1ZTAlq/Q8mDz7j5YktiNuICIAWPmad+\nA25xyNwdENvkl9JXUtOYUk9iTHZ+bFrnMHpc\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_akikeyidleaf() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBlDCCATmgAwIBAgIIdj9Yta7jxrswCgYIKoZIzj0EAwIwITEfMB0GA1UEAwwW\nQUtJIFRlc3QgUm9vdCBha2lrZXlpZDAgFw0yNjAxMDEwMDAwMDBaGA8yMTI2MDEw\nMTAwMDAwMFowGzEZMBcGA1UEAwwQYWtpa2V5aWQuZXhhbXBsZTBZMBMGByqGSM49\nAgEGCCqGSM49AwEHA0IABBGv/Wc77sSDACgSpBTa04L58Dron96DbnA+L4opn9lv\nttxX8In6uab/KKsMHBwgpOIPPNbGxxaTh6CqPyXCnr6jXzBdMBsGA1UdEQQUMBKC\nEGFraWtleWlkLmV4YW1wbGUwHQYDVR0OBBYEFEHFAqwicEg56dJRX03jE9/RGaAw\nMB8GA1UdIwQYMBaAFGwVW87eXRA60X7AbISRvW8NjcMoMAoGCCqGSM49BAMCA0kA\nMEYCIQCVkRhgGkH8eiuv45GyruDOmJVhkuOqWssMQ6vWWT698gIhANaVv+P25PPw\nuRYJLbj15zxjc1maPg59MuaRo/8sRVe5\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_akiissuer() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBnzCCAUagAwIBAgICfgIwCgYIKoZIzj0EAwIwIjEgMB4GA1UEAwwXQUtJIFRl\nc3QgUm9vdCBha2lpc3N1ZXIwIBcNMjYwMTAxMDAwMDAwWhgPMjEyNjAxMDEwMDAw\nMDBaMCIxIDAeBgNVBAMMF0FLSSBUZXN0IFJvb3QgYWtpaXNzdWVyMFkwEwYHKoZI\nzj0CAQYIKoZIzj0DAQcDQgAETDwQBiH6cynAlb2fzbzqonYvoLEyp5vTsGOABSEj\nm81DKOrfKvzPI+A6n5fj4wWyt8m8CGCy25ZCQkLXvbyM2KNqMGgwDwYDVR0TAQH/\nBAUwAwEB/zAOBgNVHQ8BAf8EBAMCAQYwHQYDVR0OBBYEFLke90q2or+DnMH/HQ7Z\naXj3ypI8MCYGA1UdIwQfMB2hG6QZMBcxFTATBgNVBAMMDFNvbWVvbmUgRWxzZTAK\nBggqhkjOPQQDAgNHADBEAiAHext1BJdB7lyDT9ocf2WasQYhJewui0k0emN+jvqf\nywIgW809gZmzi9MNIck0da/RMLohSTxsEFHOlJq5y1uZYWk=\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_akiissuerleaf() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBljCCATygAwIBAgIISslJhl99GTMwCgYIKoZIzj0EAwIwIjEgMB4GA1UEAwwX\nQUtJIFRlc3QgUm9vdCBha2lpc3N1ZXIwIBcNMjYwMTAxMDAwMDAwWhgPMjEyNjAx\nMDEwMDAwMDBaMBwxGjAYBgNVBAMMEWFraWlzc3Vlci5leGFtcGxlMFkwEwYHKoZI\nzj0CAQYIKoZIzj0DAQcDQgAEGm4Wpv0ZK/MBIHGNJFMw0ihZwtVtp97xVM/+X+po\nZHgUPQc47aEcRkpLKA1goiHZIaciZ04dT+T90V0TWBeiNKNgMF4wHAYDVR0RBBUw\nE4IRYWtpaXNzdWVyLmV4YW1wbGUwHQYDVR0OBBYEFDcOKjTQSMmSejcBy5leE2d5\n6huqMB8GA1UdIwQYMBaAFLke90q2or+DnMH/HQ7ZaXj3ypI8MAoGCCqGSM49BAMC\nA0gAMEUCIQDKIdPpZXi9+RZ/nJU0/NqRw2P90sUVqLe4fa1ZSSQAFQIgLvVfjWNx\nB4movGDSA/JmA7/7vH3vTrT36kPAICQGxvE=\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_akiserial() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBhzCCAS6gAwIBAgICfgMwCgYIKoZIzj0EAwIwIjEgMB4GA1UEAwwXQUtJIFRl\nc3QgUm9vdCBha2lzZXJpYWwwIBcNMjYwMTAxMDAwMDAwWhgPMjEyNjAxMDEwMDAw\nMDBaMCIxIDAeBgNVBAMMF0FLSSBUZXN0IFJvb3QgYWtpc2VyaWFsMFkwEwYHKoZI\nzj0CAQYIKoZIzj0DAQcDQgAE7AIluDN03TLpBdo/lDLGvyW8+bGMa61QJRX3cznT\nK0L0skwz115bHIKc+hXZInUjprLcu3JKAkTsvgtGWvtLzaNSMFAwDwYDVR0TAQH/\nBAUwAwEB/zAOBgNVHQ8BAf8EBAMCAQYwHQYDVR0OBBYEFOrxd6e1U1vNA/pmSDGF\n8Qh+UXerMA4GA1UdIwQHMAWCAwECAzAKBggqhkjOPQQDAgNHADBEAiBg2Rvq673A\n6LEfxUjtZh86YA0V5NUITQyevseDQtn5+AIgHt8ZHzyZx33LyLygoncb8jql9MNp\n9n0KyHoSPM1uq/s=\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_akiserialleaf() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBlzCCAT2gAwIBAgIJAOpWLG5gq0LcMAoGCCqGSM49BAMCMCIxIDAeBgNVBAMM\nF0FLSSBUZXN0IFJvb3QgYWtpc2VyaWFsMCAXDTI2MDEwMTAwMDAwMFoYDzIxMjYw\nMTAxMDAwMDAwWjAcMRowGAYDVQQDDBFha2lzZXJpYWwuZXhhbXBsZTBZMBMGByqG\nSM49AgEGCCqGSM49AwEHA0IABCNgXK/lhCoCfijPu0DH1RRWjwhHoXNQepvFdVYD\nE5cp8o/FyxQdFIVl+TGLGP/8W7nW/bq50QiJzRFY0IZkBQajYDBeMBwGA1UdEQQV\nMBOCEWFraXNlcmlhbC5leGFtcGxlMB0GA1UdDgQWBBTyBwXP0JmHIm43VHe73rge\n2JW10TAfBgNVHSMEGDAWgBTq8XentVNbzQP6ZkgxhfEIflF3qzAKBggqhkjOPQQD\nAgNIADBFAiBUXzs50/Sw5iRDiqZvXgg1pq49mgi7a8Vh0hkgLenO5AIhAMUqn2/K\nJXTxU1sya8sDcVwjoiYGOoUuB+o5OpTDH3YV\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_akiall() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBtjCCAV2gAwIBAgICfgQwCgYIKoZIzj0EAwIwHzEdMBsGA1UEAwwUQUtJIFRl\nc3QgUm9vdCBha2lhbGwwIBcNMjYwMTAxMDAwMDAwWhgPMjEyNjAxMDEwMDAwMDBa\nMB8xHTAbBgNVBAMMFEFLSSBUZXN0IFJvb3QgYWtpYWxsMFkwEwYHKoZIzj0CAQYI\nKoZIzj0DAQcDQgAEQg1iHTBIXN1tpoPICNObAKLSxVD+KkBcFGDTPdAW+uemTKHU\n09SX9RbKDe4nyMkEcj/XKKSzzBTCHpc5D+uTgqOBhjCBgzAPBgNVHRMBAf8EBTAD\nAQH/MA4GA1UdDwEB/wQEAwIBBjAdBgNVHQ4EFgQU9Z4WXye4BL+qcJ/jRpWiop/R\nNOcwQQYDVR0jBDowOIAUERERERERERERERERERERERERERGhG6QZMBcxFTATBgNV\nBAMMDFNvbWVvbmUgRWxzZYIDAQIDMAoGCCqGSM49BAMCA0cAMEQCIGaPhcEO/ZsG\nP3n7YkGdP60KgXA1un2/zcv5TUZeAgFhAiB/e6xk+7GNowomLrrrcPy6dC+8blhV\npH00rKUlrGesqg==\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_akiallleaf() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBjzCCATSgAwIBAgIJAJ+Vazh6owf9MAoGCCqGSM49BAMCMB8xHTAbBgNVBAMM\nFEFLSSBUZXN0IFJvb3QgYWtpYWxsMCAXDTI2MDEwMTAwMDAwMFoYDzIxMjYwMTAx\nMDAwMDAwWjAZMRcwFQYDVQQDDA5ha2lhbGwuZXhhbXBsZTBZMBMGByqGSM49AgEG\nCCqGSM49AwEHA0IABFs8weGIzZ4ao1x5ggEjX8yaU3+NhaYY1JcIs4meBdKD8VyT\ne7bmj6yArHxwxfbgSDutfpHwvmAyNZkH2ta6lb6jXTBbMBkGA1UdEQQSMBCCDmFr\naWFsbC5leGFtcGxlMB0GA1UdDgQWBBRM4xo34B7z888pm0JOTS7RBI/8+jAfBgNV\nHSMEGDAWgBT1nhZfJ7gEv6pwn+NGlaKin9E05zAKBggqhkjOPQQDAgNJADBGAiEA\n9mKxwKYFF+BSEMF18j6y1C5bz4LRSCR3vPuMJQYBdBUCIQC21pSuedFUiaHgKVo7\nRlrfZHV26OYJzyY+Ui+TtBC6ZQ==\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_akiself() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBhDCCASugAwIBAgIDAQIDMAoGCCqGSM49BAMCMCAxHjAcBgNVBAMMFUFLSSBU\nZXN0IFJvb3QgYWtpc2VsZjAgFw0yNjAxMDEwMDAwMDBaGA8yMTI2MDEwMTAwMDAw\nMFowIDEeMBwGA1UEAwwVQUtJIFRlc3QgUm9vdCBha2lzZWxmMFkwEwYHKoZIzj0C\nAQYIKoZIzj0DAQcDQgAEEM4pK+Xu0ot+NDV0xutJTQs8AebqCJCWOKF0NG8BaeWX\n2Qw06YRPXZO7bowBJVBNxMfEHBojepEnc1AZ4F71JaNSMFAwDwYDVR0TAQH/BAUw\nAwEB/zAOBgNVHQ8BAf8EBAMCAQYwHQYDVR0OBBYEFBc8PYM8mCLyqGRZ+gSBw+Tb\nm0qnMA4GA1UdIwQHMAWCAwECAzAKBggqhkjOPQQDAgNHADBEAiAIHGvLgxsT+9yV\nrUmuvusORNv7N9tl1oZ3eFvKpZKW6wIgALvcZJuLg/1mTbgL8PmSFDg7CYpSll/0\nYIsHFfHb7hE=\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_akiselfleaf() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBkDCCATagAwIBAgIIJq8378VgmTgwCgYIKoZIzj0EAwIwIDEeMBwGA1UEAwwV\nQUtJIFRlc3QgUm9vdCBha2lzZWxmMCAXDTI2MDEwMTAwMDAwMFoYDzIxMjYwMTAx\nMDAwMDAwWjAaMRgwFgYDVQQDDA9ha2lzZWxmLmV4YW1wbGUwWTATBgcqhkjOPQIB\nBggqhkjOPQMBBwNCAAQwXwhWMZDN4IZCbOL35yfkeFy0FwX45KhWH407YcMScBJ9\n0izmqLn1TvuRjvPwRs0fRTqE6/ejEwBXIUsO4CYlo14wXDAaBgNVHREEEzARgg9h\na2lzZWxmLmV4YW1wbGUwHQYDVR0OBBYEFJxwb+mecoiyctxYhHb0mvIRnguaMB8G\nA1UdIwQYMBaAFBc8PYM8mCLyqGRZ+gSBw+Tbm0qnMAoGCCqGSM49BAMCA0gAMEUC\nIQD0h/d7AMGPjpT43/LQ0jI9UC7xfVgpKsoUiqUZV+SVfwIgM+JuPWOLvh4CQ8PH\npmz7T2zzlLf1CzdV0ILJpGL/1dI=\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_kunoca() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBkTCCATegAwIBAgIJALzJ/52vN7+bMAoGCCqGSM49BAMCMBoxGDAWBgNVBAMM\nD0NoYWluIFRlc3QgUm9vdDAgFw0yNjAxMDEwMDAwMDBaGA8yMTI2MDEwMTAwMDAw\nMFowLDEqMCgGA1UEAwwhQ2hhaW4gVGVzdCBrZXlDZXJ0U2lnbiB3aXRob3V0IGNB\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEEUcFbCXUf7FKXo7LS/UXMiKR3UHU\nJ1jgwMXgJzDxKAJ69HTqkw4aahTxaRd2npx3YTmvnZo3aodeyDpshGj1ZKNSMFAw\nDgYDVR0PAQH/BAQDAgIEMB0GA1UdDgQWBBQ/Rt2adefI5PJQ5O0DPF0KCedokTAf\nBgNVHSMEGDAWgBSTExS7Fdf26uuPXD5rPfcbIRUjbTAKBggqhkjOPQQDAgNIADBF\nAiEAvZxO7aNwYGq/hTqvqPAbyqmNLMbA2T44wMnj18/KapMCIHfoUQJ1NvEXCdrR\n7gAiurO3FBxF6dsu52a5ibLZUjxM\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_kunocaleaf() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBmzCCAUGgAwIBAgIJAI4YOTUjHLNgMAoGCCqGSM49BAMCMCwxKjAoBgNVBAMM\nIUNoYWluIFRlc3Qga2V5Q2VydFNpZ24gd2l0aG91dCBjQTAgFw0yNjAxMDEwMDAw\nMDBaGA8yMTI2MDEwMTAwMDAwMFowGTEXMBUGA1UEAwwOa3Vub2NhLmV4YW1wbGUw\nWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAQOEGq2nZ/yKWa4xrWbmuPAnEB+2gwH\nfqQmT1QyrS9FgfdJRyDXBBNJZp05NxpWncWO3+upiV1v5XgJJzBqBFrio10wWzAZ\nBgNVHREEEjAQgg5rdW5vY2EuZXhhbXBsZTAdBgNVHQ4EFgQUgW5LjmTj6c4Egf60\nb8wu5txZVWkwHwYDVR0jBBgwFoAUP0bdmnXnyOTyUOTtAzxdCgnnaJEwCgYIKoZI\nzj0EAwIDSAAwRQIgbe1tX6ydTS5d3prag2Ip72rrO60o2ph5MQsz8y5wwi4CIQDB\nrL4LFy1fzH5tG44zbSg/fyhYhf+A78fY5FK8B0xQXg==\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_pinned() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBezCCASGgAwIBAgIFUEVFUgEwCgYIKoZIzj0EAwIwFzEVMBMGA1UEAwwMcGVl\nci5leGFtcGxlMCAXDTI2MDEwMTAwMDAwMFoYDzIxMjYwMTAxMDAwMDAwWjAXMRUw\nEwYDVQQDDAxwZWVyLmV4YW1wbGUwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARv\n7S9eWT57ZTmAOztQD2+5EetBRQ+B+cOtLJCr7BVBQPQExOwo/jrT1ahb6i7ZxObZ\nFrq4KWW801ggO2EZ0SqXo1gwVjAMBgNVHRMBAf8EAjAAMA4GA1UdDwEB/wQEAwIH\ngDAXBgNVHREEEDAOggxwZWVyLmV4YW1wbGUwHQYDVR0OBBYEFH8HRengm5cRK0K4\na6DbxP8afdpfMAoGCCqGSM49BAMCA0gAMEUCIDCIjkFoXJK1RI1twupNRu+WcP5M\nrU1MCAQ84vwQWP4tAiEArDbfJRioR7QSSuE4iKxVCCFaHbJs/7eLq3CNJGUFXoM=\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_icabadku() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBnTCCAUKgAwIBAgIJAO5sOGJd9DW0MAoGCCqGSM49BAMCMBoxGDAWBgNVBAMM\nD0NoYWluIFRlc3QgUm9vdDAgFw0yNjAxMDEwMDAwMDBaGA8yMTI2MDEwMTAwMDAw\nMFowJjEkMCIGA1UEAwwbQ2hhaW4gVGVzdCBJQ0EgYmFkIGtleVVzYWdlMFkwEwYH\nKoZIzj0CAQYIKoZIzj0DAQcDQgAE+AT3F9m1t43Wl9KNC+yZsRppa8bDFl4kbaiG\nPsGxKk7l0lYq8gIUpwiyFW+NNS6VqczNLtuv9B4bwTJq1IeE96NjMGEwDwYDVR0T\nAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAQCAQYwHQYDVR0OBBYEFHxFROCF4R/hDlD3\nhc31z5wKhT7eMB8GA1UdIwQYMBaAFJMTFLsV1/bq649cPms99xshFSNtMAoGCCqG\nSM49BAMCA0kAMEYCIQCaWu+7dE/IqZF7nMyC1p94Ii6rWRmTVyp/NllSkM+V3gIh\nAMUI5Zc9uRt4FhKk4Yp+eKa/vEKhlA2ln7/mgL91HabB\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_badkuleaf() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBkjCCATigAwIBAgIIbgBpfaaB9qkwCgYIKoZIzj0EAwIwJjEkMCIGA1UEAwwb\nQ2hhaW4gVGVzdCBJQ0EgYmFkIGtleVVzYWdlMCAXDTI2MDEwMTAwMDAwMFoYDzIx\nMjYwMTAxMDAwMDAwWjAYMRYwFAYDVQQDDA1iYWRrdS5leGFtcGxlMFkwEwYHKoZI\nzj0CAQYIKoZIzj0DAQcDQgAEC7eYylDd7Cwh+hPPEOaNxfc4RF0FeSPfck4WCbvp\nWKLA1DWIWTAEYoM7+TSw7TavUNCBbLFgIvIdwB41nfK3XaNcMFowGAYDVR0RBBEw\nD4INYmFka3UuZXhhbXBsZTAdBgNVHQ4EFgQUlbAxnUQzkjX9G9Tcqmb4gv1iMNYw\nHwYDVR0jBBgwFoAUfEVE4IXhH+EOUPeFzfXPnAqFPt4wCgYIKoZIzj0EAwIDSAAw\nRQIgag/UoCHWE0rC0/xG48lWlkGA4ZwcRMeOmBosqcCZSt0CIQCT5EMD4B2z+qdr\nGHPri41MtXG+CZpiPxVLJJiKr/I/Ew==\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_icadup() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBqjCCAVCgAwIBAgIIe5Aw9KwaDkswCgYIKoZIzj0EAwIwGjEYMBYGA1UEAwwP\nQ2hhaW4gVGVzdCBSb290MCAXDTI2MDEwMTAwMDAwMFoYDzIxMjYwMTAxMDAwMDAw\nWjAoMSYwJAYDVQQDDB1DaGFpbiBUZXN0IElDQSBrZXlVc2FnZSB0d2ljZTBZMBMG\nByqGSM49AgEGCCqGSM49AwEHA0IABLx0l07w4+WeOC1Btq4GxdXNrCDBHkLf9/k8\nk7W2p5mN/iJoS+ZpGxpbNws+9e7zBEejmMxxfT+Ag6BDiCzs//WjcDBuMA8GA1Ud\nEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgECMAsGA1UdDwQEAwIBBjAdBgNVHQ4E\nFgQUkZvrcHqUrer7ucotknMV6p9SRY4wHwYDVR0jBBgwFoAUkxMUuxXX9urrj1w+\naz33GyEVI20wCgYIKoZIzj0EAwIDSAAwRQIhANGZYiBYG+efpCzobz3lsse4O8BI\nDzXq4YDBoFZFVW4jAiAyrptafXCUaj/ZNmsQbC2HBOBR+A4+lj4QBHMBIF12Fg==\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_dupleaf() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBjzCCATagAwIBAgIIBfIZvvOzptswCgYIKoZIzj0EAwIwKDEmMCQGA1UEAwwd\nQ2hhaW4gVGVzdCBJQ0Ega2V5VXNhZ2UgdHdpY2UwIBcNMjYwMTAxMDAwMDAwWhgP\nMjEyNjAxMDEwMDAwMDBaMBYxFDASBgNVBAMMC2R1cC5leGFtcGxlMFkwEwYHKoZI\nzj0CAQYIKoZIzj0DAQcDQgAEtjH30mRqXUaLX/icnlq+Lk1GiwpdgDUfap4xXB9F\ni6gBYeNoerA3MCEIF19aRoSZnVE4qPAOtBQrf/OSHJ9FNaNaMFgwFgYDVR0RBA8w\nDYILZHVwLmV4YW1wbGUwHQYDVR0OBBYEFDz3WYZJCyJ0vwrxvEHm2L5fZICVMB8G\nA1UdIwQYMBaAFJGb63B6lK3q+7nKLZJzFeqfUkWOMAoGCCqGSM49BAMCA0cAMEQC\nIHNhw7oJ3GsgUhVY4r3nggQLeeMyDYEQhlK/QaIuxV0tAiBX0kaeJfJjqEz2ZOgU\nS3r/t9F+AUZ64YmZoZGXXe306A==\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_icabool() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBmTCCAT6gAwIBAgIITjwusgCIv5MwCgYIKoZIzj0EAwIwGjEYMBYGA1UEAwwP\nQ2hhaW4gVGVzdCBSb290MCAXDTI2MDEwMTAwMDAwMFoYDzIxMjYwMTAxMDAwMDAw\nWjAjMSEwHwYDVQQDDBhDaGFpbiBUZXN0IElDQSBCT09MRUFOIDEwWTATBgcqhkjO\nPQIBBggqhkjOPQMBBwNCAATiFmHI1dRDyOir+yn/zhMmV08qta3TGnA2I6pNZR9w\nnw8Wqed/puC0kd2IJef+1byUW0TphIsXgfOf20uoi7ugo2MwYTAPBgNVHRMBAf8E\nBTADAQEBMA4GA1UdDwEB/wQEAwIBBjAdBgNVHQ4EFgQUO4XEa2MDXrOqpxtOnVJK\ngvVi4kswHwYDVR0jBBgwFoAUkxMUuxXX9urrj1w+az33GyEVI20wCgYIKoZIzj0E\nAwIDSQAwRgIhALR+aXDa6odCiEyU39KVgIFKkDpLBTfRVa9ASjCy8DZfAiEAmobL\ng+pfmj4a5mkMw4SJ4HP6TE8EM4437hfe8Nk/xOY=\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_boolleaf() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBjTCCATOgAwIBAgIIDYbiZVxTmLkwCgYIKoZIzj0EAwIwIzEhMB8GA1UEAwwY\nQ2hhaW4gVGVzdCBJQ0EgQk9PTEVBTiAxMCAXDTI2MDEwMTAwMDAwMFoYDzIxMjYw\nMTAxMDAwMDAwWjAXMRUwEwYDVQQDDAxib29sLmV4YW1wbGUwWTATBgcqhkjOPQIB\nBggqhkjOPQMBBwNCAARbukahZpYzVbOJ/fHGKxHrf5pfYtK7kBK6CLlcQ68z4V4j\n6tTOsTryGLxy2slT9pWPfLvYMAQk+u3XaRy9SUMpo1swWTAXBgNVHREEEDAOggxi\nb29sLmV4YW1wbGUwHQYDVR0OBBYEFAwlaF0muvQu5hTVQDpYmrIFLUV+MB8GA1Ud\nIwQYMBaAFDuFxGtjA16zqqcbTp1SSoL1YuJLMAoGCCqGSM49BAMCA0gAMEUCIQD+\nHAOsUKQkdgNdbOuuVHr3E3vkzcRU4r5DMxv/d7BSpgIgP6Rudmihu4J4MS3EEH3B\nMnfvaNNMRGh94QYxRnK49kA=\n-----END CERTIFICATE-----\n"
+}
+
+fn certs(pem: string) -> ptr {
+    l = list_new()
+    tls13_cert.trust_store_add_pem(l, pem)
+    return l
+}
+
+// chain_verify_path(leaf, intermediates, [root]): "" or why not.
+fn path_result(leaf_pem: string, inter_pem: string) -> string {
+    anchors = certs(pem_root())
+    inters = certs(inter_pem)
+    leaves = certs(leaf_pem)
+    r = "the leaf fixture does not parse"
+    if list_size(leaves) == 1 {
+        r = tls13_cert.chain_verify_path(list.at(leaves, 0) as *LeafCert, inters, anchors)
+    }
+    tls13_cert.free_anchors(anchors)
+    tls13_cert.free_anchors(inters)
+    tls13_cert.free_anchors(leaves)
+    return r
+}
+
+// validate_chain(leaf, intermediates, [root], at, purpose, -1).
+fn chain_result(leaf_pem: string, inter_pem: string, at: string, purpose: int) -> string {
+    anchors = certs(pem_root())
+    inters = certs(inter_pem)
+    leaves = certs(leaf_pem)
+    r = "the leaf fixture does not parse"
+    if list_size(leaves) == 1 {
+        r = tls13_cert.validate_chain(list.at(leaves, 0) as *LeafCert, inters, anchors, at, purpose, -1)
+    }
+    tls13_cert.free_anchors(anchors)
+    tls13_cert.free_anchors(inters)
+    tls13_cert.free_anchors(leaves)
+    return r
+}
+
+// validate_chain(leaf, intermediates, [root], now, PURPOSE_SERVER, max_depth).
+fn depth_result(leaf_pem: string, inter_pem: string, max_depth: int) -> string {
+    anchors = certs(pem_root())
+    inters = certs(inter_pem)
+    leaves = certs(leaf_pem)
+    r = "the leaf fixture does not parse"
+    if list_size(leaves) == 1 {
+        r = tls13_cert.validate_chain(list.at(leaves, 0) as *LeafCert, inters, anchors, "", tls13_cert.PURPOSE_SERVER, max_depth)
+    }
+    tls13_cert.free_anchors(anchors)
+    tls13_cert.free_anchors(inters)
+    tls13_cert.free_anchors(leaves)
+    return r
+}
+
+// validate_chain(leaf, intermediates, [anchor], 2027, PURPOSE_SERVER, -1).
+fn anchor_result(anchor_pem: string, leaf_pem: string, inter_pem: string) -> string {
+    anchors = certs(anchor_pem)
+    inters = certs(inter_pem)
+    leaves = certs(leaf_pem)
+    r = "the leaf fixture does not parse"
+    if list_size(leaves) == 1 {
+        r = tls13_cert.validate_chain(list.at(leaves, 0) as *LeafCert, inters, anchors, "20270101000000", tls13_cert.PURPOSE_SERVER, -1)
+    }
+    tls13_cert.free_anchors(anchors)
+    tls13_cert.free_anchors(inters)
+    tls13_cert.free_anchors(leaves)
+    return r
+}
+
+// 0 when `got` is what the case wants, else 1 (and says why).
+fn check(label: string, got: string, want_ok: int) -> int {
+    if want_ok == 1 {
+        if string.equals(got, "") == 1 {
+            println("ok   ${label}")
+            return 0
+        }
+        println("FAIL ${label}: refused (${got})")
+        return 1
+    }
+    if string.equals(got, "") != 1 {
+        println("ok   ${label}: refused (${got})")
+        return 0
+    }
+    println("FAIL ${label}: accepted")
+    return 1
+}
+
+main() {
+    at = "20270101000000"
+    server = tls13_cert.PURPOSE_SERVER
+    fails = 0
+
+    // The #3303 shape, through the call the client made.
+    fails = fails + check("leaf <- ica <- root", path_result(pem_leaf(), pem_ica()), 1)
+    fails = fails + check("an end entity of the root, as a leaf", path_result(pem_ee(), ""), 1)
+    fails = fails + check("a certificate signed by an end entity (cA FALSE)", path_result(pem_forged(), pem_ee()), 0)
+    fails = fails + check("a certificate signed by an end entity without basicConstraints", path_result(pem_forged2(), pem_eenobc()), 0)
+    // keyUsage keyCertSign does not make a CA: without basicConstraints cA,
+    // an intermediate still issues nothing, now that keyCertSign outside a
+    // CA is no longer refused on its own (it is not, by OpenSSL).
+    fails = fails + check("an intermediate with keyCertSign and no basicConstraints", path_result(pem_kunocaleaf(), pem_kunoca()), 0)
+    fails = fails + check("an end entity offered beside the real intermediate", path_result(pem_leaf(), "${pem_ee()}${pem_ica()}"), 1)
+
+    // What #3340's decoders read leniently (chain_verify_path accepted each
+    // issuer before): a keyUsage that is not a BIT STRING (it counted as
+    // absent), a repeated extension (the second keyUsage, with
+    // keyCertSign, won), and a cA BOOLEAN of 0x01, which DER does not
+    // allow. Each makes the certificate malformed, as OpenSSL refuses the
+    // first two.
+    fails = fails + check("an issuer whose keyUsage is not a BIT STRING", path_result(pem_badkuleaf(), pem_icabadku()), 0)
+    fails = fails + check("an issuer with keyUsage twice", path_result(pem_dupleaf(), pem_icadup()), 0)
+    fails = fails + check("an issuer whose cA is the BOOLEAN 0x01", path_result(pem_boolleaf(), pem_icabool()), 0)
+
+    // What else an issuer and the path must satisfy.
+    fails = fails + check("validate_chain: leaf <- ica <- root", chain_result(pem_leaf(), pem_ica(), at, server), 1)
+    fails = fails + check("validate_chain: signed by an end entity", chain_result(pem_forged(), pem_ee(), at, server), 0)
+    fails = fails + check("a clientAuth-only leaf for a server", chain_result(pem_clientonly(), pem_ica(), at, server), 0)
+    fails = fails + check("a clientAuth-only leaf for a client", chain_result(pem_clientonly(), pem_ica(), at, tls13_cert.PURPOSE_CLIENT), 1)
+    fails = fails + check("a CA below a pathLenConstraint 0 CA", chain_result(pem_subleaf(), "${pem_subca()}${pem_ica0()}", at, server), 0)
+    fails = fails + check("an issuer without keyCertSign", chain_result(pem_nksleaf(), pem_icanoks(), at, server), 0)
+    fails = fails + check("a name inside the permitted subtree", chain_result(pem_ncin(), pem_icanc(), at, server), 1)
+    fails = fails + check("a name outside the permitted subtree", chain_result(pem_ncout(), pem_icanc(), at, server), 0)
+    fails = fails + check("an unknown critical extension", chain_result(pem_crit(), pem_ica(), at, server), 0)
+    fails = fails + check("before notBefore", chain_result(pem_leaf(), pem_ica(), "20251231235959", server), 0)
+    fails = fails + check("after notAfter", chain_result(pem_leaf(), pem_ica(), "21260101000001", server), 0)
+
+    // What x509-limbo showed missing.
+    fails = fails + check("a 1024-bit RSA key", chain_result(pem_weak(), pem_ica(), at, server), 0)
+    fails = fails + check("explicit curve parameters", chain_result(pem_explicit(), pem_ica(), at, server), 0)
+    fails = fails + check("*.example.com under excluded bar.example.com (CVE-2025-61727)", chain_result(pem_wild(), pem_icaex(), at, server), 0)
+    fails = fails + check("*.other.com under excluded bar.example.com", chain_result(pem_wildok(), pem_icaex(), at, server), 1)
+    fails = fails + check("max_depth 0 with one intermediate", depth_result(pem_leaf(), pem_ica(), 0), 0)
+    fails = fails + check("max_depth 1 with one intermediate", depth_result(pem_leaf(), pem_ica(), 1), 1)
+
+    // A CA certificate (keyUsage keyCertSign and cRLSign, no
+    // digitalSignature) as the leaf: TLS signs with the leaf's key, so it is
+    // refused for either purpose, as OpenSSL refuses it (#3309).
+    fails = fails + check("a CA certificate as the leaf, for a server", chain_result(pem_ica(), "", at, server), 0)
+    fails = fails + check("a CA certificate as the leaf, for a client", chain_result(pem_ica(), "", at, tls13_cert.PURPOSE_CLIENT), 0)
+    fails = fails + check("a leaf with keyUsage digitalSignature", chain_result(pem_leaf(), pem_ica(), at, server), 1)
+
+    // Only a self-signed root ends a path, as on OpenSSL (#3310): not a
+    // trusted intermediate, nor a self-issued root whose
+    // authorityKeyIdentifier names another key, issuer or serial.
+    fails = fails + check("a trusted intermediate as the anchor", anchor_result(pem_ica(), pem_leaf(), ""), 0)
+    fails = fails + check("a root whose AKI keyIdentifier is not its SKI", anchor_result(pem_akikeyid(), pem_akikeyidleaf(), ""), 0)
+    fails = fails + check("a root whose AKI names another issuer", anchor_result(pem_akiissuer(), pem_akiissuerleaf(), ""), 0)
+    fails = fails + check("a root whose AKI names another serial", anchor_result(pem_akiserial(), pem_akiserialleaf(), ""), 0)
+    fails = fails + check("a root whose AKI names another key, issuer and serial", anchor_result(pem_akiall(), pem_akiallleaf(), ""), 0)
+    fails = fails + check("a root whose AKI names its own serial", anchor_result(pem_akiself(), pem_akiselfleaf(), ""), 1)
+    fails = fails + check("the same leaf under its root", anchor_result(pem_root(), pem_leaf(), pem_ica()), 1)
+
+    // A pinned self-signed leaf with basicConstraints cA FALSE: trusted as
+    // it stands (it has no issuer), as OpenSSL trusts it.
+    fails = fails + check("a pinned self-signed leaf (cA FALSE)", anchor_result(pem_pinned(), pem_pinned(), ""), 1)
+
+    if fails > 0 {
+        println("tls13_chain: ${fails} FAILURES")
+        exit(1)
+    }
+    println("tls13_chain: all checks pass")
+}

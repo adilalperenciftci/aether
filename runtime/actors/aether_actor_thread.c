@@ -9,6 +9,7 @@
 #include <string.h>
 
 extern AETHER_TLS int current_core_id;
+extern AETHER_TLS int aether_in_actor_thread;   /* multicore_scheduler.c */
 
 // Idle iterations before the thread parks (#2592): as many as a core spins
 // before it parks (#1517), so a message that comes soon after the last one
@@ -41,6 +42,8 @@ void* aether_actor_thread(void* arg) {
     // whose single producer is the core's thread, and messages were lost or
     // delivered twice.
     current_core_id = -1;
+    /* A thread that runs an actor: scheduler_wait() refuses here (#3463). */
+    aether_in_actor_thread = 1;
 
     // The step reads actors from the tables (the ones its handler sends to),
     // so this thread publishes an epoch as a reader (#2517): from here until
@@ -67,15 +70,18 @@ void* aether_actor_thread(void* arg) {
                 // As a core steps an actor: an ask its handler leaves
                 // unanswered fails then, and a panic ends the actor, not
                 // the process.
-                scheduler_step_actor(actor);
                 // A step takes one message, as on a core. The send was
                 // counted when it was made, so without the credit
                 // scheduler_wait (and with it scheduler_shutdown) waits
-                // forever on a message an actor thread handled.
+                // forever on a message an actor thread handled; and only a
+                // step that took one (not a dead actor's) is credited, or the
+                // handled count passes the sent count (#3464). Release, as
+                // the wait's reading of it is acquire.
+                int took = scheduler_step_actor(actor);
                 int core = actor->assigned_core;
-                if (core >= 0 && core < num_cores) {
+                if (took && core >= 0 && core < num_cores) {
                     atomic_fetch_add_explicit(&schedulers[core].messages_processed, 1,
-                                              memory_order_relaxed);
+                                              memory_order_release);
                 }
             }
             continue;
@@ -102,7 +108,9 @@ void* aether_actor_thread(void* arg) {
         if (actor->timeout_ns > 0 && actor->last_activity_ns > 0 && actor->step &&
             aether_now_ns() - actor->last_activity_ns >= actor->timeout_ns) {
             idle = 0;
+            scheduler_countdown_enter();   // until its arm returns (#3443)
             scheduler_step_actor(actor);
+            scheduler_countdown_leave();
             continue;
         }
 
@@ -130,6 +138,11 @@ void* aether_actor_thread(void* arg) {
             AETHER_CPU_PAUSE();   // on no core: nothing could wake it
         }
     }
+
+    // Ended (a kill, a linked death; a panic's is finalized in its step):
+    // the death is finalized here, on the thread that owns the mailbox and
+    // takes the inbox, while it is still a reader (#2974, #3298).
+    scheduler_actor_thread_finalize(actor);
 
     // Done reading: a released actor this thread stepped can be reclaimed.
     scheduler_reader_offline();

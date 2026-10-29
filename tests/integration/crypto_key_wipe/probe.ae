@@ -1,0 +1,349 @@
+// The freed-memory probe of test_key_wipe.sh (#3382, #3402). Each test key
+// below (RSA-2048 as PKCS#8 and PKCS#1, P-256 as PKCS#8 and SEC1; made for this
+// test only) is loaded with tls13_server.load_private_key and freed with
+// free_private_key, which wipes the key itself. Then probe_shim.c asks the
+// C allocator for blocks of every size the loading's buffers had, reads them
+// as they come, and looks for 16 bytes from the middle of the private
+// exponent or scalar: a buffer freed without a wipe hands its bytes to the
+// next allocation of its size.
+//
+// A control comes first: a buffer of each of two sizes the loading uses
+// (a key's SEQUENCE, an exponent), with a known pattern, freed without a
+// wipe, must be found. Where it is not (an allocator that does not hand a
+// freed block back as it was, or one the probe must not read under), the
+// probe proves nothing and prints "SKIP: <why>". Otherwise one line per
+// key, "ok   <key>" or "FAIL <key>: <n> copies", and exits 1 on a FAIL.
+//
+// Then the same after signing with P-256, Ed25519 and RSA, an HMAC, and a
+// shield wrap and unwrap (#3402): the hash, MAC and cipher state those use
+// held the secret, so it must be wiped too.
+
+import std.bytes
+import std.string
+import std.cryptography.tls13_server
+import std.cryptography.tls13_cert
+import std.cryptography.hmac
+import std.cryptography.sha2
+import std.cryptography.rsa
+import std.cryptography.pem
+import std.cryptography.shield
+import std.cryptography.x25519
+import std.cryptography.tls13_ks
+import std.cryptography.tls13_kdf
+
+extern key_probe_supported() -> int
+extern key_probe_scan(pattern: ptr, lo: int, hi: int, blocks: int) -> int
+extern key_probe_scan_step(pattern: ptr, lo: int, hi: int, step: int, blocks: int) -> int
+extern key_probe_free_raw(pattern: ptr, size: int)
+extern exit(code: int)
+extern string_char_at(str: string, index: int) -> int
+
+const LO = 16
+const HI = 4096
+const BLOCKS = 1024
+
+// 1 when the shield leg could not check (its raw control was not found).
+var shield_unchecked: int = 0
+
+fn hexval(c: int) -> int {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    return 0
+}
+
+fn window(hex: string) -> ptr {
+    w = bytes.new(16)
+    bytes.set(w, 15, 0)
+    i = 0
+    while i < 16 {
+        bytes.set(w, i, hexval(string_char_at(hex, 2 * i)) * 16 + hexval(string_char_at(hex, 2 * i + 1)))
+        i = i + 1
+    }
+    return w
+}
+
+// A buffer of `size` bytes holding `w` in its middle, freed as it is.
+fn control(w: ptr, size: int) -> int {
+    c = bytes.new(size)
+    bytes.set(c, size - 1, 0)
+    i = 0
+    while i < 16 {
+        bytes.set(c, size / 2 + i, bytes.get(w, i))
+        i = i + 1
+    }
+    bytes.free(c)
+    return key_probe_scan(bytes.data(w), LO, HI, BLOCKS)
+}
+
+fn check(name: string, pem_text: string, hex: string) -> int {
+    w = window(hex)
+    k, err = tls13_server.load_private_key(pem_text)
+    if k == null {
+        println("FAIL ${name}: does not load: ${err}")
+        bytes.wipe_free(w)
+        return 1
+    }
+    tls13_server.free_private_key(k)
+    hits = key_probe_scan(bytes.data(w), LO, HI, BLOCKS)
+    // The window itself is a copy of the secret's bytes: wiped, or the next
+    // key's probe would find it.
+    bytes.wipe_free(w)
+    if hits != 0 {
+        println("FAIL ${name}: ${hits} copies of the key in freed memory")
+        return 1
+    }
+    println("ok   ${name}: no copy of the key in freed memory")
+    return 0
+}
+
+// `n` bytes from `hex`, a buffer of exactly that size.
+fn hexbytes(hex: string, n: int) -> ptr {
+    b = bytes.new(n)
+    bytes.set(b, n - 1, 0)
+    i = 0
+    while i < n {
+        bytes.set(b, i, hexval(string_char_at(hex, 2 * i)) * 16 + hexval(string_char_at(hex, 2 * i + 1)))
+        i = i + 1
+    }
+    return b
+}
+
+fn th32() -> ptr {
+    b = bytes.new(32)
+    i = 0
+    while i < 32 {
+        bytes.set(b, i, i)
+        i = i + 1
+    }
+    return b
+}
+
+// Scan for the window `w` (consumed: wiped) after an operation (#3402).
+fn scan_after(name: string, w: ptr) -> int {
+    hits = key_probe_scan(bytes.data(w), LO, HI, BLOCKS)
+    bytes.wipe_free(w)
+    if hits != 0 {
+        println("FAIL ${name}: ${hits} copies of the secret in freed memory")
+        return 1
+    }
+    println("ok   ${name}: no copy of the secret in freed memory")
+    return 0
+}
+
+// A P-256 CertificateVerify signature: the scalar goes through RFC 6979's
+// HMAC-DRBG, so the hash and MAC state held it.
+fn sign_p256() -> int {
+    w = window("a282997f3517fd44cd8e2c35c0ef513b")
+    scalar = tls13_server.parse_ec_private_key_pem(ec_pkcs8())
+    th = th32()
+    sig = tls13_cert.sign_server_cert_verify_ecdsa(tls13_cert.KEY_P256, scalar, bytes.view(th))
+    bytes.wipe_free(scalar)
+    bytes.free(th)
+    if sig == null {
+        println("FAIL P-256 signing: did not sign")
+        bytes.wipe_free(w)
+        return 1
+    }
+    bytes.free(sig)
+    return scan_after("P-256 signing", w)
+}
+
+// An Ed25519 CertificateVerify signature (RFC 8032 test 1's seed): the seed
+// is hashed with SHA-512.
+fn sign_ed25519() -> int {
+    w = window("ba844af492ec2cc44449c5697b326919")
+    seed = hexbytes("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60", 32)
+    th = th32()
+    sig = tls13_cert.sign_server_cert_verify_ed25519(seed, bytes.view(th))
+    bytes.wipe_free(seed)
+    bytes.free(th)
+    if sig == null {
+        println("FAIL Ed25519 signing: did not sign")
+        bytes.wipe_free(w)
+        return 1
+    }
+    bytes.free(sig)
+    return scan_after("Ed25519 signing", w)
+}
+
+// An RSA-2048 rsa_pss_rsae_sha256 signature with the PKCS#1 test key.
+fn sign_rsa() -> int {
+    w = window("26409a4310a03aecd9175eb011bab400")
+    der, _label, perr = pem.parse_at(rsa_pkcs1(), 0)
+    if der == null {
+        println("FAIL RSA signing: the key does not decode: ${perr}")
+        bytes.wipe_free(w)
+        return 1
+    }
+    k, _kerr = rsa.key_from_pkcs1_der(der)
+    bytes.wipe_free(der)
+    th = th32()
+    sig = tls13_cert.sign_server_cert_verify_rsa_pss_scheme(k, tls13_cert.SCHEME_RSA_PSS_RSAE_SHA256, bytes.view(th))
+    rsa.key_free(k)
+    bytes.free(th)
+    if sig == null {
+        println("FAIL RSA signing: did not sign")
+        bytes.wipe_free(w)
+        return 1
+    }
+    bytes.free(sig)
+    return scan_after("RSA signing", w)
+}
+
+// HMAC-SHA-256 with a 32-byte key: the key is padded into K0, then the pads.
+fn mac() -> int {
+    w = window("0f1e2d3c4b5a69788796a5b4c3d2e1f0")
+    key = hexbytes("0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0", 32)
+    m = th32()
+    out = hmac.bytes("sha256", bytes.view(key), bytes.view(m))
+    bytes.wipe_free(key)
+    bytes.free(m)
+    bytes.free(out)
+    return scan_after("HMAC-SHA-256", w)
+}
+
+// A shield wrap and unwrap: SHA-512 of the pre-key is the AEAD key, so its
+// first 16 bytes must not be left anywhere. A SHA-2 context holds its digest
+// as 64-bit words in the machine's order (little-endian on every target the
+// tests run on), so the window is the first two words as they lie in a
+// context: each 8 bytes reversed.
+fn shielded() -> int {
+    h, herr = shield.wrap(hexbytes("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", 32))
+    if h == null {
+        println("FAIL shield: ${herr}")
+        return 1
+    }
+    s = h as *shield.Shielded
+    kh = sha2.sha512_bytes(bytes.view(s.prekey))
+    w = bytes.new(16)
+    bytes.set(w, 15, 0)
+    i = 0
+    while i < 8 {
+        bytes.set(w, i, bytes.get(kh, 7 - i))
+        bytes.set(w, 8 + i, bytes.get(kh, 15 - i))
+        i = i + 1
+    }
+    bytes.wipe_free(kh)
+    // The context is a struct the C allocator hands out at its own size, so
+    // this scan steps through the sizes a context can have, with a control
+    // of its own: a raw block of about a context's size, freed unwiped, must
+    // be found first.
+    cw = window("c0ffee00c0ffee00c0ffee00c0ffee00")
+    key_probe_free_raw(bytes.data(cw), 752)
+    ctl = key_probe_scan_step(bytes.data(cw), 512, 1024, 16, 64)
+    bytes.free(cw)
+    got, _uerr = shield.unwrap(h)
+    bytes.wipe_free(got)
+    shield.free(h)
+    if ctl == 0 {
+        bytes.wipe_free(w)
+        // Not a pass: the summary says the shield was not checked (#3414).
+        shield_unchecked = 1
+        println("SKIP shield wrap and unwrap: not checked here (the raw control was not found)")
+        return 0
+    }
+    hits = key_probe_scan_step(bytes.data(w), 512, 1024, 16, 64)
+    bytes.wipe_free(w)
+    if hits != 0 {
+        println("FAIL shield wrap and unwrap: ${hits} copies of the AEAD key in freed memory")
+        return 1
+    }
+    println("ok   shield wrap and unwrap: no copy of the AEAD key in freed memory")
+    return 0
+}
+
+// An X25519 exchange (RFC 7748 6.1: Alice's key, Bob's public key): the
+// ladder works on a clamped copy of the private scalar, whose middle bytes
+// are the key's (#3414).
+fn exchange() -> int {
+    w = window("3c16c17251b26645df4c2f87ebc0992a")
+    alice = hexbytes("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a", 32)
+    bob = hexbytes("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f", 32)
+    shared, xerr = x25519.scalar_mult(alice, bob)
+    bytes.wipe_free(alice)
+    bytes.free(bob)
+    if shared == null {
+        println("FAIL X25519 exchange: ${xerr}")
+        bytes.wipe_free(w)
+        return 1
+    }
+    bytes.wipe_free(shared)
+    return scan_after("X25519 exchange", w)
+}
+
+// The TLS 1.3 key schedule (SHA-256): the master secret is HKDF-Extract
+// over the salt Derive-Secret(handshake, "derived", ""), so that salt gives
+// every application traffic key (#3414). Its first 16 bytes must not be left.
+fn key_schedule() -> int {
+    early = tls13_ks.early_secret("sha256")
+    ecdhe = hexbytes("4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742", 32)
+    hs = tls13_ks.handshake_secret("sha256", early, bytes.view(ecdhe))
+    bytes.wipe_free(ecdhe)
+    blank = bytes.new(1)
+    empty_th = sha2.sha256_bytes(bytes.view(blank)[0..0])
+    bytes.free(blank)
+    salt = tls13_kdf.derive_secret("sha256", bytes.view(hs)[0..32], "derived", bytes.view(empty_th)[0..32])
+    bytes.free(empty_th)
+    w = bytes.new(16)
+    bytes.copy_from_bytes(w, 0, salt, 0, 16)
+    bytes.wipe_free(salt)
+    ms = tls13_ks.master_secret("sha256", hs)
+    tls13_ks.free_secret(ms)
+    tls13_ks.free_secret(hs)
+    tls13_ks.free_secret(early)
+    return scan_after("TLS key schedule", w)
+}
+
+main() {
+    if key_probe_supported() == 0 {
+        println("SKIP: freed memory must not be read here (a sanitizer or Valgrind)")
+        return
+    }
+    cw = window("5a1e5a1e00112233445566778899aabb")
+    c1 = control(cw, 1216)
+    c2 = control(cw, 264)
+    bytes.free(cw)
+    if c1 == 0 || c2 == 0 {
+        println("SKIP: the allocator does not hand freed blocks back as they were (control found ${c1}, ${c2})")
+        return
+    }
+    fails = 0
+    fails = fails + check("RSA-2048, PKCS#8", rsa_pkcs8(), "26409a4310a03aecd9175eb011bab400")
+    fails = fails + check("RSA-2048, PKCS#1", rsa_pkcs1(), "26409a4310a03aecd9175eb011bab400")
+    fails = fails + check("P-256, PKCS#8", ec_pkcs8(), "a282997f3517fd44cd8e2c35c0ef513b")
+    fails = fails + check("P-256, SEC1", ec_sec1(), "a282997f3517fd44cd8e2c35c0ef513b")
+    // Signing, MACs and the shield (#3402).
+    fails = fails + sign_p256()
+    fails = fails + sign_ed25519()
+    fails = fails + sign_rsa()
+    fails = fails + mac()
+    fails = fails + shielded()
+    // The key exchange and the key schedule (#3414).
+    fails = fails + exchange()
+    fails = fails + key_schedule()
+    if fails != 0 { exit(1) }
+    if shield_unchecked == 1 {
+        println("key loading, signing, HMAC, the key exchange and schedule: no copy left in freed memory (control found ${c1}, ${c2}); the shield was not checked here")
+        return
+    }
+    println("key loading, signing, HMAC, the shield, the key exchange and schedule: no copy left in freed memory (control found ${c1}, ${c2})")
+}
+
+// The test keys (made with openssl genpkey for this test only), and 16
+// bytes from the middle of each secret: the RSA private exponent's bytes
+// 100 to 115, the P-256 scalar's bytes 8 to 23.
+fn rsa_pkcs8() -> string {
+    return "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCKxqN/G2JHNlBP\nQplppCDxPCSE65Cb2Pg+mCyg0jRtb9Dlxygx7hZW864T9ce/HGygQmr5k39Fhgy+\nEQVXuu7+mmFTC48Q6nNbWAbc/5peT847YAyMEIEgFCPVPpMt9fvmYUVXzCJUvYF/\ngTZvHO6RKzl1FT4MxvAcOC8h1hQ8QjGip9ny6SluDHCfvCGrOylWCXK3Ml7clIis\nlbAVYqQerZXOXOj6krKUxKintA4lIqMB55efOp5yIs1/tg104xd1oVfgXj4Mf1fs\nijCEG9RepsD1PXeYWds/fxjXx9QlQZCL0976sy8MJwdbV+e7QdTL7wWSkO5ZEfKS\ndxUMu4IzAgMBAAECggEADHCpCFm5PMlQIq1wLimh2wN5V0GnSWkw5lTi2e8YobTJ\nJPKY66eRm217AzFgR1qcxt2dVE5rYB1CTX7IxqgBs5NoOmG0tfSmWZ+xoc73P2a9\nBdKNiA1qCH5LBgXMJhhrt9JWvSZAmkMQoDrs2RdesBG6tABZpcXm5p4HZOuZYxtU\nJ7KRmglkFgVxPFmO2n1Pn+hhSRRy/IR9mgqIaFv+3io2lB196oWZCygif6HewSbS\npFEyOWSOXcjwPVcMM6z7fVNN5f86+Ggxwl0CSY4wbeiJQn3F7l3tFZKwBVNA12OD\nCXUrZovEWLr7nNdspTxmAyIzLMejMQkZsUAboMXS/QKBgQC9bXc7OuZxnSwTX5bE\nYSjs6icSUFbLBYBXVONORQ7B29qb1G662/DfGMgOBgnX7+16tjvsPBmiERAlJAPY\nakgjPtartz561UVNgD1zoENEgmffmZ/vthtJDFdQSpIsBk2FiflMp+qbUXQHrF77\ncY8bgzE60UQeMqJXbngUimwm/wKBgQC7jB0bWRTNygbLScy4+lIOD9ZxZAtMGfnR\nJdcgOtLagTxLrHbYwvLAJ5g4euj3N9zF6PqKKgSXngd+crELGOtM5EaKjPcFTLAW\nWl8GnCwVLQszD6WeEn0rcsdTEiliBfCh/5YMNbJZ0xZWH6Di2MUQyj8TL6CcRAaS\nRa56uOe4zQKBgFHHIVNDwVrJNM8EVG1hWK63A7knT+ED9f0924fdzloo1P6zPj6T\nVzCpXSyYtMUxgn+YjtQUuig6X5L5MmPKtmvo4/pr+KBE1E96Do2NYZ0BA2EHzIFL\nSApINqWmG+a/rdX509OhJmp5RrNNWhAJXXPONoGi+FplF6rROSv8+mX3AoGAUmH1\n1zGGRe9clKfSWd77dFnYpO6BV+iBKDIrEWlFfd4PEl6rxgO8hlPeNdEnzJCpVfZF\nN7PFWKR+Pjk7M9i6Y4hSxEGvsJBDOU5xN4IaiyLCLKfO5GTSvucoT4FG1Fwvm7md\nu7dKpNJomWRDU+JMjleI5XCiaIIpMM+TGS1n/HECgYEAkhTYMv1VzER93fGw44cr\n3TTg/LGylMV/z2OXYkbEDe+/v7F4b+Ozr1PgKVBnVSvDx9jcdVKjSy/o9e4fd7H5\nBUVwSuftieum8TP9hoJ63x4TZzZHcLmeyZYV7cJe6hUwBNgl9xVvyB+Bf+4ducSn\nWKMnh0sn+d8QWGcE9PEReXw=\n-----END PRIVATE KEY-----\n"
+}
+
+fn rsa_pkcs1() -> string {
+    return "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAisajfxtiRzZQT0KZaaQg8TwkhOuQm9j4PpgsoNI0bW/Q5cco\nMe4WVvOuE/XHvxxsoEJq+ZN/RYYMvhEFV7ru/pphUwuPEOpzW1gG3P+aXk/OO2AM\njBCBIBQj1T6TLfX75mFFV8wiVL2Bf4E2bxzukSs5dRU+DMbwHDgvIdYUPEIxoqfZ\n8ukpbgxwn7whqzspVglytzJe3JSIrJWwFWKkHq2Vzlzo+pKylMSop7QOJSKjAeeX\nnzqeciLNf7YNdOMXdaFX4F4+DH9X7IowhBvUXqbA9T13mFnbP38Y18fUJUGQi9Pe\n+rMvDCcHW1fnu0HUy+8FkpDuWRHykncVDLuCMwIDAQABAoIBAAxwqQhZuTzJUCKt\ncC4podsDeVdBp0lpMOZU4tnvGKG0ySTymOunkZttewMxYEdanMbdnVROa2AdQk1+\nyMaoAbOTaDphtLX0plmfsaHO9z9mvQXSjYgNagh+SwYFzCYYa7fSVr0mQJpDEKA6\n7NkXXrARurQAWaXF5uaeB2TrmWMbVCeykZoJZBYFcTxZjtp9T5/oYUkUcvyEfZoK\niGhb/t4qNpQdfeqFmQsoIn+h3sEm0qRRMjlkjl3I8D1XDDOs+31TTeX/OvhoMcJd\nAkmOMG3oiUJ9xe5d7RWSsAVTQNdjgwl1K2aLxFi6+5zXbKU8ZgMiMyzHozEJGbFA\nG6DF0v0CgYEAvW13OzrmcZ0sE1+WxGEo7OonElBWywWAV1TjTkUOwdvam9Ruutvw\n3xjIDgYJ1+/terY77DwZohEQJSQD2GpIIz7Wq7c+etVFTYA9c6BDRIJn35mf77Yb\nSQxXUEqSLAZNhYn5TKfqm1F0B6xe+3GPG4MxOtFEHjKiV254FIpsJv8CgYEAu4wd\nG1kUzcoGy0nMuPpSDg/WcWQLTBn50SXXIDrS2oE8S6x22MLywCeYOHro9zfcxej6\niioEl54HfnKxCxjrTORGioz3BUywFlpfBpwsFS0LMw+lnhJ9K3LHUxIpYgXwof+W\nDDWyWdMWVh+g4tjFEMo/Ey+gnEQGkkWuerjnuM0CgYBRxyFTQ8FayTTPBFRtYViu\ntwO5J0/hA/X9PduH3c5aKNT+sz4+k1cwqV0smLTFMYJ/mI7UFLooOl+S+TJjyrZr\n6OP6a/igRNRPeg6NjWGdAQNhB8yBS0gKSDalphvmv63V+dPToSZqeUazTVoQCV1z\nzjaBovhaZReq0Tkr/Ppl9wKBgFJh9dcxhkXvXJSn0lne+3RZ2KTugVfogSgyKxFp\nRX3eDxJeq8YDvIZT3jXRJ8yQqVX2RTezxVikfj45OzPYumOIUsRBr7CQQzlOcTeC\nGosiwiynzuRk0r7nKE+BRtRcL5u5nbu3SqTSaJlkQ1PiTI5XiOVwomiCKTDPkxkt\nZ/xxAoGBAJIU2DL9VcxEfd3xsOOHK9004PyxspTFf89jl2JGxA3vv7+xeG/js69T\n4ClQZ1Urw8fY3HVSo0sv6PXuH3ex+QVFcErn7YnrpvEz/YaCet8eE2c2R3C5nsmW\nFe3CXuoVMATYJfcVb8gfgX/uHbnEp1ijJ4dLJ/nfEFhnBPTxEXl8\n-----END RSA PRIVATE KEY-----\n"
+}
+
+fn ec_pkcs8() -> string {
+    return "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQghIAOPUifKACigpl/\nNRf9RM2OLDXA71E78lbJeL1jiW6hRANCAAQZrgzufBOfDgjViwVGF5QzJP9ccZVG\nPYKipK50RAfyjExBX8EIpl0x1E4NZw+XjbUElSo0kK4SrIqqNssyyYFi\n-----END PRIVATE KEY-----\n"
+}
+
+fn ec_sec1() -> string {
+    return "-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIISADj1InygAooKZfzUX/UTNjiw1wO9RO/JWyXi9Y4luoAoGCCqGSM49\nAwEHoUQDQgAEGa4M7nwTnw4I1YsFRheUMyT/XHGVRj2CoqSudEQH8oxMQV/BCKZd\nMdRODWcPl421BJUqNJCuEqyKqjbLMsmBYg==\n-----END EC PRIVATE KEY-----\n"
+}

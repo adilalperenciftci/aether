@@ -168,6 +168,7 @@ new_decryptor(key: byte[]) -> ptr {
 }
 free(ctx: @frees ptr) {
     if ctx == null { return }
+    mem.wipe(ctx, sizeof(Sm4Ctx))
     libc_free(ctx)
 }
 
@@ -213,7 +214,7 @@ ecb_run(ctx: ptr, data: ptr) -> ptr {
         eb = process_block(ctx, blk)
         k = 0
         while k < 16 { bytes.set(out, off + k, bytes.get(eb, k)); k = k + 1 }
-        bytes.free(blk); bytes.free(eb)
+        bytes.wipe_free(blk); bytes.wipe_free(eb)
         off = off + 16
     }
     return out
@@ -238,11 +239,11 @@ ctr_xor(ctx: ptr, iv: ptr, data: ptr) -> ptr {
             }
             j = j + 1
         }
-        bytes.free(ks)
+        bytes.wipe_free(ks)
         ctr_increment(ctr)
         off = off + 16
     }
-    bytes.free(ctr)
+    bytes.wipe_free(ctr)
     return out
 }
 ctr_increment(ctr: ptr) {
@@ -287,10 +288,10 @@ cbc_encrypt(ctx: ptr, iv: ptr, data: ptr) -> ptr {
             bytes.set(prev, k, v)
             k = k + 1
         }
-        bytes.free(blk); bytes.free(eb)
+        bytes.wipe_free(blk); bytes.wipe_free(eb)
         off = off + 16
     }
-    bytes.free(prev)
+    bytes.wipe_free(prev)
     return out
 }
 
@@ -315,10 +316,10 @@ cbc_decrypt(ctx: ptr, iv: ptr, data: ptr) -> ptr {
             bytes.set(prev, k, bytes.get(blk, k))
             k = k + 1
         }
-        bytes.free(blk); bytes.free(db)
+        bytes.wipe_free(blk); bytes.wipe_free(db)
         off = off + 16
     }
-    bytes.free(prev)
+    bytes.wipe_free(prev)
     return out
 }
 
@@ -371,7 +372,7 @@ pkcs7_unpad(data: ptr) -> {
 cbc_encrypt_pkcs7(ctx: ptr, iv: ptr, data: ptr) -> ptr {
     padded = pkcs7_pad(data)
     out = cbc_encrypt(ctx, iv, padded)
-    bytes.free(padded)
+    bytes.wipe_free(padded)
     return out
 }
 
@@ -385,7 +386,7 @@ cbc_decrypt_pkcs7(ctx: ptr, iv: ptr, data: ptr) -> {
     }
     raw = cbc_decrypt(ctx, iv, data)
     out, err = pkcs7_unpad(raw)
-    bytes.free(raw)
+    bytes.wipe_free(raw)
     return out, err
 }
 

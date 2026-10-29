@@ -6,6 +6,7 @@
 
 import std.cryptography.asn1
 import std.bytes
+import std.bignum
 import std.string
 
 digit(c: int) -> int {
@@ -27,7 +28,8 @@ der(hex: string) -> ptr {
 refused(hex: string, what: string) -> int {
     buf = der(hex)
     r = asn1.reader_new(buf)
-    _n, err = asn1.read_integer(r)
+    n, err = asn1.read_integer(r)
+    bignum.free(n) // null when refused
     asn1.reader_free(r)
     bytes.free(buf)
     if string.equals(err, "asn1: content runs past end of input") == 1 {
@@ -46,11 +48,13 @@ main() {
 
     buf = der("020105")
     r = asn1.reader_new(buf)
-    _n, err = asn1.read_integer(r)
+    n, err = asn1.read_integer(r)
     if string.equals(err, "") != 1 {
         println("FAIL a whole INTEGER: '${err}'")
         fails = fails + 1
     }
+    // The INTEGER read is the caller's (the macOS leaks gate runs this file).
+    bignum.free(n)
     asn1.reader_free(r)
     bytes.free(buf)
 

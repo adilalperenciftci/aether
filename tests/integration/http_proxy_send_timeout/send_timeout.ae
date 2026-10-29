@@ -8,15 +8,28 @@
 // response were held for good. Both now give up after the server's
 // keep-alive idle timeout without progress, as a receive does.
 //
-// Three pipelined GETs for 32 MB each, more than loopback buffers hold, through
-// a bare proxy (the event loop on Linux and macOS), through one behind a
-// program's middleware (the worker path), and for a file the server sends
-// with sendfile(2) on Linux and macOS, each with a one second idle timeout.
-// The client reads nothing for five seconds after the first byte arrives,
-// then reads to the end: the responses must have been cut short. Three,
-// because Windows takes a whole send into the kernel when the socket has
-// nothing queued, so the first response never blocks there; the next one
-// does. Every server listens on 127.0.0.1 and a port the kernel picks.
+// Three pipelined GETs for 32 MB each through a bare proxy (the event loop on
+// Linux and macOS), through one behind a program's middleware (the worker
+// path), and for a file the server sends with sendfile(2) on Linux and macOS,
+// each with a 300 ms idle timeout. The client reads nothing for three seconds
+// after the first byte arrives, then reads to the end: the responses must
+// have been cut short. Three, because Windows takes a whole send into the
+// kernel when the socket has nothing queued, so the first response never
+// blocks there; the next one does. Every server listens on 127.0.0.1 and a
+// port the kernel picks.
+//
+// The client connects with a 16 KB receive buffer (#3338): set after
+// connect, the window the connection opened with still stood. The idle
+// timeout is short because of what macOS's loopback does to a client that
+// sleeps (#3338, measured with the sender's TCP_CONNECTION_INFO and a
+// capture of lo0): the client's kernel takes about 300 KB over the first
+// second, and about two seconds in, in some runs, the sender's kernel starts
+// reporting tens of megabytes sent and acknowledged while the client sends
+// nothing and the wire carries them only once it reads. A sender cannot tell
+// that from a client that reads, so a server is right not to cut it; with a
+// one second timeout the worker path's cut (its first full buffer at about one
+// second, plus the timeout) met that at two seconds and lost, 21 runs in 480.
+// At 300 ms every cut comes well before it.
 
 import std.fs
 import std.http
@@ -70,7 +83,7 @@ gateway(up_url: string, worker: int) -> ptr {
     if worker == 1 {
         http.server_use_middleware(s, mw_pass, 0)
     }
-    need("keepalive", http.server_set_keepalive(s, 1, 0, 1s))
+    need("keepalive", http.server_set_keepalive(s, 1, 0, 300ms))
     pool = proxy.upstream_pool_new("round_robin", 10, 0, 0)
     need("upstream_add", proxy.upstream_add(pool, up_url, 1))
     opts = proxy.opts_new()
@@ -80,23 +93,21 @@ gateway(up_url: string, worker: int) -> ptr {
     return s
 }
 
-// The responses to three `get`s whose reading starts five seconds late:
+const READ_BUFFER = 16384
+
+// The responses to three `get`s whose reading starts three seconds late:
 // "whole" when every byte of all three arrived, else "cut short".
 late_reader(port: int, get: string) -> string {
-    sock, cerr = tcp.connect("127.0.0.1", port)
+    // A client that stops reading has to stop taking bytes, so its receive
+    // buffer is small from the start: set after connect, the window the
+    // connection opened with still stood, and Linux took that much and then
+    // drained it for sixteen seconds after the cut (#3338).
+    sock, cerr = tcp.connect_buffered("127.0.0.1", port, READ_BUFFER)
     if cerr != "" {
         return "connect failed"
     }
-    // A client that stops reading has to stop taking bytes: left to grow
-    // its receive buffer by itself, the kernel went on taking them a little
-    // at a time through the stall (macOS, now and then), and the server was
-    // right not to give up on a client its sends still reached.
-    berr = tcp.set_read_buffer(sock, 16384)
-    if berr != "" {
-        return berr
-    }
     tcp.write(sock, "${get}${get}${get}")
-    // The five seconds of not reading count from the server's first byte,
+    // The three seconds of not reading count from the server's first byte,
     // not from the request: a slow build (a sanitizer's) can take seconds to
     // fetch the body upstream, and a stall that began before the server sent
     // anything was over before it had to wait.
@@ -109,11 +120,7 @@ late_reader(port: int, get: string) -> string {
             waited = waited + 1
         }
     }
-    // Five, not three: on the worker path the server takes the body in after
-    // its first bytes went (a second or more on a busy macOS runner) before
-    // the send that waits, and a client that read again two seconds after
-    // that wait began was in time.
-    sleep(5000)
+    sleep(3000)
     total = 0
     quiet = 0
     closed = 0
@@ -179,7 +186,7 @@ main() {
     }
     files = http.server_create(0)
     http.server_set_host(files, "127.0.0.1")
-    need("keepalive", http.server_set_keepalive(files, 1, 0, 1s))
+    need("keepalive", http.server_set_keepalive(files, 1, 0, 300ms))
     http.server_get(files, "/file", handle_file, 0)
     port = start(files)
     sleep(100)

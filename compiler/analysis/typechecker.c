@@ -454,6 +454,10 @@ static Symbol* own_extern_symbol(Symbol* found, const char* merged_from, const c
 static int is_program_own_decl(const Symbol* s) {
     const ASTNode* n = s ? s->node : NULL;
     if (!n || n->origin_module || n->is_imported) return 0;
+    /* The compiler's own `message Down` (#2974) is every file's: a module's
+     * Down arm reads its field types too. */
+    if (n->type == AST_MESSAGE_DEFINITION && n->annotation && strcmp(n->annotation, "system") == 0)
+        return 0;
     switch (n->type) {
         case AST_FUNCTION_DEFINITION: case AST_BUILDER_FUNCTION:
         case AST_STRUCT_DEFINITION: case AST_SUM_TYPE_DEF: case AST_ENUM_DEFINITION:
@@ -4137,6 +4141,11 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
         case AST_LITERAL:
             return clone_type(expr->node_type);
 
+        case AST_SEND_FIRE_FORGET:
+            /* #2974: try_send(ref, Msg { ... }) says whether it sent. */
+            return create_type(expr->annotation && strcmp(expr->annotation, "try_send") == 0
+                               ? TYPE_STRING : TYPE_UNKNOWN);
+
         case AST_NONE_LITERAL:
             // `none` — optional with as-yet-unknown inner; context pins the
             // concrete T (assignment / `??` / `==`). If already pinned, use it.
@@ -5680,6 +5689,11 @@ static ASTNode* g_tc_fn_body = NULL;
 static ASTNode* g_tc_return_owner = NULL;
 static void declare_if_branch_hoists(ASTNode* body, SymbolTable* table);
 
+/* #3331: how many trailing DSL blocks enclose the code being checked. In
+ * one, a builder's `_ctx` is injected and hidden from the caller
+ * (closures-and-builder-dsl.md, "Invisible Context Injection"). */
+static int g_tc_trailing_depth = 0;
+
 /* #3025: how many times `n` binds `name`: a declaration or a re-bind, a
  * `=` to it, a pattern's name, closures' included. */
 static int count_bindings_of(const ASTNode* n, const char* name) {
@@ -6903,6 +6917,55 @@ static void typecheck_pending_callees(ASTNode* n, PendingResults* p, SymbolTable
     typecheck_pending_calls(n, p, global_table, 1);
 }
 
+/* #2974: the death notice. The runtime writes its payload, so the compiler
+ * owns its shape: `message Down { ref: actor_ref, reason: string }` is
+ * declared here, with the reserved id 254 (aether_message_registry.c), for a
+ * program that names it (an arm, a literal), and a program's own `message
+ * Down` is refused. A program that never names it drops a Down it is sent,
+ * as any type it has no arm for. */
+static int names_down_message(const ASTNode* n) {
+    if (!n) return 0;
+    if ((n->type == AST_MESSAGE_PATTERN || n->type == AST_MESSAGE_CONSTRUCTOR) &&
+        n->value && strcmp(n->value, "Down") == 0)
+        return 1;
+    for (int i = 0; i < n->child_count; i++)
+        if (names_down_message(n->children[i])) return 1;
+    return 0;
+}
+
+static void declare_down_message(ASTNode* program) {
+    int declared = 0;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (!c || c->type != AST_MESSAGE_DEFINITION || !c->value || strcmp(c->value, "Down") != 0)
+            continue;
+        if (c->annotation && strcmp(c->annotation, "system") == 0) {
+            declared = 1;   // a second check of the same program
+            continue;
+        }
+        type_error_hint("'Down' is the runtime's death notice, declared by the compiler as "
+                        "`message Down { ref: actor_ref, reason: string }`: a program cannot "
+                        "declare it",
+                        "rename this message; a `Down(ref, reason)` arm takes the runtime's",
+                        c->line, c->column);
+        return;
+    }
+    if (declared || !names_down_message(program)) return;
+    ASTNode* def = create_ast_node(AST_MESSAGE_DEFINITION, "Down", 0, 0);
+    def->annotation = strdup("system");
+    ASTNode* ref = create_ast_node(AST_MESSAGE_FIELD, "ref", 0, 0);
+    ref->node_type = create_type(TYPE_ACTOR_REF);
+    ASTNode* reason = create_ast_node(AST_MESSAGE_FIELD, "reason", 0, 0);
+    reason->node_type = create_type(TYPE_STRING);
+    add_child(def, ref);
+    add_child(def, reason);
+    // First, ahead of every use.
+    add_child(program, def);
+    memmove(&program->children[1], &program->children[0],
+            (size_t)(program->child_count - 1) * sizeof(ASTNode*));
+    program->children[0] = def;
+}
+
 int typecheck_program(ASTNode* program) {
     note_program_globals(program);
     if (!program || program->type != AST_PROGRAM) return 0;
@@ -6930,6 +6993,7 @@ int typecheck_program(ASTNode* program) {
     error_count = 0;
     warning_count = 0;
     namespace_count = 0;  // Reset imported namespaces
+    declare_down_message(program);   // #2974, counted with this check's errors
     user_explicit_namespace_count = 0;  // Reset user-explicit namespaces (issue #243)
     // (#878: per-module selective-import filter removed — nothing to reset)
 
@@ -17519,6 +17583,10 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 g_tc_return_type = NULL;
                 g_tc_return_owner = expr;
             }
+            /* A trailing DSL block is where a builder's `_ctx` is injected
+             * (#3331): calls in it are checked knowing so. */
+            int dsl_block = !ast_is_own_function(expr);
+            if (dsl_block) g_tc_trailing_depth++;
             for (int i = 0; i < expr->child_count; i++) {
                 ASTNode* child = expr->children[i];
                 if (child && child->type == AST_BLOCK) {
@@ -17527,6 +17595,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     }
                 }
             }
+            if (dsl_block) g_tc_trailing_depth--;
             g_tc_return_type = enclosing_ret;
             g_tc_return_owner = enclosing_owner;
 
@@ -18061,6 +18130,28 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     return 0;
                 }
 
+                /* #3333: a bare `actor_ref` names no actor, so no field of
+                 * one can be read or written through it; the C of `w.n` on
+                 * a `void*` did not compile. A typed reference
+                 * (`actor_ref[Counter]`, a spawn result) names the actor. */
+                if (base_type && base_type->kind == TYPE_ACTOR_REF &&
+                    !(base_type->element_type && base_type->element_type->kind == TYPE_STRUCT &&
+                      base_type->element_type->struct_name)) {
+                    char error_msg[320];
+                    char hint[320];
+                    snprintf(error_msg, sizeof(error_msg),
+                             "a bare `actor_ref` has no field '%s': it names no actor, "
+                             "so its state is not known here",
+                             expr->value);
+                    snprintf(hint, sizeof(hint),
+                             "give the reference its actor's type, `actor_ref[ActorName]`, "
+                             "to reach the actor's state field '%s'",
+                             expr->value);
+                    free_type(base_type);
+                    type_error_hint(error_msg, hint, expr->line, expr->column);
+                    return 0;
+                }
+
                 // Handle Message type member access
                 if (base_type && base_type->kind == TYPE_MESSAGE) {
                     if (strcmp(expr->value, "type") == 0 ||
@@ -18075,17 +18166,30 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 else if (base_type && base_type->kind == TYPE_ACTOR_REF && base_type->element_type &&
                          base_type->element_type->kind == TYPE_STRUCT && base_type->element_type->struct_name) {
                     Symbol* actor_sym2 = lookup_symbol(table, base_type->element_type->struct_name);
-                    if (actor_sym2 && actor_sym2->node) {
+                    if (actor_sym2 && actor_sym2->node && actor_sym2->node->type == AST_ACTOR_DEFINITION) {
                         ASTNode* actor_def2 = actor_sym2->node;
+                        int found_state = 0;
                         for (int fi = 0; fi < actor_def2->child_count; fi++) {
                             ASTNode* field = actor_def2->children[fi];
                             if (field && field->type == AST_STATE_DECLARATION &&
                                 field->value && strcmp(field->value, expr->value) == 0) {
+                                found_state = 1;
                                 if (field->node_type && field->node_type->kind != TYPE_UNKNOWN) {
                                     set_node_type(expr, clone_type(field->node_type));
                                 }
                                 break;
                             }
+                        }
+                        /* #3333: a name the actor has no state of reached
+                         * the C compiler as a member of its struct. */
+                        if (!found_state) {
+                            char error_msg[320];
+                            snprintf(error_msg, sizeof(error_msg),
+                                     "actor '%s' has no state field '%s'",
+                                     actor_def2->value ? actor_def2->value : "?", expr->value);
+                            free_type(base_type);
+                            type_error(error_msg, expr->line, expr->column);
+                            return 0;
                         }
                     }
                     // Fallback to general inference
@@ -18216,6 +18320,17 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 ASTNode* message   = expr->children[1];
 
                 typecheck_expression(actor_ref, table);
+                if (expr->annotation && strcmp(expr->annotation, "try_send") == 0) {
+                    /* #2974: as a send statement checks its target. */
+                    Type* at = infer_type(actor_ref, table);
+                    int bad = at && at->kind != TYPE_ACTOR_REF && at->kind != TYPE_UNKNOWN;
+                    free_type(at);
+                    if (bad) {
+                        type_error("try_send(ref, Msg { ... }): ref is not an actor reference",
+                                   actor_ref->line, actor_ref->column);
+                        return 0;
+                    }
+                }
 
                 // Validate that the message type is a registered message definition
                 if (message->type == AST_MESSAGE_CONSTRUCTOR && message->value) {
@@ -18233,7 +18348,9 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 typecheck_message_constructor(message, table);
                 reject_unhandled_send(actor_ref, message, table);   /* #385 */
             }
-            set_node_type(expr, create_type(TYPE_VOID));
+            /* #2974: try_send(ref, Msg { ... }) says whether it sent. */
+            set_node_type(expr, create_type(expr->annotation && strcmp(expr->annotation, "try_send") == 0
+                                            ? TYPE_STRING : TYPE_VOID));
             return 1;
         }
 
@@ -21286,9 +21403,79 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
             }
         }
 
+        /* #3331: inside a trailing DSL block a builder's `_ctx` is injected
+         * and hidden from the caller, so the call gives the parameters
+         * after it, and the defaults among those fill what it leaves out.
+         * Counting `_ctx` among the given arguments refused `item("a")` for
+         * `item(_ctx, name, kind = "plain")`, and read `item("b", "fancy")`
+         * as `_ctx = "b"` with `kind` defaulted. A call that passes the
+         * context itself (`_ctx`, or `builder_context()`) first, or gives
+         * every parameter, passes it explicitly. Codegen injects when the
+         * call is one argument short of the parameters, which the fill
+         * below leaves it. */
+        int ctx_injected = 0;
+        if (ctx_first && g_tc_trailing_depth > 0 && expected > 0) {
+            int user = 0;
+            for (int i = 0; i < call->child_count; i++) {
+                ASTNode* a = call->children[i];
+                if (a && a->type == AST_CLOSURE && a->value && strcmp(a->value, "trailing") == 0) continue;
+                user++;
+            }
+            ASTNode* first = call->child_count > 0 ? call->children[0] : NULL;
+            int passes_ctx = first &&
+                ((first->type == AST_IDENTIFIER && first->value && strcmp(first->value, "_ctx") == 0) ||
+                 (first->type == AST_FUNCTION_CALL && first->value &&
+                  strcmp(first->value, "builder_context") == 0));
+            if (!passes_ctx && user < expected) {
+                if (user < required - 1) {
+                    char error_msg[256];
+                    if (required < expected)
+                        snprintf(error_msg, sizeof(error_msg),
+                                 "Function '%s' expects %d-%d argument(s) in a builder block (its _ctx is given there), got %d",
+                                 call->value, required - 1, expected - 1, user);
+                    else
+                        snprintf(error_msg, sizeof(error_msg),
+                                 "Function '%s' expects %d argument(s) in a builder block (its _ctx is given there), got %d",
+                                 call->value, expected - 1, user);
+                    type_error(error_msg, call->line, call->column);
+                    return 0;
+                }
+                int filled = user;
+                int param_idx = 0;
+                for (int i = 0; i < symbol->node->child_count - 1 && filled < expected - 1; i++) {
+                    ASTNode* p = symbol->node->children[i];
+                    if (!is_param_node(p)) continue;
+                    /* _ctx (index 0) and the parameters the call gives. */
+                    if (param_idx <= user) {
+                        param_idx++;
+                        continue;
+                    }
+                    if (!param_has_default(p)) {
+                        char err[256];
+                        snprintf(err, sizeof(err),
+                                 "Function '%s' parameter %d has no default, caller must supply it",
+                                 call->value, param_idx);
+                        type_error(err, call->line, call->column);
+                        return 0;
+                    }
+                    ASTNode* default_clone = clone_ast_node(p->children[0]);
+                    if (!default_clone) {
+                        type_error("internal: failed to clone default expression",
+                                   call->line, call->column);
+                        return 0;
+                    }
+                    rewrite_caller_site_intrinsics(default_clone, call->line, call->column);
+                    add_child(call, default_clone);
+                    filled++;
+                    param_idx++;
+                }
+                ctx_injected = 1;
+            }
+        }
+
         // If mismatch, try excluding trailing closures (for functions that
         // don't accept fn params but have trailing blocks for DSL syntax)
-        if (got != expected && !(ctx_first && got == expected - 1)) {
+        if (!ctx_injected && got != expected && !(ctx_first && got == expected - 1)) {
             int non_closure = 0;
             for (int i = 0; i < call->child_count; i++) {
                 if (call->children[i] && call->children[i]->type != AST_CLOSURE) {
@@ -21317,7 +21504,7 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                        (ctx_first && got == expected - 1) ||
                        (got >= required && got < expected) ||
                        (is_variadic_callee && got >= expected);
-        if (!arity_ok) {
+        if (!ctx_injected && !arity_ok) {
             char error_msg[256];
             if (required < expected) {
                 snprintf(error_msg, sizeof(error_msg),
@@ -21339,7 +21526,7 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
         // codegen sees a fully-populated call and emits the right C.
         // Defaults trail required, so the missing slots are always
         // the trailing tail.
-        if (got >= required && got < expected) {
+        if (!ctx_injected && got >= required && got < expected) {
             int param_idx = 0;
             for (int i = 0; i < symbol->node->child_count - 1 &&
                             call->child_count < expected; i++) {
@@ -21844,10 +22031,22 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                 if (sa) free_type(sa);
             }
 
+            /* #3116, #3450: `free(xs)` of a slice is the builtin release
+             * whatever `free` the program declares as an extern taking a
+             * pointer (`extern free(p: ptr)`), in its own code and in every
+             * module it imports. Decayed to its pointer here, the slice went
+             * to C's free while slice ownership still released it at scope
+             * exit (a double free), and its elements' references were never
+             * given back. A `free` that takes a slice is its own business. */
+            int builtin_free = symbol->node->type == AST_EXTERN_FUNCTION && call->value &&
+                               strcmp(call->value, "free") == 0 && call->child_count == 1 &&
+                               call->children[arg_slot] &&
+                               type_is_slice(call->children[arg_slot]->node_type) &&
+                               !type_is_slice(param_type);
             /* #1286: a `T[N]` array into a `T[]` parameter becomes a slice; a
              * slice into a `ptr` parameter, or into any parameter of an
              * extern C function, decays to its pointer. */
-            if (param_type)
+            if (param_type && !builtin_free)
                 slice_coerce_slot(&call->children[arg_slot], param_type,
                                   symbol->node->type == AST_EXTERN_FUNCTION);
 

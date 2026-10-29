@@ -2734,11 +2734,25 @@ static int value_path_through_pointer(ASTNode* obj) {
     while (obj && (obj->type == AST_MEMBER_ACCESS || obj->type == AST_ARRAY_ACCESS) &&
            obj->child_count > 0 && obj->children[0]) {
         Type* ht = obj->children[0]->node_type;
-        if (ht && (ht->kind == TYPE_PTR || (obj->type == AST_ARRAY_ACCESS && type_is_slice(ht))))
+        /* An actor's state reached through its reference is read by the
+         * actor's thread, as a box through a pointer may be (#3386). */
+        if (ht && (ht->kind == TYPE_PTR || ht->kind == TYPE_ACTOR_REF ||
+                   (obj->type == AST_ARRAY_ACCESS && type_is_slice(ht))))
             return 1;
         obj = obj->children[0];
     }
     return 0;
+}
+
+/* #3398: does a store into the place `lv` publish what it takes? One rule
+ * for every store emitter (#2919): a place reached through a pointer, a
+ * slice or an actor's reference is memory another actor can reach, so the
+ * strings stored there, whichever part of the place takes them (a string,
+ * a struct, an element, a whole array, an optional, at any depth), count
+ * atomically from then on. Only the string field paths published; the
+ * other parts took their references plain. */
+static int store_publishes(ASTNode* lv) {
+    return value_path_through_pointer(lv);
 }
 
 static int struct_array_local_owns(CodeGenerator* gen, const char* name);
@@ -2793,7 +2807,9 @@ const char* struct_replace_fn(const char* sname, int is_volatile) {
  * An element of an array of such structs (`items[0]`, `o.items[0]`) is its
  * array's: a local array that owns its elements starts zeroed or
  * initialised (#2528), an actor's state starts zeroed (#2688), and a field
- * array is its holder's. */
+ * array is its holder's. So is a state field of another actor reached
+ * through its reference (`r.kept.name`, `r.items[0].name`), which its spawn
+ * set and which the actor owns (#3386). */
 static int value_path_trackers_are_initialised(CodeGenerator* gen, ASTNode* obj) {
     while (obj) {
         if (obj->type == AST_ARRAY_ACCESS && obj->child_count >= 2 && obj->children[0] &&
@@ -2808,6 +2824,8 @@ static int value_path_trackers_are_initialised(CodeGenerator* gen, ASTNode* obj)
             !obj->children[0]->node_type) break;
         ASTNode* holder = obj->children[0];
         if (holder->node_type->kind == TYPE_PTR) return 1;
+        if (holder->node_type->kind == TYPE_ACTOR_REF)
+            return actor_ref_owned_state(gen, holder, obj->value) != NULL;
         if (holder->node_type->kind != TYPE_STRUCT) return 0;
         obj = holder;
     }
@@ -2873,7 +2891,7 @@ static int emit_nested_field_heap_assign(CodeGenerator* gen, ASTNode* lhs,
     emit_string_take_owned(gen, rhs, 0);
     fprintf(gen->output, ";");
     if (release_old) fprintf(gen->output, " aether_heap_str_free(_tmp_old);");
-    if (!by_value || value_path_through_pointer(obj))
+    if (store_publishes(lhs))
         fprintf(gen->output, " aether_string_publish(%s->%s);", tgt, lhs->value);
     fprintf(gen->output, " }\n");
     return 1;
@@ -2934,19 +2952,24 @@ static int emit_struct_valued_field_store(CodeGenerator* gen, ASTNode* lhs, ASTN
     } else {
         return 0;
     }
+    /* The place is evaluated once, and through a pointer what it takes is
+     * published (#3398). */
+    int vol = lvalue_may_be_volatile(gen, lhs);
     print_indent(gen);
+    fprintf(gen->output, "{ %s%s* _ae_sv = &(", get_c_type(lhs->node_type), vol ? " volatile" : "");
+    generate_expression(gen, lhs);
+    fprintf(gen->output, "); ");
     if (trusted) {
-        fprintf(gen->output, "%s(&(", struct_replace_fn(fs, lvalue_may_be_volatile(gen, lhs)));
-        generate_expression(gen, lhs);
-        fprintf(gen->output, "), ");
+        fprintf(gen->output, "%s(_ae_sv, ", struct_replace_fn(fs, vol));
         emit_struct_take(gen, rhs, fs, NULL);
-        fprintf(gen->output, ");\n");
+        fprintf(gen->output, ");");
     } else {
-        generate_expression(gen, lhs);
-        fprintf(gen->output, " = ");
+        fprintf(gen->output, "*_ae_sv = ");
         emit_struct_take(gen, rhs, fs, NULL);
-        fprintf(gen->output, ";\n");
+        fprintf(gen->output, ";");
     }
+    if (store_publishes(lhs)) fprintf(gen->output, " %s_publish((%s*)_ae_sv);", fs, get_c_type(lhs->node_type));
+    fprintf(gen->output, " }\n");
     return 1;
 }
 
@@ -3161,21 +3184,30 @@ static void emit_whole_array_store_begin(CodeGenerator* gen, int kind, const cha
 }
 
 static void emit_whole_array_store_end(CodeGenerator* gen, int kind, const char* es, Type* at,
-                                       int release) {
+                                       int release, int publish) {
     fprintf(gen->output, "); for (int _ae_k = 0; _ae_k < %d; _ae_k++) ", at->array_size);
     if (!release || kind == AF_PLAIN) {
-        fprintf(gen->output, "_ae_fdst[_ae_k] = _ae_farr[_ae_k]; }\n");
+        fprintf(gen->output, "_ae_fdst[_ae_k] = _ae_farr[_ae_k];");
     } else if (kind == AF_STRING) {
         fprintf(gen->output, "{ const char* _ae_old = _ae_fdst[_ae_k]; _ae_fdst[_ae_k] = _ae_farr[_ae_k]; "
-                             "if (_ae_old) aether_heap_str_free(_ae_old); } }\n");
+                             "if (_ae_old) aether_heap_str_free(_ae_old); }");
     } else if (kind == AF_CLOSURE) {
         fprintf(gen->output, "{ void* _ae_old = _ae_fdst[_ae_k].env; _ae_fdst[_ae_k] = _ae_farr[_ae_k]; "
-                             "_aether_closure_env_release(_ae_old); } }\n");
+                             "_aether_closure_env_release(_ae_old); }");
     } else {
         /* The destination is reached through a volatile pointer, which
          * accepts a field of a volatile local (#2690) as well. */
-        fprintf(gen->output, "_aether_vstore_%s(&_ae_fdst[_ae_k], _ae_farr[_ae_k]); }\n", es);
+        fprintf(gen->output, "_aether_vstore_%s(&_ae_fdst[_ae_k], _ae_farr[_ae_k]);", es);
     }
+    /* #3398: through a pointer, the elements it took are published. */
+    if (publish && kind == AF_STRING) {
+        fprintf(gen->output, " for (int _ae_k = 0; _ae_k < %d; _ae_k++) "
+                             "aether_string_publish(_ae_fdst[_ae_k]);", at->array_size);
+    } else if (publish && kind == AF_STRUCT) {
+        fprintf(gen->output, " for (int _ae_k = 0; _ae_k < %d; _ae_k++) %s_publish((%s*)&_ae_fdst[_ae_k]);",
+                at->array_size, es, es);
+    }
+    fprintf(gen->output, " }\n");
 }
 
 /* #2688: `names = arr` / `names = [...]` into an actor's fixed-size array
@@ -3195,7 +3227,7 @@ static int emit_state_array_store(CodeGenerator* gen, ASTNode* sdecl, ASTNode* r
     int kind = oak == 1 ? AF_STRING : oak == 2 ? AF_CLOSURE : es ? AF_STRUCT : AF_PLAIN;
     emit_whole_array_store_begin(gen, kind, es, sdecl->node_type, rhs);
     fprintf(gen->output, "self->%s", sdecl->value);
-    emit_whole_array_store_end(gen, kind, es, sdecl->node_type, 1);
+    emit_whole_array_store_end(gen, kind, es, sdecl->node_type, 1, 0);
     return 1;
 }
 
@@ -3225,7 +3257,7 @@ static int emit_array_field_store(CodeGenerator* gen, ASTNode* lhs, ASTNode* rhs
     int kind = array_field_elem_kind(gen, sname, fdef, &es);
     emit_whole_array_store_begin(gen, kind, es, fdef->node_type, rhs);
     generate_expression(gen, lhs);
-    emit_whole_array_store_end(gen, kind, es, fdef->node_type, trusted);
+    emit_whole_array_store_end(gen, kind, es, fdef->node_type, trusted, store_publishes(lhs));
     return 1;
 }
 
@@ -3252,7 +3284,7 @@ static int emit_struct_element_store(CodeGenerator* gen, ASTNode* lhs, ASTNode* 
         generate_expression(gen, lhs);
         fprintf(gen->output, ");\n");
         print_indent(gen);
-        emit_owning_store(gen, "(*_ae_ep)", et, rhs, 0);
+        emit_owning_store(gen, "(*_ae_ep)", et, rhs, store_publishes(lhs));
         print_indent(gen);
         fprintf(gen->output, "}\n");
         return 1;
@@ -3302,38 +3334,87 @@ static int emit_struct_element_store(CodeGenerator* gen, ASTNode* lhs, ASTNode* 
         return 0;
     }
     if (!trusted) return 0;
+    /* The element's address is taken once (its index evaluated once), and
+     * through a pointer what it takes is published (#3398). */
+    int vol = lvalue_may_be_volatile(gen, lhs);
     print_indent(gen);
+    fprintf(gen->output, "{ %s%s* _ae_ep = &(", get_c_type(et), vol ? " volatile" : "");
+    generate_expression(gen, lhs);
+    fprintf(gen->output, "); ");
     if (kind == 3) {
-        fprintf(gen->output, "%s(&(", struct_replace_fn(es, lvalue_may_be_volatile(gen, lhs)));
-        generate_expression(gen, lhs);
-        fprintf(gen->output, "), ");
+        fprintf(gen->output, "%s(_ae_ep, ", struct_replace_fn(es, vol));
         emit_struct_take(gen, rhs, es, NULL);
-        fprintf(gen->output, ");\n");
+        fprintf(gen->output, ");");
+        if (store_publishes(lhs)) fprintf(gen->output, " %s_publish((%s*)_ae_ep);", es, es);
     } else if (kind == 1) {
-        fprintf(gen->output, "{ const char* _ae_old = ");
-        generate_expression(gen, lhs);
-        fprintf(gen->output, "; ");
-        generate_expression(gen, lhs);
-        fprintf(gen->output, " = ");
+        fprintf(gen->output, "const char* _ae_old = *_ae_ep; *_ae_ep = ");
         emit_owned_string_element(gen, rhs);
-        fprintf(gen->output, "; if (_ae_old) aether_heap_str_free(_ae_old); }\n");
+        fprintf(gen->output, "; if (_ae_old) aether_heap_str_free(_ae_old);");
+        if (store_publishes(lhs)) fprintf(gen->output, " aether_string_publish(*_ae_ep);");
     } else {
-        fprintf(gen->output, "{ _AeClosure _ae_cv = ");
+        /* A closure's environment counts atomically already. */
+        fprintf(gen->output, "_AeClosure _ae_cv = ");
         emit_closure_take(gen, rhs);
-        fprintf(gen->output, "; void* _ae_old = (");
-        generate_expression(gen, lhs);
-        fprintf(gen->output, ").env; ");
-        generate_expression(gen, lhs);
-        fprintf(gen->output, " = _ae_cv; _aether_closure_env_release(_ae_old); }\n");
+        fprintf(gen->output, "; void* _ae_old = _ae_ep->env; *_ae_ep = _ae_cv; "
+                             "_aether_closure_env_release(_ae_old);");
     }
+    fprintf(gen->output, " }\n");
     return 1;
 }
 
 static int emit_slice_element_store(CodeGenerator* gen, ASTNode* lhs, ASTNode* rhs);
 static int emit_composite_field_store(CodeGenerator* gen, ASTNode* lhs, ASTNode* rhs);
 
+/* #3386: a store into another actor's state through its reference, `r.f = v`
+ * (a whole fixed-size array too) or `r.f[i] = v` into an element of one.
+ * The state is a place
+ * (R2) the actor owns: destroy_state drops what it holds, and its spawn set
+ * it, so what a store replaces can be read. So the store is R3's, as the
+ * actor's own `f = v` is: it takes `v` (a fresh value moved, anything else
+ * retained) and drops what the place held, and since the actor reads the
+ * place on its own thread, what it takes is published (#2919), as through
+ * a pointer. It was a plain C assignment: the state shared what the source
+ * still owned (std.supervise's `sup.kids[i] = s.kids[i]`, whose spec was
+ * then freed, left the supervisor holding released names and factories)
+ * and leaked what it replaced. A deeper path (`r.f.name = v`,
+ * `r.f[i].name = v`) is a struct's, trusted through the reference by
+ * value_path_trackers_are_initialised. The place is evaluated once. */
+static int emit_actor_ref_state_store(CodeGenerator* gen, ASTNode* lhs, ASTNode* rhs) {
+    ASTNode* field = lhs;
+    int element = 0;
+    if (lhs->type == AST_ARRAY_ACCESS && lhs->child_count >= 2 && lhs->children[0]) {
+        field = lhs->children[0];
+        element = 1;
+    }
+    if (field->type != AST_MEMBER_ACCESS || !field->value || field->child_count != 1 ||
+        !field->children[0]) return 0;
+    ASTNode* sd = actor_ref_owned_state(gen, field->children[0], field->value);
+    if (!sd) return 0;
+    Type* st = sd->node_type;
+    int sized = st->kind == TYPE_ARRAY && st->array_size > 0 && st->element_type;
+    if (element && !sized) return 0;
+    Type* t = element ? st->element_type : st;
+    if (!own_type_owns(gen, t)) return 0;
+    print_indent(gen);
+    fprintf(gen->output, "{ %s* _ae_sp = %s(", get_c_type(sized && !element ? st->element_type : t),
+            sized && !element ? "" : "&");
+    generate_expression(gen, lhs);
+    fprintf(gen->output, ");\n");
+    print_indent(gen);
+    if (sized && !element) {
+        emit_owning_array_store(gen, "_ae_sp", st, rhs);
+        if (store_publishes(lhs)) own_emit_part(gen, st, "_ae_sp", OWN_PUBLISH);
+    } else {
+        emit_owning_store(gen, "(*_ae_sp)", t, rhs, store_publishes(lhs));
+    }
+    print_indent(gen);
+    fprintf(gen->output, "}\n");
+    return 1;
+}
+
 static int emit_struct_field_heap_assign(CodeGenerator* gen, ASTNode* lhs, ASTNode* rhs) {
     if (!gen || !lhs || !rhs) return 0;
+    if (emit_actor_ref_state_store(gen, lhs, rhs)) return 1;   /* #3386 */
     if (emit_slice_element_store(gen, lhs, rhs)) return 1;   /* #2921 */
     if (emit_composite_field_store(gen, lhs, rhs)) return 1;  /* #2921 */
     if (emit_struct_element_store(gen, lhs, rhs)) return 1;
@@ -3435,7 +3516,7 @@ static int emit_struct_field_heap_assign(CodeGenerator* gen, ASTNode* lhs, ASTNo
             objs, acc, lhs->value, objs, acc, lhs->value);
     emit_string_take_owned(gen, rhs, 0);
     fprintf(gen->output, "; aether_heap_str_free(_tmp_old);");
-    if (acc[0] == '-')
+    if (store_publishes(lhs))
         fprintf(gen->output, " aether_string_publish(%s%s%s);", objs, acc, lhs->value);
     fprintf(gen->output, " }\n");
     return 1;
@@ -3708,7 +3789,7 @@ static int emit_composite_field_store(CodeGenerator* gen, ASTNode* lhs, ASTNode*
     generate_expression(gen, lhs);
     fprintf(gen->output, ");\n");
     print_indent(gen);
-    emit_owning_store(gen, "(*_ae_fp)", ft, rhs, ot->kind == TYPE_PTR);
+    emit_owning_store(gen, "(*_ae_fp)", ft, rhs, store_publishes(lhs));
     print_indent(gen);
     fprintf(gen->output, "}\n");
     return 1;
@@ -3744,7 +3825,7 @@ static int emit_slice_element_store(CodeGenerator* gen, ASTNode* lhs, ASTNode* r
     generate_expression(gen, lhs);
     fprintf(gen->output, ");\n");
     print_indent(gen);
-    emit_owning_store(gen, "(*_ae_ep)", at->element_type, rhs, 0);
+    emit_owning_store(gen, "(*_ae_ep)", at->element_type, rhs, store_publishes(lhs));
     print_indent(gen);
     fprintf(gen->output, "}\n");
     return 1;
@@ -5484,6 +5565,47 @@ static void collect_owned_locals(ASTNode* n, const char** names, Type** types, i
     for (int i = 0; i < n->child_count; i++) collect_owned_locals(n->children[i], names, types, count, cap);
 }
 
+/* #3413: the function the unwind journal runs on a place of an owned pointer
+ * type, `void f(void*)` as aether_unwind_track_owned_place takes it. The
+ * checker accepts any one-parameter `@frees ptr` function as a drop, whatever
+ * it returns and however its C prototype spells the pointer (`int
+ * fclose(FILE*)`), so the journal holds a thunk that calls the drop as the
+ * exit release does, `f((void*)p)`. One per drop function, written at the end
+ * of the program with the defer thunks (emit_defer_thunks), where every drop
+ * function is declared, and declared where the function bodies start. */
+static const char* owned_drop_thunk(CodeGenerator* gen, const char* drop_c) {
+    int i = 0;
+    while (i < gen->owned_thunk_count && strcmp(gen->owned_thunks[i], drop_c) != 0) i++;
+    if (i == gen->owned_thunk_count) {
+        if (gen->owned_thunk_count == gen->owned_thunk_cap) {
+            gen->owned_thunk_cap = gen->owned_thunk_cap ? gen->owned_thunk_cap * 2 : 4;
+            gen->owned_thunks = aether_xrealloc((void*)gen->owned_thunks,
+                                                sizeof(char*) * (size_t)gen->owned_thunk_cap);
+        }
+        gen->owned_thunks[gen->owned_thunk_count++] = cg_intern(drop_c);
+    }
+    return cg_internf("_ae_owned_drop_%s", drop_c);
+}
+
+/* #3406: the one rule for every place of an owned pointer type, a local
+ * (hoist_owned_locals) or an arm's binding of a message field (the
+ * handler's prologue): released at each exit of its scope, and journaled
+ * while it lives, so a panic that skips the exit releases it as the exit
+ * would. The journal writes nothing outside every frame (no panic can be
+ * caught there, so nothing can skip the exit and go on); the exit's release
+ * forgets the place first. The journal runs the drop through its thunk. */
+void push_owned_place_drop(CodeGenerator* gen, const char* name, const char* drop_c,
+                           int line, int column) {
+    print_line(gen, "int _aeo_%s = aether_unwind_track_owned_place((const void*)&%s, %s);", name, name,
+               owned_drop_thunk(gen, drop_c));
+    ASTNode* carrier = create_ast_node(AST_EXPRESSION_STATEMENT, NULL, line, column);
+    if (!carrier) return;
+    if (carrier->annotation) free(carrier->annotation);
+    carrier->annotation = heap_strf("owned_exit_drop:%s:%s", name, drop_c);
+    codegen_own_node(gen, carrier);
+    push_defer(gen, carrier);
+}
+
 /* #3142: an owned-pointer local is one variable for the whole function, as a
  * string local is: declared at its top holding nothing, and released at
  * every exit. A `move` of it (a `return` of it is one) leaves it holding
@@ -5503,11 +5625,7 @@ void hoist_owned_locals(CodeGenerator* gen, ASTNode* body) {
             print_line(gen, "void* %s = NULL;", name);
             mark_var_declared(gen, name);
         }
-        ASTNode* carrier = create_ast_node(AST_EXPRESSION_STATEMENT, NULL, body->line, body->column);
-        if (!carrier) continue;
-        carrier->annotation = heap_strf("owned_exit_drop:%s:%s", name, drop);
-        codegen_own_node(gen, carrier);
-        push_defer(gen, carrier);
+        push_owned_place_drop(gen, name, drop, body->line, body->column);
     }
 }
 
@@ -6071,7 +6189,7 @@ static void td_emit_dispatch(CodeGenerator* gen, int level, const char* fallback
         print_line(gen, "if (--_aether_reductions <= 0) { _aether_reductions = 10000; sched_yield(); }");
     }
     if (gen->emit_lib) {
-        print_line(gen, "if (aether_caps_armed && aether_caps_deadline_tripped()) { __aether_abort_call(); goto _ae_td_exit_%d; }", id);
+        print_line(gen, "if (AETHER_RT_DATA_PRESENT(aether_caps_armed) && atomic_load_explicit(&aether_caps_armed, memory_order_relaxed) && aether_exec_poll()) { __aether_abort_call(); goto _ae_td_exit_%d; }", id);
     }
     g_td_in_head++;
     for (int i = 0; i < si; i++) {
@@ -8874,11 +8992,19 @@ static void emit_defer_registration(CodeGenerator* gen, ASTNode* body) {
 
 /* The thunks, after everything else, and their prototypes where the
  * function bodies start (gen->defer_proto_pos): the file from there is
- * written again after them. */
+ * written again after them. The defer thunks, and the owned places' drop
+ * thunks (#3413, owned_drop_thunk). */
 void emit_defer_thunks(CodeGenerator* gen) {
-    if (gen->defer_thunk_count == 0) return;
-    fputs("\n// Deferred statements a panic runs (#2923)\n", gen->output);
-    fputs(gen->defer_thunks, gen->output);
+    if (gen->defer_thunk_count == 0 && gen->owned_thunk_count == 0) return;
+    if (gen->defer_thunk_count > 0) {
+        fputs("\n// Deferred statements a panic runs (#2923)\n", gen->output);
+        fputs(gen->defer_thunks, gen->output);
+    }
+    if (gen->owned_thunk_count > 0)
+        fputs("\n// The drops of owned places a panic runs (#3413)\n", gen->output);
+    for (int i = 0; i < gen->owned_thunk_count; i++)
+        fprintf(gen->output, "static void _ae_owned_drop_%s(void* _p) { %s((void*)_p); }\n",
+                gen->owned_thunks[i], gen->owned_thunks[i]);
     fflush(gen->output);
     long end = ftell(gen->output);
     long pos = gen->defer_proto_pos;
@@ -8891,6 +9017,8 @@ void emit_defer_thunks(CodeGenerator* gen) {
     }
     for (int i = 0; i < gen->defer_thunk_count; i++)
         fprintf(gen->output, "static void _ae_defer_%d(const void* _p);\n", i);
+    for (int i = 0; i < gen->owned_thunk_count; i++)
+        fprintf(gen->output, "static void _ae_owned_drop_%s(void* _p);\n", gen->owned_thunks[i]);
     fwrite(tail, 1, n, gen->output);
     fflush(gen->output);
     free(tail);
@@ -9140,8 +9268,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         "_ask_st%d == AETHER_ASK_DEAD ? \"the actor is dead\" : "
                         "_ask_st%d == AETHER_ASK_DIED ? \"the actor died before it replied\" : "
                         "_ask_st%d == AETHER_ASK_NO_REPLY ? \"the handler returned without replying\" : "
+                        "_ask_st%d == AETHER_ASK_KILLED ? \"the asking actor was killed\" : "
+                        "_ask_st%d == AETHER_ASK_FULL ? \"the mailbox is full\" : "
                         "\"out of memory\" };\n",
-                        tuple_type_name, tmp_id, tmp_id, tmp_id, tmp_id, to, tmp_id, tmp_id, tmp_id);
+                        tuple_type_name, tmp_id, tmp_id, tmp_id, tmp_id, to, tmp_id, tmp_id, tmp_id,
+                        tmp_id, tmp_id);
             } else {
                 print_indent(gen);
                 fprintf(gen->output, "%s _tup%d = ", tuple_type_name, tmp_id);
@@ -11259,7 +11390,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             // --emit=exe builds (the if (gen->emit_lib) gate elides
             // the print entirely).
             if (gen->emit_lib) {
-                print_line(gen, "if (aether_caps_armed && aether_caps_deadline_tripped()) { __aether_abort_call(); break; }");
+                print_line(gen, "if (AETHER_RT_DATA_PRESENT(aether_caps_armed) && atomic_load_explicit(&aether_caps_armed, memory_order_relaxed) && aether_exec_poll()) { __aether_abort_call(); break; }");
             }
             /* Issue #501: snapshot try_frame_depth at loop entry.
              * #893: record the loop's label / containing scope / C-label id. */
@@ -11379,7 +11510,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             }
             // Issue #343 codegen tripwire — see AST_FOR_LOOP comment.
             if (gen->emit_lib) {
-                print_line(gen, "if (aether_caps_armed && aether_caps_deadline_tripped()) { __aether_abort_call(); break; }");
+                print_line(gen, "if (AETHER_RT_DATA_PRESENT(aether_caps_armed) && atomic_load_explicit(&aether_caps_armed, memory_order_relaxed) && aether_exec_poll()) { __aether_abort_call(); break; }");
             }
             /* Issue #501: snapshot try_frame_depth at loop entry so
              * `break` / `continue` inside the body drains only
@@ -12750,12 +12881,10 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             indent(gen);
             /* A panic that unwinds out of an enforced block (or out of a
              * trusted call inside one) skips the code that pops the sandbox
-             * or restores its depth. Catching it puts the depth back to what
-             * it was here, so a catch inside the block stays sandboxed and
-             * one outside it is no longer held to the block's grants. */
-            if (gen->uses_sandbox) {
-                print_line(gen, "int _aether_try_sbx_%d = _aether_sandbox_depth;", uid);
-            }
+             * or restores its depth. The runtime leaves the levels pushed
+             * inside this frame as the panic reaches it (#2955), so a catch
+             * inside the block stays sandboxed and one outside it is no
+             * longer held to the block's grants, whichever code catches. */
             /* #2810: so does a panic out of a trailing block: the builder
              * context stack goes back to its depth here, and the configs of
              * the builder blocks the panic abandoned are released. */
@@ -12771,10 +12900,12 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             unindent(gen);
             print_line(gen, "} else {");
             indent(gen);
-            if (gen->uses_sandbox) {
-                print_line(gen, "_aether_sandbox_depth = _aether_try_sbx_%d;", uid);
-            }
             print_line(gen, "_aether_ctx_unwind(_aether_try_ctx_%d);", uid);
+            /* #2956: an interruption (a library call's deadline or cancel)
+             * is not this try's to handle: its frame has done its cleanup
+             * (the journal drained, the builder contexts above), and the
+             * interruption goes on to the next frame, the execution's. */
+            print_line(gen, "if (aether_exec_interrupting()) aether_exec_reraise();");
             /* #2739: a binding a `try` of its handler writes is volatile:
              * the handler is outside that try, whose setjmp sees it. */
             print_line(gen, "%s %s = _aether_try_%d->reason ? _aether_try_%d->reason : \"panic\";",
@@ -13489,6 +13620,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             case TYPE_UINT64:     c_type = "uint64_t"; break;
                             case TYPE_DURATION:   c_type = "int64_t"; break;
                             case TYPE_PTR:        c_type = "void*"; break;
+                            /* #3332: a reference is a pointer, as on the asker's side. */
+                            case TYPE_ACTOR_REF:  c_type = "void*"; break;
                             default:              c_type = "int"; break;
                         }
                         fprintf(gen->output, "{ %s _reply_val = (%s)(", c_type, c_type);

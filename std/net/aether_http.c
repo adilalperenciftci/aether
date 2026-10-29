@@ -119,6 +119,8 @@ int http_request_set_timeout_ns_raw(HttpClientRequest* r, int64_t ns) { (void)r;
 int http_request_set_follow_redirects_raw(HttpClientRequest* r, int n) { (void)r; (void)n; return -1; }
 int http_request_set_insecure_raw(HttpClientRequest* r, int on) { (void)r; (void)on; return -1; }
 int http_request_set_cafile_raw(HttpClientRequest* r, const char* p) { (void)r; (void)p; return -1; }
+int http_request_set_partial_chain_raw(HttpClientRequest* r, int on) { (void)r; (void)on; return -1; }
+int http_request_set_tls_backend_raw(HttpClientRequest* r, const char* n) { (void)r; (void)n; return -1; }
 int http_request_use_env_proxy_raw(HttpClientRequest* r, int on) { (void)r; (void)on; return -1; }
 int http_request_use_http_proxy_raw(HttpClientRequest* r, const char* u) { (void)r; (void)u; return -1; }
 int http_request_ignore_http_proxy_raw(HttpClientRequest* r) { (void)r; return -1; }
@@ -151,10 +153,6 @@ void http_client_pool_size_for_proxy(void) {}
 #ifdef _WIN32
     #include <winsock2.h>
     #include <ws2tcpip.h>
-    /* The ROOT certificate store (#2675). Before the OpenSSL headers, which
-     * undefine the names wincrypt.h shares with them (X509_NAME and others);
-     * aether_thread.h's WIN32_LEAN_AND_MEAN keeps windows.h from bringing it. */
-    #include <wincrypt.h>
     #ifdef _MSC_VER
         #pragma comment(lib, "ws2_32.lib")
     #endif
@@ -204,7 +202,9 @@ void http_client_pool_size_for_proxy(void) {}
  * connection or a forward-proxy CONNECT tunnel -- http_dial completes the
  * tunnel before calling this, so proxying needs no separate path.
  *
- * verify_mode: 0 = full verification, 1 = skip it (set_insecure).
+ * verify_mode: a bit set. 0 = full verification; 1 = skip it (set_insecure);
+ * 2 = any certificate in the trust store ends a path, not only a self-signed
+ * root (set_partial_chain, #3311).
  * cafile: a pinned CA bundle path (set_cafile), or NULL for the default store.
  * Returns an opaque connection, or NULL on failure. */
 AETHER_WEAK void* aether_pure_tls_client_connect(int fd, const char* host,
@@ -268,43 +268,44 @@ static int pt_client_available(void) {
  * The connect callback hands back only a pointer, so before this every pure
  * failure -- an untrusted chain, a wrong hostname, a TLS 1.2-only server, no
  * trust store at all -- reached the caller as one generic sentence that
- * guessed at the cause. tls13_client knows the real reason; it stores it here
+ * guessed at the cause. tls13_client knows the real reason; it gives it as
+ * the callback's reason (aether_callback_set_reason, thread-local, #3426)
  * just before returning NULL, and http_dial copies it into the request's
- * error. Thread-local because the handshake runs synchronously on the
- * dialling thread, so two requests on two threads cannot see each other's
- * reason, and no lock is needed. Cleared before each connect so a stale
- * reason is never reported for a later failure that did not set one. */
-static _Thread_local char pt_client_last_err[512];
+ * error. The handshake runs synchronously on the dialling thread, so two
+ * requests on two threads cannot see each other's reason, and no lock is
+ * needed. Cleared before each connect so a stale reason is never reported
+ * for a later failure that did not set one. It went through a function of
+ * this file, which linked the whole HTTP client into every program that
+ * imported the pure client. */
 
-void aether_pure_tls_client_set_error(const char* msg) {
-    if (!msg) { pt_client_last_err[0] = '\0'; return; }
-    size_t n = strlen(msg);
-    if (n >= sizeof(pt_client_last_err)) n = sizeof(pt_client_last_err) - 1;
-    memcpy(pt_client_last_err, msg, n);
-    pt_client_last_err[n] = '\0';
-}
-
-/* Which TLS client backend an https request uses.
+/* Which TLS client backend an https request uses (#1298).
  *
- * A build without OpenSSL has only the pure-Aether client. A build WITH it
- * keeps OpenSSL as the default and switches to the pure client when
- * AETHER_PURE_TLS is 1 or true -- the same variable that already selects the
- * pure TLS server (aether_http_server.c), so one setting moves a process onto
- * the pure stack in both directions. Read per request rather than cached, so
- * the pool key and the dial always agree on the answer for a given request. */
-static int http_client_use_pure_tls(void) {
-#ifndef AETHER_HAS_OPENSSL
-    return 1;
-#else
-    const char* v = getenv("AETHER_PURE_TLS");
-    return v && (strcmp(v, "1") == 0 || strcasecmp(v, "true") == 0);
-#endif
-}
+ * A request names one with http_request_set_tls_backend_raw ("aether" or
+ * "openssl"). Otherwise: a build without OpenSSL has only the pure-Aether
+ * client; a build WITH it keeps OpenSSL as the default and switches to the
+ * pure client when AETHER_PURE_TLS is 1 or true -- the same variable that
+ * selects the pure TLS server (aether_http_server.c), so one setting moves a
+ * process onto the pure stack in both directions. Read per request rather
+ * than cached, so the pool key and the dial always agree on the answer for a
+ * given request. Defined after struct HttpClientRequest. */
+#define HTTP_TLS_BACKEND_DEFAULT 0
+#define HTTP_TLS_BACKEND_AETHER  1
+#define HTTP_TLS_BACKEND_OPENSSL 2
+static int http_client_use_pure_tls(const HttpClientRequest* req);
 
 #ifdef AETHER_HAS_OPENSSL
     #include <openssl/ssl.h>
     #include <openssl/err.h>
     #include <openssl/x509v3.h>
+/* The hostname check: no partial-label wildcards ("f*.example.com"), and
+ * never the subject CN (#3313), only the SANs, as the pure-Aether backend
+ * reads them (RFC 9525), so both backends accept the same servers. Every
+ * OpenSSL from 1.1.0 has the flag. */
+#ifdef X509_CHECK_FLAG_NEVER_CHECK_SUBJECT
+#define AETHER_HOSTFLAGS (X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS | X509_CHECK_FLAG_NEVER_CHECK_SUBJECT)
+#else
+#define AETHER_HOSTFLAGS X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS
+#endif
 #endif
 
 static int http_initialized = 0;
@@ -396,156 +397,9 @@ int parse_url_alloc(const char* url, char* host, size_t host_size,
 // Windows trust anchors, the same for both HTTPS clients (#2675)
 // -----------------------------------------------------------------
 //
-// Neither client read the Windows certificate store, so a program copied to a
-// machine without MSYS2 or Git for Windows could make no HTTPS request at all,
-// and the two looked for different bundle files (OpenSSL's list here, the
-// pure-Aether client's in std.cryptography.tls13_client), so one could work on
-// a machine where the other failed. Both now trust, unless SSL_CERT_FILE or
-// SSL_CERT_DIR names the store, every certificate in the system ROOT store
-// (what Python's ssl module loads on Windows) together with the first bundle
-// file of the one list below. The bundle joins the store rather than standing
-// in for it: Windows adds a root to the store on demand, the first time
-// CryptoAPI needs it, so a root a server chains to can be missing from the
-// store of a machine that has never met that server.
-//
-// The tls13_client module reaches these through extern declarations, which is
-// why they live here, beside the OpenSSL code that uses them too, and why
-// they exist (returning nothing) on every platform.
-
-#ifdef _WIN32
-/* wincrypt.h is included with winsock2.h at the top, before the OpenSSL
- * headers, which undefine the names it shares with them (X509_NAME...). */
-
-/* The first file of the bundle list that exists, in `out`; "" when none
- * does. In order: the bundle the release archive ships beside the program
- * (<root>\bin\prog.exe -> <root>\share\ssl\ca-bundle.crt, or the program's own
- * directory when it is not in a bin\), MSYS2's ca-certificates for MINGW64
- * and UCRT64 under both names it has used, and Git for Windows'. */
-static const char* windows_ca_bundle(char* out, size_t cap) {
-    static const char* fixed[] = {
-        "C:\\msys64\\mingw64\\etc\\ssl\\certs\\ca-bundle.crt",
-        "C:\\msys64\\ucrt64\\etc\\ssl\\certs\\ca-bundle.crt",
-        "C:\\msys64\\mingw64\\etc\\ssl\\cert.pem",
-        "C:\\msys64\\ucrt64\\etc\\ssl\\cert.pem",
-        "C:\\Program Files\\Git\\mingw64\\etc\\ssl\\certs\\ca-bundle.crt",
-        NULL
-    };
-    char exe_path[MAX_PATH];
-    DWORD n = GetModuleFileNameA(NULL, exe_path, sizeof(exe_path));
-    if (n > 0 && n < sizeof(exe_path)) {
-        char* p = strrchr(exe_path, '\\');           // ...\bin\prog.exe -> ...\bin
-        if (p) {
-            *p = '\0';
-            char* q = strrchr(exe_path, '\\');        // ...\bin -> ...
-            if (q && _stricmp(q, "\\bin") == 0) *q = '\0';
-        }
-        snprintf(out, cap, "%s\\share\\ssl\\ca-bundle.crt", exe_path);
-        DWORD a = GetFileAttributesA(out);
-        if (a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY)) return out;
-    }
-    for (int i = 0; fixed[i]; i++) {
-        DWORD a = GetFileAttributesA(fixed[i]);
-        if (a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY)) {
-            snprintf(out, cap, "%s", fixed[i]);
-            return out;
-        }
-    }
-    if (cap) out[0] = '\0';
-    return out;
-}
-
-/* Calls `each` with the DER of every certificate in the ROOT system store of
- * the current user, which includes the machine's. Returns how many. */
-static int windows_root_store_each(void (*each)(const unsigned char* der, size_t len, void* arg),
-                                   void* arg) {
-    HCERTSTORE store = CertOpenSystemStoreW(0, L"ROOT");
-    if (!store) return 0;
-    int n = 0;
-    PCCERT_CONTEXT c = NULL;
-    while ((c = CertEnumCertificatesInStore(store, c)) != NULL) {
-        if ((c->dwCertEncodingType & X509_ASN_ENCODING) && c->cbCertEncoded > 0) {
-            each(c->pbCertEncoded, (size_t)c->cbCertEncoded, arg);
-            n++;
-        }
-    }
-    CertCloseStore(store, 0);
-    return n;
-}
-
-typedef struct { char* buf; size_t len, cap; int oom; } PemOut;
-
-static void pem_out_append(PemOut* o, const char* s, size_t n) {
-    if (o->oom) return;
-    if (o->len + n + 1 > o->cap) {
-        size_t want = o->cap ? o->cap * 2 : 65536;
-        while (want < o->len + n + 1) want *= 2;
-        char* grown = (char*)aether_caps_realloc(o->buf, o->cap, want);
-        if (!grown) { o->oom = 1; return; }
-        o->buf = grown;
-        o->cap = want;
-    }
-    memcpy(o->buf + o->len, s, n);
-    o->len += n;
-    o->buf[o->len] = '\0';
-}
-
-/* One certificate as a PEM block, base64 in lines of 64. */
-static void pem_out_cert(const unsigned char* der, size_t len, void* arg) {
-    static const char b64[] =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    PemOut* o = (PemOut*)arg;
-    pem_out_append(o, "-----BEGIN CERTIFICATE-----\n", 28);
-    char line[65];
-    size_t col = 0;
-    for (size_t i = 0; i < len; i += 3) {
-        unsigned v = (unsigned)der[i] << 16;
-        if (i + 1 < len) v |= (unsigned)der[i + 1] << 8;
-        if (i + 2 < len) v |= der[i + 2];
-        line[col++] = b64[(v >> 18) & 63];
-        line[col++] = b64[(v >> 12) & 63];
-        line[col++] = i + 1 < len ? b64[(v >> 6) & 63] : '=';
-        line[col++] = i + 2 < len ? b64[v & 63] : '=';
-        if (col == 64) {
-            line[col++] = '\n';
-            pem_out_append(o, line, col);
-            col = 0;
-        }
-    }
-    if (col) {
-        line[col++] = '\n';
-        pem_out_append(o, line, col);
-    }
-    pem_out_append(o, "-----END CERTIFICATE-----\n", 26);
-}
-#endif  // _WIN32
-
-/* Every certificate of the Windows ROOT system store as PEM text, a fresh
- * counted string the caller releases; "" when there is none, and on any other
- * platform. NULL only when out of memory. */
-char* aether_tls_windows_store_pem(void) {
-#ifdef _WIN32
-    PemOut o = { NULL, 0, 0, 0 };
-    windows_root_store_each(pem_out_cert, &o);
-    if (o.oom) { aether_caps_free(o.buf, o.cap); return NULL; }
-    if (o.buf) return (char*)string_adopt_caps_buffer(o.buf, o.len, o.cap);
-#endif
-    return (char*)string_empty();
-}
-
-/* The first bundle file of the list above that exists, a fresh counted string
- * the caller releases; "" when none does, and on any other platform. NULL only
- * when out of memory. */
-char* aether_tls_windows_bundle(void) {
-#ifdef _WIN32
-    char path[MAX_PATH + 64];
-    windows_ca_bundle(path, sizeof(path));
-    size_t n = strlen(path);
-#else
-    const char* path = "";
-    size_t n = 0;
-#endif
-    return (char*)string_new_with_length(path, n);
-}
+// In aether_tls_trust.c (#3426), which the pure-Aether client reads too,
+// without linking this file.
+#include "aether_tls_trust.h"
 
 // -----------------------------------------------------------------
 // OpenSSL context: lazy init, shared across all HTTPS calls
@@ -584,9 +438,9 @@ static int load_windows_trust(SSL_CTX* ctx) {
         if (file && SSL_CTX_load_verify_locations(ctx, file, NULL) == 1) loaded = 1;
         if (dir && SSL_CTX_load_verify_locations(ctx, NULL, dir) == 1) loaded = 1;
     } else {
-        loaded = windows_root_store_each(x509_store_add_der, SSL_CTX_get_cert_store(ctx)) > 0;
+        loaded = aether_tls_windows_root_store_each(x509_store_add_der, SSL_CTX_get_cert_store(ctx)) > 0;
         char bundle[MAX_PATH + 64];
-        if (windows_ca_bundle(bundle, sizeof(bundle))[0] &&
+        if (aether_tls_windows_ca_bundle(bundle, sizeof(bundle))[0] &&
             SSL_CTX_load_verify_locations(ctx, bundle, NULL) == 1) loaded = 1;
     }
     /* What failed to load (a duplicate, a missing file) is no error of any
@@ -595,6 +449,21 @@ static int load_windows_trust(SSL_CTX* ctx) {
     return loaded;
 }
 #endif  // _WIN32
+
+/* Security level 2 at least (#3312): RSA, DSA and DH keys of 2048 bits or
+ * more and elliptic curves of 224 bits or more, in the certificate chain and
+ * the handshake, whatever level the distribution configures (OpenSSL's own
+ * default, level 1, accepts RSA-1024; Debian and Ubuntu raise it to 2). A
+ * system set higher stays higher. The pure-Aether TLS backend refuses the
+ * same keys, so which backend a program runs on does not change which peers
+ * it accepts. */
+static void tls_min_security_level(SSL_CTX* ctx) {
+#if !defined(LIBRESSL_VERSION_NUMBER) || LIBRESSL_VERSION_NUMBER >= 0x3060000fL
+    if (SSL_CTX_get_security_level(ctx) < 2) SSL_CTX_set_security_level(ctx, 2);
+#else
+    (void)ctx;
+#endif
+}
 
 // Get (or lazily create) the shared SSL_CTX. Benign race on first call —
 // compare-exchange ensures at most one SSL_CTX is installed even if two
@@ -615,6 +484,7 @@ static SSL_CTX* get_ssl_ctx(void) {
 
     ctx = SSL_CTX_new(TLS_client_method());
     if (!ctx) return NULL;
+    tls_min_security_level(ctx);
     SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
     SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
 
@@ -829,11 +699,12 @@ static int64_t http_now_ms(void) { return (int64_t)http_clock_ms(); }
 /* Everything that makes two connections non-interchangeable: the origin, the
  * endpoint actually dialled (proxy or origin), TLS and which backend carries
  * it (`use_tls` is 0 plain, 1 OpenSSL, 2 pure-Aether), and the verification the
- * caller asked for. A connection opened with a pinned CA or with verification
- * off must never be handed to a request that did not ask for that. */
+ * caller asked for (`verify`: http_req_verify_mode's bits). A connection
+ * opened with a pinned CA, with verification off or with partial chains
+ * trusted must never be handed to a request that did not ask for that. */
 static void http_pool_key(char* out, size_t n, const char* host, int port,
                           int use_tls, const char* dial_host, int dial_port,
-                          int insecure, const char* cafile) {
+                          int verify, const char* cafile) {
     const char* h  = host      ? host      : "";
     const char* dh = dial_host ? dial_host : "";
     const char* ca = cafile    ? cafile    : "";
@@ -846,7 +717,7 @@ static void http_pool_key(char* out, size_t n, const char* host, int port,
     if (port < 0 || dial_port < 0 || hl + dhl + cal + 48 > n) {
         snprintf(out, n, "%s:%d|%s:%d|%d|%d|%s",
                  h, port, dh, dial_port,
-                 use_tls, insecure ? 1 : 0, ca);
+                 use_tls, verify & 3, ca);
         return;
     }
 
@@ -861,7 +732,7 @@ static void http_pool_key(char* out, size_t n, const char* host, int port,
     *p++ = '|';
     *p++ = (char)('0' + (use_tls >= 0 && use_tls <= 9 ? use_tls : 1));
     *p++ = '|';
-    *p++ = insecure ? '1' : '0';
+    *p++ = (char)('0' + (verify & 3));
     *p++ = '|';
     memcpy(p, ca, cal); p += cal;
     *p = '\0';
@@ -1333,6 +1204,11 @@ struct HttpClientRequest {
                           * verification on. Applied per-connection via a
                           * per-SSL X509_STORE, never on the shared SSL_CTX
                           * (#1107). */
+    int   partial_chain; /* 1: any certificate in the trust store (the system
+                          * one, or set_cafile's) ends a path, not only a
+                          * self-signed root: OpenSSL's X509_V_FLAG_PARTIAL_CHAIN
+                          * and the pure client's TRUST_PARTIAL_CHAIN (#3311).
+                          * Off by default; per-SSL, never on a shared CTX. */
     int   stream;        /* 0 = buffer the whole body (default); 1 = streaming:
                           * read only the header block and hand the open
                           * transport to an HttpStream for incremental reads (#1004). */
@@ -1345,7 +1221,21 @@ struct HttpClientRequest {
      *   PROXY_MODE_DIRECT (0)   default: no proxy */
     int   proxy_mode;
     char* proxy_url;     /* owned; set only for PROXY_MODE_EXPLICIT */
+    int   tls_backend;   /* HTTP_TLS_BACKEND_*: DEFAULT follows AETHER_PURE_TLS
+                          * and the build; AETHER or OPENSSL is the program's
+                          * choice for this request (set_tls_backend, #1298). */
 };
+
+static int http_client_use_pure_tls(const HttpClientRequest* req) {
+    if (req && req->tls_backend == HTTP_TLS_BACKEND_AETHER) return 1;
+    if (req && req->tls_backend == HTTP_TLS_BACKEND_OPENSSL) return 0;
+#ifndef AETHER_HAS_OPENSSL
+    return 1;
+#else
+    const char* v = getenv("AETHER_PURE_TLS");
+    return v && (strcmp(v, "1") == 0 || strcasecmp(v, "true") == 0);
+#endif
+}
 
 /* Proxy-mode ladder (see struct HttpClientRequest.proxy_mode). */
 #define PROXY_MODE_DIRECT   0
@@ -1547,6 +1437,28 @@ int http_request_set_insecure_raw(HttpClientRequest* req, int on) {
     return 0;
 }
 
+/* Trust partial chains for THIS request (#3311): any certificate in the trust
+ * store, the system one or set_cafile's, ends a path, not only a self-signed
+ * root. For a deployment that distributes an intermediate CA alone (a private
+ * PKI that hands out the issuing CA, or pinning one CA below a public root).
+ * Peer and hostname verification stay on, and a trusted certificate that is
+ * not a root must still be a CA. Both backends: OpenSSL's
+ * X509_V_FLAG_PARTIAL_CHAIN, set per SSL, and the pure client's
+ * TRUST_PARTIAL_CHAIN. `on` non-zero enables it; 0 (the default) does not. */
+int http_request_set_partial_chain_raw(HttpClientRequest* req, int on) {
+    if (!req) return -1;
+    req->partial_chain = on ? 1 : 0;
+    return 0;
+}
+
+/* The verification a request asked for, as the bridge's verify_mode bit set
+ * (1 = skip, 2 = partial chains). It is part of a pooled connection's
+ * identity as well. */
+static int http_req_verify_mode(const HttpClientRequest* req) {
+    if (!req) return 0;
+    return (req->insecure ? 1 : 0) | (req->partial_chain ? 2 : 0);
+}
+
 /* Pin a custom CA for THIS request: verify the peer certificate against the PEM
  * bundle at `path` instead of the system trust store, while keeping peer and
  * hostname verification ON (#1107). This is the "verify, but against THIS cert"
@@ -1560,6 +1472,34 @@ int http_request_set_cafile_raw(HttpClientRequest* req, const char* path) {
     free(req->cafile);
     req->cafile = (path && *path) ? strdup(path) : NULL;
     return 0;
+}
+
+/* Choose THIS request's TLS client backend (#1298): "aether" (the pure-Aether
+ * TLS 1.3 client, std.cryptography.tls13_client) or "openssl"; "" goes back to
+ * the default (OpenSSL where it is built in, unless AETHER_PURE_TLS selects
+ * the pure client). The choice is part of the pooled connection's identity.
+ * Returns 0; -1 on a null request; -2 for any other name; -3 when the build
+ * has no OpenSSL; -4 when the pure client is not linked into the program. */
+int http_request_set_tls_backend_raw(HttpClientRequest* req, const char* name) {
+    if (!req) return -1;
+    if (!name || !*name) {
+        req->tls_backend = HTTP_TLS_BACKEND_DEFAULT;
+        return 0;
+    }
+    if (strcmp(name, "aether") == 0) {
+        if (!pt_client_available()) return -4;
+        req->tls_backend = HTTP_TLS_BACKEND_AETHER;
+        return 0;
+    }
+    if (strcmp(name, "openssl") == 0) {
+#ifdef AETHER_HAS_OPENSSL
+        req->tls_backend = HTTP_TLS_BACKEND_OPENSSL;
+        return 0;
+#else
+        return -3;
+#endif
+    }
+    return -2;
 }
 
 /* #1004: enable streaming response bodies for THIS request. When on, the
@@ -2330,11 +2270,17 @@ static void ae_set_err(char** out_err, const char* msg) {
  * Split out of http_request_internal so a pooled connection that turns out to
  * be dead can be redialled without duplicating any of this (#1653). */
 /* Why HTTPS cannot run in this program, or NULL when it can: the
- * pure-Aether client is selected (AETHER_PURE_TLS=1, or a build without
- * OpenSSL) but not linked. The program's to fix, and known before any
- * network is touched. */
-static const char* http_tls_backend_missing(void) {
-    if (!http_client_use_pure_tls() || pt_client_available()) return NULL;
+ * pure-Aether client is selected (set_tls_backend "aether", AETHER_PURE_TLS=1,
+ * or a build without OpenSSL) but not linked. The program's to fix, and known
+ * before any network is touched. (set_tls_backend itself refuses "aether"
+ * when the client is not linked; this catches the other two routes.) */
+static const char* http_tls_backend_missing(const HttpClientRequest* req) {
+    if (!http_client_use_pure_tls(req) || pt_client_available()) return NULL;
+    if (req && req->tls_backend == HTTP_TLS_BACKEND_AETHER) {
+        return "set_tls_backend(\"aether\") selects the pure-Aether TLS client, "
+               "but it is not linked into this program. Add "
+               "`import std.cryptography.tls13_client` to the program.";
+    }
 #ifdef AETHER_HAS_OPENSSL
     return "AETHER_PURE_TLS selects the pure-Aether TLS client, but it is "
            "not linked into this program. Add "
@@ -2358,7 +2304,7 @@ static int http_dial(HttpClientRequest* req, AetherAddrList* addrs,
      * next time. */
     const char* why = NULL;
     int sockfd = aether_net_dial_addrs(dial_host, dial_port, addrs,
-                                       req->timeout_ns > 0 ? req->timeout_ns : 0, &why);
+                                       req->timeout_ns > 0 ? req->timeout_ns : 0, 0, &why);
     if (sockfd < 0) {
         ae_set_err(out_err, why);
         return -1;
@@ -2454,18 +2400,18 @@ static int http_dial(HttpClientRequest* req, AetherAddrList* addrs,
      * Verification is the pure client's own: certificate chain to a trusted
      * anchor, validity window, and hostname/SAN pinned to `host`. set_insecure
      * skips it; set_cafile pins a couriered bundle. */
-    if (use_tls && http_client_use_pure_tls()) {
+    if (use_tls && http_client_use_pure_tls(req)) {
         /* http_request_internal has said so before dialling; a dial from
          * anywhere else must not reach the handshake without a client. */
-        const char* missing = http_tls_backend_missing();
+        const char* missing = http_tls_backend_missing(req);
         if (missing) {
             close(sockfd);
             ae_set_err(out_err, missing);
             return -1;
         }
-        aether_pure_tls_client_set_error(NULL);
+        aether_callback_set_reason(NULL);
         void* pc = pt_client_connect(sockfd, host,
-                                     req && req->insecure ? 1 : 0,
+                                     http_req_verify_mode(req),
                                      req ? req->cafile : NULL);
         if (!pc) {
             /* Not close(sockfd): the descriptor was handed over, and the pure
@@ -2474,13 +2420,14 @@ static int http_dial(HttpClientRequest* req, AetherAddrList* addrs,
              * NUMBER, which another thread may already have been given for a
              * fresh socket of its own.
              *
-             * tls13_client leaves the reason in pt_client_last_err. Only a
+             * tls13_client leaves the reason as the callback's. Only a
              * failure before it got that far (out of memory, an unusable
              * socket) arrives without one. */
             char emsg[640];
-            if (pt_client_last_err[0]) {
+            const char* reason = aether_callback_reason();
+            if (reason[0]) {
                 snprintf(emsg, sizeof(emsg), "TLS handshake failed (pure-Aether TLS 1.3): %s",
-                         pt_client_last_err);
+                         reason);
             } else {
                 snprintf(emsg, sizeof(emsg),
                          "TLS handshake failed (pure-Aether TLS 1.3): the connection "
@@ -2519,6 +2466,7 @@ static int http_dial(HttpClientRequest* req, AetherAddrList* addrs,
         if (req->cafile) {
             ctx = SSL_CTX_new(TLS_client_method());
             if (ctx) {
+                tls_min_security_level(ctx);
                 SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
                 SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
                 if (SSL_CTX_load_verify_locations(ctx, req->cafile, NULL) != 1) {
@@ -2563,10 +2511,13 @@ static int http_dial(HttpClientRequest* req, AetherAddrList* addrs,
             // still verifies. Mirrors curl -k / wget --no-check-certificate.
             SSL_set_verify(ssl, SSL_VERIFY_NONE, NULL);
         } else {
-            // Verify the cert's CN/SAN matches the host we connected to. For an
-            // IP literal (e.g. a Proxmox API at https://192.168.0.204:8006),
+            // Verify the cert's SAN matches the host we connected to (never the
+            // subject CN, #3313: the pure-Aether backend reads SANs only, as
+            // RFC 9525 and browsers do, and the backends must accept the same
+            // servers). For an IP literal (e.g. a Proxmox API at
+            // https://192.168.0.204:8006),
             // set1_ip_asc pins the IP SAN; for a DNS name, set1_host pins the
-            // DNS SAN/CN. Using the IP-specific call for IP literals is correct
+            // DNS SAN. Using the IP-specific call for IP literals is correct
             // across OpenSSL versions (older set1_host did not auto-detect IPs).
             // The trust anchor for THIS connection is either the shared system
             // store or, when set_cafile was called, the couriered CA loaded onto
@@ -2575,7 +2526,12 @@ static int http_dial(HttpClientRequest* req, AetherAddrList* addrs,
             // stronger than set_insecure and fails closed if the CA doesn't
             // cover the presented cert.
             X509_VERIFY_PARAM* vpm = SSL_get0_param(ssl);
-            X509_VERIFY_PARAM_set_hostflags(vpm, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+            X509_VERIFY_PARAM_set_hostflags(vpm, AETHER_HOSTFLAGS);
+            // set_partial_chain (#3311): any trusted certificate ends a
+            // path, as on the pure backend; this SSL's param only.
+            if (req->partial_chain) {
+                X509_VERIFY_PARAM_set_flags(vpm, X509_V_FLAG_PARTIAL_CHAIN);
+            }
             struct in_addr in4;
             struct in6_addr in6;
             if (inet_pton(AF_INET, host, &in4) == 1 ||
@@ -3482,7 +3438,7 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
      * connect failed first (a server not up yet, a loaded machine) the
      * request reported "connection failed" instead. */
     if (use_tls) {
-        const char* missing = http_tls_backend_missing();
+        const char* missing = http_tls_backend_missing(req);
         if (missing) {
             free(path);
             response->error = string_new(missing);
@@ -3555,9 +3511,9 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
     /* The TLS backend is part of a connection's identity: 1 = OpenSSL,
      * 2 = pure-Aether. A pooled OpenSSL connection must never serve a request
      * that asked for the pure client, or the reverse. */
-    int tls_kind = use_tls ? (http_client_use_pure_tls() ? 2 : 1) : 0;
+    int tls_kind = use_tls ? (http_client_use_pure_tls(req) ? 2 : 1) : 0;
     http_pool_key(pool_key, sizeof(pool_key), host, port, tls_kind,
-                  dial_host, dial_port, req->insecure, req->cafile);
+                  dial_host, dial_port, http_req_verify_mode(req), req->cafile);
     /* A streaming response hands the transport to the caller, who may abandon
      * it mid-body, so those connections are never pooled in either direction.
      * A caller who set their own Connection header gets exactly that, and a

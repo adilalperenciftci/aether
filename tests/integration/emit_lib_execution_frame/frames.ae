@@ -1,0 +1,68 @@
+// The library of the execution-frame test (#2955, #2956).
+import std.host
+
+extern host_service(which: int)
+extern aether_sandbox_depth() -> int
+
+fn count_to(n: int) -> int {
+    i = 0
+    odd = 0
+    while i < n {
+        if i % 2 == 1 {
+            odd = odd + 1
+        }
+        i = i + 1
+    }
+    return i
+}
+
+// An uncaught panic in an export.
+boom(n: int) -> int {
+    if n > 0 {
+        panic("boom ${n}")
+    }
+    return n + 1
+}
+
+// Arithmetic only: nothing can end it from outside its code, so its stub
+// has no frame and records the OK outcome alone.
+plain(n: int) -> int {
+    return n * 2 + 1
+}
+
+// The inner call of a host service: returns 7 (which 0), refuses with -1
+// (1), panics (2), or loops until the deadline the service set for it
+// ends it (3). It leaves a sandbox level of its own pushed, which its
+// frame takes off.
+inner(which: int) -> int {
+    sandbox_push(null)
+    if which == 2 {
+        panic("inner panicked")
+    }
+    if which == 3 {
+        return count_to(2000000000)
+    }
+    if which == 1 {
+        return -1
+    }
+    return 7
+}
+
+// Calls the host service, then says what it still sees, one bit each:
+// 1 its caller is "outer"; 2 its own loop is not cut by the deadline the
+// service set for the inner call; 4 its sandbox levels are as they were.
+outer(which: int) -> int {
+    levels = aether_sandbox_depth()
+    host_service(which)
+    bits = 0
+    if host.caller_identity() == "outer" {
+        bits = bits + 1
+    }
+    if count_to(5000000) == 5000000 {
+        bits = bits + 2
+    }
+    if aether_sandbox_depth() == levels {
+        bits = bits + 4
+    }
+    return bits
+}

@@ -8,6 +8,7 @@
 // Import with:  import std.cryptography.photon_beetle
 
 import std.bytes
+import std.mem
 
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
@@ -292,11 +293,11 @@ finalize_to_bytes(c: *PhotonBeetleCtx) -> ptr {
 }
 
 free_internals(c: *PhotonBeetleCtx) {
-    if c.state != null { bytes.free(c.state); c.state = null }
-    if c.state_2d != null { bytes.free(c.state_2d); c.state_2d = null }
-    if c.block != null { bytes.free(c.block); c.block = null }
-    if c.temp_row != null { bytes.free(c.temp_row); c.temp_row = null }
-    if c.temp_mix != null { bytes.free(c.temp_mix); c.temp_mix = null }
+    if c.state != null { bytes.wipe_free(c.state); c.state = null }
+    if c.state_2d != null { bytes.wipe_free(c.state_2d); c.state_2d = null }
+    if c.block != null { bytes.wipe_free(c.block); c.block = null }
+    if c.temp_row != null { bytes.wipe_free(c.temp_row); c.temp_row = null }
+    if c.temp_mix != null { bytes.wipe_free(c.temp_mix); c.temp_mix = null }
 }
 
 final_bytes(ctx: ptr) -> ptr {
@@ -304,6 +305,7 @@ final_bytes(ctx: ptr) -> ptr {
     out = finalize_to_bytes(c)
     s = bytes.finish(out, 32)
     free_internals(c)
+    mem.wipe(ctx, sizeof(PhotonBeetleCtx))
     free(ctx)
     res = bytes.new(32)
     bytes.copy_from_string(res, 0, s, 32)
@@ -331,9 +333,10 @@ final_hex(ctx: ptr) -> string {
         bytes.set(hexbuf, i * 2 + 1, c_lo)
         i = i + 1
     }
-    bytes.free(out)
+    bytes.wipe_free(out)
     s = bytes.finish(hexbuf, 64)
     free_internals(c)
+    mem.wipe(ctx, sizeof(PhotonBeetleCtx))
     free(ctx)
     return s
 }
@@ -344,6 +347,7 @@ free_ctx(ctx: ptr) {
     }
     c = ctx as *PhotonBeetleCtx
     free_internals(c)
+    mem.wipe(ctx, sizeof(PhotonBeetleCtx))
     free(ctx)
 }
 

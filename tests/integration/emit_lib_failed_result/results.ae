@@ -1,0 +1,44 @@
+// The library of the failed-result test (#3388): exports whose call returns
+// normally, but with a stop noted after its last safe point. The first
+// allocation each makes is the one the test hook fails; the code survives
+// it (the std operation returns its error) and has no loop after it, so
+// the call ends at its return with AETHER_OUT_OF_MEMORY. It must return its
+// zero value, and what it would have returned is not the caller's. The
+// strings are made from `n`, so none is a literal the compiler folds.
+import std.string
+
+extern aether_test_fail_alloc_after(n: int)
+extern aether_caps_used_bytes() -> long
+
+struct Pair { a: int, s: string }
+
+// The cap-aware bytes this library's runtime holds, and its test hook: for
+// an importer, which has a runtime of its own.
+used() -> long {
+    return aether_caps_used_bytes()
+}
+
+fail_next(n: int) {
+    aether_test_fail_alloc_after(n)
+}
+
+greet(n: int) -> string {
+    _x = string.from_int(n)
+    return string.concat("hello", string.from_int(n))
+}
+
+answer(n: int) -> int {
+    _x = string.from_int(n)
+    return 42
+}
+
+pair(n: int) -> Pair {
+    _x = string.from_int(n)
+    return Pair { a: 1, s: string.concat("p", string.from_int(n)) }
+}
+
+greeter(n: int) -> fn {
+    _x = string.from_int(n)
+    tail = string.concat("closure ", string.from_int(n))
+    return || -> string.concat("hello ", tail)
+}

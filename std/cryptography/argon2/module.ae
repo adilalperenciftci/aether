@@ -34,10 +34,11 @@
 //     uses std.bits.lsr64 / urem64 for the unsigned semantics RFC 9106
 //     requires.
 //   * The memory matrix is several MiB; it (and all scratch blocks) are
-//     freed before return (the macOS leak gate is strict).
+//     wiped and freed before return (#3414; the macOS leak gate is strict).
 
 import std.bits
 import std.bytes
+import std.mem
 import std.cryptography.blake2
 import std.string
 
@@ -90,14 +91,14 @@ hprime(input: byte[], out_len: int, out: ptr, out_off: int) {
     if out_len <= 64 {
         h = blake2.blake2b_bytes_n(string.bytes(seed_as_string(bytes.view(seed)[0..seed_len]))[0..seed_len], out_len)
         bytes.copy_from_bytes(out, out_off, h, 0, out_len)
-        bytes.free(h)
-        bytes.free(seed)
+        bytes.wipe_free(h)
+        bytes.wipe_free(seed)
         return
     }
 
     // out_len > 64: chained 32-byte halves.
     v = blake2.blake2b_bytes_n(string.bytes(seed_as_string(bytes.view(seed)[0..seed_len]))[0..seed_len], 64)
-    bytes.free(seed)
+    bytes.wipe_free(seed)
     pos = out_off
     bytes.copy_from_bytes(out, pos, v, 0, 32)
     pos = pos + 32
@@ -107,7 +108,7 @@ hprime(input: byte[], out_len: int, out: ptr, out_off: int) {
     i = 2
     while i <= r {
         nv = blake2.blake2b_bytes_n(string.bytes(bytes_as_string(bytes.view(v)[0..64]))[0..64], 64)
-        bytes.free(v)
+        bytes.wipe_free(v)
         v = nv
         bytes.copy_from_bytes(out, pos, v, 0, 32)
         pos = pos + 32
@@ -116,9 +117,9 @@ hprime(input: byte[], out_len: int, out: ptr, out_off: int) {
 
     last_len = out_len - 32 * r
     last = blake2.blake2b_bytes_n(string.bytes(bytes_as_string(bytes.view(v)[0..64]))[0..64], last_len)
-    bytes.free(v)
+    bytes.wipe_free(v)
     bytes.copy_from_bytes(out, pos, last, 0, last_len)
-    bytes.free(last)
+    bytes.wipe_free(last)
 }
 
 // blake2 one-shots take a `string` (binary-safe). Convert a bytes buffer
@@ -312,7 +313,7 @@ argon2(atype: int, pass: byte[], salt: byte[], secret: byte[], ad: byte[], t_cos
     if mem_raw == null {
         return null
     }
-    mem = (mem_raw as long[])[0..lanes]
+    matrix = (mem_raw as long[])[0..lanes]
     rblk = Block {}
     zblk = Block {}
     addr_blk = Block {}
@@ -328,7 +329,7 @@ argon2(atype: int, pass: byte[], salt: byte[], secret: byte[], ad: byte[], t_cos
     put_le32(pre, 16, VERSION)
     put_le32(pre, 20, atype)
     blake2.update(ctx, bytes.view(pre)[0..24])
-    bytes.free(pre)
+    bytes.wipe_free(pre)
 
     add_byte_string(ctx, pass)
     add_byte_string(ctx, salt)
@@ -350,18 +351,18 @@ argon2(atype: int, pass: byte[], salt: byte[], secret: byte[], ad: byte[], t_cos
         // block 0
         put_le32(seed, 64, 0)
         hprime(bytes.view(seed)[0..72], 1024, blk_bytes, 0)
-        load_block_from_bytes(mem, lane * lane_length + 0, blk_bytes)
+        load_block_from_bytes(matrix, lane * lane_length + 0, blk_bytes)
         // block 1
         put_le32(seed, 64, 1)
         hprime(bytes.view(seed)[0..72], 1024, blk_bytes, 0)
-        load_block_from_bytes(mem, lane * lane_length + 1, blk_bytes)
+        load_block_from_bytes(matrix, lane * lane_length + 1, blk_bytes)
         lane = lane + 1
     }
-    bytes.free(seed)
-    bytes.free(h0)
+    bytes.wipe_free(seed)
+    bytes.wipe_free(h0)
 
     // ---- Fill memory blocks ----
-    fill_memory(mem, atype, t_cost, parallelism, memory_blocks, segment_length, lane_length, &rblk, &zblk, &addr_blk, &input_blk)
+    fill_memory(matrix, atype, t_cost, parallelism, memory_blocks, segment_length, lane_length, &rblk, &zblk, &addr_blk, &input_blk)
 
     // ---- Digest: XOR last block of every lane, then H'(out_len, finalBlock) ----
     final_idx = lane_length - 1
@@ -372,18 +373,20 @@ argon2(atype: int, pass: byte[], salt: byte[], secret: byte[], ad: byte[], t_cos
         while k < QWORDS {
             fbase = final_idx * QWORDS
             lbase = last_in_lane * QWORDS
-            mem[fbase + k] = mem[fbase + k] ^ mem[lbase + k]
+            matrix[fbase + k] = matrix[fbase + k] ^ matrix[lbase + k]
             k = k + 1
         }
         i = i + 1
     }
-    store_block_to_bytes(mem, final_idx, blk_bytes)
+    store_block_to_bytes(matrix, final_idx, blk_bytes)
 
     out = bytes.new(out_len)
     hprime(bytes.view(blk_bytes)[0..1024], out_len, out, 0)
 
-    bytes.free(blk_bytes)
-    free(mem)
+    bytes.wipe_free(blk_bytes)
+    // The matrix is the password's working memory: wiped first (#3414).
+    mem.wipe(mem_raw, lanes * 8)
+    free(matrix)
     return out
 }
 
@@ -406,7 +409,7 @@ add_byte_string(ctx: ptr, octets: byte[]) {
     lp = bytes.new(4)
     put_le32(lp, 0, use_n)
     blake2.update(ctx, bytes.view(lp)[0..4])
-    bytes.free(lp)
+    bytes.wipe_free(lp)
     if use_n > 0 {
         blake2.update(ctx, octets[0..use_n])
     }
@@ -614,7 +617,7 @@ to_hex(out: ptr, out_len: int) -> string {
         bytes.set(hexbuf, i * 2 + 1, c_lo)
         i = i + 1
     }
-    bytes.free(out)
+    bytes.wipe_free(out)
     return bytes.finish(hexbuf, out_len * 2)
 }
 

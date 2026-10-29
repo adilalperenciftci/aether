@@ -554,6 +554,9 @@ int state_array_owned(ASTNode* state_decl, int* len);
 /* #2688: a `T[N]` state field whose struct T owns strings or closures: T's
  * name (each element is the actor's own), or NULL. */
 const char* state_struct_array_owned(CodeGenerator* gen, ASTNode* state_decl, int* len);
+/* #3386: the owning state declaration `field` of the actor the reference
+ * `ref` names (`r.field`), or NULL. */
+ASTNode* actor_ref_owned_state(CodeGenerator* gen, ASTNode* ref, const char* field);
 /* #2528 (codegen_stmt.c): `v` as the value an owned string element takes. */
 void emit_owned_string_element(CodeGenerator* gen, ASTNode* v);
 
@@ -640,6 +643,10 @@ int tc_type_is_owned(const Type* t);
 const char* tc_owned_drop_c(const Type* t);
 int emit_owned_ptr_drop(CodeGenerator* gen, Type* t, const char* lv);
 void hoist_owned_locals(CodeGenerator* gen, ASTNode* body);
+/* #3406: the release and the unwind journal entry of a place of an owned
+ * pointer type, for every such place (codegen_stmt.c). */
+void push_owned_place_drop(CodeGenerator* gen, const char* name, const char* drop_c,
+                           int line, int column);
 int program_releases_messages(CodeGenerator* gen);
 int expr_is_c_view_of_slice(CodeGenerator* gen, const ASTNode* expr);
 void emit_array_fill(CodeGenerator* gen, const char* dst, ASTNode* e, Type* at);

@@ -1,0 +1,66 @@
+// The library of the cross-copy case (#3419): built with a runtime of its
+// own, loaded by a C host with another. Kicker's handler has the host enter
+// an enforce block of the host's copy, sends to Looker, idle on Kicker's
+// core, which is stepped inside the send, inside the host's block, and has
+// the host leave it. Looker must run without the host's levels, whether
+// this copy had looked the levels up before or not.
+import std.os
+
+extern cross_host_enter()
+extern cross_host_leave()
+extern cross_note_look()
+extern cross_looked() -> int
+
+message Kick {}
+message Look {}
+message Seen {}
+
+var g_looker: actor_ref = null
+
+fn readable() -> int {
+    v = os.os_getenv("PATH")
+    if v == null {
+        return 0
+    }
+    return 1
+}
+
+actor Looker {
+    state seen = -1
+    receive {
+        Look() -> {
+            seen = readable()
+            cross_note_look()
+        }
+        Seen() -> { reply seen }
+    }
+}
+
+actor Kicker {
+    state looker: actor_ref = null
+    receive {
+        Kick() -> {
+            cross_host_enter()
+            looker ! Look {}
+            stepped = cross_looked()
+            cross_host_leave()
+            reply stepped
+        }
+    }
+}
+
+// look_first: this copy reads PATH first (it has looked the levels up).
+// Returns that read * 100 + whether Looker ran inside the send * 10 + what
+// Looker read.
+start(look_first: int) -> int {
+    pre = 0
+    if look_first == 1 {
+        pre = readable()
+    }
+    lk = spawn(Looker(), core: 0)
+    k = spawn(Kicker(), core: 0)
+    k.looker = lk
+    int stepped = k ? Kick {}
+    int s = lk ? Seen {}
+    return pre * 100 + stepped * 10 + s
+}

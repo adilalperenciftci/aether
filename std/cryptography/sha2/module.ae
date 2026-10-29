@@ -26,6 +26,7 @@
 
 import std.bits
 import std.bytes
+import std.mem
 
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
@@ -378,6 +379,7 @@ new(algo: string) -> {
         ctx.h7 = 0x0eb72ddc81c52ca2
         ctx.digest_len = 32
     } else {
+        mem.wipe(ctx, sizeof(Sha2Ctx))
         free(ctx)
         return null, "unknown algorithm"
     }
@@ -534,20 +536,22 @@ emit_be64_words(c: *Sha2Ctx, out: ptr) {
     }
 }
 
-// Finalize and return the raw digest bytes as an owned AetherString of
-// digest_len bytes. FREES the context.
+// Finalize and return the raw digest as a std.bytes buffer of digest_len
+// bytes. FREES the context.
+//
+// The digest stays in the byte buffer it was written to. It used to go
+// through a string (bytes.finish) and back (bytes.copy_from_string), whose C
+// side asks whether its argument is a string by reading its first bytes,
+// which here are the digest: a branch on HMAC's secret state, which the
+// constant-time test found in RFC 6979's HMAC-DRBG (#2600), and a misread
+// for any digest that starts like a string header.
 final_bytes(ctx: ptr) -> ptr {
     c = ctx as *Sha2Ctx
     out = finalize_to_bytes(c)
-    dl = c.digest_len
-    s = bytes.finish(out, dl)
-    free_internals(c)
-    free(ctx)
-    // Wrap the AetherString back into a bytes buffer so callers get a
-    // ptr (matching the requested signature). Length is dl.
-    res = bytes.new(dl)
-    bytes.copy_from_string(res, 0, s, dl)
-    return res
+    // SHA-512/224 serializes four whole 64-bit words: keep digest_len.
+    bytes.set_length(out, c.digest_len)
+    wipe_ctx_free(ctx)
+    return out
 }
 
 // Finalize and return the digest as lowercase hex. FREES the context.
@@ -573,18 +577,29 @@ final_hex(ctx: ptr) -> string {
         bytes.set(hexbuf, i * 2 + 1, c_lo)
         i = i + 1
     }
-    bytes.free(out)
+    bytes.wipe_free(out)
     s = bytes.finish(hexbuf, dl * 2)
-    free_internals(c)
-    free(ctx)
+    wipe_ctx_free(ctx)
     return s
 }
 
 free_internals(c: *Sha2Ctx) {
     if c.block != null {
-        bytes.free(c.block)
+        bytes.wipe_free(c.block)
         c.block = null
     }
+}
+
+// Free a context, wiped first (#3402): its hash words and schedule are a
+// digest and the last block of whatever it hashed, its buffer the block in
+// progress, and an HMAC key, a private key's seed or a DRBG's state among
+// what it hashed. mem.wipe, as a zeroing before a free is otherwise a dead
+// store the C compiler may drop.
+fn wipe_ctx_free(ctx: ptr) {
+    c = ctx as *Sha2Ctx
+    free_internals(c)
+    mem.wipe(ctx, sizeof(Sha2Ctx))
+    free(ctx)
 }
 
 // Abandon a context without finalizing — the bail-out cleanup path.
@@ -593,9 +608,7 @@ free_ctx(ctx: ptr) {
     if ctx == null {
         return
     }
-    c = ctx as *Sha2Ctx
-    free_internals(c)
-    free(ctx)
+    wipe_ctx_free(ctx)
 }
 
 // ---- One-shot convenience wrappers ----

@@ -32,6 +32,7 @@
 import std.bytes
 import std.bits
 import std.intarr
+import std.cryptography.ct as ctime
 
 exports(
     chacha20_xor, poly1305_mac, aead_seal, aead_open
@@ -147,7 +148,8 @@ chacha20_xor(key: ptr, nonce: ptr, counter: long, data: byte[]) -> ptr {
         off = off + 64
         blk = blk + 1
     }
-    bytes.free(ks)
+    // The keystream XORed with the ciphertext gives the plaintext (#3376).
+    bytes.wipe_free(ks)
     return out
 }
 
@@ -311,7 +313,7 @@ poly_key_for(key: ptr, nonce: ptr) -> ptr {
     chacha_block(key, nonce, 0, blk)
     pk = bytes.new(32)
     bytes.copy_from_bytes(pk, 0, blk, 0, 32)
-    bytes.free(blk)
+    bytes.wipe_free(blk)
     return pk
 }
 
@@ -360,14 +362,14 @@ aead_seal(key: ptr, nonce: ptr, aad: byte[], plaintext: byte[]) -> ptr {
     pk = poly_key_for(key, nonce)
     md = mac_data(aad, bytes.view(ct)[0..pt_len])
     tag = poly1305_mac(pk, bytes.view(md))
-    bytes.free(pk)
-    bytes.free(md)
+    bytes.wipe_free(pk)
+    bytes.wipe_free(md)
 
     out = bytes.new(pt_len + 16)
     bytes.copy_from_bytes(out, 0, ct, 0, pt_len)
     bytes.copy_from_bytes(out, pt_len, tag, 0, 16)
-    bytes.free(ct)
-    bytes.free(tag)
+    bytes.wipe_free(ct)
+    bytes.wipe_free(tag)
     return out
 }
 
@@ -384,8 +386,8 @@ aead_open(key: ptr, nonce: ptr, aad: byte[], ct_with_tag: byte[]) -> {
     pk = poly_key_for(key, nonce)
     md = mac_data(aad, ct_with_tag[0..body_len])
     want = poly1305_mac(pk, bytes.view(md))
-    bytes.free(pk)
-    bytes.free(md)
+    bytes.wipe_free(pk)
+    bytes.wipe_free(md)
 
     // Constant-time compare against the supplied tag at offset body_len.
     diff = 0
@@ -394,8 +396,8 @@ aead_open(key: ptr, nonce: ptr, aad: byte[], ct_with_tag: byte[]) -> {
         diff = diff | ((bytes.get(want, i) ^ ct_with_tag[body_len + i]) & 0xFF)
         i = i + 1
     }
-    bytes.free(want)
-    if diff != 0 {
+    bytes.wipe_free(want)
+    if ctime.declassify(ctime.eq(diff, 0)) == 0 {
         return null, "authentication failed"
     }
 

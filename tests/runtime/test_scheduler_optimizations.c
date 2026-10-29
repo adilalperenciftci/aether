@@ -7,6 +7,8 @@
 #include "../../runtime/actors/aether_simd_batch.h"
 #include "../../runtime/actors/aether_message_dedup.h"
 #include "../../runtime/actors/aether_message_coalescing.h"
+#include "../../runtime/actors/aether_send_message.h"
+#include "../../runtime/aether_runtime.h"
 #include <string.h>
 
 // Test 1: Optimized actor initialization
@@ -420,4 +422,31 @@ TEST_CATEGORY(coalescing_adaptive_decision, TEST_CATEGORY_RUNTIME) {
     // Either a deep queue or a high rate turns it on.
     ASSERT_TRUE(coalescing_should_enable(10, 1000));
     ASSERT_TRUE(coalescing_should_enable(3, 50000));
+}
+
+// #3374: there is no message payload pool. AETHER_FLAG_LOCKFREE_POOLS is
+// accepted and ignored: auto-detect used to add it, has_feature said it was
+// on and the configuration reported use_lockfree_pools 1, for a pool nothing
+// draws from. The pool statistics are zeros, and a payload free is a free().
+TEST_CATEGORY(runtime_lockfree_pools_flag_is_ignored, TEST_CATEGORY_RUNTIME) {
+    aether_runtime_shutdown();
+    aether_runtime_init(2, AETHER_FLAG_AUTO_DETECT | AETHER_FLAG_LOCKFREE_POOLS);
+    int has = aether_runtime_has_feature(AETHER_FLAG_LOCKFREE_POOLS);
+    int field = aether_runtime_get_config()->use_lockfree_pools;
+    aether_runtime_shutdown();
+    ASSERT_EQ(0, has);
+    ASSERT_EQ(0, field);
+
+    aether_runtime_init(2, AETHER_FLAG_AUTO_DETECT);
+    has = aether_runtime_has_feature(AETHER_FLAG_LOCKFREE_POOLS);
+    aether_runtime_shutdown();
+    ASSERT_EQ(0, has);
+
+    uint64_t hits = 1, misses = 1, large = 1;
+    aether_message_pool_stats(&hits, &misses, &large);
+    ASSERT_EQ(0, (int)hits);
+    ASSERT_EQ(0, (int)misses);
+    ASSERT_EQ(0, (int)large);
+    aether_free_message(malloc(24));
+    aether_free_message(NULL);
 }

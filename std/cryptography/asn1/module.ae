@@ -233,7 +233,8 @@ read_tlv(r: ptr) -> (ptr, string) {
     }
 
     if is_indefinite == 1 {
-        // Read TLVs recursively until we find EOC (00 00)
+        // Read TLVs recursively until we find EOC (00 00); each copy is
+        // wiped as it is replaced, the TLVs may hold a key (#3382).
         acc = bytes.new(0)
         acc_len = 0
         loop = 1
@@ -248,19 +249,19 @@ read_tlv(r: ptr) -> (ptr, string) {
             }
             if loop == 1 {
                 if rr.pos >= rr.len {
-                    bytes.free(acc)
+                    bytes.wipe_free(acc)
                     return null, "asn1: unexpected end of input in indefinite length"
                 }
                 start_pos = rr.pos
                 sub_content, suberr = read_tlv(r)
                 if string.equals(suberr, "") != 1 {
-                    bytes.free(acc)
+                    bytes.wipe_free(acc)
                     return null, suberr
                 }
                 // suberr is the sub-call's (empty) success string; release it
                 // so the recursive read_tlv's "" doesn't leak per sub-TLV.
                 string.release(suberr)
-                bytes.free(sub_content)
+                bytes.wipe_free(sub_content)
                 end_pos = rr.pos
                 sub_tlv_len = end_pos - start_pos
 
@@ -270,7 +271,7 @@ read_tlv(r: ptr) -> (ptr, string) {
                     bytes.copy_from_bytes(new_acc, 0, acc, 0, acc_len)
                 }
                 bytes.copy_from_bytes(new_acc, acc_len, rr.buf, start_pos, sub_tlv_len)
-                bytes.free(acc)
+                bytes.wipe_free(acc)
                 acc = new_acc
                 acc_len = acc_len + sub_tlv_len
             }
@@ -318,7 +319,7 @@ read_tagged(r: ptr, want_tag: int) -> (ptr, string) {
     }
     rr = r as *Asn1Reader
     if rr.last_tag != want_tag {
-        bytes.free(content)
+        bytes.wipe_free(content)
         return null, "asn1: unexpected tag"
     }
     return content, err
@@ -345,7 +346,8 @@ read_integer(r: ptr) -> (ptr, string) {
     }
     clen = bytes.length(content)
     n = bignum.from_bytes(content, clen)
-    bytes.free(content)
+    // The content may be a private key's number (an RSA d, #3382).
+    bytes.wipe_free(content)
     return n, err
 }
 
@@ -363,7 +365,7 @@ read_bit_string(r: ptr) -> (ptr, int, string) {
     }
     clen = bytes.length(content)
     if clen < 1 {
-        bytes.free(content)
+        bytes.wipe_free(content)
         return null, 0, "asn1: empty BIT STRING"
     }
     unused = bytes.get(content, 0) & 0xFF
@@ -373,7 +375,7 @@ read_bit_string(r: ptr) -> (ptr, int, string) {
         bytes.set(out, i - 1, bytes.get(content, i))
         i = i + 1
     }
-    bytes.free(content)
+    bytes.wipe_free(content)
     return out, unused, err
 }
 
@@ -383,7 +385,7 @@ read_null(r: ptr) -> string {
         return err
     }
     n = bytes.length(content)
-    bytes.free(content)
+    bytes.wipe_free(content)
     if n != 0 {
         return "asn1: NULL with non-empty content"
     }
@@ -396,11 +398,11 @@ read_boolean(r: ptr) -> (int, string) {
         return 0, err
     }
     if bytes.length(content) != 1 {
-        bytes.free(content)
+        bytes.wipe_free(content)
         return 0, "asn1: BOOLEAN length != 1"
     }
     v = bytes.get(content, 0) & 0xFF
-    bytes.free(content)
+    bytes.wipe_free(content)
     if v == 0 { return 0, err }
     return 1, err
 }
@@ -413,7 +415,7 @@ read_oid(r: ptr) -> (string, string) {
     }
     n = bytes.length(content)
     if n < 1 {
-        bytes.free(content)
+        bytes.wipe_free(content)
         return "", "asn1: empty OID"
     }
     sb = strbuilder.new(n * 4)
@@ -438,7 +440,7 @@ read_oid(r: ptr) -> (string, string) {
         }
         i = i + 1
     }
-    bytes.free(content)
+    bytes.wipe_free(content)
     return strbuilder.finish(sb), err
 }
 
@@ -529,9 +531,9 @@ wrap_tlv(tag: int, content: ptr) -> ptr {
         bytes.set(out, ntag + nlen + j, bytes.get(content, j))
         j = j + 1
     }
-    bytes.free(tag_bytes)
-    bytes.free(lenbytes)
-    bytes.free(content)
+    bytes.wipe_free(tag_bytes)
+    bytes.wipe_free(lenbytes)
+    bytes.wipe_free(content)
     return out
 }
 
@@ -559,9 +561,9 @@ wrap_tlv_ext(tag_class: int, tag_pc: int, tag_number: int, content: ptr) -> ptr 
         bytes.set(out, ntag + nlen + j, bytes.get(content, j))
         j = j + 1
     }
-    bytes.free(tag_bytes)
-    bytes.free(lenbytes)
-    bytes.free(content)
+    bytes.wipe_free(tag_bytes)
+    bytes.wipe_free(lenbytes)
+    bytes.wipe_free(content)
     return out
 }
 
@@ -780,7 +782,7 @@ read_bmp_string(r: ptr) -> (string, string) {
         return "", err
     }
     s = decode_bmp_string_bytes(content)
-    bytes.free(content)
+    bytes.wipe_free(content)
     return s, err // reuse tracked (empty) err, not a fresh "" (avoids 1-byte leak)
 }
 
@@ -795,7 +797,7 @@ read_universal_string(r: ptr) -> (string, string) {
         return "", err
     }
     s = decode_universal_string_bytes(content)
-    bytes.free(content)
+    bytes.wipe_free(content)
     return s, err // reuse tracked (empty) err, not a fresh "" (avoids 1-byte leak)
 }
 
@@ -811,7 +813,7 @@ bignum_to_int(bn: ptr) -> int {
     bytes_buf = bignum.to_bytes(bn)
     n = bytes.length(bytes_buf)
     if n == 0 {
-        bytes.free(bytes_buf)
+        bytes.wipe_free(bytes_buf)
         return 0
     }
     first = bytes.get(bytes_buf, 0)
@@ -824,7 +826,7 @@ bignum_to_int(bn: ptr) -> int {
         v = (v << 8) | (bytes.get(bytes_buf, i) & 0xFF)
         i = i + 1
     }
-    bytes.free(bytes_buf)
+    bytes.wipe_free(bytes_buf)
     return v
 }
 
@@ -835,7 +837,7 @@ read_enumerated(r: ptr) -> (int, string) {
     }
     clen = bytes.length(content)
     bn = bignum.from_bytes(content, clen)
-    bytes.free(content)
+    bytes.wipe_free(content)
     v = bignum_to_int(bn)
     bignum.free(bn)
     return v, err
@@ -912,7 +914,7 @@ encode_bmp_string_bytes(s: string) -> ptr {
     }
     final_out = bytes.new(out_idx)
     bytes.copy_from_bytes(final_out, 0, out, 0, out_idx)
-    bytes.free(out)
+    bytes.wipe_free(out)
     return final_out
 }
 
@@ -981,7 +983,7 @@ encode_set(elements_list: ptr) -> ptr {
     while i < sz {
         el = list.at(elements_list, i)
         off = emit_bytes(body, off, el)
-        bytes.free(el)
+        bytes.wipe_free(el)
         i = i + 1
     }
 
@@ -1024,7 +1026,7 @@ encode_sequence_list(elements_list: ptr) -> ptr {
     while i < sz {
         el = list.at(elements_list, i)
         off = emit_bytes(body, off, el)
-        bytes.free(el)
+        bytes.wipe_free(el)
         i = i + 1
     }
     list_free(elements_list)
@@ -1089,8 +1091,8 @@ encode_tagged(is_explicit: int, tag_class: int, tag_number: int, content: @keep 
         i = i + 1
     }
 
-    bytes.free(new_tag_bytes)
-    bytes.free(content)
+    bytes.wipe_free(new_tag_bytes)
+    bytes.wipe_free(content)
     return out
 }
 
@@ -1106,7 +1108,7 @@ read_tagged_ext(r: ptr, is_explicit: int, want_class: int, want_number: int) -> 
         return null, err
     }
     if rr.last_tag_class != want_class || rr.last_tag_number != want_number {
-        bytes.free(content)
+        bytes.wipe_free(content)
         return null, "asn1: unexpected tag class or number"
     }
     return content, err
@@ -1198,6 +1200,6 @@ encode_universal_string_bytes(s: string) -> ptr {
     }
     final_out = bytes.new(out_idx)
     bytes.copy_from_bytes(final_out, 0, out, 0, out_idx)
-    bytes.free(out)
+    bytes.wipe_free(out)
     return final_out
 }

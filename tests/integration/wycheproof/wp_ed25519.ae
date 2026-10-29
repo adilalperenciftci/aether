@@ -8,6 +8,9 @@
 // Signatures whose length is not exactly 64 bytes are rejected up front:
 // verify() takes a fixed 64-byte buffer by contract, so a wrong-length
 // sig cannot even be presented to it — refusal by construction.
+//
+// Every case runs (a verify is a few hundred microseconds since #2600);
+// WYCHEPROOF_STRIDE=N samples every Nth case instead.
 
 import std.cryptography.ed25519
 import std.os
@@ -49,7 +52,7 @@ main() {
     // 180s harness budget is shared with rsa+x448). The tcId-151 forgery
     // class is pinned permanently in tests/integration/crypto_ed25519, so
     // sampling loses no regression coverage. WYCHEPROOF_FULL=1 runs all.
-    stride = 5
+    stride = 1
     wf = os.getenv("WYCHEPROOF_FULL")
     if wf == "1" { stride = 1 }
     sv = os.getenv("WYCHEPROOF_STRIDE")

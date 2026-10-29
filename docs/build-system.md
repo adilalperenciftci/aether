@@ -966,7 +966,11 @@ targeting WASI should treat `panic` as fatal and use `(value, err)` returns for
 anything it expects to recover from.
 
 `--target=wasm` remains the route to a runnable **browser** bundle with JS
-glue; `wasm32-wasi` produces a self-contained module for a WASI runtime.
+glue; `wasm32-wasi` produces a self-contained module for a WASI runtime. The
+runtime `--target=wasm` compiles beside the program is the cooperative one
+`runtime/coop_runtime_sources.txt` lists (installed as
+`share/aether/runtime/coop_runtime_sources.txt`), the list ci-wasm and the
+ESP32 build read too (#3383).
 
 `wasm32-freestanding` is deliberately **not** offered: it ships no libc, so the
 generated C's `#include <stdio.h>` cannot resolve and `--emit=obj` fails
