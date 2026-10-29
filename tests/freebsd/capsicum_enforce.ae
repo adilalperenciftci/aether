@@ -1,7 +1,6 @@
-// FreeBSD-only Capsicum enforcement test (run as a subprocess by the
-// nightly harness / tests/freebsd/run.sh). NOT in the CI regression set —
-// the CI matrix has no FreeBSD runner; the portable contract is covered by
-// tests/regression/test_capsicum_portability.ae.
+// FreeBSD-only Capsicum enforcement test (run as a subprocess by
+// tests/freebsd/run.sh in the native FreeBSD CI job). The portable contract
+// is covered by std/capsicum/test_capsicum_portability.ae.
 //
 // capsicum.enter() is IRREVERSIBLE and process-wide, so this whole program
 // is the unit: it asserts pre-state, enters capability mode, then asserts

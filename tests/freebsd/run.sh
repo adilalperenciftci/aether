@@ -2,9 +2,8 @@
 # tests/freebsd/run.sh — run the FreeBSD-only sandbox enforcement tests.
 #
 # These exercise REAL Capsicum/Casper behaviour and can only pass on a
-# FreeBSD host with a Capsicum-enabled kernel; there is no FreeBSD runner
-# in the CI matrix yet, so they live outside tests/regression/ and are
-# driven by this script (locally / by the nightly harness).
+# FreeBSD host with a Capsicum-enabled kernel. The native FreeBSD CI job
+# and the optional nightly harness both drive this script.
 #
 # Each test .ae is a self-contained program: exit 0 = pass, 1 = fail,
 # 2 = skip (not FreeBSD). On a non-FreeBSD host every test skips and the
