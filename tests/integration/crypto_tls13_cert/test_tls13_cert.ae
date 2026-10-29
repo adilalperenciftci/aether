@@ -59,6 +59,18 @@ fn set_path_fixture_validity(c: *tls13_cert.LeafCert) {
     c.not_after_len = 13
 }
 
+// Parse a DER certificate and return its pathLenConstraint, or -999 when the
+// parse fails or the certificate has none.
+fn parsed_path_len(hex: string) -> int {
+    der = from_hex(hex)
+    c = tls13_cert.LeafCert { tbs: null, tbs_len: 0, sig_alg_oid: null, signature: null, signature_len: 0, spki_algo_oid: null, spki_key: null, spki_key_len: 0, issuer: null, issuer_len: 0, subject: null, subject_len: 0, not_before: null, not_before_len: 0, not_after: null, not_after_len: 0, dns_names: null }
+    err = tls13_cert.parse_certificate(bytes.view(der), &c)
+    v = -999
+    if string.equals(err, "") == 1 && c.has_path_len == 1 { v = c.path_len }
+    tls13_cert.free_leaf(&c); bytes.free(der)
+    return v
+}
+
 // Encode a DER INTEGER (with sign byte) from a 32-byte big-endian magnitude,
 // writing to `out` at `off`; returns new offset.
 fn der_int(out: ptr, off: int, mag32: ptr) -> int {
@@ -430,6 +442,20 @@ main() {
         println("ok   pathLenConstraint=0 parsed")
     } else { println("FAIL pathLenConstraint=0 not parsed"); total_ok = 0 }
     tls13_cert.free_leaf(&pathlen_cert); bytes.free(pathlen_der)
+
+    // pathLenConstraint=128 is DER INTEGER 00 80: the leading zero must not
+    // make it read as negative. 300 (01 2c) has no leading zero. The same
+    // certificate with the bytes changed to ff 80 (-128) must give the
+    // rejecting -1. (Fixtures: openssl req -x509, prime256v1, pathlen:128/300.)
+    if parsed_path_len("3082017230820118a003020102021402e3400f60aba8e263948b45654d6cbe1889deca300a06082a8648ce3d04030230153113301106035504030c0a506174684c656e313238301e170d3236313032393037353832365a170d3336313032363037353832365a30153113301106035504030c0a506174684c656e3132383059301306072a8648ce3d020106082a8648ce3d030107034200042cce06783196bb7146e0a39b7dd2faa049a4cbcaf5cef3590cfde32a30fe66967479ba13f89f69b2806d74f2260df041e0fcf7b60adc0dd7dee9beb3a9d306fea3463044301d0603551d0e04160414b99719befb036c4a90681d1cb2d08fa30b35501b30130603551d130101ff040930070101ff02020080300e0603551d0f0101ff040403020204300a06082a8648ce3d0403020348003045022100ed34eefa744e8120877af33f75c9d17c63e26c8fa883f1f200c05d36d97b797202202ad4eca699a0b641a6687653a787cbb9c04f5b2f22fe617146efbb7baea10712") == 128 {
+        println("ok   pathLenConstraint=128 (00 80) parsed")
+    } else { println("FAIL pathLenConstraint=128 (00 80) misread"); total_ok = 0 }
+    if parsed_path_len("3082017330820118a00302010202143ac45b366b953d3b367dc2566c364f10b43abe76300a06082a8648ce3d04030230153113301106035504030c0a506174684c656e333030301e170d3236313032393037353832365a170d3336313032363037353832365a30153113301106035504030c0a506174684c656e3330303059301306072a8648ce3d020106082a8648ce3d030107034200042cce06783196bb7146e0a39b7dd2faa049a4cbcaf5cef3590cfde32a30fe66967479ba13f89f69b2806d74f2260df041e0fcf7b60adc0dd7dee9beb3a9d306fea3463044301d0603551d0e04160414b99719befb036c4a90681d1cb2d08fa30b35501b30130603551d130101ff040930070101ff0202012c300e0603551d0f0101ff040403020204300a06082a8648ce3d040302034900304602210085db7da35a750a83e979741ebf6e3202f203603d4c8349e22b2c1fb634f7b59c022100d7f734b746c5f0ed02ac92860a4fd454f7b58450f87b5e4f376a8d92008f77cb") == 300 {
+        println("ok   pathLenConstraint=300 parsed")
+    } else { println("FAIL pathLenConstraint=300 misread"); total_ok = 0 }
+    if parsed_path_len("3082017230820118a003020102021402e3400f60aba8e263948b45654d6cbe1889deca300a06082a8648ce3d04030230153113301106035504030c0a506174684c656e313238301e170d3236313032393037353832365a170d3336313032363037353832365a30153113301106035504030c0a506174684c656e3132383059301306072a8648ce3d020106082a8648ce3d030107034200042cce06783196bb7146e0a39b7dd2faa049a4cbcaf5cef3590cfde32a30fe66967479ba13f89f69b2806d74f2260df041e0fcf7b60adc0dd7dee9beb3a9d306fea3463044301d0603551d0e04160414b99719befb036c4a90681d1cb2d08fa30b35501b30130603551d130101ff040930070101ff0202ff80300e0603551d0f0101ff040403020204300a06082a8648ce3d0403020348003045022100ed34eefa744e8120877af33f75c9d17c63e26c8fa883f1f200c05d36d97b797202202ad4eca699a0b641a6687653a787cbb9c04f5b2f22fe617146efbb7baea10712") == -1 {
+        println("ok   negative pathLenConstraint becomes a rejecting limit")
+    } else { println("FAIL negative pathLenConstraint not rejected"); total_ok = 0 }
 
     // pathLenConstraint counts intermediate CAs, not the target certificate,
     // even when that target happens to assert cA.

@@ -765,12 +765,17 @@ fn decode_path_len(content: @keep ptr, out: *LeafCert) {
     out.has_path_len = 1
     out.path_len = -1
     if n < 1 { return }
+    // The sign is the first content byte's top bit. Test it before stripping
+    // leading zeros: DER writes 128 as 00 80, which reads as negative once
+    // the 00 is gone.
+    if (bytes.get(content, 0) & 0x80) != 0 { return }
     start = 0
     while start < n - 1 && bytes.get(content, start) == 0 {
         start = start + 1
     }
-    if (bytes.get(content, start) & 0x80) != 0 { return }
-    if n - start > 4 {
+    // Four or more significant bytes is at least 2^24, far past
+    // MAX_CHAIN_DEPTH, and a fourth byte of 0x80 or more would overflow int.
+    if n - start >= 4 {
         out.path_len = 2147483647
         return
     }
