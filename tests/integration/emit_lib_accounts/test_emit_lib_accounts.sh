@@ -134,7 +134,7 @@ expect() {
 if ! "$CC" -O1 -I"$ROOT/include" -I"$ROOT/runtime" $("$AE" cflags --cflags) \
         "$SCRIPT_DIR/two_copies.c" -o "$TMP/two_copies" \
         $("$AE" cflags --libs) -lpthread $dl > "$TMP/cc_two.log" 2>&1 ||
-   ! "$CC" -shared -fPIC "$SCRIPT_DIR/foreign_rv.c" -o "$TMP/foreign_rv.$ext" > "$TMP/cc_rv.log" 2>&1; then
+   ! "$CC" -shared -fPIC -I"$ROOT/runtime" "$SCRIPT_DIR/foreign_rv.c" -o "$TMP/foreign_rv.$ext" > "$TMP/cc_rv.log" 2>&1; then
     echo "  [FAIL] emit_lib_accounts: the two-copies host did not build"
     head -10 "$TMP/cc_two.log" "$TMP/cc_rv.log" | sed 's/^/        /'
     exit 1

@@ -211,9 +211,9 @@ AETHER_API int aether_exec_cancel(AetherExecToken token);
  * other copy may be unloaded, and leaves them as it goes (#3411). Each copy
  * is found by a record in its image, so a program's own copy is found
  * though its executable exports nothing (Windows, Linux without -rdynamic;
- * #3445); a library built by an earlier release has none and is found by its
- * export, and where two copies did not find each other, a copy refuses (-1)
- * to put in use an account the other made. Copies of different
+ * #3445). Where two copies do not find each other (Cygwin, which reads no
+ * records), a copy refuses (-1) to put in use an account the other made.
+ * Copies of different
  * layouts (another accounts version) never share: a copy that finds the
  * other's says so once on stderr, its aether_exec_account_new returns NULL
  * and its aether_exec_use -1 for an account, its allocations are charged to

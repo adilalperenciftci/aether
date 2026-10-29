@@ -41,6 +41,9 @@
 #    include <mach-o/getsect.h>
 #  elif defined(__linux__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
 #    include <link.h>
+#    if defined(__linux__) || defined(__FreeBSD__)
+#      include <sys/auxv.h>   /* AT_PHDR: the program's headers, among the objects */
+#    endif
 #    define AETHER_RV_PHDR 1
 #  endif
 #endif
@@ -1001,12 +1004,12 @@ static const AetherAccountsRendezvous g_own_accounts = {
     own_step_aside, own_step_back,
 };
 
-/* Found through this copy's record (aether_rv_mark.h, #3445), and by name
- * by the copies of a release before the records, so exported from each. */
+/* This copy's, which its record names (aether_rv_mark.h, #3445): the other
+ * copies find it by the record, never by name, so it is the copy's own. */
 #if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("default"), used))
+__attribute__((used))
 #endif
-const AetherAccountsRendezvous* aether_accounts_rendezvous(void) {
+AETHER_COPY_LOCAL const AetherAccountsRendezvous* aether_accounts_rendezvous(void) {
     return &g_own_accounts;
 }
 
@@ -1193,22 +1196,28 @@ AETHER_CAPS_API AetherExecAccount* aether_exec_account_make(uint64_t memory_byte
  * A library built without --shared-runtime carries a copy of the runtime,
  * and on Windows and macOS that copy stays apart from the program's. State
  * that must be one per process (the sandbox levels a thread is inside, the
- * execution accounts) lives in one copy, the first loaded image that has
- * it: every copy asks the same question, so they agree. An image says it by
- * its record (aether_rv_mark.h), which an executable that exports nothing
- * carries too (#3445); one of a release before the records, by its export of
- * the symbol naming it. That copy must stay loaded while another uses its
- * state.
+ * execution accounts) lives in one copy, the first loaded image, in load
+ * order, with a record of it (aether_rv_mark.h): every copy asks the same
+ * question, so they agree, whatever the images export (#3445). An image is
+ * read while it is held loaded, and a record counts only when the function
+ * it names lies inside its image. The copy that owns the state must stay
+ * loaded while another uses it.
  * ------------------------------------------------------------------ */
 
 #if AETHER_RV_MARKS
+#  if AETHER_RV_ELF
+#    define RV_DESC_AT offsetof(AetherRvMark, fn_offset)
+#    define RV_DESC_SIZE sizeof(int32_t)
+#  else
+#    define RV_DESC_AT offsetof(AetherRvMark, fn)
+#    define RV_DESC_SIZE sizeof(aether_rv_fn)
+#  endif
+
 /* The record of `kind` among the notes in [p, p + size), aligned to `align`
- * as ELF notes are (aether_rv_mark.h), or NULL. Only a record's header and
- * name are read here, never its function: an image another thread is still
- * loading may not be relocated yet. */
+ * (4 or 8) as ELF notes are (aether_rv_mark.h), or NULL. */
 static const AetherRvMark* rv_mark_in(const unsigned char* p, size_t size, size_t align,
                                       uint32_t kind) {
-    if (align < 4 || (align & (align - 1)) != 0) align = 4;
+    if (align != 8) align = 4;
     size_t at = 0;
     while (p && size - at >= 12) {
         uint32_t namesz, descsz, type;
@@ -1219,9 +1228,8 @@ static const AetherRvMark* rv_mark_in(const unsigned char* p, size_t size, size_
         size_t desc = (12 + (size_t)namesz + align - 1) & ~(align - 1);
         size_t next = (desc + (size_t)descsz + align - 1) & ~(align - 1);
         if (next > size - at) break;
-        if (type == kind && namesz == sizeof AETHER_RV_NAME && descsz == sizeof(aether_rv_fn) &&
-            desc == offsetof(AetherRvMark, fn) &&
-            memcmp(p + at + 12, AETHER_RV_NAME, sizeof AETHER_RV_NAME) == 0)
+        if (type == kind && namesz == sizeof AETHER_RV_NAME && descsz == RV_DESC_SIZE &&
+            desc == RV_DESC_AT && memcmp(p + at + 12, AETHER_RV_NAME, sizeof AETHER_RV_NAME) == 0)
             return (const AetherRvMark*)(const void*)(p + at);
         at += next;
     }
@@ -1230,90 +1238,119 @@ static const AetherRvMark* rv_mark_in(const unsigned char* p, size_t size, size_
 
 /* The function a record names, as aether_rendezvous_find returns it. */
 static void* rv_mark_fn(const AetherRvMark* m) {
+#  if AETHER_RV_ELF
+    int32_t off;
+    memcpy(&off, (const unsigned char*)m + RV_DESC_AT, sizeof(off));
+    return (void*)((uintptr_t)m + RV_DESC_AT + (uintptr_t)(intptr_t)off);
+#  else
     aether_rv_fn f;
-    memcpy(&f, (const unsigned char*)m + offsetof(AetherRvMark, fn), sizeof(f));
+    memcpy(&f, (const unsigned char*)m + RV_DESC_AT, sizeof(f));
     void* p;
     memcpy(&p, &f, sizeof(p));
     return p;
+#  endif
 }
 #endif
 
 #if defined(_WIN32) && AETHER_RV_MARKS
 /* The function the module's record of `kind` names (its .aerv section, from
- * the headers the loader maps with it), when it lies inside the module, as
- * a record's function does once the module is relocated; NULL otherwise. */
-static void* rv_pe_mark(HMODULE m, uint32_t kind) {
+ * the headers the loader maps with it), when it lies inside the module;
+ * NULL otherwise. The module is held while it is read, and one another
+ * thread has unloaded is skipped. */
+static void* rv_pe_mark(HMODULE listed, uint32_t kind) {
+    HMODULE m = NULL;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCWSTR)(const void*)listed, &m) ||
+        !m)
+        return NULL;
+    void* f = NULL;
     const unsigned char* base = (const unsigned char*)m;
     const IMAGE_DOS_HEADER* dos = (const IMAGE_DOS_HEADER*)(const void*)base;
-    if (!base || dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0) return NULL;
-    const IMAGE_NT_HEADERS* nt = (const IMAGE_NT_HEADERS*)(const void*)(base + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) return NULL;
-    const IMAGE_SECTION_HEADER* s = IMAGE_FIRST_SECTION(nt);
-    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; i++) {
-        if (memcmp(s[i].Name, AETHER_RV_SECTION "\0\0\0", IMAGE_SIZEOF_SHORT_NAME) != 0) continue;
-        const AetherRvMark* mark = rv_mark_in(base + s[i].VirtualAddress,
-                                              (size_t)s[i].Misc.VirtualSize, sizeof(void*), kind);
-        if (!mark) return NULL;
-        void* f = rv_mark_fn(mark);
-        uintptr_t a = (uintptr_t)f, lo = (uintptr_t)base;
-        return (a >= lo && a - lo < (uintptr_t)nt->OptionalHeader.SizeOfImage) ? f : NULL;
+    if (dos->e_magic == IMAGE_DOS_SIGNATURE && dos->e_lfanew > 0) {
+        const IMAGE_NT_HEADERS* nt = (const IMAGE_NT_HEADERS*)(const void*)(base + dos->e_lfanew);
+        if (nt->Signature == IMAGE_NT_SIGNATURE) {
+            const IMAGE_SECTION_HEADER* s = IMAGE_FIRST_SECTION(nt);
+            for (WORD i = 0; i < nt->FileHeader.NumberOfSections; i++) {
+                if (memcmp(s[i].Name, AETHER_RV_SECTION "\0\0\0", IMAGE_SIZEOF_SHORT_NAME) != 0) continue;
+                const AetherRvMark* mark =
+                    rv_mark_in(base + s[i].VirtualAddress, (size_t)s[i].Misc.VirtualSize, sizeof(void*), kind);
+                if (mark) {
+                    uintptr_t a = (uintptr_t)rv_mark_fn(mark), lo = (uintptr_t)base;
+                    if (a >= lo && a - lo < (uintptr_t)nt->OptionalHeader.SizeOfImage) f = rv_mark_fn(mark);
+                }
+                break;
+            }
+        }
     }
-    return NULL;
+    FreeLibrary(m);
+    return f;
 }
 #endif
 
-#if defined(__APPLE__) && AETHER_RV_MARKS
-/* The record of `kind` in the image's __DATA,__aether_rv section. */
-static const AetherRvMark* rv_macho_mark(uint32_t i, uint32_t kind) {
+#if defined(__APPLE__) && AETHER_RV_MARKS && defined(RTLD_NOLOAD)
+/* The function image `i`'s record of `kind` names (its __DATA_CONST,
+ * __aether_rv section), when it lies inside the image; NULL otherwise. An
+ * image but the program is held while it is read (a dlopen without loading,
+ * which waits for a load in progress and fails for an image no longer
+ * loaded), and read only while it is still the image listed. */
+static void* rv_macho_mark(uint32_t i, uint32_t kind, const AetherRvMark* self) {
     const struct mach_header* h = _dyld_get_image_header(i);
     if (!h) return NULL;
+    void* held = NULL;
+    if (i > 0) {
+        const char* name = _dyld_get_image_name(i);
+        Dl_info di;
+        if (!name || !(held = dlopen(name, RTLD_LAZY | RTLD_NOLOAD))) return NULL;
+        if (!dladdr(h, &di) || di.dli_fbase != (const void*)h) {
+            dlclose(held);
+            return NULL;
+        }
+    }
+    void* f = NULL;
     unsigned long size = 0;
 #  if defined(__LP64__)
-    const uint8_t* sec = getsectiondata((const struct mach_header_64*)(const void*)h,
-                                        AETHER_RV_SEGMENT, AETHER_RV_SECTNAME, &size);
+    const uint8_t* sec = getsectiondata((const struct mach_header_64*)(const void*)h, AETHER_RV_SEGMENT,
+                                        AETHER_RV_SECTNAME, &size);
 #  else
     const uint8_t* sec = getsectiondata(h, AETHER_RV_SEGMENT, AETHER_RV_SECTNAME, &size);
 #  endif
-    return sec ? rv_mark_in(sec, (size_t)size, sizeof(void*), kind) : NULL;
+    const AetherRvMark* mark = sec ? rv_mark_in(sec, (size_t)size, sizeof(void*), kind) : NULL;
+    if (mark) {
+        void* q = rv_mark_fn(mark);
+        Dl_info di;
+        if (mark == self || (dladdr(q, &di) && di.dli_fbase == (const void*)h)) f = q;
+    }
+    if (held) dlclose(held);
+    return f;
 }
 #endif
 
-#if !defined(_WIN32) && (defined(__APPLE__) || defined(AETHER_RV_PHDR)) && defined(RTLD_NOLOAD)
-/* `symbol` in the object `name` (a loaded object's path; NULL or "" the
- * program), opened by name without loading, so an object a host loaded
- * RTLD_LOCAL, which the global scope does not show, is found too. */
-static void* rv_symbol_of(const char* name, const char* symbol) {
-    void* h = (name && name[0]) ? dlopen(name, RTLD_LAZY | RTLD_NOLOAD) : dlopen(NULL, RTLD_LAZY);
-    if (!h) return NULL;
-    void* p = dlsym(h, symbol);
-    dlclose(h);
-    return p;
-}
+#if defined(AETHER_RV_PHDR) && AETHER_RV_ELF && defined(RTLD_NOLOAD)
+/* A loaded object, the addresses its segments span, and the function its
+ * record of the kind looked for names, when that lies inside it (#3442),
+ * read from its notes while dl_iterate_phdr holds the loader's lock; and
+ * whether it is the program, which is loaded whole before any of its code
+ * runs: the object whose headers the kernel gave the loader (AT_PHDR), and
+ * where those are not known, the one with no name or the walk's first
+ * (musl and FreeBSD name the program, glibc does not). */
+typedef struct {
+    const char* name;
+    uintptr_t lo, hi;
+    const AetherRvMark* mark;
+    void* fn;
+    int program;
+} RvObject;
+typedef struct { RvObject* o; int n, cap, oom; uint32_t kind; const void* program_phdr; } RvObjects;
 
-#  if AETHER_RV_MARKS
-/* Whether the object `name` (NULL or "" the program) is loaded whole: a
- * dlopen without loading waits for a load in progress, and fails for an
- * object that is not loaded, or no longer. */
-static int rv_loaded(const char* name) {
-    if (!name || !name[0]) return 1;
-    void* h = dlopen(name, RTLD_LAZY | RTLD_NOLOAD);
-    if (!h) return 0;
-    dlclose(h);
-    return 1;
-}
+static const void* rv_program_phdr(void) {
+#  if defined(__linux__)
+    return (const void*)getauxval(AT_PHDR);
+#  elif defined(__FreeBSD__)
+    void* p = NULL;
+    return elf_aux_info(AT_PHDR, &p, (int)sizeof(p)) == 0 ? p : NULL;
+#  else
+    return NULL;
 #  endif
-#endif
-
-#ifdef AETHER_RV_PHDR
-/* A loaded object and the addresses its segments span. A symbol looked up
- * in an object's handle may be found in its dependencies, and the program's
- * handle searches the whole global scope (every RTLD_GLOBAL library,
- * whenever it was loaded), so a definition counts for the object being
- * visited only when it lies inside it (#3442): copies that looked at
- * different times then still agree on the first object in load order. Its
- * record of the kind looked for, from its notes, comes first (#3445). */
-typedef struct { const char* name; uintptr_t lo, hi; const void* mark; } RvObject;
-typedef struct { RvObject* o; int n, cap, oom; uint32_t kind; } RvObjects;
+}
 
 static int rv_collect(struct dl_phdr_info* info, size_t size, void* data) {
     (void)size;
@@ -1330,19 +1367,22 @@ static int rv_collect(struct dl_phdr_info* info, size_t size, void* data) {
     o->lo = UINTPTR_MAX;
     o->hi = 0;
     o->mark = NULL;
+    o->fn = NULL;
+    o->program = objs->program_phdr ? (const void*)info->dlpi_phdr == objs->program_phdr
+                                    : (objs->n == 1 || !info->dlpi_name || !info->dlpi_name[0]);
     for (int k = 0; k < (int)info->dlpi_phnum; k++) {
-#if AETHER_RV_MARKS
-        if (info->dlpi_phdr[k].p_type == PT_NOTE && !o->mark)
-            o->mark = rv_mark_in((const unsigned char*)((uintptr_t)info->dlpi_addr +
-                                                        (uintptr_t)info->dlpi_phdr[k].p_vaddr),
-                                 (size_t)info->dlpi_phdr[k].p_memsz,
-                                 (size_t)info->dlpi_phdr[k].p_align, objs->kind);
-#endif
-        if (info->dlpi_phdr[k].p_type != PT_LOAD) continue;
         uintptr_t a = (uintptr_t)info->dlpi_addr + (uintptr_t)info->dlpi_phdr[k].p_vaddr;
+        if (info->dlpi_phdr[k].p_type == PT_NOTE && !o->mark)
+            o->mark = rv_mark_in((const unsigned char*)a, (size_t)info->dlpi_phdr[k].p_memsz,
+                                 (size_t)info->dlpi_phdr[k].p_align, objs->kind);
+        if (info->dlpi_phdr[k].p_type != PT_LOAD) continue;
         uintptr_t b = a + (uintptr_t)info->dlpi_phdr[k].p_memsz;
         if (a < o->lo) o->lo = a;
         if (b > o->hi) o->hi = b;
+    }
+    if (o->mark) {
+        uintptr_t f = (uintptr_t)rv_mark_fn(o->mark);
+        if (f >= o->lo && f < o->hi) o->fn = (void*)f;
     }
     return 0;
 }
@@ -1350,13 +1390,12 @@ static int rv_collect(struct dl_phdr_info* info, size_t size, void* data) {
 
 void* aether_rendezvous_find(const char* symbol, uint32_t kind, const AetherRvMark* self) {
     void* p = NULL;
+    (void)symbol;
     (void)kind;
     (void)self;
-#if defined(_WIN32)
-    /* The modules in load order, the program first; the first with a
-     * record, or that exports one. A DLL that `ae build --emit=lib` links
-     * exports every symbol, the shared runtime too; an executable exports
-     * none, and is found by its record (#3445). */
+#if defined(_WIN32) && AETHER_RV_MARKS
+    /* The modules in load order, the program first: the first with a
+     * record. */
     typedef BOOL (WINAPI *enum_modules_fn)(HANDLE, HMODULE*, DWORD, LPDWORD);
     HMODULE k32 = GetModuleHandleA("kernel32.dll");
     enum_modules_fn enum_modules = NULL;
@@ -1370,72 +1409,35 @@ void* aether_rendezvous_find(const char* symbol, uint32_t kind, const AetherRvMa
     if (!enum_modules(GetCurrentProcess(), mods, (DWORD)sizeof(mods), &need)) return NULL;
     DWORD n = need / (DWORD)sizeof(HMODULE);
     if (n > 512) n = 512;
-    for (DWORD i = 0; i < n && !p; i++) {
-#  if AETHER_RV_MARKS
-        p = rv_pe_mark(mods[i], kind);
-        if (p) break;
-#  endif
-        FARPROC fp = GetProcAddress(mods[i], symbol);
-        if (!fp) continue;
-        /* A forwarded export resolves into another module: it is that
-         * module's, found when its turn comes (#3442). */
-        HMODULE owner = NULL;
-        if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                    GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                (LPCSTR)fp, &owner) || owner != mods[i])
-            continue;
-        memcpy(&p, &fp, sizeof(p));
-    }
-#elif defined(__APPLE__) && defined(RTLD_NOLOAD)
-    /* The images in load order, the program first. A lookup in an image's
-     * handle may find the definition in another image (the program's handle
-     * searches every image not opened RTLD_LOCAL): it counts only inside
-     * the image being visited (#3442). An image's record comes first
-     * (#3445); one another thread is still loading counts once it is loaded
-     * whole. */
+    for (DWORD i = 0; i < n && !p; i++) p = rv_pe_mark(mods[i], kind);
+#elif defined(__APPLE__) && AETHER_RV_MARKS && defined(RTLD_NOLOAD)
+    /* The images in load order, the program first: the first with a
+     * record. */
     uint32_t n = _dyld_image_count();
-    for (uint32_t i = 0; i < n && !p; i++) {
-#  if AETHER_RV_MARKS
-        const AetherRvMark* m = rv_macho_mark(i, kind);
-        if (m) {
-            if (i == 0 || m == self || rv_loaded(_dyld_get_image_name(i))) p = rv_mark_fn(m);
-            continue;
-        }
-#  endif
-        void* q = rv_symbol_of(i == 0 ? NULL : _dyld_get_image_name(i), symbol);
-        Dl_info di;
-        if (q && dladdr(q, &di) && di.dli_fbase == (const void*)_dyld_get_image_header(i)) p = q;
-    }
-#elif defined(AETHER_RV_PHDR) && defined(RTLD_NOLOAD)
-    /* The loaded objects in load order, the program first (its name is
-     * empty; opened as NULL it is the global scope). Their names and spans
-     * are taken first and opened after: dl_iterate_phdr holds a loader
-     * lock. Out of memory partway, what was taken is searched. An object's
-     * record comes first (#3445); one another thread is still loading
-     * counts once it is loaded whole. */
-    RvObjects objs = { NULL, 0, 0, 0, kind };
+    for (uint32_t i = 0; i < n && !p; i++) p = rv_macho_mark(i, kind, self);
+#elif defined(AETHER_RV_PHDR) && AETHER_RV_ELF && defined(RTLD_NOLOAD)
+    /* The loaded objects in load order, the program first: the first with a
+     * record. Their records are read while dl_iterate_phdr holds the
+     * loader's lock; an object but the program and this one counts once it
+     * is loaded whole, its relocations done: a dlopen without loading waits
+     * for a load in progress, and fails for an object no longer loaded. Out
+     * of memory partway, what was taken is searched. */
+    RvObjects objs = { NULL, 0, 0, 0, kind, rv_program_phdr() };
     dl_iterate_phdr(rv_collect, &objs);
     for (int i = 0; i < objs.n && !p; i++) {
-#  if AETHER_RV_MARKS
-        const AetherRvMark* m = (const AetherRvMark*)objs.o[i].mark;
-        if (m) {
-            /* Its function lies inside it, as #3442 has an export's. */
-            if (m == self || rv_loaded(objs.o[i].name)) {
-                void* f = rv_mark_fn(m);
-                if ((uintptr_t)f >= objs.o[i].lo && (uintptr_t)f < objs.o[i].hi) p = f;
-            }
-            continue;
+        if (!objs.o[i].fn) continue;
+        if (!objs.o[i].program && objs.o[i].mark != self) {
+            const char* name = objs.o[i].name;
+            void* h = (name && name[0]) ? dlopen(name, RTLD_LAZY | RTLD_NOLOAD) : NULL;
+            if (!h) continue;
+            dlclose(h);
         }
-#  endif
-        void* q = rv_symbol_of(objs.o[i].name, symbol);
-        if (q && (uintptr_t)q >= objs.o[i].lo && (uintptr_t)q < objs.o[i].hi) p = q;
+        p = objs.o[i].fn;
     }
     free(objs.o);
 #elif (defined(__unix__) || defined(__APPLE__)) && defined(RTLD_DEFAULT)
     /* The global scope in load order. */
     p = dlsym(RTLD_DEFAULT, symbol);
-#else
-    (void)symbol;
 #endif
     return p;
 }

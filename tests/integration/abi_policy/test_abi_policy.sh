@@ -158,7 +158,7 @@ if "$CC" -shared -fPIC -O1 -DAETHER_HAS_SANDBOX -I"$ROOT/include" -I"$ROOT/runti
         "$SCRIPT_DIR/sbx_copy.c" -o "$TMP/sbx_copy.$ext" $("$AE" cflags --libs) $dl > "$TMP/sbx_cc.log" 2>&1 &&
    "$CC" -O1 "$SCRIPT_DIR/sbx_driver.c" -o "$TMP/sbx_driver" $dl >> "$TMP/sbx_cc.log" 2>&1; then
     for rvv in 1 9; do
-        if ! "$CC" -shared -fPIC -DRV_VERSION=$rvv "$SCRIPT_DIR/foreign_sbx.c" -o "$TMP/foreign_sbx$rvv.$ext" \
+        if ! "$CC" -shared -fPIC -I"$ROOT/runtime" -DRV_VERSION=$rvv "$SCRIPT_DIR/foreign_sbx.c" -o "$TMP/foreign_sbx$rvv.$ext" \
                 > "$TMP/sbx_cc$rvv.log" 2>&1; then
             bad "the version-$rvv rendezvous did not build" "$TMP/sbx_cc$rvv.log"
             continue

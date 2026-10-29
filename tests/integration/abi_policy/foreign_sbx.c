@@ -1,11 +1,13 @@
-/* A library exporting a sandbox rendezvous of another layout (#2957), with
- * working members, as a copy of another Aether exports it: by default the
+/* A library with a sandbox rendezvous of another layout (#2957), with
+ * working members, which its record names as a copy of another Aether names
+ * its own (aether_rv_mark.h, #3445): by default the
  * version-1 one, which had no size; with -DRV_VERSION=n a later one, with a
  * size and a member more. A copy that finds it first refuses to share
  * levels with it, says so once, and reads nothing of it but its version
  * and size: its level count is never called. */
 #include <stdatomic.h>
 #include <stdint.h>
+#include "aether_rv_mark.h"
 #if defined(_WIN32)
 #define EXPORT __declspec(dllexport)
 #else
@@ -44,9 +46,11 @@ typedef struct {
 static const Later g_rv = { RV_VERSION, (uint32_t)sizeof(Later), &g_threads, levels, 0 };
 #endif
 
-EXPORT const void* aether_sandbox_rendezvous(void) {
+__attribute__((used)) AETHER_COPY_LOCAL const void* foreign_sandbox_rendezvous(void) {
     return &g_rv;
 }
+
+AETHER_RV_MARK(foreign_sandbox_mark, AETHER_RV_KIND_SANDBOX, foreign_sandbox_rendezvous);
 
 /* How many times a copy called this rendezvous's level count. */
 EXPORT int foreign_sbx_calls(void) {

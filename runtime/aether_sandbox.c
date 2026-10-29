@@ -59,9 +59,10 @@ extern void aether_sandbox_audit(const char* category, const char* resource, int
 // enforce block (through a host service), it cannot read that block's
 // grants, so it must not allow what they would refuse. Every copy counts
 // the levels each thread has in all of them in one place, the rendezvous of
-// the first copy it finds in the process (the earliest loaded that exports
-// one), so a copy sees when this thread is inside levels it cannot read,
-// and refuses (aether_sandbox_check_slow). On one runtime image all of this
+// the first copy it finds in the process (the earliest loaded with a record
+// of them, aether_rv_mark.h), so a copy sees when this thread is inside
+// levels it cannot read, and refuses (aether_sandbox_check_slow). On one
+// runtime image all of this
 // is one copy, and the count is its own.
 
 /* The rendezvous's layout (#2957): its version and its size come first, so
@@ -118,12 +119,12 @@ static const AetherSandboxRendezvous g_own_rv = {
     AETHER_SANDBOX_RV_VERSION, (uint32_t)sizeof(AetherSandboxRendezvous), &g_threads, rv_levels
 };
 
-/* Found through this copy's record (aether_rv_mark.h, #3445), and by name
- * by the copies of a release before the records, so exported from each. */
+/* This copy's, which its record names (aether_rv_mark.h, #3445): the other
+ * copies find it by the record, never by name, so it is the copy's own. */
 #if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("default"), used))
+__attribute__((used))
 #endif
-const AetherSandboxRendezvous* aether_sandbox_rendezvous(void) {
+AETHER_COPY_LOCAL const AetherSandboxRendezvous* aether_sandbox_rendezvous(void) {
     return &g_own_rv;
 }
 
@@ -149,9 +150,8 @@ typedef const AetherSandboxRendezvous* (*rendezvous_fn)(void);
 
 #define RV_SYMBOL "aether_sandbox_rendezvous"
 
-/* The first loaded image with a record of the levels, or, of a release
- * before the records, that exports one (aether_rendezvous_find, in
- * aether_resource_caps.c, which the execution accounts share). */
+/* The first loaded image with a record of the levels (aether_rendezvous_find,
+ * in aether_resource_caps.c, which the execution accounts share). */
 static const AetherSandboxRendezvous* find_rendezvous(void) {
     void* p = aether_rendezvous_find(RV_SYMBOL, AETHER_RV_KIND_SANDBOX, RV_SELF);
     if (!p) return NULL;

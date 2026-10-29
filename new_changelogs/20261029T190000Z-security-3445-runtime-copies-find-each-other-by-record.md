@@ -8,8 +8,9 @@
   library's copy never found: the library's code that the program called
   inside a deny-all block was allowed everything, and an account the
   program had put in use was charged nothing the library allocated. Each
-  copy now carries a record in its image (a PE section, an ELF note, a
-  Mach-O section) that every copy reads in load order, the program first.
-  A library built by an earlier release has no record and is still found by
-  its export, so with a program that exports nothing it stays apart, as
-  before: rebuild it, or build it with `--shared-runtime`.
+  copy now carries a record in its image that every copy reads in load
+  order, the program first: on ELF a read-only note naming the copy's
+  rendezvous by an offset fixed at link time, on PE and Mach-O a section of
+  its own. An image is read while it is held loaded, and a record counts
+  only when what it names lies inside its image. The record never changes,
+  so copies of later releases read it too.

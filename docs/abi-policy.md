@@ -55,9 +55,10 @@ records the one it was made for (`runtime_abi`).
 
 **Shared facilities.** A library without `--shared-runtime` brings a copy
 of the runtime, and copies in one process share the sandbox levels and the
-execution accounts through the first copy loaded that has them: by its
-record in its image (a PE section, an ELF note, a Mach-O section, #3445),
-or, for an image built before the records, by its export. Each
+execution accounts through the first copy loaded that has them, by its
+record in its image (a PE section, an ELF note, a Mach-O section, #3445).
+The record's layout never changes, so a copy of any release reads any
+other's. Each
 rendezvous starts with its version and its size, and the accounts' also
 carry the sizes of what the copies pass each other. A copy that finds
 another layout refuses that one facility, says so once on stderr naming

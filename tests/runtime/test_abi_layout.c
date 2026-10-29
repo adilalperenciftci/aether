@@ -219,19 +219,24 @@ TEST_CATEGORY(abi_rendezvous_layouts, TEST_CATEGORY_RUNTIME) {
 
 /* The record each copy carries in its image (#3445), an ELF note on every
  * format: how copies of different releases find each other, so it never
- * changes (another layout takes another name). */
+ * changes (another layout takes another name). Its desc is the function's
+ * offset from the desc on ELF, the function's address elsewhere. */
 typedef struct {
     uint32_t namesz;
     uint32_t descsz;
     uint32_t kind;
     char name[12];
-    void (*fn)(void);
-} RvMark_1;
+} RvMarkHead_1;
 
 TEST_CATEGORY(abi_rv_mark_layout, TEST_CATEGORY_RUNTIME) {
-    ASSERT_EQ(sizeof(RvMark_1), sizeof(AetherRvMark));
+    ASSERT_EQ(24, sizeof(RvMarkHead_1));
+#if AETHER_RV_ELF
+    ASSERT_EQ(24, offsetof(AetherRvMark, fn_offset));
+    ASSERT_EQ(28, sizeof(AetherRvMark));
+#else
     ASSERT_EQ(24, offsetof(AetherRvMark, fn));
-    ASSERT_EQ(offsetof(RvMark_1, fn), offsetof(AetherRvMark, fn));
+    ASSERT_EQ(24 + sizeof(void (*)(void)), sizeof(AetherRvMark));
+#endif
     ASSERT_EQ(9, sizeof AETHER_RV_NAME);
     ASSERT_STREQ("AetherRV", AETHER_RV_NAME);
     ASSERT_EQ(1, AETHER_RV_KIND_SANDBOX);
