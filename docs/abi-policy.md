@@ -123,11 +123,14 @@ runs every supported pair, and the refusals of the unsupported ones:
 - Aether consumers both ways: this importer with the old library, the old
   importer with this one;
 - the shared runtime: each library on its own, the new library on the old
-  runtime (refused at load or by its preflight), and this importer with the
-  old shared-runtime library (refused).
+  runtime, and this importer with the old shared-runtime library. Matching
+  runtime ABI IDs must work; different IDs must be refused (at load or by
+  the preflight for the C host, at import for the Aether consumer). The
+  latest published release may have the same ABI as the tree under test.
 
-What each case prints depends on the levels alone, so the matrix holds
-against whichever release came before. To run it:
+Call output depends on the host ABI levels; shared-runtime acceptance
+depends on the full runtime ABI IDs, including revision and layout flags.
+To run it:
 
 ```sh
 AETHER_ABI_OLD_HOME=/path/to/aether-0.856.0 sh tests/integration/abi_matrix/test_abi_matrix.sh
