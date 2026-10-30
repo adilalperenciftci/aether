@@ -14,6 +14,33 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.862.0]
+
+### Changed
+
+- **The TinyWeb examples print their usage hints once the server is
+  listening.** `example_auth`, `example_composition`, `example_sse`,
+  `example_static` and `example_websocket` printed curl hints before
+  `tw_start`, so the hints appeared even when the bind failed, and named a
+  hard-coded port. They now print from `http.monitor`'s `listening` callback
+  with the bound port, as `example_app` does.
+
+### Security
+
+- **`std.cbor` decodes untrusted input safely by default.** `parse` now
+  refuses duplicate map keys (`cbor: duplicate map key "grant"`), where two
+  keys are duplicates when they are the same value however they were encoded,
+  and limits each array or map to 131072 elements or pairs. It also refuses a
+  declared length or count that cannot fit in the bytes left before
+  allocating for it. `parse_with(data, opts)` takes a `CborDecodeOptions`
+  (`default_decode_options()` gives the defaults) to change the limits, allow
+  duplicates, or refuse indefinite-length items. `encode_deterministic`
+  writes RFC 8949 §4.2.1 core deterministic encoding: shortest forms, definite
+  lengths and sorted map keys. Duplicate detection and key sorting are
+  linear-logarithmic, so a map at the limit cannot be used to spend minutes
+  of CPU. Refusing duplicate keys is a change to `parse`'s behaviour; use
+  `parse_with` with `allow_duplicate_keys = 1` for the old one.
+
 ## [0.861.0]
 
 ### Fixed
